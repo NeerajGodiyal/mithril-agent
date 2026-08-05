@@ -23,6 +23,7 @@ import (
 
 const usage = `Usage:
   mithril-agent-telegram --status-socket PATH --cursor PATH [--explanations off|openai|local] [--explanation-budget PATH]
+  mithril-agent-telegram link    discover your chat ID (read-only; see link --help)
 
 Environment:
   MITHRIL_AGENT_TELEGRAM_BOT_TOKEN  Telegram bot token
@@ -64,6 +65,12 @@ func run(
 	output io.Writer,
 	getenv func(string) string,
 ) error {
+	if len(args) > 0 && args[0] == "link" {
+		if len(args) > 1 {
+			return errors.New("link takes no arguments")
+		}
+		return runLink(ctx, output, getenv)
+	}
 	flags := flag.NewFlagSet("mithril-agent-telegram", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	statusSocketPath := flags.String("status-socket", "", "bounded operator status socket")

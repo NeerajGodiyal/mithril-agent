@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -171,5 +172,15 @@ func TestRunPropagatesServiceFailureWithoutSecretDetail(t *testing.T) {
 	}, &bytes.Buffer{}, func(key string) string { return environment[key] })
 	if err == nil || err.Error() != "service stopped" {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLinkRequiresTheTokenFromEnvironmentOnly(t *testing.T) {
+	err := run(t.Context(), []string{"link"}, io.Discard, func(string) string { return "" })
+	if err == nil || !strings.Contains(err.Error(), "MITHRIL_AGENT_TELEGRAM_BOT_TOKEN") {
+		t.Fatalf("link without the env token must fail naming the variable, got %v", err)
+	}
+	if err := run(t.Context(), []string{"link", "extra"}, io.Discard, func(string) string { return "" }); err == nil {
+		t.Fatal("link with arguments must be refused")
 	}
 }

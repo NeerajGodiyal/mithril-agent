@@ -21,8 +21,9 @@ f0cc354ff2c88ef7404a474ce999cbc37e2abd4ff985985c580b502ce566aeb4  ./cmd/mithril-
 8ab759bb8f51f04e6bd77d884e5e030224b24d477d3e7eefdbbdda8e924a20c6  ./cmd/mithril-agent-status-bridge/main.go
 a8a4e243473dc6bd0e28d1577f906d697f6c158ff489cc91924261ef50e205fd  ./cmd/mithril-agent-status-bridge/main_test.go
 b10d4b0247bef9d030bd9a79fdb45decf3abafce6de2591c440e31c10284de7a  ./cmd/mithril-agent-submitter/main.go
-884007ce6d28aa6be38b52eea0508926a79f920534f4e8ae2e1d930265b65a5f  ./cmd/mithril-agent-telegram/main.go
-811159452b7a0b2458cb51dff860e9717fae538fa1b5907d4592beabbfe17f77  ./cmd/mithril-agent-telegram/main_test.go
+6c20775b5967822c32f6e8d7f9c7eb86b200bf2049d93e6ba031901b3bca60c2  ./cmd/mithril-agent-telegram/link.go
+9b35da653c1c0b16d24795ddd89012113cd01bcca33ee371a588e8da40a6fbb8  ./cmd/mithril-agent-telegram/main.go
+3ca1faf7dc625a9fb381b9fe1c0c156d527403270a3e0132a4c01298e62a841b  ./cmd/mithril-agent-telegram/main_test.go
 71cc30de4db707e2a4ac13162954dcb3c762066f3b153494a18c40b9245e5900  ./cmd/mithril-agent/alerts.go
 dcbb800030cdfd275c039c8d0b022e8bca0d3a115b6dfdd3540b9826b218d202  ./cmd/mithril-agent/alerts_test.go
 62e8e51ed9f8b2b174341702b28ca0dcc40fd8faaea99c9fe8441705f1b09482  ./cmd/mithril-agent/current.go
