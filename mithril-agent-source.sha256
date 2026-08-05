@@ -36,7 +36,7 @@ e4d3b18e6d68c1699af0a6ad25d4147b654210fc8bb490159f12183082fd3943  ./cmd/mithril-
 c7fd585988c9612d0213522e5c7bdd31ea588214dac4ae784c2970cd6946651f  ./cmd/mithril-agent/explain_stage.go
 40fb4d8b59992caef262f5c26e65a58894e91f948fb3b3edd7a84e0f7e8146e4  ./cmd/mithril-agent/explain_stage_test.go
 9d1152c89cc99d00273856e680ebb12ef41381dea4f0b744633bbd4f587dbf11  ./cmd/mithril-agent/explain_test.go
-64b995837702d6c9d20e3ad4890176380c3af584cdffef9587b93ba7fcae6938  ./cmd/mithril-agent/funding.go
+05a46211e4503b90a6cd9720d2d8c1d0b00d78d92ce778720869fb9c75fe3641  ./cmd/mithril-agent/funding.go
 7efa68ea6c21df651d14828ca3d73a49e1a124b53d807596ad566190985fd85f  ./cmd/mithril-agent/funding_test.go
 e6b0361c514efeb0ab612c6be6036cb27ad6f5b55773ce1a62fe42e144909b94  ./cmd/mithril-agent/journal.go
 a231f8e63c8d16e027362818c17852387e70aea6ecfca4db0f2eeddb47a1f139  ./cmd/mithril-agent/journal_test.go

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/readiness"
 	"github.com/Overclock-Validator/mithril-agent/squads"
@@ -58,6 +59,8 @@ func runFundingCheck(ctx context.Context, args []string, output io.Writer) error
 	maxLamports := flags.Uint64("max-lamports", 0, "largest per-period cap accepted")
 	mint := flags.String("mint", squads.NativeMint, "asset being capped")
 	periods := flags.String("period", "one-time,daily", "accepted refill periods")
+	owner := flags.String("owner", "", "your wallet: the key expected to control the vault")
+	spender := flags.String("spender", "", "the key expected to spend through the limit")
 	asJSON := flags.Bool("json", false, "emit stable JSON")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -96,8 +99,65 @@ func runFundingCheck(ctx context.Context, args []string, output io.Writer) error
 			squads.ExposureNote(limit)); err != nil {
 			return err
 		}
+		// Available right now, modelling the program's lazy period reset: an
+		// exhausted limit whose period has passed has in fact refilled.
+		if _, err := fmt.Fprintf(output, "Available this period: %d base units\n\n",
+			limit.AvailableAt(time.Now().UTC())); err != nil {
+			return err
+		}
+	}
+	// A cap says how much can leave; only the multisig says who can take the
+	// cap away. With --owner and --spender the check also proves revocability
+	// instead of assuming it.
+	if readErr == nil && *owner != "" && *spender != "" {
+		vault, vaultErr := readMultisig(ctx, limit.Multisig)
+		if vaultErr != nil {
+			if _, err := fmt.Fprintf(output, "Control: could not read the vault: %v\n", vaultErr); err != nil {
+				return err
+			}
+		} else {
+			revocability, controlFindings := squads.VerifyControl(vault, limit, squads.ControlExpectation{
+				MultisigAddress: limit.Multisig, Owner: *owner, Spender: *spender,
+			})
+			if _, err := fmt.Fprintf(output, "Control: %s\n", revocability); err != nil {
+				return err
+			}
+			for _, finding := range controlFindings {
+				if _, err := fmt.Fprintf(output, "  ! %s: %s\n", finding.Check, finding.Problem); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	return report.Render(output)
+}
+
+// readMultisig fetches and decodes the vault the limit belongs to, with the
+// same owner check as the spending limit read.
+func readMultisig(ctx context.Context, address string) (squads.Multisig, error) {
+	var result struct {
+		Result struct {
+			Value *struct {
+				Data  []string `json:"data"`
+				Owner string   `json:"owner"`
+			} `json:"value"`
+		} `json:"result"`
+	}
+	if err := walletRPC(ctx, "getAccountInfo",
+		[]any{address, map[string]any{"encoding": "base64"}}, &result); err != nil {
+		return squads.Multisig{}, errors.New("could not read the multisig account")
+	}
+	if result.Result.Value == nil || len(result.Result.Value.Data) == 0 {
+		return squads.Multisig{}, errors.New("the multisig account does not exist")
+	}
+	if result.Result.Value.Owner != squads.ProgramID {
+		return squads.Multisig{}, errors.New("that account is not owned by the Squads program")
+	}
+	raw, err := base64.StdEncoding.DecodeString(result.Result.Value.Data[0])
+	if err != nil {
+		return squads.Multisig{}, errors.New("the multisig account could not be decoded")
+	}
+	return squads.DecodeMultisig(raw)
 }
 
 // fundingReport turns the findings into the same readiness shape doctor uses,
