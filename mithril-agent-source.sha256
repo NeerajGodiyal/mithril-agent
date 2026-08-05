@@ -41,8 +41,10 @@ c7fd585988c9612d0213522e5c7bdd31ea588214dac4ae784c2970cd6946651f  ./cmd/mithril-
 7efa68ea6c21df651d14828ca3d73a49e1a124b53d807596ad566190985fd85f  ./cmd/mithril-agent/funding_test.go
 e6b0361c514efeb0ab612c6be6036cb27ad6f5b55773ce1a62fe42e144909b94  ./cmd/mithril-agent/journal.go
 a231f8e63c8d16e027362818c17852387e70aea6ecfca4db0f2eeddb47a1f139  ./cmd/mithril-agent/journal_test.go
-3101775a2a065fc6eba5f58790147cc0e0a8dec3b3eeadd9ff2117265216d2f8  ./cmd/mithril-agent/main.go
+e91aeb3eaf0a893ef4ea47fbdd569633616b849437b095b332bac2f9297baea5  ./cmd/mithril-agent/main.go
 c20c6a4ab68c085998222a3da3b5c94d11a3990e0544378c3740f5d0d5e68f1e  ./cmd/mithril-agent/main_test.go
+0d06b22931ea508f8903992dcb6ed2a4da68bd3c692447775ae9bc513f9047dd  ./cmd/mithril-agent/mcpconfig.go
+a1467186aa77f102ebfc1b3ed6bd80b7378d40d50250ccbca6d837455911260e  ./cmd/mithril-agent/mcpconfig_test.go
 fe0d5f2b0ffe27087c9ab2b3cc7a4c23d61ae20eb912e8d5219c13a726361324  ./cmd/mithril-agent/preflight.go
 1d68a2069f027d87b353dbb2194fdc670a2785e21a7bb6e3edfd420c725eca55  ./cmd/mithril-agent/preflight_explain.go
 9b48d97749c5ff5ff3c3b947cfb20cc814409435038c0964cddc2e901ca0022e  ./cmd/mithril-agent/preflight_explain_test.go

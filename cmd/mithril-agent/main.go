@@ -304,6 +304,9 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 	case "status":
 		return runStatus(args[1:], output)
 	case "mcp":
+		if len(args) > 1 && args[1] == "config" {
+			return runMCPConfig(args[2:], output)
+		}
 		return runMCP(ctx, args[1:], os.Stdin, output)
 	case "profile-fingerprint":
 		return runProfileFingerprint(args[1:], output)
