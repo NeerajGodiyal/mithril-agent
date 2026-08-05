@@ -1,0 +1,70 @@
+[Unit]
+Description=Mithril read-only Telegram operator
+Requires=mithril-agent-status.socket
+Wants=network-online.target
+After=network-online.target mithril-agent-status.socket
+
+[Service]
+Type=simple
+User=mithril-agent-telegram
+Group=mithril-agent-telegram
+SupplementaryGroups=mithril-agent-status
+UMask=0077
+EnvironmentFile=/etc/mithril-agent/telegram-operator.env
+StateDirectory=mithril-agent-telegram
+StateDirectoryMode=0700
+ExecStart=/usr/local/libexec/mithril-agent/mithril-agent-telegram --status-socket /run/mithril-agent-status.sock --cursor /var/lib/mithril-agent-telegram/update-cursor.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=40s
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+ReadWritePaths=/var/lib/mithril-agent-telegram
+InaccessiblePaths=-/var/lib/mithril-agent -/etc/mithril-agent
+LockPersonality=yes
+CPUAccounting=yes
+CPUQuota=20%
+IOAccounting=yes
+IOWriteBandwidthMax=/ 1M
+IPAccounting=yes
+# Deny node, metadata, and private-network services. The specific loopback
+# addresses are reserved for systemd-resolved and an optional local model.
+IPAddressDeny=127.0.0.0/8
+IPAddressDeny=::1/128
+IPAddressDeny=10.0.0.0/8
+IPAddressDeny=172.16.0.0/12
+IPAddressDeny=192.168.0.0/16
+IPAddressDeny=169.254.0.0/16
+IPAddressDeny=fc00::/7
+IPAddressDeny=fe80::/10
+IPAddressAllow=127.0.0.2/32
+IPAddressAllow=127.0.0.53/32
+IPAddressAllow=127.0.0.54/32
+MemoryAccounting=yes
+MemoryDenyWriteExecute=yes
+MemoryMax=128M
+MemorySwapMax=0
+RemoveIPC=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+TasksMax=32
+LimitNOFILE=64
+
+[Install]
+WantedBy=multi-user.target

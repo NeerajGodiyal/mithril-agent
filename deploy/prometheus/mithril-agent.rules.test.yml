@@ -1,0 +1,523 @@
+rule_files:
+  - mithril-agent.rules.yml
+
+evaluation_interval: 15s
+
+tests:
+  - name: a missing agent target pages
+    interval: 15s
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilAgentDown
+        exp_alerts:
+          - exp_labels:
+              job: mithril-agent
+              severity: critical
+            exp_annotations:
+              summary: "Mithril agent is unreachable; execution state needs checking"
+
+  - name: a dead agent target pages
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-agent",instance="agent"}'
+        values: '0+0x8'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilAgentDown
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              job: mithril-agent
+              severity: critical
+            exp_annotations:
+              summary: "Mithril agent is unreachable; execution state needs checking"
+
+  - name: an incomplete metrics contract pages
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-agent",instance="agent"}'
+        values: '1+0x8'
+      - series: 'mithril_agent_last_cycle_timestamp_seconds{job="mithril-agent",instance="agent"}'
+        values: '1000+15x8'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilAgentMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              job: mithril-agent
+              severity: critical
+            exp_annotations:
+              summary: "Mithril agent metrics are incomplete; keep execution stopped"
+
+  - name: each send counter is independently required
+    interval: 15s
+    input_series:
+      - series: 'up{job="mithril-agent",instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_process_start_timestamp_seconds{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_last_heartbeat_timestamp_seconds{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_last_cycle_timestamp_seconds{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_attention_required{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_last_failure{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_last_action_timestamp_seconds{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_last_action_result{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_last_action_verdict{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_last_action_submitted{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_price_trigger_configured{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_price_trigger_valid{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_price_trigger_available{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_price_trigger_condition_met{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_price_trigger_executable_evaluated{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_price_trigger_executable_condition_met{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_price_trigger_target_microusd{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_price_trigger_conservative_microusd{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_price_trigger_minimum_devusdc_per_sol_micro{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_price_trigger_observed_timestamp_seconds{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_journal_records{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_send_started_total{instance="agent"}'
+        values: '_ _ _ _ _ 1+0x8'
+      - series: 'mithril_agent_submitted_total{instance="agent"}'
+        values: '1+0x4 stale _ _ _ _ _ _ _'
+      - series: 'mithril_agent_journal_record_limit{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_journal_bytes{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_journal_reserved_bytes{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_journal_byte_limit{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_oldest_pending_reconciliation_age_seconds{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_reconciliation_timeout_seconds{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_control_mode{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_terminal_stop{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_activation_max_actions{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_activation_remaining_actions{instance="agent"}'
+        values: '1+0x12'
+      - series: 'mithril_agent_activation_expires_timestamp_seconds{instance="agent"}'
+        values: '1+0x12'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: MithrilAgentMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              job: mithril-agent
+              severity: critical
+            exp_annotations:
+              summary: "Mithril agent metrics are incomplete; keep execution stopped"
+      - eval_time: 2m15s
+        alertname: MithrilAgentMetricsMissing
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              job: mithril-agent
+              severity: critical
+            exp_annotations:
+              summary: "Mithril agent metrics are incomplete; keep execution stopped"
+
+  - name: stale reconciliation suppresses umbrella attention
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_attention_required{instance="agent"}'
+        values: '1+0x4'
+      - series: 'mithril_agent_oldest_pending_reconciliation_age_seconds{instance="agent"}'
+        values: '181+0x4'
+      - series: 'mithril_agent_reconciliation_timeout_seconds{instance="agent"}'
+        values: '180+0x4'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: MithrilAgentAttentionRequired
+        exp_alerts: []
+      - eval_time: 15s
+        alertname: MithrilAgentReconciliationStale
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              severity: critical
+            exp_annotations:
+              summary: "Submitted swap is still unresolved; keep execution stopped and inspect status"
+
+  - name: unexplained attention pages once it persists
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_attention_required{instance="agent"}'
+        values: '1+0x40'
+    alert_rule_test:
+      # A single bad scrape must not page; only a sustained condition does.
+      - eval_time: 15s
+        alertname: MithrilAgentAttentionRequired
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: MithrilAgentAttentionRequired
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              severity: critical
+            exp_annotations:
+              summary: "Mithril agent needs operator review; keep execution stopped and inspect status"
+
+  - name: quote service loss warns only when it persists
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_last_failure{instance="agent",category="quote_unavailable"}'
+        values: '1+0x60'
+    alert_rule_test:
+      # A transient provider blip is not an incident.
+      - eval_time: 15s
+        alertname: MithrilAgentQuoteUnavailable
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: MithrilAgentQuoteUnavailable
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: MithrilAgentQuoteUnavailable
+        exp_alerts:
+          - exp_labels:
+              category: quote_unavailable
+              instance: agent
+              severity: warning
+            exp_annotations:
+              summary: "Quotes are unavailable; no new swap can start"
+
+  - name: a completed action notifies once while recent
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_last_action_result{instance="agent",decision="complete"}'
+        values: '1+0x24'
+      - series: 'mithril_agent_last_action_verdict{instance="agent",verdict="finalized"}'
+        values: '1+0x24'
+      - series: 'mithril_agent_last_action_submitted{instance="agent"}'
+        values: '1+0x24'
+      - series: 'mithril_agent_last_action_timestamp_seconds{instance="agent"}'
+        values: '60+0x24'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilAgentActionCompleted
+        exp_alerts:
+          - exp_labels:
+              decision: complete
+              instance: agent
+              lifecycle: event
+              severity: info
+            exp_annotations:
+              summary: "Devnet swap confirmed by both evidence providers"
+      - eval_time: 2m
+        alertname: MithrilAgentActionSubmitted
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: MithrilAgentActionCompleted
+        exp_alerts: []
+
+  - name: a submitted action notifies once while recent
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_last_action_submitted{instance="agent"}'
+        values: '1+0x24'
+      - series: 'mithril_agent_last_action_result{instance="agent",decision="pending"}'
+        values: '1+0x24'
+      - series: 'mithril_agent_last_action_timestamp_seconds{instance="agent"}'
+        values: '60+0x24'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: MithrilAgentActionSubmitted
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              lifecycle: event
+              severity: info
+            exp_annotations:
+              summary: "Devnet swap submitted; confirmation is pending"
+      - eval_time: 6m
+        alertname: MithrilAgentActionSubmitted
+        exp_alerts: []
+
+  - name: a reached price target notifies once it holds
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_price_trigger_configured{instance="agent"}'
+        values: '1+0x40'
+      - series: 'mithril_agent_price_trigger_valid{instance="agent"}'
+        values: '1+0x40'
+      - series: 'mithril_agent_price_trigger_available{instance="agent"}'
+        values: '1+0x40'
+      - series: 'mithril_agent_price_trigger_condition_met{instance="agent"}'
+        values: '1+0x40'
+      - series: 'mithril_agent_control_mode{instance="agent",mode="no_new_actions"}'
+        values: '1+0x40'
+    alert_rule_test:
+      # Price sitting on the threshold must not re-notify every evaluation.
+      - eval_time: 15s
+        alertname: MithrilAgentPriceTargetReached
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: MithrilAgentPriceTargetReached
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              lifecycle: event
+              severity: info
+            exp_annotations:
+              summary: "SOL price target reached; execution is stopped"
+
+  - name: a terminal action pages until exact acknowledgement
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_terminal_stop{instance="agent",outcome="halted"}'
+        values: '1+0x4 0+0x4'
+      - series: 'mithril_agent_last_action_submitted{instance="agent"}'
+        values: '1+0x8'
+      - series: 'mithril_agent_last_action_result{instance="agent",decision="halted"}'
+        values: '1+0x8'
+      - series: 'mithril_agent_last_action_timestamp_seconds{instance="agent"}'
+        values: '1+0x8'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: MithrilAgentActionTerminal
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              lifecycle: state
+              outcome: halted
+              severity: critical
+            exp_annotations:
+              summary: "Devnet swap failed or halted; operator review is required"
+      - eval_time: 30s
+        alertname: MithrilAgentActionSubmitted
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: MithrilAgentActionTerminal
+        exp_alerts: []
+
+  - name: any restart pages
+    interval: 1m
+    input_series:
+      - series: 'mithril_agent_process_start_timestamp_seconds{instance="agent"}'
+        values: '100 100 200 200 200 200 200 200 200 200 200'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: MithrilAgentRestarted
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              lifecycle: event
+              severity: info
+            exp_annotations:
+              summary: "Mithril agent restarted; execution remains stopped until re-enabled"
+
+  - name: inconsistent control state pages
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_control_mode{instance="agent",mode="no_new_actions"}'
+        values: '0+0x4'
+      - series: 'mithril_agent_control_mode{instance="agent",mode="devnet_enabled"}'
+        values: '1+0x4'
+      - series: 'mithril_agent_activation_max_actions{instance="agent"}'
+        values: '1+0x4'
+      - series: 'mithril_agent_activation_remaining_actions{instance="agent"}'
+        values: '0+0x4'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: MithrilAgentControlStateInvalid
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              mode: devnet_enabled
+              severity: critical
+            exp_annotations:
+              summary: "Mithril agent control state is invalid; keep execution stopped"
+
+      - eval_time: 15s
+        alertname: MithrilAgentExecutionEnabled
+        exp_alerts: []
+
+  - name: valid bounded execution enablement notifies
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_control_mode{instance="agent",mode="no_new_actions"}'
+        values: '0+0x4'
+      - series: 'mithril_agent_control_mode{instance="agent",mode="devnet_enabled"}'
+        values: '1+0x4'
+      - series: 'mithril_agent_activation_max_actions{instance="agent"}'
+        values: '1+0x4'
+      - series: 'mithril_agent_activation_remaining_actions{instance="agent"}'
+        values: '1+0x4'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: MithrilAgentExecutionEnabled
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              lifecycle: state
+              mode: devnet_enabled
+              severity: warning
+            exp_annotations:
+              summary: "Bounded Mithril Devnet execution is enabled"
+
+  - name: stale cycles and journal pressure page
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_last_heartbeat_timestamp_seconds{instance="agent"}'
+        values: '1+0x16'
+      - series: 'mithril_agent_last_cycle_timestamp_seconds{instance="agent"}'
+        values: '1+0x16'
+      - series: 'mithril_agent_journal_records{instance="agent"}'
+        values: '80+0x16'
+      - series: 'mithril_agent_journal_record_limit{instance="agent"}'
+        values: '100+0x16'
+      - series: 'mithril_agent_journal_bytes{instance="agent"}'
+        values: '1+0x16'
+      - series: 'mithril_agent_journal_byte_limit{instance="agent"}'
+        values: '100+0x16'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: MithrilAgentCycleStale
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              severity: critical
+            exp_annotations:
+              summary: "Mithril agent heartbeat is stale; keep execution stopped"
+      - eval_time: 2m
+        alertname: MithrilAgentJournalNearLimit
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              severity: warning
+            exp_annotations:
+              summary: "Mithril agent journal is near capacity; archive it before enabling execution"
+
+  - name: a configured met alert fires after persistence and an unconfigured one stays silent
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_alert_price_above_configured{job="mithril-agent",instance="agent"}'
+        values: '1+0x60'
+      - series: 'mithril_agent_alert_price_above_condition_met{job="mithril-agent",instance="agent"}'
+        values: '1+0x60'
+      - series: 'mithril_agent_alert_evidence_available{job="mithril-agent",instance="agent"}'
+        values: '1+0x60'
+      - series: 'mithril_agent_alert_price_below_configured{job="mithril-agent",instance="agent"}'
+        values: '0+0x60'
+      - series: 'mithril_agent_alert_price_below_condition_met{job="mithril-agent",instance="agent"}'
+        values: '0+0x60'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: MithrilAgentAlertPriceAbove
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              job: mithril-agent
+              severity: info
+              lifecycle: event
+            exp_annotations:
+              summary: "ALERT (notify only): SOL price reached the configured high threshold"
+      - eval_time: 6m
+        alertname: MithrilAgentAlertPriceBelow
+        exp_alerts: []
+
+  - name: a met condition without evidence does not fire the threshold alert
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_alert_balance_below_configured{job="mithril-agent",instance="agent"}'
+        values: '1+0x60'
+      - series: 'mithril_agent_alert_balance_below_condition_met{job="mithril-agent",instance="agent"}'
+        values: '1+0x60'
+      - series: 'mithril_agent_alert_evidence_available{job="mithril-agent",instance="agent"}'
+        values: '0+0x60'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: MithrilAgentAlertBalanceBelow
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: MithrilAgentAlertEvidenceUnavailable
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              job: mithril-agent
+              severity: warning
+            exp_annotations:
+              summary: "Configured alerts have no usable evidence; their conditions are not being watched"
+
+  - name: unconfigured alerts never report missing evidence
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_alert_price_above_configured{job="mithril-agent",instance="agent"}'
+        values: '0+0x60'
+      - series: 'mithril_agent_alert_price_below_configured{job="mithril-agent",instance="agent"}'
+        values: '0+0x60'
+      - series: 'mithril_agent_alert_balance_above_configured{job="mithril-agent",instance="agent"}'
+        values: '0+0x60'
+      - series: 'mithril_agent_alert_balance_below_configured{job="mithril-agent",instance="agent"}'
+        values: '0+0x60'
+      - series: 'mithril_agent_alert_evidence_available{job="mithril-agent",instance="agent"}'
+        values: '0+0x60'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: MithrilAgentAlertEvidenceUnavailable
+        exp_alerts: []
+
+  - name: a brief threshold touch does not page
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_alert_price_above_configured{job="mithril-agent",instance="agent"}'
+        values: '1+0x60'
+      - series: 'mithril_agent_alert_price_above_condition_met{job="mithril-agent",instance="agent"}'
+        values: '0 0 0 0 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0+0x40'
+      - series: 'mithril_agent_alert_evidence_available{job="mithril-agent",instance="agent"}'
+        values: '1+0x60'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: MithrilAgentAlertPriceAbove
+        exp_alerts: []
+
+  - name: a fresh sweep registration notifies and an old one stays quiet
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_sweep_destination_registered_timestamp_seconds{job="mithril-agent",instance="agent"}'
+        values: '60+0x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: MithrilAgentSweepDestinationChanged
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              job: mithril-agent
+              severity: info
+              lifecycle: state
+            exp_annotations:
+              summary: "Sweep destination was registered in the last 48 hours; ignore if that was you"
+
+  - name: no registration means no destination-change notification
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_sweep_destination_registered_timestamp_seconds{job="mithril-agent",instance="agent"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: MithrilAgentSweepDestinationChanged
+        exp_alerts: []

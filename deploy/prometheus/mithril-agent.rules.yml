@@ -1,0 +1,386 @@
+groups:
+  - name: mithril-agent
+    interval: 15s
+    rules:
+      - alert: MithrilAgentDown
+        expr: >-
+          up{job="mithril-agent"} != 1
+          or
+          absent(up{job="mithril-agent"})
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Mithril agent is unreachable; execution state needs checking"
+
+      - alert: MithrilAgentMetricsMissing
+        expr: >-
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_process_start_timestamp_seconds)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_last_heartbeat_timestamp_seconds)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_last_cycle_timestamp_seconds)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_attention_required)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_last_failure)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_last_action_timestamp_seconds)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_last_action_result)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_last_action_verdict)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_last_action_submitted)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_price_trigger_configured)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_price_trigger_valid)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_price_trigger_available)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_price_trigger_condition_met)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_price_trigger_executable_evaluated)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_price_trigger_executable_condition_met)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_price_trigger_target_microusd)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_price_trigger_conservative_microusd)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_price_trigger_minimum_devusdc_per_sol_micro)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_price_trigger_observed_timestamp_seconds)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_journal_records)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_send_started_total)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_submitted_total)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_journal_record_limit)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_journal_bytes)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_journal_reserved_bytes)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_journal_byte_limit)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_oldest_pending_reconciliation_age_seconds)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_reconciliation_timeout_seconds)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_control_mode)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_terminal_stop)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_activation_max_actions)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_activation_remaining_actions)
+          or
+          (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_activation_expires_timestamp_seconds)
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Mithril agent metrics are incomplete; keep execution stopped"
+
+      - alert: MithrilAgentCycleStale
+        expr: >-
+          mithril_agent_last_heartbeat_timestamp_seconds == 0
+          or
+          time() - mithril_agent_last_heartbeat_timestamp_seconds > 150
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Mithril agent heartbeat is stale; keep execution stopped"
+
+      - alert: MithrilAgentRestarted
+        expr: >-
+          changes(mithril_agent_process_start_timestamp_seconds[10m]) >= 1
+        labels:
+          severity: info
+          lifecycle: event
+        annotations:
+          summary: "Mithril agent restarted; execution remains stopped until re-enabled"
+
+      - alert: MithrilAgentAttentionRequired
+        expr: >-
+          mithril_agent_attention_required == 1
+          unless on(instance)
+          mithril_agent_terminal_stop == 1
+          unless on(instance)
+          mithril_agent_last_failure{category="quote_unavailable"} == 1
+          unless on(instance)
+          (mithril_agent_reconciliation_timeout_seconds > 0
+            and
+            mithril_agent_oldest_pending_reconciliation_age_seconds
+              > mithril_agent_reconciliation_timeout_seconds)
+        # A single bad scrape is not an incident; a condition that persists is.
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Mithril agent needs operator review; keep execution stopped and inspect status"
+
+      - alert: MithrilAgentQuoteUnavailable
+        expr: >-
+          mithril_agent_last_failure{category="quote_unavailable"} == 1
+        # A transient provider blip is not an incident. This is already excluded
+        # from the AttentionRequired umbrella for the same reason.
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Quotes are unavailable; no new swap can start"
+
+      - alert: MithrilAgentActionCompleted
+        expr: >-
+          mithril_agent_last_action_result{decision="complete"} == 1
+          and on(instance)
+          mithril_agent_last_action_verdict{verdict="finalized"} == 1
+          and on(instance)
+          time() - mithril_agent_last_action_timestamp_seconds >= 0
+          and on(instance)
+          time() - mithril_agent_last_action_timestamp_seconds < 300
+        labels:
+          severity: info
+          lifecycle: event
+        annotations:
+          summary: "Devnet swap confirmed by both evidence providers"
+
+      - alert: MithrilAgentActionSubmitted
+        expr: >-
+          mithril_agent_last_action_submitted == 1
+          and on(instance)
+          mithril_agent_last_action_result{decision="pending"} == 1
+          and on(instance)
+          time() - mithril_agent_last_action_timestamp_seconds >= 0
+          and on(instance)
+          time() - mithril_agent_last_action_timestamp_seconds < 300
+        labels:
+          severity: info
+          lifecycle: event
+        annotations:
+          summary: "Devnet swap submitted; confirmation is pending"
+
+      - alert: MithrilAgentPriceTargetReached
+        expr: >-
+          mithril_agent_price_trigger_configured == 1
+          and on(instance)
+          mithril_agent_price_trigger_valid == 1
+          and on(instance)
+          mithril_agent_price_trigger_available == 1
+          and on(instance)
+          mithril_agent_price_trigger_condition_met == 1
+          and on(instance)
+          mithril_agent_control_mode{mode="no_new_actions"} == 1
+        # Without this the alert re-fires every evaluation while the price sits
+        # on the threshold. The operator can read the same state from /price.
+        for: 5m
+        labels:
+          severity: info
+          lifecycle: event
+        annotations:
+          summary: "SOL price target reached; execution is stopped"
+
+      - alert: MithrilAgentActionTerminal
+        expr: >-
+          mithril_agent_terminal_stop == 1
+        labels:
+          severity: critical
+          lifecycle: state
+        annotations:
+          summary: "Devnet swap failed or halted; operator review is required"
+
+      - alert: MithrilAgentControlStateInvalid
+        expr: >-
+          sum by (instance) (mithril_agent_control_mode) != 1
+          or
+          mithril_agent_control_mode{mode="devnet_enabled"} == 1
+          and on(instance)
+          (mithril_agent_activation_max_actions < 1
+            or mithril_agent_activation_remaining_actions < 1
+            or mithril_agent_activation_remaining_actions
+              > mithril_agent_activation_max_actions)
+        labels:
+          severity: critical
+        annotations:
+          summary: "Mithril agent control state is invalid; keep execution stopped"
+
+      - alert: MithrilAgentExecutionEnabled
+        expr: >-
+          mithril_agent_control_mode{mode="devnet_enabled"} == 1
+          and on(instance)
+          sum by (instance) (mithril_agent_control_mode) == 1
+          and on(instance)
+          mithril_agent_activation_max_actions >= 1
+          and on(instance)
+          mithril_agent_activation_remaining_actions >= 1
+          and on(instance)
+          mithril_agent_activation_remaining_actions
+            <= mithril_agent_activation_max_actions
+        labels:
+          severity: warning
+          lifecycle: state
+        annotations:
+          summary: "Bounded Mithril Devnet execution is enabled"
+
+      - alert: MithrilAgentReconciliationStale
+        expr: >-
+          mithril_agent_reconciliation_timeout_seconds > 0
+          and
+          mithril_agent_oldest_pending_reconciliation_age_seconds
+            > mithril_agent_reconciliation_timeout_seconds
+        labels:
+          severity: critical
+        annotations:
+          summary: "Submitted swap is still unresolved; keep execution stopped and inspect status"
+
+      - alert: MithrilAgentJournalNearLimit
+        expr: >-
+          mithril_agent_journal_record_limit > 0
+          and
+          mithril_agent_journal_records
+            / mithril_agent_journal_record_limit >= 0.8
+          or
+          mithril_agent_journal_byte_limit > 0
+          and
+          mithril_agent_journal_bytes
+            / mithril_agent_journal_byte_limit >= 0.8
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Mithril agent journal is near capacity; archive it before enabling execution"
+
+      # Operator-configured notify-only alerts. The agent exports the
+      # condition as gauges each cycle; persistence (for), anti-flap
+      # (keep_firing_for) and delivery cadence (Alertmanager repeat_interval)
+      # live here, not in the agent — one alert engine, this one.
+      - alert: MithrilAgentAlertPriceAbove
+        expr: >-
+          mithril_agent_alert_price_above_configured == 1
+          and on(instance)
+          mithril_agent_alert_evidence_available == 1
+          and on(instance)
+          mithril_agent_alert_price_above_condition_met == 1
+        for: 5m
+        keep_firing_for: 5m
+        labels:
+          severity: info
+          lifecycle: event
+        annotations:
+          summary: "ALERT (notify only): SOL price reached the configured high threshold"
+
+      - alert: MithrilAgentAlertPriceBelow
+        expr: >-
+          mithril_agent_alert_price_below_configured == 1
+          and on(instance)
+          mithril_agent_alert_evidence_available == 1
+          and on(instance)
+          mithril_agent_alert_price_below_condition_met == 1
+        for: 5m
+        keep_firing_for: 5m
+        labels:
+          severity: info
+          lifecycle: event
+        annotations:
+          summary: "ALERT (notify only): SOL price fell to the configured low threshold"
+
+      - alert: MithrilAgentAlertBalanceAbove
+        expr: >-
+          mithril_agent_alert_balance_above_configured == 1
+          and on(instance)
+          mithril_agent_alert_evidence_available == 1
+          and on(instance)
+          mithril_agent_alert_balance_above_condition_met == 1
+        for: 5m
+        keep_firing_for: 5m
+        labels:
+          severity: info
+          lifecycle: event
+        annotations:
+          summary: "ALERT (notify only): agent balance reached the configured high threshold"
+
+      - alert: MithrilAgentAlertBalanceBelow
+        expr: >-
+          mithril_agent_alert_balance_below_configured == 1
+          and on(instance)
+          mithril_agent_alert_evidence_available == 1
+          and on(instance)
+          mithril_agent_alert_balance_below_condition_met == 1
+        for: 5m
+        keep_firing_for: 5m
+        labels:
+          severity: info
+          lifecycle: event
+        annotations:
+          summary: "ALERT (notify only): agent balance fell to the configured low threshold"
+
+      # A configured alert whose evidence source cannot answer is a silently
+      # dead alert — worse than a firing one. Same posture as
+      # MithrilAgentQuoteUnavailable: transient blips are not incidents.
+      - alert: MithrilAgentAlertEvidenceUnavailable
+        expr: >-
+          (mithril_agent_alert_price_above_configured == 1
+            or mithril_agent_alert_price_below_configured == 1
+            or mithril_agent_alert_balance_above_configured == 1
+            or mithril_agent_alert_balance_below_configured == 1)
+          and on(instance)
+          mithril_agent_alert_evidence_available == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Configured alerts have no usable evidence; their conditions are not being watched"
+
+      # A sweep destination was registered or changed recently. Registration
+      # is a deliberate operator ceremony, so this firing when the operator
+      # did nothing is the signal that matters: someone else re-pointed the
+      # sweep. Delivered on a channel an on-host attacker does not control.
+      - alert: MithrilAgentSweepDestinationChanged
+        expr: >-
+          mithril_agent_sweep_destination_registered_timestamp_seconds > 0
+          and
+          time() - mithril_agent_sweep_destination_registered_timestamp_seconds < 48 * 3600
+        labels:
+          severity: info
+          lifecycle: state
+        annotations:
+          summary: "Sweep destination was registered in the last 48 hours; ignore if that was you"

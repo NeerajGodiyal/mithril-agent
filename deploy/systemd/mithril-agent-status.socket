@@ -1,0 +1,17 @@
+[Unit]
+Description=Mithril bounded operator status socket
+
+[Socket]
+ListenStream=/run/mithril-agent-status.sock
+SocketUser=mithril-agent
+SocketGroup=mithril-agent-status
+SocketMode=0660
+FileDescriptorName=operator-status
+Service=mithril-agent-status-bridge.service
+Accept=no
+Backlog=8
+FlushPending=no
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

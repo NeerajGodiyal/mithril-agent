@@ -1,0 +1,79 @@
+[Unit]
+Description=Mithril bounded Devnet swap agent
+After=network-online.target mithril-agent-quote.service
+Wants=network-online.target mithril-agent-quote.service
+StartLimitIntervalSec=5min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=mithril-agent
+Group=mithril-agent
+UMask=0077
+EnvironmentFile=/etc/mithril-agent/rpc.env
+EnvironmentFile=-/etc/mithril-agent/mcp.env
+EnvironmentFile=-/etc/mithril-agent/price.env
+InaccessiblePaths=-/etc/mithril-agent/quote.env
+# This stop runs on EVERY start, including after a crash, and that is
+# deliberate: the agent must never come back up still armed. It is the single
+# most important property of this unit.
+#
+# The known cost: a stop clears any in-flight recovery marker, so a crash inside
+# the send window is indistinguishable from an operator acknowledging it. If the
+# agent crashes between sending and reconciling, the marker that a transaction
+# may be on-chain and unresolved is discarded silently.
+#
+# Coming back up armed would be far worse, so the trade is the right way round —
+# but after any unclean restart, check the journal for a swap.send_started with
+# no matching swap.reconciled, and confirm the signature on-chain before
+# re-enabling. Do not remove this line to preserve the marker.
+ExecStartPre=/usr/local/libexec/mithril-agent/mithril-agent swap stop --config /var/lib/mithril-agent/agent/config.json --reason service_start
+ExecStartPre=/usr/local/libexec/mithril-agent/mithril-agent preflight --config /var/lib/mithril-agent/agent/config.json
+ExecStart=/usr/local/libexec/mithril-agent/mithril-agent swap run --config /var/lib/mithril-agent/agent/config.json --interval 10s --metrics-address 127.0.0.1:9191
+ExecStop=/usr/local/libexec/mithril-agent/mithril-agent swap drain --config /var/lib/mithril-agent/agent/config.json --timeout 16m --reason service_stop
+ExecStopPost=/usr/local/libexec/mithril-agent/mithril-agent swap stop --config /var/lib/mithril-agent/agent/config.json --reason service_stop
+Restart=on-failure
+RestartSec=10s
+TimeoutStartSec=30s
+TimeoutStopSec=17min
+KillMode=control-group
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=no
+ProtectControlGroups=yes
+ProtectHome=read-only
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+ProtectProc=invisible
+ReadOnlyPaths=/var/lib/mithril-agent/agent
+ReadWritePaths=/var/lib/mithril-agent/agent/state
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+IPAccounting=yes
+IPAddressDeny=0.0.0.0/8
+IPAddressDeny=10.0.0.0/8
+IPAddressDeny=100.64.0.0/10
+IPAddressDeny=172.16.0.0/12
+IPAddressDeny=192.168.0.0/16
+IPAddressDeny=169.254.0.0/16
+IPAddressDeny=198.18.0.0/15
+IPAddressDeny=240.0.0.0/4
+IPAddressDeny=fc00::/7
+IPAddressDeny=fec0::/10
+IPAddressDeny=fe80::/10
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+TasksMax=64
+LimitNOFILE=1024
+
+[Install]
+WantedBy=multi-user.target
