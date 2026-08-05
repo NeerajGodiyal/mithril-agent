@@ -22,3 +22,7 @@ func openFile(path string) (*os.File, error) {
 func openReadFile(path string) (*os.File, error) {
 	return os.Open(path)
 }
+
+func createExclusive(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+}

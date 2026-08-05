@@ -1356,7 +1356,11 @@ func (e *Engine) executionStates() (map[string]*executionState, []string, error)
 	for _, record := range e.store.Records() {
 		switch record.Type {
 		case agent.EventActionShadowProposed, agent.EventActionShadowed,
-			EventClockAccepted, EventNodeObserved, EventNodeObservationFailed:
+			EventClockAccepted, EventNodeObserved, EventNodeObservationFailed,
+			// The rotation marker belongs to the journal, not to any action.
+			// It must be skipped here rather than typed as an event: it
+			// carries no action ID, so the check below would reject it.
+			journal.EventRotated:
 			continue
 		case agent.EventActionProposed,
 			EventExecutionStarted,

@@ -139,7 +139,7 @@ func runSwapBindProviders(args []string, output io.Writer) error {
 		return errors.New("validate swap profile")
 	}
 	bindProvidersAfterInitialConfigRead()
-	store, err := journal.Open(initialCfg.Journal.Path)
+	store, err := journal.OpenRotating(initialCfg.Journal.Path)
 	if err != nil {
 		return errors.New("open audit journal; stop the swap runner before binding providers")
 	}

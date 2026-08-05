@@ -1278,7 +1278,7 @@ func openDevnetRuntime(
 	if err != nil {
 		return nil, fmt.Errorf("control state: %w", err)
 	}
-	store, err := journal.Open(cfg.Journal.Path)
+	store, err := journal.OpenRotating(cfg.Journal.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -1395,7 +1395,7 @@ func runShadow(args []string, output io.Writer) error {
 		return fmt.Errorf("read observation: %w", err)
 	}
 
-	store, err := journal.Open(*journalPath)
+	store, err := journal.OpenRotating(*journalPath)
 	if err != nil {
 		return err
 	}

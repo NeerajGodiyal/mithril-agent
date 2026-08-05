@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,7 +29,39 @@ const (
 	// Format identifies the journal encoding and hash domain.
 	Format     = "mithril-agent/journal-v1"
 	hashDomain = Format
+
+	// EventRotated is the first record of every new active segment. It carries
+	// the sealed segment's identity and chain head, and because it is written
+	// into the staged file BEFORE that file becomes the active journal, a new
+	// active file is never durably empty — which is what makes deletion of the
+	// newest sealed segment detectable rather than silent.
+	EventRotated = "journal.rotated"
+
+	// maxSegments bounds how many sealed segments one journal may accumulate.
+	// It is a backstop against unbounded directory and memory growth, not an
+	// operational limit: at the rotation threshold it is decades of running.
+	maxSegments = 1024
+
+	segmentSuffix = ".seg-"
+	stagedSuffix  = ".next"
+	lockSuffix    = ".lock"
 )
+
+// rotationMarker is the payload of an EventRotated record.
+type rotationMarker struct {
+	SealedSegment      int    `json:"sealed_segment"`
+	SealedLastSequence uint64 `json:"sealed_last_sequence"`
+	SealedChainHead    string `json:"sealed_chain_head"`
+}
+
+// scanSeed continues a hash chain across a segment boundary. The zero value
+// starts a fresh chain, which is exactly what a single-file journal needs, so
+// the non-rotating path is unchanged.
+type scanSeed struct {
+	startSequence uint64
+	prevHash      string
+	lastAt        time.Time
+}
 
 // ErrLocked reports that another process owns the journal writer lock.
 var ErrLocked = errors.New("journal is already open by another process")
@@ -60,6 +94,21 @@ type Store struct {
 	reserveBytes int64
 	records      []Record
 	poison       error
+
+	// rotating stores seal the active file into a numbered segment when it
+	// approaches the per-file caps, so a runner can append indefinitely.
+	// Rotation is opt-in because the signer's authorization ledger reuses this
+	// type and requires its own header at records[0].
+	rotating bool
+	basePath string
+	// lock is the stable lock file. Exclusivity has to outlive the active
+	// file's identity, which rotation changes, so it cannot live on the data
+	// file alone.
+	lock *os.File
+	// activeStart is the index in records where the active segment begins.
+	// The per-file caps apply from here; sequence and hash chain stay global.
+	activeStart int
+	segments    int
 }
 
 type Stats struct {
@@ -83,6 +132,10 @@ type Verification struct {
 }
 
 func Open(path string) (*Store, error) {
+	return open(path, false)
+}
+
+func open(path string, rotating bool) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("journal path is empty")
 	}
@@ -92,6 +145,25 @@ func Open(path string) (*Store, error) {
 	}
 	if err := validateJournalDirectory(parent); err != nil {
 		return nil, err
+	}
+	if !rotating {
+		// A non-rotating open of a rotated journal would read only the active
+		// segment and silently lose the history every latch is derived from.
+		// The scanner would reject it anyway on sequence contiguity; saying so
+		// plainly is the difference between a diagnosable error and a puzzle.
+		segments, staged, err := hasSegments(path)
+		if err != nil {
+			return nil, err
+		}
+		if segments {
+			return nil, errors.New("journal has rotated segments; reopen with rotation enabled")
+		}
+		if staged {
+			return nil, errors.New("journal has an incomplete rotation; reopen with rotation enabled")
+		}
+	}
+	if rotating {
+		return openRotating(path, parent)
 	}
 	_, statErr := os.Lstat(path)
 	created := errors.Is(statErr, os.ErrNotExist)
@@ -125,7 +197,7 @@ func Open(path string) (*Store, error) {
 		return closeOnError(err)
 	}
 
-	store := &Store{file: file, reservePath: path + ".reserve"}
+	store := &Store{file: file, reservePath: path + ".reserve", basePath: path}
 	if err := store.load(); err != nil {
 		return closeOnError(err)
 	}
@@ -141,6 +213,351 @@ func Open(path string) (*Store, error) {
 	return store, nil
 }
 
+// OpenRotating opens a journal that seals its active file into a numbered
+// segment as it fills, so an unattended runner is not stopped by the per-file
+// caps after about six weeks.
+//
+// Sequence numbers and the hash chain stay GLOBAL across segments: reading the
+// segments in order and then the active file reproduces exactly the record
+// stream a single-file journal would have held. Records() therefore still
+// returns the complete history, which is what keeps every fail-closed
+// invariant derived by full-scanning it — the halted latch, the clock anchor,
+// the daily debit sums — correct across a rotation.
+//
+// Rotation is deliberately opt-in rather than the default. The signer's
+// authorization ledger reuses this type, requires its own header record at
+// records[0], and already holds an exclusive lock on the identical
+// <path>.lock name; making rotation default would both break its header
+// assumption and deadlock it against itself.
+func OpenRotating(path string) (*Store, error) {
+	store, err := open(path, true)
+	if err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+// openRotating opens the stable lock, completes any interrupted rotation, and
+// loads every segment in order.
+func openRotating(path, parent string) (*Store, error) {
+	lock, err := openFile(path + lockSuffix)
+	if err != nil {
+		return nil, fmt.Errorf("open journal lock: %w", err)
+	}
+	if err := lockFile(lock); err != nil {
+		_ = lock.Close()
+		if errors.Is(err, ErrLocked) {
+			return nil, ErrLocked
+		}
+		return nil, fmt.Errorf("lock journal: %w", err)
+	}
+	failed := func(err error) (*Store, error) {
+		_ = lock.Close()
+		return nil, err
+	}
+	if err := syncDirectory(parent); err != nil {
+		return failed(fmt.Errorf("sync journal directory: %w", err))
+	}
+	if err := recoverInterruptedRotation(path); err != nil {
+		return failed(err)
+	}
+
+	segments, err := discoverSegments(path)
+	if err != nil {
+		return failed(err)
+	}
+	store := &Store{
+		file: nil, reservePath: path + ".reserve",
+		rotating: true, basePath: path, lock: lock, segments: len(segments),
+	}
+	// Sealed segments are immutable: a torn record in one is corruption, not a
+	// crash to repair, so they are scanned with no recovery callback.
+	seed := scanSeed{}
+	for _, segment := range segments {
+		records, scanErr := scanSealedSegment(segment, seed)
+		if scanErr != nil {
+			return failed(scanErr)
+		}
+		store.records = append(store.records, records...)
+		seed = seedFrom(store.records)
+	}
+	store.activeStart = len(store.records)
+
+	if err := rejectSymlink(path); err != nil {
+		return failed(err)
+	}
+	active, err := openFile(path)
+	if err != nil {
+		return failed(fmt.Errorf("open journal: %w", err))
+	}
+	if err := lockFile(active); err != nil {
+		_ = active.Close()
+		return failed(fmt.Errorf("lock journal: %w", err))
+	}
+	info, err := active.Stat()
+	if err != nil {
+		_ = active.Close()
+		return failed(fmt.Errorf("stat journal: %w", err))
+	}
+	if err := validateJournalFile(info); err != nil {
+		_ = active.Close()
+		return failed(err)
+	}
+	if len(segments) > 0 && info.Size() == 0 {
+		// The staged file was born holding a durable rotation marker before it
+		// ever became the active journal, so an empty active file beside
+		// sealed segments means the marker was removed. Recreating it here
+		// would rewrite history to match the damage.
+		_ = active.Close()
+		return failed(errors.New("journal active segment is empty; its rotation marker is missing"))
+	}
+	store.file = active
+	if err := store.loadActive(seed); err != nil {
+		_ = active.Close()
+		return failed(err)
+	}
+	if err := store.loadReserve(); err != nil {
+		_ = active.Close()
+		return failed(err)
+	}
+	if _, err := active.Seek(0, io.SeekEnd); err != nil {
+		if store.reserve != nil {
+			_ = store.reserve.Close()
+		}
+		_ = active.Close()
+		return failed(fmt.Errorf("seek journal: %w", err))
+	}
+	// A reserve present at open belongs to an action that was in flight when
+	// the process stopped. Rotating now would strand it against the wrong
+	// segment, so startup rotation waits for that action to release.
+	if store.reserve == nil {
+		if err := store.rotateIfFullLocked(); err != nil {
+			_ = store.Close()
+			return nil, err
+		}
+	}
+	return store, nil
+}
+
+// seedFrom derives the continuation seed from the records loaded so far.
+func seedFrom(records []Record) scanSeed {
+	if len(records) == 0 {
+		return scanSeed{}
+	}
+	tail := records[len(records)-1]
+	return scanSeed{startSequence: tail.Sequence, prevHash: tail.Hash, lastAt: tail.At.UTC()}
+}
+
+func scanSealedSegment(path string, seed scanSeed) ([]Record, error) {
+	if err := rejectSymlink(path); err != nil {
+		return nil, err
+	}
+	file, err := openReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("open journal segment: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat journal segment: %w", err)
+	}
+	if err := validateJournalFile(info); err != nil {
+		return nil, err
+	}
+	return scanJournalSeeded(file, seed, nil)
+}
+
+// loadActive scans the active file as a continuation, repairing only a torn
+// final record exactly as the single-file path does.
+func (s *Store) loadActive(seed scanSeed) error {
+	if _, err := s.file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek journal: %w", err)
+	}
+	records, err := scanJournalSeeded(s.file, seed, func(lineStart int64) error {
+		if err := s.file.Truncate(lineStart); err != nil {
+			return fmt.Errorf("recover torn journal tail: %w", err)
+		}
+		return s.file.Sync()
+	})
+	if err != nil {
+		return err
+	}
+	if s.segments > 0 && len(records) == 0 {
+		return errors.New("journal active segment lost its rotation marker")
+	}
+	s.records = append(s.records, records...)
+	return nil
+}
+
+// recoverInterruptedRotation completes or rejects a rotation that a crash left
+// half-applied. Rotation stages the new active file first, so the states are
+// enumerable and none of them requires inventing a record.
+func recoverInterruptedRotation(base string) error {
+	staged := base + stagedSuffix
+	stagedInfo, stagedErr := os.Lstat(staged)
+	if errors.Is(stagedErr, os.ErrNotExist) {
+		segments, err := discoverSegments(base)
+		if err != nil {
+			return err
+		}
+		if len(segments) == 0 {
+			return nil
+		}
+		if _, err := os.Lstat(base); errors.Is(err, os.ErrNotExist) {
+			// Both renames were lost but sealed segments exist. Recreating an
+			// active file would silently roll history back to the seal.
+			return errors.New("journal active segment is missing; restore it or the sealed segments are incomplete")
+		}
+		return nil
+	}
+	if stagedErr != nil {
+		return fmt.Errorf("inspect staged journal segment: %w", stagedErr)
+	}
+	if stagedInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.New("staged journal segment must not be a symlink")
+	}
+
+	segments, err := discoverSegments(base)
+	if err != nil {
+		return err
+	}
+	_, baseErr := os.Lstat(base)
+	baseMissing := errors.Is(baseErr, os.ErrNotExist)
+	if baseErr != nil && !baseMissing {
+		return fmt.Errorf("inspect journal: %w", baseErr)
+	}
+	if baseMissing {
+		// The seal rename landed; only the staged promotion was lost.
+		if err := verifyStagedMarker(staged, segments, base, true); err != nil {
+			return err
+		}
+		if err := os.Rename(staged, base); err != nil {
+			return fmt.Errorf("promote staged journal segment: %w", err)
+		}
+		return syncDirectory(filepath.Dir(base))
+	}
+	// Neither rename landed: the staged marker must chain from the active
+	// file's current head, or something other than this rotation wrote it.
+	if err := verifyStagedMarker(staged, segments, base, false); err != nil {
+		return err
+	}
+	if err := os.Rename(base, segmentPath(base, len(segments)+1)); err != nil {
+		return fmt.Errorf("seal journal segment: %w", err)
+	}
+	if err := syncDirectory(filepath.Dir(base)); err != nil {
+		return err
+	}
+	if err := os.Rename(staged, base); err != nil {
+		return fmt.Errorf("promote staged journal segment: %w", err)
+	}
+	return syncDirectory(filepath.Dir(base))
+}
+
+// verifyStagedMarker checks that the staged file holds exactly the rotation
+// marker this journal would have written, chained from the records that
+// preceded it. Anything else is refused rather than adopted.
+func verifyStagedMarker(staged string, segments []string, base string, sealed bool) error {
+	seed := scanSeed{}
+	for _, segment := range segments {
+		records, err := scanSealedSegment(segment, seed)
+		if err != nil {
+			return err
+		}
+		seed = seedFrom(records)
+		if seed.startSequence == 0 {
+			return errors.New("journal segment is empty")
+		}
+	}
+	if !sealed {
+		// The active file has not been sealed yet, so the marker must follow
+		// its tail rather than the last sealed segment's.
+		records, err := scanSealedSegment(base, seed)
+		if err != nil {
+			return err
+		}
+		if len(records) == 0 {
+			return errors.New("journal active segment is empty; refusing to complete a rotation from it")
+		}
+		seed = seedFrom(records)
+	}
+	stagedRecords, err := scanSealedSegment(staged, seed)
+	if err != nil {
+		return fmt.Errorf("staged journal segment does not continue the chain: %w", err)
+	}
+	if len(stagedRecords) != 1 || stagedRecords[0].Type != EventRotated {
+		return errors.New("staged journal segment does not hold exactly one rotation marker")
+	}
+	return nil
+}
+
+func segmentPath(base string, index int) string {
+	return fmt.Sprintf("%s%s%06d", base, segmentSuffix, index)
+}
+
+// discoverSegments returns the sealed segment paths in order. Indices must run
+// contiguously from one: a gap means a segment was removed, and continuing
+// would silently drop the history an invariant depends on.
+func discoverSegments(base string) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Dir(base))
+	if err != nil {
+		return nil, fmt.Errorf("read journal directory: %w", err)
+	}
+	prefix := filepath.Base(base) + segmentSuffix
+	found := make(map[int]string)
+	highest := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		index, convErr := strconv.Atoi(strings.TrimPrefix(name, prefix))
+		if convErr != nil || index <= 0 {
+			return nil, errors.New("journal directory holds an unrecognized segment name")
+		}
+		if _, duplicate := found[index]; duplicate {
+			return nil, errors.New("journal directory holds a duplicate segment index")
+		}
+		found[index] = filepath.Join(filepath.Dir(base), name)
+		if index > highest {
+			highest = index
+		}
+	}
+	if highest > maxSegments {
+		return nil, errors.New("journal has more segments than this build supports")
+	}
+	paths := make([]string, 0, highest)
+	for index := 1; index <= highest; index++ {
+		path, ok := found[index]
+		if !ok {
+			return nil, errors.New("journal segments are not contiguous; one has been removed")
+		}
+		paths = append(paths, path)
+	}
+	return paths, nil
+}
+
+// hasSegments reports whether any rotation artifact exists beside a journal.
+func hasSegments(base string) (segments bool, staged bool, err error) {
+	entries, readErr := os.ReadDir(filepath.Dir(base))
+	if readErr != nil {
+		if errors.Is(readErr, os.ErrNotExist) {
+			return false, false, nil
+		}
+		return false, false, fmt.Errorf("read journal directory: %w", readErr)
+	}
+	prefix := filepath.Base(base) + segmentSuffix
+	stagedName := filepath.Base(base) + stagedSuffix
+	for _, entry := range entries {
+		switch {
+		case strings.HasPrefix(entry.Name(), prefix):
+			segments = true
+		case entry.Name() == stagedName:
+			staged = true
+		}
+	}
+	return segments, staged, nil
+}
+
 // Verify validates an existing journal without creating it or changing its
 // contents. The writer must be stopped so the verifier can hold a shared
 // non-blocking lock for the complete read.
@@ -150,6 +567,16 @@ func Verify(path string) (Verification, error) {
 	}
 	if err := validateJournalDirectory(filepath.Dir(path)); err != nil {
 		return Verification{}, err
+	}
+	segments, staged, err := hasSegments(path)
+	if err != nil {
+		return Verification{}, err
+	}
+	if staged {
+		return Verification{}, errors.New("journal has an incomplete rotation; open it once to complete recovery")
+	}
+	if segments {
+		return verifyRotated(path)
 	}
 	before, err := os.Lstat(path)
 	if err != nil {
@@ -211,6 +638,99 @@ func Verify(path string) (Verification, error) {
 		result.ChainHeadSHA256 = records[len(records)-1].Hash
 	}
 	return result, nil
+}
+
+// verifyRotated walks the sealed segments in order and then the active file,
+// validating one continuous chain. It holds a shared lock on the stable lock
+// file, which the writer holds exclusively, so a successful verification still
+// proves no writer was active for the whole read — the guarantee that would
+// otherwise be lost once the active file's identity can change.
+//
+// The digest covers the segments' bytes in index order followed by the active
+// file, so it is reproducible by concatenating the files in that order.
+func verifyRotated(path string) (Verification, error) {
+	lock, err := openReadFile(path + lockSuffix)
+	if err != nil {
+		return Verification{}, errors.New("journal lock file is missing; the journal has never been opened for rotation")
+	}
+	defer lock.Close()
+	if err := lockReadFile(lock); err != nil {
+		return Verification{}, fmt.Errorf("lock journal for verification: %w", err)
+	}
+	segments, err := discoverSegments(path)
+	if err != nil {
+		return Verification{}, err
+	}
+	hasher := sha256.New()
+	var (
+		all   []Record
+		bytes int64
+		seed  scanSeed
+	)
+	for _, file := range append(append([]string{}, segments...), path) {
+		records, size, scanErr := verifySegmentFile(file, seed, hasher)
+		if scanErr != nil {
+			return Verification{}, scanErr
+		}
+		all = append(all, records...)
+		bytes += size
+		seed = seedFrom(all)
+	}
+	sendStarted, submitted := actionEventCounts(all)
+	result := Verification{
+		Records: len(all), Bytes: bytes,
+		FileSHA256:         hex.EncodeToString(hasher.Sum(nil)),
+		SendStartedRecords: sendStarted,
+		SubmittedRecords:   submitted,
+	}
+	if len(all) > 0 {
+		result.ChainHeadSHA256 = all[len(all)-1].Hash
+	}
+	return result, nil
+}
+
+func verifySegmentFile(
+	path string, seed scanSeed, hasher io.Writer,
+) ([]Record, int64, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, 0, fmt.Errorf("inspect journal segment: %w", err)
+	}
+	if before.Mode()&os.ModeSymlink != 0 {
+		return nil, 0, errors.New("journal segment must not be a symlink")
+	}
+	if err := validateJournalFile(before); err != nil {
+		return nil, 0, err
+	}
+	file, err := openReadFile(path)
+	if err != nil {
+		return nil, 0, fmt.Errorf("open journal segment: %w", err)
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, 0, fmt.Errorf("stat journal segment: %w", err)
+	}
+	if !os.SameFile(before, opened) {
+		return nil, 0, errors.New("journal segment changed while opening")
+	}
+	limited := &io.LimitedReader{R: file, N: maxJournalBytes + 1}
+	records, err := scanJournalSeeded(io.TeeReader(limited, hasher), seed, nil)
+	if limited.N == 0 {
+		return nil, 0, errors.New("journal segment exceeds size limit")
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	final, err := file.Stat()
+	if err != nil {
+		return nil, 0, fmt.Errorf("stat journal segment after verification: %w", err)
+	}
+	if !os.SameFile(opened, final) || final.Size() != opened.Size() ||
+		!final.ModTime().Equal(opened.ModTime()) || final.Mode() != opened.Mode() {
+		return nil, 0, errors.New("journal segment changed while verifying")
+	}
+	return records, final.Size(), nil
 }
 
 func validateJournalDirectory(path string) error {
@@ -287,12 +807,22 @@ func (s *Store) load() error {
 }
 
 func scanJournal(source io.Reader, recoverTorn func(int64) error) ([]Record, error) {
+	return scanJournalSeeded(source, scanSeed{}, recoverTorn)
+}
+
+// scanJournalSeeded validates one file as a continuation of a chain that began
+// in an earlier segment. With a zero seed it is exactly the single-file scan.
+// The per-file record and byte caps stay per-file: lifting the aggregate limit
+// is the whole point of segmenting.
+func scanJournalSeeded(
+	source io.Reader, seed scanSeed, recoverTorn func(int64) error,
+) ([]Record, error) {
 	reader := bufio.NewReaderSize(source, 64<<10)
 	var (
 		records  []Record
 		offset   int64
-		prevHash string
-		lastAt   time.Time
+		prevHash = seed.prevHash
+		lastAt   = seed.lastAt
 	)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -324,7 +854,7 @@ func scanJournal(source io.Reader, recoverTorn func(int64) error) ([]Record, err
 		if err := strictjson.Decode(line, &record); err != nil {
 			return nil, fmt.Errorf("decode journal record %d: %w", len(records)+1, err)
 		}
-		if record.Sequence != uint64(len(records)+1) {
+		if record.Sequence != seed.startSequence+uint64(len(records))+1 {
 			return nil, errors.New("journal sequence is not contiguous")
 		}
 		if record.Type == "" || record.At.IsZero() || len(record.Payload) == 0 {
@@ -379,6 +909,8 @@ func (s *Store) Stats() (Stats, error) {
 	}
 	sendStarted, submitted := actionEventCounts(s.records)
 	return Stats{
+		// Records counts the whole history; Bytes and the caps describe the
+		// ACTIVE segment, which is what fullness alerting must watch.
 		Records:            len(s.records),
 		Bytes:              info.Size(),
 		ReservedBytes:      s.reserveBytes,
@@ -415,7 +947,7 @@ func (s *Store) EnsureCapacity(records int, bytes int64) error {
 	if records <= 0 || bytes <= 0 {
 		return errors.New("journal capacity request must be positive")
 	}
-	if len(s.records)+records > maxRecords {
+	if s.activeRecords()+records > maxRecords {
 		return errors.New("journal lacks record capacity")
 	}
 	info, err := s.file.Stat()
@@ -454,7 +986,138 @@ func (s *Store) EnsureCapacity(records int, bytes int64) error {
 func (s *Store) ReleaseCapacity() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.releaseCapacityLocked()
+	if err := s.releaseCapacityLocked(); err != nil {
+		return err
+	}
+	// Rotation happens here and nowhere else. Every caller of ReleaseCapacity
+	// has just finished an action: nothing is in flight, the reservation is
+	// gone, and a halted action that still needs acknowledgement deliberately
+	// never reaches this call. That makes this the one point where sealing the
+	// active file cannot cut across a live transaction.
+	return s.rotateIfFullLocked()
+}
+
+// activeRecords is the number of records in the active segment. The per-file
+// caps apply to it; sequence and hash chain remain global.
+func (s *Store) activeRecords() int {
+	return len(s.records) - s.activeStart
+}
+
+// rotateIfFullLocked seals the active file once it passes half a segment's
+// worth. Half rather than full leaves room for the terminal records an action
+// in progress may still need to write before its next release.
+func (s *Store) rotateIfFullLocked() error {
+	if !s.rotating || s.file == nil || s.poison != nil {
+		return nil
+	}
+	if s.activeRecords() < maxRecords/2 {
+		info, err := s.file.Stat()
+		if err != nil {
+			return fmt.Errorf("stat journal: %w", err)
+		}
+		if info.Size() < maxJournalBytes/2 {
+			return nil
+		}
+	}
+	if s.segments >= maxSegments {
+		return errors.New("journal has reached its segment limit; archive the sealed segments")
+	}
+	return s.rotateLocked()
+}
+
+// rotateLocked seals the active file and promotes a staged successor.
+//
+// The successor is created and given its rotation marker BEFORE either rename,
+// so at every instant on disk the complete chain is recoverable: the marker
+// names the segment it follows and carries its chain head, and it is durable
+// before the file bearing it becomes the journal. A crash between the renames
+// leaves exactly one recoverable state, handled at open.
+//
+// Failure at or after the first rename poisons the store: three callers
+// discard this method's error so that a cleanup failure cannot hide a durable
+// terminal result, which means a half-applied rotation must stop later appends
+// by itself rather than relying on the caller noticing.
+func (s *Store) rotateLocked() error {
+	staged := s.basePath + stagedSuffix
+	next, err := createExclusive(staged)
+	if err != nil {
+		return fmt.Errorf("stage journal segment: %w", err)
+	}
+	cleanupStaged := func(cause error) error {
+		_ = next.Close()
+		_ = os.Remove(staged)
+		return cause
+	}
+	if err := lockFile(next); err != nil {
+		return cleanupStaged(fmt.Errorf("lock staged journal segment: %w", err))
+	}
+	tail := s.records[len(s.records)-1]
+	marker := Record{
+		Sequence: tail.Sequence + 1,
+		At:       tail.At.UTC(),
+		Type:     EventRotated,
+	}
+	payload, err := json.Marshal(rotationMarker{
+		SealedSegment:      s.segments + 1,
+		SealedLastSequence: tail.Sequence,
+		SealedChainHead:    tail.Hash,
+	})
+	if err != nil {
+		return cleanupStaged(errors.New("encode journal rotation marker"))
+	}
+	marker.Payload = payload
+	marker.PrevHash = tail.Hash
+	marker.Hash, err = recordHash(marker)
+	if err != nil {
+		return cleanupStaged(err)
+	}
+	line, err := json.Marshal(marker)
+	if err != nil {
+		return cleanupStaged(errors.New("encode journal rotation marker record"))
+	}
+	line = append(line, '\n')
+	if err := writeAll(next, line); err != nil {
+		return cleanupStaged(fmt.Errorf("write journal rotation marker: %w", err))
+	}
+	if err := next.Sync(); err != nil {
+		return cleanupStaged(fmt.Errorf("sync journal rotation marker: %w", err))
+	}
+	parent := filepath.Dir(s.basePath)
+	if err := syncDirectory(parent); err != nil {
+		return cleanupStaged(err)
+	}
+
+	// From here a failure leaves the journal half-rotated on disk. Recovery at
+	// open completes it; this process must stop appending.
+	poison := func(cause error) error {
+		s.poison = cause
+		_ = next.Close()
+		return cause
+	}
+	sealed := segmentPath(s.basePath, s.segments+1)
+	if err := os.Rename(s.basePath, sealed); err != nil {
+		return poison(fmt.Errorf("seal journal segment: %w", err))
+	}
+	if err := syncDirectory(parent); err != nil {
+		return poison(err)
+	}
+	if err := os.Rename(staged, s.basePath); err != nil {
+		return poison(fmt.Errorf("promote staged journal segment: %w", err))
+	}
+	if err := syncDirectory(parent); err != nil {
+		return poison(err)
+	}
+	if err := s.file.Close(); err != nil {
+		return poison(fmt.Errorf("close sealed journal segment: %w", err))
+	}
+	if _, err := next.Seek(0, io.SeekEnd); err != nil {
+		return poison(fmt.Errorf("seek journal: %w", err))
+	}
+	s.file = next
+	s.segments++
+	s.records = append(s.records, marker)
+	s.activeStart = len(s.records) - 1
+	return nil
 }
 
 func (s *Store) Append(at time.Time, eventType, actionID string, payload any) (Record, error) {
@@ -473,7 +1136,7 @@ func (s *Store) Append(at time.Time, eventType, actionID string, payload any) (R
 	if len(s.records) > 0 && at.Before(s.records[len(s.records)-1].At) {
 		return Record{}, errors.New("journal event time regressed")
 	}
-	if len(s.records) >= maxRecords {
+	if s.activeRecords() >= maxRecords {
 		return Record{}, errors.New("journal record limit reached")
 	}
 	encodedPayload, err := json.Marshal(payload)
@@ -692,6 +1355,12 @@ func (s *Store) Close() error {
 	}
 	err := s.file.Close()
 	s.file = nil
+	if s.lock != nil {
+		if lockErr := s.lock.Close(); err == nil {
+			err = lockErr
+		}
+		s.lock = nil
+	}
 	if err == nil {
 		err = reserveErr
 	}

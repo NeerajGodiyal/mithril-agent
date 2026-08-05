@@ -43,3 +43,19 @@ func openReadFile(path string) (*os.File, error) {
 	}
 	return os.NewFile(uintptr(fd), path), nil
 }
+
+// createExclusive creates a new private file, failing if it already exists.
+// Rotation needs the O_EXCL guarantee that openFile deliberately lacks: the
+// staged next-segment file must never be an existing file the process would
+// silently adopt.
+func createExclusive(path string) (*os.File, error) {
+	fd, err := syscall.Open(
+		path,
+		syscall.O_CREAT|syscall.O_EXCL|syscall.O_RDWR|syscall.O_CLOEXEC|syscall.O_NOFOLLOW,
+		0o600,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), path), nil
+}

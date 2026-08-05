@@ -519,7 +519,7 @@ func runSwapAcknowledge(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	store, err := journal.Open(cfg.Journal.Path)
+	store, err := journal.OpenRotating(cfg.Journal.Path)
 	if err != nil {
 		if errors.Is(err, journal.ErrLocked) {
 			return errors.New("stop the swap runner before acknowledging its terminal action")
@@ -898,7 +898,7 @@ func openSwapRuntime(configPath string, requireFreshActivation bool) (*swapRunti
 	if err != nil {
 		return nil, fmt.Errorf("control state: %w", err)
 	}
-	store, err := journal.Open(cfg.Journal.Path)
+	store, err := journal.OpenRotating(cfg.Journal.Path)
 	if err != nil {
 		return nil, err
 	}
