@@ -2152,3 +2152,30 @@ func appendEvent(t *testing.T, store *journal.Store, at time.Time, event, action
 		t.Fatal(err)
 	}
 }
+
+// A rotation writes a journal-owned marker record with no action ID. The
+// projection that derives the halted latch must skip it: treating it as an
+// unknown event would make the engine fail closed on its own bookkeeping, and
+// treating it as an action event would trip the action-ID check.
+func TestExecutionStatesAcceptsTheRotationMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "events.jsonl")
+	store, err := journal.OpenRotating(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	at := time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC)
+	if _, err := store.Append(at, journal.EventRotated, "", map[string]any{
+		"sealed_segment": 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	engine := &Engine{store: store}
+	states, order, err := engine.executionStates()
+	if err != nil {
+		t.Fatalf("the rotation marker must be skipped, not rejected: %v", err)
+	}
+	if len(states) != 0 || len(order) != 0 {
+		t.Fatal("the marker belongs to no action and must contribute no state")
+	}
+}

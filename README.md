@@ -1250,6 +1250,31 @@ with separate service identities and narrow authenticated IPC. The signing key,
 signer authorization ledger, risk key, and submitter key must not be readable or
 deletable by the runner identity.
 
+## The audit journal and its segments
+
+Every action writes to an append-only journal whose records are chained by
+SHA-256: each record commits to the one before it, so removing or altering
+anything downstream is detectable. `mithril-agent journal verify --path PATH`
+re-walks the chain and reports the record count and chain head.
+
+A single journal file is capped at 65,536 records, which a continuously
+running agent reaches in about six weeks. Runner journals therefore rotate:
+when the active file is half full it is sealed as `events.jsonl.seg-000001`
+and a fresh active file takes over. Sequence numbers and the hash chain stay
+global across segments, so concatenating the segments in order and then the
+active file reproduces exactly the stream a single file would have held — and
+`journal verify` walks all of them as one chain.
+
+Rotation is deliberately crash-safe and refuses to guess. The successor file
+is created and given its rotation marker, chained to the sealed segment's
+head, *before* either rename happens; a crash mid-rotation leaves exactly one
+recoverable state, which the next open completes. If the active file or a
+sealed segment is missing, the journal refuses to open rather than rebuilding
+what was lost: silently recreating either would roll history back and unlatch
+whatever it recorded, including a halt. The signer's authorization ledger
+never rotates — it requires its own header record first, and its daily spend
+totals are recomputed from the whole file.
+
 ## Strategy: caps, triggers, alerts, and sweep
 
 One command shows everything the agent is allowed to do and where each

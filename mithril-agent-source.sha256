@@ -1,6 +1,6 @@
 36dea557310cae8cbaec68d3a1eda180b6792faa526e6b9f823c0f1c83ef28d4  ./DEMO.md
 330789c931fb529ee44a7c3150ca84ba0bc63b51044732bef8a02c74df167c0c  ./Makefile
-9719b8251c68f50ef921ac45ac5acc95c7c7517e291273cab3864e7f6e8b7895  ./README.md
+bdc8dcc1bc9a0a6cbb0d4a267c7b17fde5c3344b6389fd1a90c967b538d7c450  ./README.md
 3688881cc51845e928c69243b25a2ba0d073d7e1350a1740ea7765bc1bf244cb  ./adapters/orca-mainnet/quote.mjs
 bfcd6726440d914b4070637a2d4de34cbf9b17a1f566d29816e6165c1cf89f4a  ./adapters/orca/package-lock.json
 57ced315005c1edb13df550c1d16f2ea45869c92c532a77bb59d087451233af3  ./adapters/orca/package.json
@@ -41,7 +41,7 @@ c7fd585988c9612d0213522e5c7bdd31ea588214dac4ae784c2970cd6946651f  ./cmd/mithril-
 7efa68ea6c21df651d14828ca3d73a49e1a124b53d807596ad566190985fd85f  ./cmd/mithril-agent/funding_test.go
 e6b0361c514efeb0ab612c6be6036cb27ad6f5b55773ce1a62fe42e144909b94  ./cmd/mithril-agent/journal.go
 a231f8e63c8d16e027362818c17852387e70aea6ecfca4db0f2eeddb47a1f139  ./cmd/mithril-agent/journal_test.go
-e91aeb3eaf0a893ef4ea47fbdd569633616b849437b095b332bac2f9297baea5  ./cmd/mithril-agent/main.go
+7beaa1883a870fd4377d3a2a9a380a9ad802cae20ec561ccd881f2dbc6365bea  ./cmd/mithril-agent/main.go
 c20c6a4ab68c085998222a3da3b5c94d11a3990e0544378c3740f5d0d5e68f1e  ./cmd/mithril-agent/main_test.go
 0d06b22931ea508f8903992dcb6ed2a4da68bd3c692447775ae9bc513f9047dd  ./cmd/mithril-agent/mcpconfig.go
 a1467186aa77f102ebfc1b3ed6bd80b7378d40d50250ccbca6d837455911260e  ./cmd/mithril-agent/mcpconfig_test.go
@@ -50,7 +50,7 @@ fe0d5f2b0ffe27087c9ab2b3cc7a4c23d61ae20eb912e8d5219c13a726361324  ./cmd/mithril-
 9b48d97749c5ff5ff3c3b947cfb20cc814409435038c0964cddc2e901ca0022e  ./cmd/mithril-agent/preflight_explain_test.go
 f2427e8663f44ef5e9a9962d2e438e7df07caabe10adf1abc128e2e5b25d8700  ./cmd/mithril-agent/preflight_test.go
 033e9955f74e373c0fedececec8a9aa15afc2b3de6b60f3281fcb34ee5dbcf5d  ./cmd/mithril-agent/prompt.go
-2549b87539b80a8f4b227081dc93b5429def4d60dd72f23312c2a24d28408377  ./cmd/mithril-agent/providers.go
+22853873aa67c3c12c8e2857210d4f3eb28687a25685791939ce93dc30a1bd53  ./cmd/mithril-agent/providers.go
 e684d5123cac52bac61019486354ab54b68fa2a76f9c827dd13cb28ca77dd1b8  ./cmd/mithril-agent/providers_test.go
 3749565568b82bdc02d51db405b5f8d923f342e0bce29a771aab1c5fc85b4e28  ./cmd/mithril-agent/setup.go
 a48dbe5125f8e99e5e1cc31679be97070f9c67e033282b485210889f3a2367e1  ./cmd/mithril-agent/setup_test.go
@@ -61,7 +61,7 @@ cbe6067ef0a44d1ff984deac2933c44ba07c3317780ad1fa4b72d1a140dfb2d3  ./cmd/mithril-
 9c0e26e89b916010a0885a2c3c43cb3e7447e2b28367399a2d3e94817745222b  ./cmd/mithril-agent/shadowrun.go
 9d14d091abb210aa2d1a4fcf642ebec548b901e5f0021a3bf82c48375b8b7beb  ./cmd/mithril-agent/shadowrun_test.go
 2315c14fb1edf5f775e6921ccabac018314e13a95d2e9f93f12f07c3c96a1feb  ./cmd/mithril-agent/strategy.go
-c0b4335e469c38cc4d36e378d3122ba396af1f0ad488be8438de105da746fda9  ./cmd/mithril-agent/swap.go
+5c2ba35fdba74f87b0660cf19d74ac08fee931c30b1f082248c45d70b6292981  ./cmd/mithril-agent/swap.go
 2438ccac2f5b5b04ebb6a2cdd6b20df99a85880f7f751dd0d83596a079fd9bb2  ./cmd/mithril-agent/swap_demo.go
 2aede8f572fe5cd2aa935a912840681d241af0a331ff08f6858bf46d29a55772  ./cmd/mithril-agent/swap_demo_test.go
 0d0ce62a96302e46d6fcc7b58fe3b1a759bf4e84b8d10e952e6458e2072690cb  ./cmd/mithril-agent/swap_integration_test.go
@@ -85,8 +85,8 @@ bd9b177a14ac3591a0f253243c78a514709528f4ea4883e450faf496edbf9b4f  ./deploy/syste
 3e2b2ea18c6be5124fb2aace448db7837c2e457d9c61423abe09ac6fb9ff8240  ./deploy/systemd/mithril-agent-telegram.service
 db654df0b7ec85ee4310e04664d1d24063cb1cb6631e50d985bd2aff2f7311be  ./deploy/sysusers/mithril-agent-status.conf
 d209ebd884c74ee3c3940a90103e45ef41b5d10631037e501a51c67078bf1491  ./deploy/timesyncd/90-mithril-agent.conf
-64a7278952dbf8d66088d2cc03170d47eedf41ba650f969bd0a8d83b35f58719  ./execution/engine.go
-ca8c877a5b2392f10b133afd2af9b0b1e76456907b30e4514be17d1e31de80ef  ./execution/engine_test.go
+7137e0aed0b7bead386926a1a33f403bf1b8cce89f13198c734eb29db5946f9f  ./execution/engine.go
+c7a5f5fe5affb4a4bafd69914ccfb2dad78db20fa398ad953b3ebcb3db9172d8  ./execution/engine_test.go
 be0ec8d1f92b8d65dbec18e3d4312c6b3583d90fc6488cbd458a78572ebe0dc3  ./independentdecode/transfer.go
 0a151b78069a4e887e7e310a576058b74e3fb67700a8365edef9b99bf861eba8  ./independentdecode/transfer_test.go
 32e50c763d881d36109ebc172e10a356d1da99d95cd800acc28574017f477e62  ./internal/clockcheck/check_linux.go
@@ -116,9 +116,10 @@ fed57f459a98df2371e2a4c1ba10da1576fbaddea3f6e490b410b87b00f59ada  ./internal/sec
 202a3bc2f31ca6dae2278fbcb5fd60dbaf675c7fd81a23dab4e780b961bd6532  ./internal/securefile/replace.go
 07e806cb82a2d030f07dee2b2b6c50d565c2dc3f51887e766675048ecf650656  ./internal/strictjson/strictjson.go
 d17b4a31ccf7cded31e6dcd10fd7aea93a4cee719a69362d862a13f76d357c50  ./internal/strictjson/strictjson_test.go
-f542073b41aee51b97fc659065430892e84421bcd4493d82a3a761c9f05d6ee5  ./journal/lock_other.go
-86f9c4eb6d48c30bc87eba7815216b3171d0c8f7df1e88d64e7019e519a79e7e  ./journal/lock_unix.go
-3e036334964927b493cee06af669bb20ea314dcdb9fd36ccc6b2f2ec22954533  ./journal/store.go
+e655fea3d34c6341fbba090e3326bcbcadcba9e1c00700ca1bfa573e9e8ef3d6  ./journal/lock_other.go
+21bf79f84d41ddf931793cfa53e6b987fef5f77930029bc287478a094eb7181d  ./journal/lock_unix.go
+355cce5c0def5c5632b13734540fa6c70bd1b431b4f2178743f911c15be90607  ./journal/rotation_test.go
+2aeed906cd9cc35b838c24ecd7176def3609f1005422aa6da8f2a4f28b76fb7c  ./journal/store.go
 00b5e8248c04b88c422041eca90e7efa4bf11fe15bad07ee8da24db4980823c8  ./journal/store_test.go
 62614d9990fdbb299ee06dcbb6aaff3ca780f64eba91a756fae684a716ea07f3  ./mcpobserve/client.go
 8dde515455b8a4ac3e3f61962b197e814633476f0aff55bbf509679e604a8cab  ./mcpobserve/client_test.go
