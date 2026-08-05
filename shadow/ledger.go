@@ -1,0 +1,309 @@
+package shadow
+
+import (
+	"errors"
+	"math"
+	"math/big"
+)
+
+// The ledger is kept in two assets, named for their role rather than their
+// ticker: base is the thing whose price moves (SOL), quote is what that price
+// is denominated in (a dollar stable). A sell spends base and receives quote; a
+// buy does the reverse. Naming them this way means the accounting does not have
+// to branch on direction in more than one place.
+//
+// Values are integers throughout. Equity, cost basis and profit are all carried
+// in USD micros; inventory is carried in each asset's own base units.
+
+// Ledger is a value, not a mutable account. Applying a fill returns a new
+// ledger, so a caller cannot accidentally half-apply one and keep going with a
+// ledger that never existed.
+type Ledger struct {
+	Policy Policy `json:"-"`
+
+	BaseUnits  uint64 `json:"base_units"`
+	QuoteUnits uint64 `json:"quote_units"`
+
+	// CostBasisMicros is the exact total cost of the base currently held.
+	// Carrying the total rather than a per-unit average matters: re-deriving a
+	// running average from an already-truncated average rounds down every time,
+	// and because the bias only ever goes one way it compounds — understating
+	// cost, and so overstating profit, a little more with every trade.
+	CostBasisMicros uint64 `json:"cost_basis_micros"`
+	// AverageCostMicros is that basis per whole unit, derived for display.
+	// Opening inventory is marked at the first observed price so realized profit
+	// measures what the strategy did, not what the market did before it began.
+	AverageCostMicros uint64 `json:"average_cost_micros"`
+
+	RealizedMicros int64  `json:"realized_micros"`
+	FeesMicros     int64  `json:"fees_micros"`
+	TurnoverMicros uint64 `json:"turnover_micros"`
+	Fills          uint64 `json:"fills"`
+
+	PeakEquityMicros    uint64 `json:"peak_equity_micros"`
+	MaxDrawdownMicros   uint64 `json:"max_drawdown_micros"`
+	OpeningEquityMicros uint64 `json:"opening_equity_micros"`
+	openingBaseUnits    uint64
+	openingQuoteUnits   uint64
+}
+
+var (
+	errInsufficientInventory = errors.New("not enough inventory to make this trade")
+	errUnrepresentable       = errors.New("value is too large to account for")
+)
+
+// signed converts a magnitude to a signed amount, refusing rather than wrapping.
+// A silent wrap here would turn an enormous profit into an enormous loss, which
+// is the single worst thing an accounting bug can do to a report.
+func signed(value uint64) (int64, error) {
+	if value > math.MaxInt64 {
+		return 0, errUnrepresentable
+	}
+	return int64(value), nil
+}
+
+// NewLedger opens the books, marking the starting inventory at the first price
+// actually observed.
+func NewLedger(policy Policy, openingPriceMicros uint64) (Ledger, error) {
+	if err := policy.Validate(); err != nil {
+		return Ledger{}, err
+	}
+	if openingPriceMicros == 0 {
+		return Ledger{}, errZeroReference
+	}
+	base, quote := policy.StartingInputUnits, policy.StartingOutputUnits
+	if !policy.IsSell() {
+		base, quote = policy.StartingOutputUnits, policy.StartingInputUnits
+	}
+	opening, err := valueAt(base, openingPriceMicros, baseDecimalsFor(policy))
+	if err != nil {
+		return Ledger{}, err
+	}
+	ledger := Ledger{
+		Policy: policy, BaseUnits: base, QuoteUnits: quote,
+		CostBasisMicros: opening, AverageCostMicros: openingPriceMicros,
+	}
+	equity, err := ledger.EquityMicros(openingPriceMicros)
+	if err != nil {
+		return Ledger{}, err
+	}
+	ledger.OpeningEquityMicros, ledger.PeakEquityMicros = equity, equity
+	ledger.openingBaseUnits, ledger.openingQuoteUnits = base, quote
+	return ledger, nil
+}
+
+// Apply books a filled trade and returns the resulting ledger. A refused fill
+// changes nothing, which is the point of recording refusals separately.
+func (l Ledger) Apply(fill Fill, markPriceMicros uint64) (Ledger, error) {
+	if !fill.Filled {
+		return l.mark(markPriceMicros)
+	}
+	if markPriceMicros == 0 {
+		return Ledger{}, errZeroReference
+	}
+	next := l
+	baseDecimals, quoteDecimals := l.baseDecimals(), l.quoteDecimals()
+
+	if l.Policy.IsSell() {
+		if fill.SpentUnits > l.BaseUnits {
+			return Ledger{}, errInsufficientInventory
+		}
+		proceeds, err := scaleToMicros(fill.ReceivedUnits, quoteDecimals)
+		if err != nil {
+			return Ledger{}, err
+		}
+		// Proportional to what is actually held, so the basis is exact rather
+		// than reconstructed from a rounded average.
+		cost := shareOf(l.CostBasisMicros, fill.SpentUnits, l.BaseUnits)
+		signedProceeds, err := signed(proceeds)
+		if err != nil {
+			return Ledger{}, err
+		}
+		signedCost, err := signed(cost)
+		if err != nil {
+			return Ledger{}, err
+		}
+		next.BaseUnits -= fill.SpentUnits
+		next.CostBasisMicros -= cost
+		next.QuoteUnits += fill.ReceivedUnits
+		next.RealizedMicros += signedProceeds - signedCost
+		next.TurnoverMicros += proceeds
+	} else {
+		if fill.SpentUnits > l.QuoteUnits {
+			return Ledger{}, errInsufficientInventory
+		}
+		spent, err := scaleToMicros(fill.SpentUnits, quoteDecimals)
+		if err != nil {
+			return Ledger{}, err
+		}
+		// Buying simply adds what it cost to the basis of everything held.
+		next.BaseUnits += fill.ReceivedUnits
+		next.CostBasisMicros += spent
+		next.QuoteUnits -= fill.SpentUnits
+		next.TurnoverMicros += spent
+	}
+
+	// The fee is always paid in the native asset, which is the base.
+	if fill.FeeLamports > next.BaseUnits {
+		return Ledger{}, errInsufficientInventory
+	}
+	feeMicros, err := valueAt(fill.FeeLamports, markPriceMicros, baseDecimals)
+	if err != nil {
+		return Ledger{}, err
+	}
+	signedFee, err := signed(feeMicros)
+	if err != nil {
+		return Ledger{}, err
+	}
+	// The fee lamports leave the book, so their share of the basis leaves with
+	// them. The small unrealized gain on those few thousand lamports is not
+	// separately booked; at a transaction fee's scale it is far below a micro.
+	next.CostBasisMicros -= shareOf(next.CostBasisMicros, fill.FeeLamports, next.BaseUnits)
+	next.BaseUnits -= fill.FeeLamports
+	next.FeesMicros += signedFee
+	next.RealizedMicros -= signedFee
+	next.Fills++
+	if next.AverageCostMicros, err = averageCost(
+		next.CostBasisMicros, next.BaseUnits, baseDecimals,
+	); err != nil {
+		return Ledger{}, err
+	}
+	return next.mark(markPriceMicros)
+}
+
+// mark revalues the book at the current price and updates the high-water mark
+// and the worst peak-to-trough fall seen so far.
+func (l Ledger) mark(priceMicros uint64) (Ledger, error) {
+	if priceMicros == 0 {
+		return Ledger{}, errZeroReference
+	}
+	equity, err := l.EquityMicros(priceMicros)
+	if err != nil {
+		return Ledger{}, err
+	}
+	next := l
+	if equity > next.PeakEquityMicros {
+		next.PeakEquityMicros = equity
+	}
+	if fall := next.PeakEquityMicros - min(equity, next.PeakEquityMicros); fall > next.MaxDrawdownMicros {
+		next.MaxDrawdownMicros = fall
+	}
+	return next, nil
+}
+
+// Mark revalues without trading, so a flat day still records its drawdown.
+func (l Ledger) Mark(priceMicros uint64) (Ledger, error) { return l.mark(priceMicros) }
+
+// EquityMicros is everything held, valued in USD micros at the given price.
+func (l Ledger) EquityMicros(priceMicros uint64) (uint64, error) {
+	base, err := valueAt(l.BaseUnits, priceMicros, l.baseDecimals())
+	if err != nil {
+		return 0, err
+	}
+	quote, err := scaleToMicros(l.QuoteUnits, l.quoteDecimals())
+	if err != nil {
+		return 0, err
+	}
+	return base + quote, nil
+}
+
+// UnrealizedMicros is the profit sitting in inventory that has not been sold.
+func (l Ledger) UnrealizedMicros(priceMicros uint64) (int64, error) {
+	current, err := valueAt(l.BaseUnits, priceMicros, l.baseDecimals())
+	if err != nil {
+		return 0, err
+	}
+	signedCurrent, err := signed(current)
+	if err != nil {
+		return 0, err
+	}
+	signedCost, err := signed(l.CostBasisMicros)
+	if err != nil {
+		return 0, err
+	}
+	return signedCurrent - signedCost, nil
+}
+
+// HoldBenchmarkMicros is what doing nothing at all would have been worth. A
+// strategy that does not beat it has not earned the risk it took.
+func (l Ledger) HoldBenchmarkMicros(priceMicros uint64) (uint64, error) {
+	base, err := valueAt(l.openingBaseUnits, priceMicros, l.baseDecimals())
+	if err != nil {
+		return 0, err
+	}
+	quote, err := scaleToMicros(l.openingQuoteUnits, l.quoteDecimals())
+	if err != nil {
+		return 0, err
+	}
+	return base + quote, nil
+}
+
+func (l Ledger) baseDecimals() uint8 { return baseDecimalsFor(l.Policy) }
+
+func baseDecimalsFor(policy Policy) uint8 {
+	if policy.IsSell() {
+		return policy.InputDecimals
+	}
+	return policy.OutputDecimals
+}
+
+// shareOf allocates a total in proportion to a part, exactly and only once.
+func shareOf(total, part, whole uint64) uint64 {
+	if whole == 0 || part == 0 {
+		return 0
+	}
+	if part >= whole {
+		return total
+	}
+	value := new(big.Int).SetUint64(total)
+	value.Mul(value, new(big.Int).SetUint64(part))
+	value.Div(value, new(big.Int).SetUint64(whole))
+	if !value.IsUint64() {
+		return total
+	}
+	return value.Uint64()
+}
+
+func (l Ledger) quoteDecimals() uint8 {
+	if l.Policy.IsSell() {
+		return l.Policy.OutputDecimals
+	}
+	return l.Policy.InputDecimals
+}
+
+// valueAt converts an amount of an asset into USD micros at a price expressed
+// in USD micros per whole unit.
+func valueAt(units, priceMicros uint64, decimals uint8) (uint64, error) {
+	value := new(big.Int).SetUint64(units)
+	value.Mul(value, new(big.Int).SetUint64(priceMicros))
+	value.Div(value, pow10(uint(decimals)))
+	if !value.IsUint64() {
+		return 0, errPriceRange
+	}
+	return value.Uint64(), nil
+}
+
+// scaleToMicros converts an amount of a dollar-denominated asset into USD
+// micros, which is a pure change of scale.
+func scaleToMicros(units uint64, decimals uint8) (uint64, error) {
+	value := new(big.Int).SetUint64(units)
+	value.Mul(value, big.NewInt(1_000_000))
+	value.Div(value, pow10(uint(decimals)))
+	if !value.IsUint64() {
+		return 0, errPriceRange
+	}
+	return value.Uint64(), nil
+}
+
+func averageCost(totalMicros, units uint64, decimals uint8) (uint64, error) {
+	if units == 0 {
+		return 0, nil
+	}
+	average := new(big.Int).SetUint64(totalMicros)
+	average.Mul(average, pow10(uint(decimals)))
+	average.Div(average, new(big.Int).SetUint64(units))
+	if !average.IsUint64() {
+		return 0, errPriceRange
+	}
+	return average.Uint64(), nil
+}
