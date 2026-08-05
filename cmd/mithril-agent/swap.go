@@ -927,12 +927,12 @@ func openSwapRuntime(configPath string, requireFreshActivation bool) (*swapRunti
 // without restarting the runner. On any read or validation failure it reports
 // no alerts configured: for a notify-only feature, silence plus the
 // evidence-available gauge is the fail-closed direction.
-func (runtime *swapRuntime) Alerts() alertsConfig {
+func (runtime *swapRuntime) Alerts() (alertsConfig, bool) {
 	cfg, err := readSwapConfig(runtime.configPath)
 	if err != nil {
-		return alertsConfig{}
+		return alertsConfig{}, false
 	}
-	return cfg.Alerts
+	return cfg.Alerts, true
 }
 
 func (runtime *swapRuntime) Step(ctx context.Context) (execution.Result, journal.Stats, error) {

@@ -81,8 +81,8 @@ func (a alertsConfig) validate(swap *swaprun.Profile) error {
 // consumes. Everything here is a pure comparison; freshness, deviation and
 // confidence were already judged by the price trigger's evaluator, and the
 // balance carries its own observation timestamp on the metrics surface.
-func evaluateAlerts(alerts alertsConfig, result execution.Result) runmetrics.AlertGauges {
-	gauges := runmetrics.AlertGauges{EvidenceAvailable: true}
+func evaluateAlerts(alerts alertsConfig, configValid bool, result execution.Result) runmetrics.AlertGauges {
+	gauges := runmetrics.AlertGauges{EvidenceAvailable: true, ConfigValid: configValid}
 
 	priceAvailable := result.PriceTrigger != nil && result.PriceTrigger.Available
 	var conservative uint64

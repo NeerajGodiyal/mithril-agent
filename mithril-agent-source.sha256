@@ -23,8 +23,8 @@ a8a4e243473dc6bd0e28d1577f906d697f6c158ff489cc91924261ef50e205fd  ./cmd/mithril-
 b10d4b0247bef9d030bd9a79fdb45decf3abafce6de2591c440e31c10284de7a  ./cmd/mithril-agent-submitter/main.go
 884007ce6d28aa6be38b52eea0508926a79f920534f4e8ae2e1d930265b65a5f  ./cmd/mithril-agent-telegram/main.go
 811159452b7a0b2458cb51dff860e9717fae538fa1b5907d4592beabbfe17f77  ./cmd/mithril-agent-telegram/main_test.go
-0695cca75847015a1bf052a97fc33a8d4d928ca626a0552cc63ed18992b64210  ./cmd/mithril-agent/alerts.go
-f35debe69fcea84b71ec25b66c660159427693cb3e06b01da5ea040e4a5173fd  ./cmd/mithril-agent/alerts_test.go
+71cc30de4db707e2a4ac13162954dcb3c762066f3b153494a18c40b9245e5900  ./cmd/mithril-agent/alerts.go
+dcbb800030cdfd275c039c8d0b022e8bca0d3a115b6dfdd3540b9826b218d202  ./cmd/mithril-agent/alerts_test.go
 62e8e51ed9f8b2b174341702b28ca0dcc40fd8faaea99c9fe8441705f1b09482  ./cmd/mithril-agent/current.go
 8baefe52ccb8998c1910bc2d594e9d6be9b3fe01f1c9b175f73c26d41fedc53e  ./cmd/mithril-agent/current_test.go
 f54a037497a70e7ad0fb1dc2d0b54f3c9164902b4be8f6f72d521bab6a3db5f0  ./cmd/mithril-agent/devnet_check.go
@@ -40,7 +40,7 @@ c7fd585988c9612d0213522e5c7bdd31ea588214dac4ae784c2970cd6946651f  ./cmd/mithril-
 7efa68ea6c21df651d14828ca3d73a49e1a124b53d807596ad566190985fd85f  ./cmd/mithril-agent/funding_test.go
 e6b0361c514efeb0ab612c6be6036cb27ad6f5b55773ce1a62fe42e144909b94  ./cmd/mithril-agent/journal.go
 a231f8e63c8d16e027362818c17852387e70aea6ecfca4db0f2eeddb47a1f139  ./cmd/mithril-agent/journal_test.go
-760d9dd0b06a06d52185e0c476e0db45d635dae83f95ae7839850a657c170e2f  ./cmd/mithril-agent/main.go
+3101775a2a065fc6eba5f58790147cc0e0a8dec3b3eeadd9ff2117265216d2f8  ./cmd/mithril-agent/main.go
 c20c6a4ab68c085998222a3da3b5c94d11a3990e0544378c3740f5d0d5e68f1e  ./cmd/mithril-agent/main_test.go
 fe0d5f2b0ffe27087c9ab2b3cc7a4c23d61ae20eb912e8d5219c13a726361324  ./cmd/mithril-agent/preflight.go
 1d68a2069f027d87b353dbb2194fdc670a2785e21a7bb6e3edfd420c725eca55  ./cmd/mithril-agent/preflight_explain.go
@@ -58,7 +58,7 @@ cbe6067ef0a44d1ff984deac2933c44ba07c3317780ad1fa4b72d1a140dfb2d3  ./cmd/mithril-
 9c0e26e89b916010a0885a2c3c43cb3e7447e2b28367399a2d3e94817745222b  ./cmd/mithril-agent/shadowrun.go
 9d14d091abb210aa2d1a4fcf642ebec548b901e5f0021a3bf82c48375b8b7beb  ./cmd/mithril-agent/shadowrun_test.go
 2315c14fb1edf5f775e6921ccabac018314e13a95d2e9f93f12f07c3c96a1feb  ./cmd/mithril-agent/strategy.go
-37d51372e0e0cf98bbc9b5d1cc03a5f7c3ae29ea33132736aef01de7a09f7bdf  ./cmd/mithril-agent/swap.go
+c0b4335e469c38cc4d36e378d3122ba396af1f0ad488be8438de105da746fda9  ./cmd/mithril-agent/swap.go
 2438ccac2f5b5b04ebb6a2cdd6b20df99a85880f7f751dd0d83596a079fd9bb2  ./cmd/mithril-agent/swap_demo.go
 2aede8f572fe5cd2aa935a912840681d241af0a331ff08f6858bf46d29a55772  ./cmd/mithril-agent/swap_demo_test.go
 0d0ce62a96302e46d6fcc7b58fe3b1a759bf4e84b8d10e952e6458e2072690cb  ./cmd/mithril-agent/swap_integration_test.go
@@ -73,8 +73,8 @@ d83f9d646ca2a23093507f42ddf30d26349acc0568626a0fa6bee57c11f4a460  ./cmd/mithril-
 df80e7178002608bfd2825f5b335ed556c63fa13fb46074c89bedd9f9c81b5ff  ./cmd/mithril-agent/walkthrough_test.go
 e4272642613486cfce9238902a987b4af5a64755c8f9d363595b7c1488c6c401  ./cmd/mithril-agent/wallet.go
 8299a0417a65d9214f259ac0a180070cb46984744c58b70a2e0935023efb2d40  ./cmd/mithril-agent/wallet_test.go
-a557049764d39c9dff7b4b9a45ddd642abb1410ec4752dbc888388764454c625  ./deploy/prometheus/mithril-agent.rules.test.yml
-ee1e17ff85b4c45459441c56d4f58786f60bd89942f446c43d74e5c91c2099b9  ./deploy/prometheus/mithril-agent.rules.yml
+9df9a9cb6490e93e4c01459731b046d93f5e1c2ba60e19a06f10c0dc59a16aa3  ./deploy/prometheus/mithril-agent.rules.test.yml
+235033726bf2bd2e17b4c3f635b4730d78bf98a1e9468ea32fd5a071e0805911  ./deploy/prometheus/mithril-agent.rules.yml
 9facf6d1cc9e384b5245ea21950323b39405c793914fe355063b4f0cfb1cbd1b  ./deploy/systemd/mithril-agent-demo.service
 1d8d381e8e9c70f0b0e2392836615cff92bc9e4e599ac614e474044b42d04b11  ./deploy/systemd/mithril-agent-quote.service
 e007c659dda2825f9473cce78030fbb695833cfbc68dd0a4e6dd7ff38e13f78c  ./deploy/systemd/mithril-agent-status-bridge.service
@@ -103,7 +103,7 @@ fe8ae8c5e8e0a8a17d633e8c899ec06daf4384b82909464bf82fb8ab1a722f63  ./internal/off
 f51010379c733161eb29973f225ea31141ea32210897ff65b942fc4b27ef8fb0  ./internal/offchainmsg/offchainmsg_test.go
 a9b0dc0155f2e0a93089c3f3acdf07227c2f4868b941b42e701ad4687d5c3764  ./internal/operatorstatus/status.go
 58a047fd9ee3ed65ccc254be260fbbd13447b95d6fb029ff0c6b8f1bef8fe47a  ./internal/operatorstatus/status_test.go
-707c33fde5b4295e19be3634c44daed523609e3653ac8978fab291659d5c8f32  ./internal/runmetrics/metrics.go
+dab7e4a6acb1f83c5446fe51ac871c08cf5e4c05b8081db80268bdc18cacd403  ./internal/runmetrics/metrics.go
 6ca6732e8a8d0a703a523f76e5f198de914e6e76de82723c3c4415e2a97f0bb4  ./internal/runmetrics/metrics_test.go
 00467c5ac59ce9cd08faab366faaeda7929e5e7dcdccf47f99fcfc19901485b5  ./internal/secureexec/validate.go
 bb8d3f37b1c237e505546bfc823a367fa74bdd77cf6c2e159fec378ab7e32c45  ./internal/secureexec/validate_test.go

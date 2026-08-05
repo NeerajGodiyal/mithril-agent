@@ -521,3 +521,47 @@ tests:
       - eval_time: 5m
         alertname: MithrilAgentSweepDestinationChanged
         exp_alerts: []
+
+  - name: a fresh balance reading fires and a stale one does not
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_alert_balance_above_configured{job="mithril-agent",instance="agent"}'
+        values: '1+0x400'
+      - series: 'mithril_agent_alert_balance_above_condition_met{job="mithril-agent",instance="agent"}'
+        values: '1+0x400'
+      - series: 'mithril_agent_alert_evidence_available{job="mithril-agent",instance="agent"}'
+        values: '1+0x400'
+      # Observation time frozen at t=0: fresh during the first 10 minutes,
+      # stale afterwards.
+      - series: 'mithril_agent_balance_observation_timestamp_seconds{job="mithril-agent",instance="agent"}'
+        values: '0+0x400'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: MithrilAgentAlertBalanceAbove
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              job: mithril-agent
+              severity: info
+              lifecycle: event
+            exp_annotations:
+              summary: "ALERT (notify only): agent balance reached the configured high threshold"
+      - eval_time: 20m
+        alertname: MithrilAgentAlertBalanceAbove
+        exp_alerts: []
+
+  - name: an unreadable alerts config pages after persistence
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_alert_config_valid{job="mithril-agent",instance="agent"}'
+        values: '0+0x60'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: MithrilAgentAlertConfigInvalid
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              job: mithril-agent
+              severity: warning
+            exp_annotations:
+              summary: "The alerts configuration is unreadable; no operator alerts are being evaluated"

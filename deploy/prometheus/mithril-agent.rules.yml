@@ -330,6 +330,8 @@ groups:
           mithril_agent_alert_evidence_available == 1
           and on(instance)
           mithril_agent_alert_balance_above_condition_met == 1
+          and on(instance)
+          time() - mithril_agent_balance_observation_timestamp_seconds < 600
         for: 5m
         keep_firing_for: 5m
         labels:
@@ -345,6 +347,8 @@ groups:
           mithril_agent_alert_evidence_available == 1
           and on(instance)
           mithril_agent_alert_balance_below_condition_met == 1
+          and on(instance)
+          time() - mithril_agent_balance_observation_timestamp_seconds < 600
         for: 5m
         keep_firing_for: 5m
         labels:
@@ -384,3 +388,15 @@ groups:
           lifecycle: state
         annotations:
           summary: "Sweep destination was registered in the last 48 hours; ignore if that was you"
+
+      # A corrupted or invalid alerts section must be loud: the runner
+      # evaluates no alerts in that state, and silence here would disable the
+      # operator's notifications with nothing firing.
+      - alert: MithrilAgentAlertConfigInvalid
+        expr: >-
+          mithril_agent_alert_config_valid == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The alerts configuration is unreadable; no operator alerts are being evaluated"

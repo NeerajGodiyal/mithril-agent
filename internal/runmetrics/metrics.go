@@ -66,6 +66,10 @@ type AlertGauges struct {
 	BalanceAbove      AlertSlot
 	BalanceBelow      AlertSlot
 	EvidenceAvailable bool
+	// ConfigValid is false when the alerts section could not be read or
+	// validated this cycle. Corruption must be loud: silently evaluating no
+	// alerts would disable the operator's notifications with nothing firing.
+	ConfigValid bool
 }
 
 type Metrics struct {
@@ -265,6 +269,12 @@ func (m *Metrics) ServeHTTP(writer http.ResponseWriter, _ *http.Request) {
 	}
 	_, _ = fmt.Fprintln(writer, "# TYPE mithril_agent_alert_evidence_available gauge")
 	_, _ = fmt.Fprintf(writer, "mithril_agent_alert_evidence_available %d\n", evidenceAvailable)
+	configValid := 0
+	if alerts.ConfigValid {
+		configValid = 1
+	}
+	_, _ = fmt.Fprintln(writer, "# TYPE mithril_agent_alert_config_valid gauge")
+	_, _ = fmt.Fprintf(writer, "mithril_agent_alert_config_valid %d\n", configValid)
 	_, _ = fmt.Fprintln(
 		writer,
 		"# TYPE mithril_agent_sweep_destination_registered_timestamp_seconds gauge",

@@ -95,7 +95,7 @@ func TestAlertEvaluationTable(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gauges := evaluateAlerts(alerts, tc.result)
+			gauges := evaluateAlerts(alerts, true, tc.result)
 			if gauges.PriceAbove.Met != tc.wantPriceAbove ||
 				gauges.PriceBelow.Met != tc.wantPriceBelow ||
 				gauges.BalanceAbove.Met != tc.wantBalanceAbove ||
@@ -129,7 +129,7 @@ func TestAlertEvaluationTable(t *testing.T) {
 func TestUnconfiguredSlotsNeverBlockEvidence(t *testing.T) {
 	// With nothing configured, a refused price gate is not an alerting
 	// evidence problem: there is no alert to disable.
-	gauges := evaluateAlerts(alertsConfig{}, execution.Result{})
+	gauges := evaluateAlerts(alertsConfig{}, true, execution.Result{})
 	if !gauges.EvidenceAvailable {
 		t.Fatal("no configured slots means no missing evidence")
 	}

@@ -1061,8 +1061,9 @@ func runDevnetCycles(
 			return err
 		}
 		metrics.Observe(time.Now().UTC(), result, stats, controlStatus, lastAction)
-		if carrier, ok := runtime.(interface{ Alerts() alertsConfig }); ok {
-			metrics.ObserveAlerts(evaluateAlerts(carrier.Alerts(), result))
+		if carrier, ok := runtime.(interface{ Alerts() (alertsConfig, bool) }); ok {
+			alerts, valid := carrier.Alerts()
+			metrics.ObserveAlerts(evaluateAlerts(alerts, valid, result))
 		}
 		if carrier, ok := runtime.(interface{ SweepRegistration() (int64, int64) }); ok {
 			metrics.ObserveSweepRegistration(carrier.SweepRegistration())
@@ -1161,12 +1162,12 @@ type devnetRuntime struct {
 // Alerts re-reads the current alert slots. On any read or validation failure
 // it reports no alerts configured: for a notify-only feature, silence plus
 // the evidence-available gauge is the fail-closed direction.
-func (runtime *devnetRuntime) Alerts() alertsConfig {
+func (runtime *devnetRuntime) Alerts() (alertsConfig, bool) {
 	cfg, err := readConfig(runtime.configPath)
 	if err != nil || cfg.Alerts.validate(cfg.Swap) != nil {
-		return alertsConfig{}
+		return alertsConfig{}, false
 	}
-	return cfg.Alerts
+	return cfg.Alerts, true
 }
 
 // SweepRegistration reports when this setup's destination was proven and when
