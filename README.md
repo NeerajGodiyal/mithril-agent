@@ -1070,6 +1070,11 @@ the node monitor:
 ]
 ```
 
+A sweep runner is a second process with its own metrics: run it with
+`--metrics-address 127.0.0.1:9192` and add `127.0.0.1:9192` to the same
+targets list, or the sweep's balance gauges, alert slots, and destination
+registration are invisible to every rule above.
+
 Pin the exact Mithril commit used by the node and follow
 `https://github.com/Overclock-Validator/mithril/blob/COMMIT/prometheus/README.md`,
 replacing `COMMIT` with that full commit ID. The pinned inputs are
