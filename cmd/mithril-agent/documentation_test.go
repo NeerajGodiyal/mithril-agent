@@ -12,6 +12,7 @@ import (
 func TestFullStrategyDocumentationMatchesGeneratedLayout(t *testing.T) {
 	quick := readDocumentation(t, "../../QUICKSTART.md")
 	for _, want := range []string{
+		"94718096a9d8ab02e38725a94a253ff105c0ed89",
 		"mithril-agent-run.service",
 		"mithril-agent-alerts.service",
 		"/run/mithril-agent-status-sell.sock",
