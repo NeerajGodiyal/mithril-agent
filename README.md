@@ -1,5 +1,10 @@
 # Mithril Agent
 
+> **Start here:** [QUICKSTART.md](QUICKSTART.md) is the single supported
+> first-run path for the complete Devnet strategy. This README is the detailed
+> security, recovery, monitoring, and legacy single-leg reference. Do not mix
+> the quick-start's generated strategy services with the legacy units below.
+
 ## Quick source check — you already run Mithril
 
 This is a component that sits beside your Mithril node. If you have a node
@@ -30,9 +35,10 @@ These commands run after the supervised host installation above. The quote
 socket keeps Node.js out of the process that can sign and submit.
 `service install` also supplies that socket explicitly, so an older Devnet
 profile can use the safer layout without rewriting its policy, keys or journal.
-The short commands show the workflow; on a live host, run setup and resume with
-the supervised command shapes in the installation section. Do not source the
-protected environment files into a login shell.
+The short commands show the workflow and assume the `mithril-agent` service
+identity with `HOME=/var/lib/mithril-agent`. On a live host, use the supervised
+command shapes in the installation section or the complete QUICKSTART. Do not
+source the protected environment files into a login shell.
 
 A strategy is a sell leg, a buy leg, and a sweep on one wallet. You enter the
 settings once. On a fresh wallet, the first setup writes the sell and sweep;
@@ -60,7 +66,9 @@ proof or wallet from different setup attempts: the proof deliberately binds one
 exact agent account to one exact payout address.
 
 After the first sell completes, finish the same saved setup and reinstall the
-generated service so it includes the buy leg:
+generated service so it includes the buy leg. Run every install and restart
+command printed by `service install`; `daemon-reload` alone does not update an
+already-running runner or Telegram process:
 
 ```bash
 mithril-agent setup strategy --resume
@@ -197,19 +205,22 @@ below it. `setup sweep` configures sending profit to your own wallet, and
 `setup` looks for your node's `config.toml` where you would actually have it —
 the working directory, where `mithril config init` writes it, then `~/.mithril`
 — and finds the quote adapter in this checkout. It records where it put things,
-which is why `doctor` and `demo` need no paths.
+which is why `doctor`, `start`, and `strategy show` need no paths. `demo` is a
+single-leg command and needs an explicit `--config` after strategy-only setup.
 
 **What you need:** Go 1.25.12+, Node 24.18.x with npm 11.16.x (for live quotes
 only), and a Mithril node you can point at. `make prereqs` tells you which of
 those you are missing rather than letting you find out one failure at a time.
 
-To configure a trade you also need **three RPC endpoints** in the environment:
+To configure a trade you need **four RPC URLs** in the protected environment:
 
 - `MITHRIL_AGENT_MITHRIL_RPC_URL` — your own Mithril node. Plain http is
   accepted here when the host is loopback, because it is your machine.
 - `MITHRIL_AGENT_PRIMARY_RPC_URL` and `MITHRIL_AGENT_SECONDARY_RPC_URL` — two
   https endpoints from **different providers**, so no single provider is the
   only witness to what happened.
+- `MITHRIL_AGENT_QUOTE_RPC_URL` — the HTTPS read endpoint used only by the
+  isolated quote sidecar. It is not a third source of confirmation evidence.
 
 Setup reads them from the environment and never copies them into the generated
 strategy or trading profile. A supervised installation keeps them separately
@@ -562,7 +573,7 @@ export MITHRIL_AGENT_MITHRIL_RPC_URL='http://127.0.0.1:8899'
 export MITHRIL_AGENT_QUOTE_RPC_URL='https://quote-provider.example/...'
 export MITHRIL_AGENT_PRIMARY_RPC_URL='https://evidence-a.example/...'
 export MITHRIL_AGENT_SECONDARY_RPC_URL='https://evidence-b.example/...'
-export MITHRIL_AGENT_PYTH_API_KEY='required-only-for-a-price-rule'
+export MITHRIL_AGENT_PYTH_API_KEY='required-only-for-the-optional-hermes-source'
 ```
 
 The Mithril endpoint must be a literal loopback address. The two evidence URLs
@@ -782,7 +793,7 @@ sudo systemd-sysusers /usr/lib/sysusers.d/mithril-agent-status.conf
 
 sudo install -d -o root -g root -m 0755 /usr/local/libexec/mithril-agent
 sudo install -d -o root -g root -m 0755 /usr/local/share/doc/mithril-agent
-sudo install -o root -g root -m 0644 README.md DEMO.md \
+sudo install -o root -g root -m 0644 README.md QUICKSTART.md DEMO.md \
   /usr/local/share/doc/mithril-agent/
 sudo install -o root -g root -m 0755 \
   ./bin/mithril-agent \
@@ -846,10 +857,10 @@ sudoedit /etc/mithril-agent/telegram-operator.env
 
 `rpc.env` contains only the Mithril, primary-evidence, and
 secondary-evidence RPC variables. `quote.env` contains only the quote RPC
-variable. `price.env` contains only the Pyth key and may be empty when no price
-rule is configured. `mcp.env` contains only nonsecret Mithril observation-path
-overrides. Put the Telegram variables documented below only in
-`telegram-operator.env`.
+variable. `price.env` may stay empty for the default on-chain Pyth push source;
+it contains a Pyth API key only when the optional Hermes HTTP source is chosen.
+`mcp.env` contains only nonsecret Mithril observation-path overrides. Put the
+Telegram variables documented below only in `telegram-operator.env`.
 
 Install the Devnet keypair at
 `/var/lib/mithril-agent/private/devnet-keypair.json`, owned by
@@ -950,8 +961,11 @@ service install` generates both from the legs setup recorded, so they name your
 actual paths and cannot drift from them. It prints the privileged commands to
 run, including the ones that create the alert account and group.
 
-Install and validate the supplied units and clock policy only after setup is
-complete:
+**Legacy single-leg deployments only:** install the supplied units below after
+single-leg setup is complete. If you followed `QUICKSTART.md`, skip this whole
+block. The full strategy uses the generated `mithril-agent-run.service`,
+per-leg status units, and `mithril-agent-alerts.service`; starting both layouts
+creates competing runners and Telegram consumers.
 
 ```sh
 sudo install -m 0644 deploy/systemd/mithril-agent-quote.service /etc/systemd/system/
@@ -1216,20 +1230,24 @@ MCP; use a separately reviewed forced-command SSH account or a future
 authenticated remote transport if desktop access is required.
 
 On the Linux host, give the human operator access only to the bounded status
-socket. Reconnect the login session after adding the group:
+socket. A legacy single-leg setup uses `/run/mithril-agent-status.sock`; a
+generated strategy uses one socket per leg. Reconnect the login session after
+adding the group:
 
 ```sh
 sudo usermod -aG mithril-agent-status "$USER"
 /usr/local/libexec/mithril-agent/mithril-agent status \
-  --status-socket /run/mithril-agent-status.sock
+  --status-socket /run/mithril-agent-status-sell.sock
 ```
 
-Configure an MCP client to start the same binary as a managed stdio
-subprocess:
+Configure an MCP client to start the same binary as a managed stdio subprocess.
+For a full strategy, create a separate read-only MCP entry for each configured
+leg (`sell`, `buy`, and `sweep`); this version has no combined multi-leg MCP
+socket:
 
 ```text
 command: /usr/local/libexec/mithril-agent/mithril-agent
-args:    mcp --status-socket /run/mithril-agent-status.sock
+args:    mcp --status-socket /run/mithril-agent-status-sell.sock
 ```
 
 Do not launch the MCP command separately and wait for a prompt; waiting for
@@ -1295,7 +1313,15 @@ Setting these variables starts nothing: alerts come from a separate process.
 Prove it can reach you before a trade depends on it:
 
 ```bash
-mithril-agent-telegram test    # one message to every allowed chat, per-chat result
+# Development shell with the two Telegram variables already set:
+mithril-agent-telegram test
+
+# Supervised host; systemd loads the protected environment without printing it:
+sudo systemd-run --quiet --wait --pipe --collect \
+  --uid=mithril-agent-telegram --gid=mithril-agent-telegram \
+  -p 'EnvironmentFile=/etc/mithril-agent/telegram-operator.env' \
+  /usr/local/libexec/mithril-agent/mithril-agent-telegram test
+
 mithril-agent-telegram --status-socket PATH --cursor PATH   # leave running
 ```
 
@@ -1381,21 +1407,21 @@ sign, submit, or configure a transaction.
 On a same-host Prometheus deployment, install the rule file as
 `/etc/prometheus/rules/mithril-agent.yml` and create
 `/etc/prometheus/targets/mithril-agent.json` with the same deployment ID used by
-the node monitor:
+the node monitor. A complete generated strategy has fixed ports: sell `9310`,
+buy `9311`, and sweep `9312`:
 
 ```json
 [
   {
-    "targets": ["127.0.0.1:9191"],
+    "targets": ["127.0.0.1:9310", "127.0.0.1:9311", "127.0.0.1:9312"],
     "labels": {"deployment_id": "replace-at-deploy"}
   }
 ]
 ```
 
-A sweep runner is a second process with its own metrics: run it with
-`--metrics-address 127.0.0.1:9192` and add `127.0.0.1:9192` to the same
-targets list, or the sweep's balance gauges, alert slots, and destination
-registration are invisible to every rule above.
+Before the buy leg exists, leave `9311` out of the target list; the sweep stays
+on `9312`. Legacy single-leg runners keep their explicitly configured ports
+such as `9191` and `9192` and must not run beside the generated strategy.
 
 Pin the exact Mithril commit used by the node and follow
 `https://github.com/Overclock-Validator/mithril/blob/COMMIT/prometheus/README.md`,

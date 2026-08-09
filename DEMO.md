@@ -1,7 +1,8 @@
 # Mithril Agent Devnet demonstration
 
-This guide is the short path for reviewing an already installed pilot. It does
-not replace the full installation and operations reference in `README.md`.
+This guide is the short path for reviewing an already installed pilot. A new
+host must first complete [QUICKSTART.md](QUICKSTART.md). `README.md` remains the
+detailed operations and recovery reference.
 
 ## What the demonstration proves
 
@@ -24,7 +25,7 @@ below.
 ## Handing this to someone non-technical
 
 Split it in two: an operator prepares and validates the host once, then the
-reviewer uses the bounded status and demo commands. A reviewer must never be
+reviewer uses the bounded status and strategy view. A reviewer must never be
 asked to find a private path, edit an environment file, or debug a service.
 
 **One-time, by an administrator with root:**
@@ -37,7 +38,7 @@ sudo ln -sfn /usr/local/libexec/mithril-agent/mithril-agent /usr/local/bin/mithr
 sudo usermod -aG mithril-agent-status REVIEWER
 # The reviewer must log out and back in for the group to take effect.
 
-# 3. Finish the supervised installation and guided strategy setup from README.
+# 3. Finish the supervised installation and guided strategy setup from QUICKSTART.
 #    Run setup as the mithril-agent service identity with its protected
 #    environment; do not run it from a normal login shell.
 ```
@@ -57,13 +58,14 @@ read-only and the group grants nothing but reading it.
 Before handoff, the operator must prove all of these:
 
 ```sh
-mithril-agent strategy show             # sell and sweep are listed
+sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
+  /usr/local/bin/mithril-agent strategy show  # sell and sweep are listed
 systemctl is-active mithril-agent-run.service
 ```
 
-Then run the supervised no-trade check shown below and require `status:
-ready`. Do not run `mithril-agent check` from a login shell that lacks the
-protected service environment.
+Then run the supervised no-trade check shown below and require it to say that
+everything is ready. Do not run a direct check from a login shell that lacks
+the protected service environment.
 
 After the first sell, the operator runs `mithril-agent setup strategy --resume`,
 reinstalls the generated service, and repeats the same checks until `strategy
@@ -72,20 +74,18 @@ bootstrap before it can be left unattended. Process exit alone is never proof
 of a usable setup; the generated artifacts and read-only gate are the
 acceptance evidence.
 
-**Then the reviewer runs two path-free commands:**
+**Then the reviewer uses the fixed read-only surfaces:**
 
 ```sh
-mithril-agent strategy show
-mithril-agent demo
+mithril-agent status --status-socket /run/mithril-agent-status-sell.sock
+mithril-agent status --status-socket /run/mithril-agent-status-buy.sock
+mithril-agent status --status-socket /run/mithril-agent-status-sweep.sock
 ```
 
-`demo` authorises at most one bounded Devnet action; the supervised runner
-executes it and returns to stopped mode. If the runner is not healthy, `demo`
-refuses and names the failed stage.
-
-The guided strategy setup recorded where it put things and `demo` finds it,
-which is why the reviewer needs no path. If anything is wrong,
-`mithril-agent doctor` says what and prints the next safe action.
+Telegram `/status`, `/price`, and `/last_trade` provide the combined phone
+view. The separate `demo` command is for a legacy single-leg setup; it does not
+discover a strategy pointer and must not be presented as the full-strategy
+review path.
 
 Before any of that, and needing nothing at all installed, they can run
 `mithril-agent explain` and `mithril-agent walkthrough` on their own laptop.
@@ -110,11 +110,12 @@ Neither command needs a wallet, a host, or a configuration. Creating a strategy
 does need the prepared Linux host and must follow the supervised installation
 in `README.md`; do not improvise a laptop setup and copy its files to the host.
 
-On an installed host, check the bounded operator view:
+On an installed full-strategy host, check one bounded leg through its generated
+socket. Use `buy` or `sweep` in place of `sell` for the other legs:
 
 ```sh
 /usr/local/libexec/mithril-agent/mithril-agent status \
-  --status-socket /run/mithril-agent-status.sock
+  --status-socket /run/mithril-agent-status-sell.sock
 ```
 
 If access is denied, ask an administrator to add the reviewer to the
@@ -126,11 +127,9 @@ required, and a Devnet profile. This command cannot read the wallet, private
 configuration, RPC credentials, or raw journal. It receives only bounded
 journal counters through the status snapshot.
 
-For a no-trade review, run the live read-only gate as the service identity.
-Systemd loads the protected environment without exposing it to the operator
-shell. If you intend to start the demonstration next, skip this standalone
-call: the demonstration repeats the same gate, and back-to-back calls can hit
-a provider rate limit.
+For a no-trade review, run the path-free readiness command as the service
+identity. Systemd loads the protected environment without exposing it to the
+operator shell:
 
 ```sh
 sudo systemd-run --quiet --wait --pipe --collect \
@@ -139,16 +138,19 @@ sudo systemd-run --quiet --wait --pipe --collect \
   -p 'EnvironmentFile=/etc/mithril-agent/quote.env' \
   -p 'EnvironmentFile=-/etc/mithril-agent/mcp.env' \
   -p 'EnvironmentFile=-/etc/mithril-agent/price.env' \
-  /usr/local/libexec/mithril-agent/mithril-agent check \
-  --config /var/lib/mithril-agent/agent/config.json
+  /usr/local/libexec/mithril-agent/mithril-agent start
 ```
 
-Continue only when it reports `status: ready`. Its `policy` object is the
-reviewable, non-secret summary of direction, input and output assets, input in
-raw base units, slippage, fee and reserve limits, direction-specific daily
-caps, and schedule window.
+Continue only when it reports that everything is ready. `strategy show` is the
+reviewable, non-secret summary of both trade directions, amounts, triggers,
+daily caps, sweep bounds, and current grants.
 
 ## Run exactly one Devnet trade
+
+This section is **legacy single-leg only**. It requires an explicit single-leg
+setup at `/var/lib/mithril-agent/agent` and the supplied
+`mithril-agent-demo.service`. Skip it when reviewing the generated full
+strategy; use the next section instead.
 
 The reviewer must have checked the policy values during setup or a prior
 read-only gate. If a standalone gate was just run, wait for the provider's
@@ -211,22 +213,24 @@ bootstrap and `strategy show` lists sell, buy, and sweep. The supervised runner
 must already be active; the reviewer does not start a second copy.
 
 ```sh
-mithril-agent strategy show
-mithril-agent start
+sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
+  /usr/local/bin/mithril-agent strategy show
 ```
 
-`start` changes nothing. When every check is ready, it prints the exact bounded
-`strategy enable` command for this saved setup, including `--allow-any-price`
-when the operator intentionally configured market-price legs. Review the
-duration and maximum trades, replace `TEXT` with the review reason, and run
-that command once.
+The operator runs the protected, no-trade `start` command from the earlier
+section. When every check is ready, it prints bounded `strategy enable`
+arguments, including `--allow-any-price` when the operator intentionally
+configured market-price legs. Review the duration and maximum trades, replace
+`TEXT` with the review reason, and run those arguments once through the
+`sudo -u mithril-agent env HOME=/var/lib/mithril-agent` wrapper in QUICKSTART.
 
 The runner then watches the configured rules without an open terminal. A sell,
 buy, and sweep happen only when their own trigger, funding, schedule, evidence,
 and spending gates pass. Check all three from either surface:
 
 ```sh
-mithril-agent strategy show
+sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
+  /usr/local/bin/mithril-agent strategy show
 # In Telegram: /status, /price, /last_trade
 ```
 
@@ -235,7 +239,8 @@ legs; a price-triggered strategy can correctly remain waiting. Stop the whole
 strategy at any time with:
 
 ```sh
-mithril-agent strategy stop --reason 'review finished'
+sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
+  /usr/local/bin/mithril-agent strategy stop --reason 'review finished'
 ```
 
 Afterward, `strategy show` must report every leg stopped. Do not infer success
@@ -247,12 +252,14 @@ Configure any MCP client to launch:
 
 ```text
 command: /usr/local/libexec/mithril-agent/mithril-agent
-args:    mcp --status-socket /run/mithril-agent-status.sock
+args:    mcp --status-socket /run/mithril-agent-status-sell.sock
 ```
 
-The MCP process waiting for input is normal. It exposes information, status,
-the configured strategy, and the operator guide. It cannot authorize, sign, or
-submit a trade.
+The MCP process waiting for input is normal. A generated strategy has separate
+`sell`, `buy`, and `sweep` sockets; configure one MCP entry per leg. This
+version has no combined multi-leg MCP socket. Each entry exposes information,
+status, the configured leg, and the operator guide. It cannot authorize, sign,
+or submit a trade.
 
 Telegram is also read-only. The useful reviewer commands are:
 
@@ -269,21 +276,25 @@ policy, signing, submission, or confirmation.
 
 ## Verify the evidence
 
-The live runner holds the journal lock, so journal verification must not be run
-while that service is active. During a planned review window, stop the runner,
-verify the sealed journal, then start the runner again. Its service starts with
-new actions disabled:
+The full-strategy runner holds all three journal locks, so journal verification
+must not run while that service is active. During a planned review window, stop
+the generated runner, verify every journal, then start the runner again. Its
+service starts with new actions disabled:
 
 ```sh
-sudo systemctl stop mithril-agent-swap.service
-sudo -u mithril-agent \
-  /usr/local/libexec/mithril-agent/mithril-agent journal verify \
-  --path /var/lib/mithril-agent/agent/state/events.jsonl
-sudo systemctl start mithril-agent-swap.service
+sudo systemctl stop mithril-agent-run.service
+for leg in sell buy sweep; do
+  sudo -u mithril-agent \
+    /usr/local/libexec/mithril-agent/mithril-agent journal verify \
+    --path "/var/lib/mithril-agent/.mithril-agent/strategy/$leg/state/events.jsonl" \
+    || exit 1
+done
+sudo systemctl start mithril-agent-run.service
 ```
 
-The verification must pass. After restart, wait for the public status to become
-recent and confirm that control remains `no_new_actions`.
+The verification must pass. If setup used a custom strategy directory, use its
+three `state/events.jsonl` paths instead. After restart, wait for all public
+statuses to become recent and confirm that every leg remains stopped.
 
 ## Handoff checklist
 
