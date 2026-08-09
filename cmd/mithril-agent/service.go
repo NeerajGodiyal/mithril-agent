@@ -47,10 +47,13 @@ terminals, dropped connections and reboots.
 Installing the unit arms nothing. Granting spending authority stays a separate,
 bounded, explicit command.
 
-With no --output the unit is printed. The normal path stages it as your user,
-then prints the exact privileged install commands:
+With no --output the unit is printed. Run this command as the same service
+identity that owns the strategy; it stages the units there and prints the exact
+privileged install commands:
 
-  mithril-agent service install --output "$HOME/.mithril-agent/mithril-agent-run.service"`
+  sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
+    mithril-agent service install \
+    --output /var/lib/mithril-agent/.mithril-agent/mithril-agent-run.service`
 
 const serviceUnitName = "mithril-agent-run.service"
 
@@ -181,7 +184,7 @@ func runServiceInstall(args []string, output io.Writer) error {
 	// behind by an earlier rehearsal, crash-looping seven times before anyone
 	// looked. Checking here costs one bind attempt and turns it into a sentence.
 	if !updating {
-		if err := metricsPortsFree(*basePort, len(plan.Legs)); err != nil {
+		if err := metricsPortsFree(*basePort, metricsPortSpan(plan.Legs)); err != nil {
 			return err
 		}
 	}
@@ -234,9 +237,12 @@ func runServiceInstall(args []string, output io.Writer) error {
 	}
 	if _, err := fmt.Fprintf(output,
 		"Wrote %d unit(s) into %s:\n  %s\n\nReview them, then install:\n  less %s\n%s"+
-			"  sudo systemctl daemon-reload\n  sudo systemctl enable --now %s\n",
-		len(staged), directory, strings.Join(staged, "\n  "), clean, installStep,
-		strings.TrimSuffix(name, ".service")); err != nil {
+			"  sudo systemctl daemon-reload\n"+
+			"  sudo systemctl enable %s\n"+
+			"  sudo systemctl restart %s\n",
+		len(staged), directory, strings.Join(staged, "\n  "),
+		strings.Join(prefixed(directory, staged), " "), installStep,
+		name, name); err != nil {
 		return err
 	}
 	if len(alerts) != 0 {
@@ -250,17 +256,26 @@ func runServiceInstall(args []string, output io.Writer) error {
 				// would require a group that does not exist yet on a fresh host.
 				"  id %s >/dev/null 2>&1 || sudo useradd --system --no-create-home --user-group -G %s %s\n"+
 				"  sudo install -d -o %s -g %s -m 0700 %s\n"+
-				"  sudo systemctl enable --now %s %s\n\n"+
-				"Check delivery before you rely on it:\n  mithril-agent-telegram test\n",
+				"  sudo systemctl enable %s %s\n"+
+				"  sudo systemctl restart %s %s\n\n"+
+				"Check delivery before you rely on it:\n"+
+				"  sudo systemd-run --quiet --wait --pipe --collect \\\n"+
+				"    --uid=%s --gid=%s \\\n"+
+				"    -p 'EnvironmentFile=%s' \\\n"+
+				"    %s test\n",
 			statusGroupName, alertsAccountName, statusGroupName, alertsAccountName,
 			alertsAccountName, alertsAccountName, filepath.Dir(alertsCursorPath),
-			strings.Join(alertSocketUnits(plan), " "), alertsUnitName); err != nil {
+			strings.Join(alertSocketUnits(plan), " "), alertsUnitName,
+			strings.Join(alertSocketUnits(plan), " "), alertsUnitName,
+			alertsAccountName, alertsAccountName, alertsEnvFile,
+			filepath.Join(filepath.Dir(plan.Binary), "mithril-agent-telegram")); err != nil {
 			return err
 		}
 	}
 	_, err = fmt.Fprintf(output,
-		"\nInstalling arms nothing. Granting spending authority stays separate:\n  mithril-agent %s\n",
-		plan.ArmCommand)
+		"\nInstalling arms nothing. Granting spending authority stays separate:\n"+
+			"  sudo -u %s env HOME=%s %s %s\n",
+		plan.User, plan.Home, plan.Binary, plan.ArmCommand)
 	return err
 }
 
@@ -295,21 +310,21 @@ func generatedUnitTarget(path string) (bool, error) {
 // somebody reads the journal, and the race it cannot catch is a single restart.
 // At least one port is always checked, so a plan with no legs recorded yet
 // still reports a collision on the base port the unit will use.
-func metricsPortsFree(base, legs int) error {
-	if legs < 1 {
-		legs = 1
+func metricsPortsFree(base, span int) error {
+	if span < 1 {
+		span = 1
 	}
-	if base < 1024 || base > 65_000 || base+legs-1 > 65_535 {
-		return errors.New("--metrics-base-port must leave one valid non-privileged port per strategy leg")
+	if base < 1024 || base > 65_000 || base+span-1 > 65_535 {
+		return errors.New("--metrics-base-port must leave room for every fixed strategy metrics offset")
 	}
-	for offset := range legs {
+	for offset := range span {
 		port := base + offset
 		address := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 		listener, err := net.Listen("tcp", address)
 		if err != nil {
 			return fmt.Errorf(
-				"%s is already in use, and the runner binds one metrics port per leg "+
-					"starting there — it would crash-loop forever. Free that port, or "+
+				"%s is already in use, and the runner reserves fixed metrics offsets "+
+					"from that base — it would crash-loop forever. Free that port, or "+
 					"pass a clear range: mithril-agent service install --metrics-base-port %d",
 				address, base+100)
 		}
@@ -318,6 +333,18 @@ func metricsPortsFree(base, legs int) error {
 		}
 	}
 	return nil
+}
+
+// metricsPortSpan includes gaps for legs that are not configured yet. A fresh
+// strategy has sell and sweep but no buy; sweep still owns base+2, not base+1.
+func metricsPortSpan(legs []serviceLeg) int {
+	span := 1
+	for _, leg := range legs {
+		if offset, ok := legMetricsOffset[leg.Name]; ok && offset+1 > span {
+			span = offset + 1
+		}
+	}
+	return span
 }
 
 // alertSocketUnits names the sockets to enable. Only the sockets are enabled:

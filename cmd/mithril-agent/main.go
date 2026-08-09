@@ -42,75 +42,47 @@ import (
 
 const rootUsage = `Mithril Agent — bounded Solana Devnet pilot
 
-If you read one line of this, read this one. It says where you are and the
-single next thing to do, from any state, and changes nothing:
-  mithril-agent start
+New host:
+  Read QUICKSTART.md in this checkout, or the installed copy at:
+  /usr/local/share/doc/mithril-agent/QUICKSTART.md
 
-Installed supervised pilot:
-  mithril-agent status --status-socket /run/mithril-agent-status.sock
-  sudo systemctl start --wait mithril-agent-demo.service
-  Read /usr/local/share/doc/mithril-agent/DEMO.md before starting the demo.
+The supported setup is one generated strategy: sell, buy, sweep, read-only
+Telegram alerts, and one read-only MCP socket per leg. Do not mix it with the
+legacy single-leg systemd units.
 
-Nothing installed? These two need no wallet, no server, no account:
-  mithril-agent explain          what it can and cannot do, in plain English
-  mithril-agent walkthrough      watch the real machinery run, on live prices
+Read-only review of an installed strategy:
+  mithril-agent status --status-socket /run/mithril-agent-status-sell.sock
+  mithril-agent status --status-socket /run/mithril-agent-status-buy.sock
+  mithril-agent status --status-socket /run/mithril-agent-status-sweep.sock
 
-On a prepared host, the demonstration is three steps:
-  mithril-agent setup            guided; press Enter to accept each default
-  mithril-agent service install --output "$HOME/.mithril-agent/mithril-agent-run.service"
-                                 prints the review and install steps
-  mithril-agent demo             arms ONE bounded trade for the runner to make
+Run these strategy commands as the mithril-agent service identity, with
+HOME=/var/lib/mithril-agent:
+  mithril-agent start                   show the one next step; changes nothing
+  mithril-agent strategy show           show every configured leg and grant
+  mithril-agent strategy enable ...     grant bounded spending authority
+  mithril-agent strategy stop --reason TEXT
 
-The runner executes; demo only authorises. Without a running runner, demo has
-nothing to act for it and says so.
+Nothing installed? These need no wallet, host, or configuration:
+  mithril-agent explain                 plain-language capability summary
+  mithril-agent walkthrough             read-only live-price walkthrough
 
-Trading at a price, and getting the profit out:
-  mithril-agent setup            asks the price to trade at (blank = no condition)
-  mithril-agent setup strategy --sell-at-usd P --buy-at-usd P --to ADDRESS
-                                 one round trip: sell high, buy back, sweep profit
-  mithril-agent setup sweep --wallet PATH --to ADDRESS   profit to YOUR wallet
-  mithril-agent strategy show [--config PATH]   everything currently configured
-
-Alerts on your phone are a separate process:
-  mithril-agent-telegram link    find your chat ID (Telegram never shows it)
-  mithril-agent-telegram test    prove a message reaches you, before a trade does
-
-  mithril-agent doctor           is it ready? what to do if not  [--json]
-  mithril-agent wallet check --file PATH   check a wallet you already have
-  mithril-agent funding check    is the cap on the agent's account real?
-
-Local setup and review:
-  mithril-agent check [--config PATH]
-  mithril-agent demo [--config PATH] [--timeout DURATION] [--json]
-  mithril-agent status --config PATH
-  mithril-agent preflight [--config PATH] [--explain]
-
-The read-only commands and demo find the configuration that setup recorded, or
-the installed one, so a reviewer never has to know a path. The commands that
-arm or stop the agent still require an explicit --config: someone changing what
-the agent may do should have to name what they are changing.
-  mithril-agent swap --help
+Other supported tools:
+  mithril-agent wallet check --file PATH
+  mithril-agent doctor [--config PATH] [--json]
   mithril-agent mcp (--config PATH | --status-socket PATH)
   mithril-agent shadow policy --out PATH --observe ADDR --sell-at-usd N
   mithril-agent shadow run --policy PATH --dir PATH
   mithril-agent shadow report --policy PATH --dir PATH
-  mithril-agent shadow backtest --policy PATH --dir PATH --buy-at-usd N
   mithril-agent journal verify --path ABSOLUTE_PATH
   mithril-agent clock-check --config PATH
   mithril-agent version
 
-Shadow mode watches a live market, including Mainnet, and records what the rule
-would have done. It holds no key and has no code path to a signature, which is
-why it is the one surface allowed to look at Mainnet.
+MCP and Telegram are read-only. Neither can enable, sign, or submit a trade.
+Shadow mode may watch Mainnet but holds no key and cannot sign. Trading remains
+Devnet-only in this pilot.
 
-The check command is read-only. Direct check and demo commands require the
-protected local environment; installed operators should use the supervised
-paths above. The demo permits at most one bounded Devnet trade and returns
-execution to stopped mode. MCP and Telegram are read-only and cannot authorize,
-sign, or submit a transaction.
-
-Legacy transfer commands remain available for compatibility but are unsupported
-for new deployments.`
+Legacy single-leg check, demo, preflight, and swap commands remain available
+for existing deployments; they are not the full-strategy first-run path.`
 
 // version is stamped at build time:
 //

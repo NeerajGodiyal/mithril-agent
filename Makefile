@@ -69,14 +69,16 @@ prereqs:
 	 else echo "  checksum MISSING — needed by make verify-source"; ok=0; fi; \
 	 miss=""; \
 	 [[ -z "$$MITHRIL_AGENT_MITHRIL_RPC_URL" ]] && miss="$$miss MITHRIL_AGENT_MITHRIL_RPC_URL"; \
+	 [[ -z "$$MITHRIL_AGENT_QUOTE_RPC_URL" ]] && miss="$$miss MITHRIL_AGENT_QUOTE_RPC_URL"; \
 	 [[ -z "$$MITHRIL_AGENT_PRIMARY_RPC_URL" ]] && miss="$$miss MITHRIL_AGENT_PRIMARY_RPC_URL"; \
 	 [[ -z "$$MITHRIL_AGENT_SECONDARY_RPC_URL" ]] && miss="$$miss MITHRIL_AGENT_SECONDARY_RPC_URL"; \
 	 if [[ -z "$$miss" ]]; then \
-	   echo "  RPC endpoints all three set  ok"; \
+	   echo "  RPC endpoints all four set  ok"; \
 	 else \
 	   echo "  RPC endpoints NOT SET:$$miss"; \
-	   echo "                THREE are needed to configure a trade:"; \
+	   echo "                FOUR are needed to configure a trade:"; \
 	   echo "                  _MITHRIL_  your own node (http on loopback is fine)"; \
+	   echo "                  _QUOTE_  isolated quote-sidecar reads"; \
 	   echo "                  _PRIMARY_ and _SECONDARY_  two https endpoints from"; \
 	   echo "                  DIFFERENT providers, so no single provider is the"; \
 	   echo "                  only witness to what happened."; \

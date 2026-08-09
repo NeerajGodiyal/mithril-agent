@@ -38,7 +38,7 @@ runtime finds its sibling Node.js executable and quote adapter itself.
 
   mithril-agent setup strategy
 
-Then, when you are ready:
+Then, when you are ready, run these as the same service identity and HOME:
 
   mithril-agent service install --output "$HOME/.mithril-agent/mithril-agent-run.service"
     Run once per host; it prints the review and install commands.
@@ -563,7 +563,7 @@ func runStrategySetup(ctx context.Context, args []string, output io.Writer) (fai
 	setupComplete = true
 	_, err = fmt.Fprintf(output,
 		"\nStrategy written\n  sell   %s\n  buy    pending — run: mithril-agent setup strategy --resume\n"+
-			"  sweep  %s\n\nNext\n"+
+			"  sweep  %s\n\nNext (as the same service identity and HOME)\n"+
 			"  1. mithril-agent service install --output \"$HOME/.mithril-agent/mithril-agent-run.service\"\n"+
 			"                                         (once per host; prints the install commands)\n"+
 			"  2. mithril-agent start                 (says what is left to do)\n",
@@ -838,8 +838,9 @@ func resumeStrategyBuyLeg(
 	}
 	_, err = fmt.Fprintf(output,
 		"Buy leg written to %s\nThe sweep floor already reserved it. Then:\n"+
-			"  sudo systemctl restart mithril-agent-run\n"+
-			"  mithril-agent start\n", result.ConfigPath)
+			"  regenerate the services with mithril-agent service install\n"+
+			"  run every install and restart command it prints\n"+
+			"  run mithril-agent start as the same service identity and HOME\n", result.ConfigPath)
 	return err
 }
 

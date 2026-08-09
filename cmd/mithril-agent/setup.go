@@ -321,11 +321,9 @@ func guideTelegramLink(p *prompter) error {
 		// Saying "configured" and stopping was the whole bug: the variables being
 		// set starts nothing. Alerts come from a SEPARATE process, and until it is
 		// running the operator waits for a message nothing exists to send.
-		p.sayf("Nothing sends alerts yet — that is a separate process. Check it")
-		p.sayf("works, then leave it running:")
-		p.sayf("")
-		p.sayf("  mithril-agent-telegram test")
-		p.sayf("  mithril-agent-telegram --status-socket PATH --cursor PATH")
+		p.sayf("Nothing sends alerts yet — that is a separate process. The later")
+		p.sayf("service install step generates it from these strategy legs, starts")
+		p.sayf("it, and prints the protected delivery test to run.")
 		return nil
 	}
 
