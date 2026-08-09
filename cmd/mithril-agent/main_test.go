@@ -126,32 +126,26 @@ func TestRootHelpPrioritizesSupportedCommands(t *testing.T) {
 	if strings.ContainsRune(help, '\t') {
 		t.Fatalf("root help contains tab indentation:\n%s", help)
 	}
-	status := strings.Index(help, "mithril-agent status --status-socket /run/mithril-agent-status.sock")
-	supervisedDemo := strings.Index(help, "sudo systemctl start --wait mithril-agent-demo.service")
-	documentation := strings.Index(help, "/usr/local/share/doc/mithril-agent/DEMO.md")
-	check := strings.Index(help, "mithril-agent check [--config PATH]")
-	demo := strings.Index(help, "mithril-agent demo [--config PATH]")
-	preflight := strings.Index(help, "mithril-agent preflight [--config PATH]")
-	swap := strings.Index(help, "mithril-agent swap --help")
-	legacy := strings.Index(help, "Legacy transfer commands remain available for compatibility")
-	if status < 0 || supervisedDemo < 0 || documentation < 0 || check < 0 || demo < 0 ||
-		preflight < 0 || swap < 0 || legacy < 0 || status > supervisedDemo ||
-		supervisedDemo > documentation || documentation > check || check > demo ||
-		demo > preflight || preflight > swap || swap > legacy {
-		t.Fatalf("root help does not prioritize the supported swap flow:\n%s", help)
+	documentation := strings.Index(help, "/usr/local/share/doc/mithril-agent/QUICKSTART.md")
+	status := strings.Index(help, "mithril-agent status --status-socket /run/mithril-agent-status-sell.sock")
+	start := strings.Index(help, "mithril-agent start")
+	legacy := strings.Index(help, "Legacy single-leg check, demo, preflight, and swap commands")
+	if documentation < 0 || status < 0 || start < 0 || legacy < 0 ||
+		documentation > status || status > start || start > legacy {
+		t.Fatalf("root help does not prioritize the generated strategy flow:\n%s", help)
 	}
 	if strings.Contains(help, "mithril-agent devnet-check") ||
-		strings.Contains(help, "mithril-agent devnet-enable") {
+		strings.Contains(help, "mithril-agent devnet-enable") ||
+		strings.Contains(help, "mithril-agent-demo.service") ||
+		strings.Contains(help, "/run/mithril-agent-status.sock\n") {
 		t.Fatalf("root help advertises unsupported legacy commands:\n%s", help)
 	}
 	for _, statement := range []string{
-		"The check command is read-only.",
-		"Direct check and demo commands require the",
-		"installed operators should use the supervised",
-		"at most one bounded",
-		"MCP and Telegram are",
-		"cannot authorize,",
-		"sign, or submit",
+		"one generated strategy: sell, buy, sweep",
+		"Run these strategy commands as the mithril-agent service identity",
+		"MCP and Telegram are read-only.",
+		"Neither can enable, sign, or submit a trade.",
+		"Trading remains\nDevnet-only",
 	} {
 		if !strings.Contains(help, statement) {
 			t.Fatalf("root help is missing %q:\n%s", statement, help)

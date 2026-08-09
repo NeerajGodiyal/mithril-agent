@@ -229,7 +229,8 @@ func TestServiceInstallPrintsBeforeItWrites(t *testing.T) {
 	// Telling the operator the unit exists is useless without the two commands
 	// that make it take effect.
 	if !strings.Contains(wrote.String(), "daemon-reload") ||
-		!strings.Contains(wrote.String(), "enable --now") {
+		!strings.Contains(wrote.String(), "sudo systemctl enable "+serviceUnitName) ||
+		!strings.Contains(wrote.String(), "sudo systemctl restart "+serviceUnitName) {
 		t.Errorf("did not say how to make the unit take effect:\n%s", wrote.String())
 	}
 	if !strings.Contains(wrote.String(), "sudo install") ||
@@ -675,6 +676,18 @@ func TestServiceInstallAlsoWiresTheAlertPath(t *testing.T) {
 			t.Errorf("%s was written but never named to the operator:\n%s", name, printed.String())
 		}
 	}
+	for _, instruction := range []string{
+		"less " + filepath.Join(directory, serviceUnitName),
+		"sudo systemctl enable mithril-agent-status-sell.socket " + alertsUnitName,
+		"sudo systemctl restart mithril-agent-status-sell.socket " + alertsUnitName,
+		"--uid=" + alertsAccountName + " --gid=" + alertsAccountName,
+		"EnvironmentFile=" + alertsEnvFile,
+		filepath.Join(filepath.Dir(planBinaryForTest(t)), "mithril-agent-telegram") + " test",
+	} {
+		if !strings.Contains(printed.String(), instruction) {
+			t.Errorf("the generated install instructions are missing %q:\n%s", instruction, printed.String())
+		}
+	}
 
 	// The bot must be pointed at THIS deployment's socket. A unit naming another
 	// deployment's path connects, stays quiet, and looks healthy.
@@ -794,6 +807,13 @@ func TestServiceInstallAcceptsAFreeMetricsRange(t *testing.T) {
 	var out bytes.Buffer
 	if err := runService([]string{"install", "--metrics-base-port", strconv.Itoa(port)}, &out); err != nil {
 		t.Fatalf("a free port was refused: %v", err)
+	}
+}
+
+func TestMetricsPortSpanKeepsTheSweepPortBeforeBuyExists(t *testing.T) {
+	legs := []serviceLeg{{Name: "sell"}, {Name: "sweep"}}
+	if got := metricsPortSpan(legs); got != 3 {
+		t.Fatalf("metrics span = %d, want 3 for sell at base and sweep at base+2", got)
 	}
 }
 
