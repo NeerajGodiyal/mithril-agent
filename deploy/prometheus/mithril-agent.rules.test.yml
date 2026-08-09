@@ -388,6 +388,8 @@ tests:
         values: '1+0x16'
       - series: 'mithril_agent_journal_records{instance="agent"}'
         values: '80+0x16'
+      - series: 'mithril_agent_journal_active_records{instance="agent"}'
+        values: '80+0x16'
       - series: 'mithril_agent_journal_record_limit{instance="agent"}'
         values: '100+0x16'
       - series: 'mithril_agent_journal_bytes{instance="agent"}'
@@ -410,7 +412,7 @@ tests:
               instance: agent
               severity: warning
             exp_annotations:
-              summary: "Mithril agent journal is near capacity; archive it before enabling execution"
+              summary: "Mithril agent journal segment is near capacity; check that rotation is working"
 
   - name: a configured met alert fires after persistence and an unconfigured one stays silent
     interval: 15s
@@ -565,3 +567,107 @@ tests:
               severity: warning
             exp_annotations:
               summary: "The alerts configuration is unreadable; no operator alerts are being evaluated"
+
+  - name: a rotating journal does not permanently trip the fullness warning
+    interval: 15s
+    input_series:
+      # Whole history well past one segment's limit, but the active segment is
+      # freshly rotated and nearly empty: rotation is working, so no warning.
+      - series: 'mithril_agent_journal_records{job="mithril-agent",instance="agent"}'
+        values: '200000+0x20'
+      - series: 'mithril_agent_journal_active_records{job="mithril-agent",instance="agent"}'
+        values: '120+0x20'
+      - series: 'mithril_agent_journal_record_limit{job="mithril-agent",instance="agent"}'
+        values: '65536+0x20'
+      - series: 'mithril_agent_journal_bytes{job="mithril-agent",instance="agent"}'
+        values: '1000000+0x20'
+      - series: 'mithril_agent_journal_byte_limit{job="mithril-agent",instance="agent"}'
+        values: '67108864+0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MithrilAgentJournalNearLimit
+        exp_alerts: []
+
+  - name: an active segment genuinely near its limit still warns
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_journal_records{job="mithril-agent",instance="agent"}'
+        values: '60000+0x20'
+      - series: 'mithril_agent_journal_active_records{job="mithril-agent",instance="agent"}'
+        values: '60000+0x20'
+      - series: 'mithril_agent_journal_record_limit{job="mithril-agent",instance="agent"}'
+        values: '65536+0x20'
+      - series: 'mithril_agent_journal_bytes{job="mithril-agent",instance="agent"}'
+        values: '1000000+0x20'
+      - series: 'mithril_agent_journal_byte_limit{job="mithril-agent",instance="agent"}'
+        values: '67108864+0x20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MithrilAgentJournalNearLimit
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              job: mithril-agent
+              severity: warning
+            exp_annotations:
+              summary: "Mithril agent journal segment is near capacity; check that rotation is working"
+
+  - name: a signed-but-unsent halt is visible even though it no longer latches
+    interval: 15s
+    input_series:
+      # The halt as it really behaves: brief, then self-resolved to canceled
+      # once the blockhash expires. terminal_stop stays 0 because an unsent
+      # transaction no longer latches the control state.
+      - series: 'mithril_agent_last_result{decision="halted",job="mithril-agent",instance="agent"}'
+        values: '1 1 1 1 1 1 0 0 0 0 0 0'
+      - series: 'mithril_agent_terminal_stop{job="mithril-agent",instance="agent"}'
+        values: '0+0x12'
+      - series: 'mithril_agent_attention_required{job="mithril-agent",instance="agent"}'
+        values: '1 1 1 1 1 1 0 0 0 0 0 0'
+    alert_rule_test:
+      # The umbrella cannot see it: attention clears well inside its 5m window.
+      - eval_time: 2m
+        alertname: MithrilAgentAttentionRequired
+        exp_alerts: []
+      # The dedicated rule does.
+      - eval_time: 1m
+        alertname: MithrilAgentActionHalted
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              job: mithril-agent
+              severity: warning
+              lifecycle: state
+              decision: halted
+            exp_annotations:
+              summary: "A swap halted; check whether it was sent before deciding anything"
+
+  - name: a sustained below-floor market warns without paging
+    interval: 1m
+    input_series:
+      - series: 'mithril_agent_last_failure{category="price_below_floor",job="mithril-agent",instance="agent"}'
+        values: '1+0x90'
+      - series: 'mithril_agent_attention_required{job="mithril-agent",instance="agent"}'
+        values: '1+0x90'
+      - series: 'mithril_agent_terminal_stop{job="mithril-agent",instance="agent"}'
+        values: '0+0x90'
+    alert_rule_test:
+      # Excluded from the critical umbrella: an unreached price is not a fault.
+      - eval_time: 30m
+        alertname: MithrilAgentAttentionRequired
+        exp_alerts: []
+      # Below the hour it is just an ordinary market.
+      - eval_time: 30m
+        alertname: MithrilAgentPriceBelowFloor
+        exp_alerts: []
+      # Sustained, it means the frozen floor no longer matches the market.
+      - eval_time: 75m
+        alertname: MithrilAgentPriceBelowFloor
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              job: mithril-agent
+              category: price_below_floor
+              severity: warning
+            exp_annotations:
+              summary: "Quotes have stayed under the route floor for an hour; consider re-running setup with --floor-tolerance-bps"
