@@ -279,6 +279,49 @@ func TestTerminalStopCanReconcileSameActionWithoutOpeningAuthority(t *testing.T)
 	}
 }
 
+func TestFinalizedActionClearsRecoveryWithoutRestoringAuthority(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "control.json")
+	fingerprint := "c23f7a4c8d169646c7582a8ce5ef4b97e20b1b5984ce09633b620842b5634694"
+	now := time.Now().UTC()
+	if err := WriteDevnetActivation(
+		path, fingerprint, now.Add(-time.Second), now.Add(time.Hour), 2, "two actions",
+	); err != nil {
+		t.Fatal(err)
+	}
+	state, err := NewStateFile(path, fingerprint, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocked, err := state.WithSendBarrier(testActionID, func() error { return nil }); err != nil || blocked {
+		t.Fatalf("send barrier: blocked=%v err=%v", blocked, err)
+	}
+	if err := state.ClearTerminalForFinalized(testActionID); err != nil {
+		t.Fatal(err)
+	}
+	status, err := state.Status()
+	if err != nil || status.Mode != ModeDevnetEnabled || status.RemainingActions != 1 ||
+		status.RecoveryPending {
+		t.Fatalf("finalized status = %+v, %v", status, err)
+	}
+	lastActionID := "3fc17e5d2bc3c229233bc38e11f02b41566753db05b1c9be93aececd816a3d6d"
+	if blocked, err := state.WithSendBarrier(lastActionID, func() error { return nil }); err != nil || blocked {
+		t.Fatalf("last send barrier: blocked=%v err=%v", blocked, err)
+	}
+	if err := state.ClearTerminalForFinalized(lastActionID); err != nil {
+		t.Fatal(err)
+	}
+	status, err = state.Status()
+	if err != nil || status.Mode != ModeNoNewActions || status.RecoveryPending {
+		t.Fatalf("exhausted finalized status = %+v, %v", status, err)
+	}
+	document, err := state.readStateUnlocked()
+	if err != nil || document == nil || document.RemainingActions != 0 ||
+		document.RecoveryActionID != "" {
+		t.Fatalf("finalized state = %+v, %v", document, err)
+	}
+}
+
 func TestStateWritersDoNotEraseInvalidOrTerminalState(t *testing.T) {
 	fingerprint := "c23f7a4c8d169646c7582a8ce5ef4b97e20b1b5984ce09633b620842b5634694"
 	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
@@ -851,5 +894,138 @@ func TestStopWaitsForSendBarrier(t *testing.T) {
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("control lock mode = %s", info.Mode())
+	}
+}
+
+// A multi-action activation is the autonomy dial: it must permit exactly the
+// number of sends it granted and then stop, without a human intervening to
+// stop it and without any path to a further send.
+func TestMultiActionActivationSpendsExactlyItsGrant(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.json")
+	fingerprint := strings.Repeat("b", 64)
+	state, err := NewStateFile(path, fingerprint, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const granted = 3
+	if err := WriteDevnetActivation(
+		path, fingerprint,
+		time.Now().UTC().Add(-time.Second), time.Now().UTC().Add(time.Hour),
+		granted, "multi-action test",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	for index := range granted {
+		actionID := strings.Repeat(string(rune('a'+index)), 64)
+		performed := false
+		blocked, err := state.WithSendBarrier(actionID, func() error {
+			performed = true
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("send %d: %v", index+1, err)
+		}
+		if blocked || !performed {
+			t.Fatalf("send %d was blocked while the activation still had capacity", index+1)
+		}
+		status, err := state.Status()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := uint32(granted - index - 1); status.RemainingActions != want {
+			t.Fatalf("after send %d: remaining = %d, want %d",
+				index+1, status.RemainingActions, want)
+		}
+	}
+
+	// The grant is spent. Nothing further may send, and it must fail closed
+	// rather than by erroring — an exhausted activation is a normal end state.
+	performed := false
+	blocked, err := state.WithSendBarrier(strings.Repeat("f", 64), func() error {
+		performed = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("exhausted activation: %v", err)
+	}
+	if !blocked || performed {
+		t.Fatal("an exhausted activation must block every further send")
+	}
+}
+
+// Capacity is consumed before the durable send marker, so an interrupted send
+// loses a slot rather than leaving one that could be spent twice.
+func TestInterruptedSendConsumesCapacityRatherThanReusingIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.json")
+	fingerprint := strings.Repeat("c", 64)
+	state, err := NewStateFile(path, fingerprint, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteDevnetActivation(
+		path, fingerprint,
+		time.Now().UTC().Add(-time.Second), time.Now().UTC().Add(time.Hour),
+		2, "interrupted send test",
+	); err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("send failed after the barrier")
+	if _, err := state.WithSendBarrier(strings.Repeat("d", 64), func() error {
+		return failure
+	}); !errors.Is(err, failure) {
+		t.Fatalf("the operation's error must surface: %v", err)
+	}
+	status, err := state.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.RemainingActions != 1 {
+		t.Fatalf("a failed send must still consume its slot: remaining = %d",
+			status.RemainingActions)
+	}
+}
+
+// An activation is the operator's stated bound. Replacing a live one would
+// silently restore its spent capacity, so every writer must be refused —
+// including the plain WriteDevnetActivation the sweep path uses, not just the
+// revision-checked variant the swap path uses.
+func TestNoWriterMayReplaceALiveActivation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.json")
+	fingerprint := strings.Repeat("e", 64)
+	state, err := NewStateFile(path, fingerprint, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued := time.Now().UTC().Add(-time.Second)
+	expires := time.Now().UTC().Add(time.Hour)
+	if err := WriteDevnetActivation(path, fingerprint, issued, expires, 3, "first grant"); err != nil {
+		t.Fatal(err)
+	}
+	// Spend one slot so a silent replacement would visibly restore capacity.
+	if _, err := state.WithSendBarrier(strings.Repeat("a", 64), func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := WriteDevnetActivation(path, fingerprint, issued, expires, 100, "widen"); err == nil ||
+		!strings.Contains(err.Error(), "stop the current activation") {
+		t.Fatalf("replacing a live activation must be refused, got %v", err)
+	}
+	status, err := state.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.MaxActions != 3 || status.RemainingActions != 2 {
+		t.Fatalf("the original grant must be intact: max=%d remaining=%d",
+			status.MaxActions, status.RemainingActions)
+	}
+
+	// After an explicit stop, a fresh grant is allowed — the bound is a
+	// deliberate gate, not a permanent lock.
+	if err := WriteNoNewActions(path, "operator stop"); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteDevnetActivation(path, fingerprint, issued, expires, 5, "second grant"); err != nil {
+		t.Fatalf("a fresh grant after stopping must succeed: %v", err)
 	}
 }

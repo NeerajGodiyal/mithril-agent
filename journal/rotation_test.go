@@ -381,3 +381,44 @@ func lastLine(t *testing.T, path string) []byte {
 	lines := strings.SplitAfter(strings.TrimRight(string(raw), "\n"), "\n")
 	return []byte(lines[len(lines)-1] + "\n")
 }
+
+// The per-file caps bound the ACTIVE segment. Reporting the whole history here
+// would compare a growing total against a per-segment limit, so utilisation
+// would climb past 100% and stay there for as long as the agent ran.
+func TestActiveRecordsCountsOnlyTheActiveSegment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "events.jsonl")
+	store := openRotatingForTest(t, path)
+	at := rotateAfter(t, store, 3, time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC))
+	forceRotate(t, store)
+	rotateAfter(t, store, 2, at)
+
+	stats, err := store.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 3 sealed, then the marker and 2 more in the file being appended to. The
+	// marker belongs to the NEW segment: it is written to the promoted file.
+	if stats.Records != 6 {
+		t.Fatalf("Records = %d, want the whole history of 6", stats.Records)
+	}
+	if stats.ActiveRecords != 3 {
+		t.Fatalf("ActiveRecords = %d, want 3 — marker plus the 2 appended after it",
+			stats.ActiveRecords)
+	}
+
+	// And the split must survive a reopen, or utilisation would jump the moment
+	// the agent restarted: reload rebuilds activeStart from the sealed segments
+	// rather than from the rotation that produced them.
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openRotatingForTest(t, path)
+	after, err := reopened.Stats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ActiveRecords != stats.ActiveRecords || after.Records != stats.Records {
+		t.Fatalf("after reopen ActiveRecords/Records = %d/%d, want %d/%d",
+			after.ActiveRecords, after.Records, stats.ActiveRecords, stats.Records)
+	}
+}

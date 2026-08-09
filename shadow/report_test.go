@@ -17,7 +17,7 @@ func testReport(t *testing.T) Report {
 		t.Fatal(err)
 	}
 	ledger, err = ledger.Apply(Fill{
-		Filled: true, SpentUnits: 100_000_000, ReceivedUnits: 2_200_000, FeeLamports: 5_000,
+		Filled: true, Sell: true, SpentUnits: 100_000_000, ReceivedUnits: 2_200_000, FeeLamports: 5_000,
 	}, 22_000_000)
 	if err != nil {
 		t.Fatal(err)

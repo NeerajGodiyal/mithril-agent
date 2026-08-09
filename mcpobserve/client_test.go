@@ -2,6 +2,7 @@ package mcpobserve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -12,6 +13,16 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/solana"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+func TestFailureStageDoesNotExposeTheError(t *testing.T) {
+	err := failAt("state", errors.New("private detail"))
+	if got := FailureStage(err); got != "state" {
+		t.Fatalf("FailureStage() = %q, want state", got)
+	}
+	if got := FailureStage(errors.New("unstaged")); got != "" {
+		t.Fatalf("unstaged error reported %q", got)
+	}
+}
 
 const helperEnv = "MITHRIL_AGENT_MCP_HELPER"
 const helperHealthTimeEnv = "MITHRIL_AGENT_MCP_HEALTH_TIME"

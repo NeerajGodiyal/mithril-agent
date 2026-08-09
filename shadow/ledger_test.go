@@ -20,7 +20,7 @@ func TestSellBooksProceedsCostAndFee(t *testing.T) {
 
 	// Sell 0.1 SOL at $22, receiving 2.2 USDC.
 	fill := Fill{
-		Filled: true, SpentUnits: 100_000_000, ReceivedUnits: 2_200_000,
+		Filled: true, Sell: true, SpentUnits: 100_000_000, ReceivedUnits: 2_200_000,
 		FeeLamports: 5_000,
 	}
 	after, err := ledger.Apply(fill, 22_000_000)
@@ -57,7 +57,7 @@ func TestFeeAlwaysReducesRealizedProfit(t *testing.T) {
 	}
 	// Sell at exactly the cost basis: no gain, so the result must be the fee.
 	after, err := ledger.Apply(Fill{
-		Filled: true, SpentUnits: 100_000_000, ReceivedUnits: 2_000_000, FeeLamports: 5_000,
+		Filled: true, Sell: true, SpentUnits: 100_000_000, ReceivedUnits: 2_000_000, FeeLamports: 5_000,
 	}, 20_000_000)
 	if err != nil {
 		t.Fatal(err)
@@ -99,7 +99,7 @@ func TestLedgerRefusesToSpendWhatItDoesNotHold(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := ledger.Apply(Fill{
-		Filled: true, SpentUnits: 2_000_000, ReceivedUnits: 40_000, FeeLamports: 5_000,
+		Filled: true, Sell: true, SpentUnits: 2_000_000, ReceivedUnits: 40_000, FeeLamports: 5_000,
 	}, 20_000_000); err == nil {
 		t.Fatal("the ledger sold inventory it did not have")
 	}
@@ -142,7 +142,7 @@ func TestHoldBenchmarkIgnoresWhatTheStrategyDid(t *testing.T) {
 		t.Fatal(err)
 	}
 	traded, err := ledger.Apply(Fill{
-		Filled: true, SpentUnits: 500_000_000, ReceivedUnits: 10_000_000, FeeLamports: 5_000,
+		Filled: true, Sell: true, SpentUnits: 500_000_000, ReceivedUnits: 10_000_000, FeeLamports: 5_000,
 	}, 20_000_000)
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +181,7 @@ func TestBuyingReAveragesCostBasis(t *testing.T) {
 	}
 	// Buy another whole SOL at $10, so the average of 1 at $20 and 1 at $10 is $15.
 	after, err := ledger.Apply(Fill{
-		Filled: true, SpentUnits: 10_000_000, ReceivedUnits: 1_000_000_000, FeeLamports: 5_000,
+		Filled: true, Sell: false, SpentUnits: 10_000_000, ReceivedUnits: 1_000_000_000, FeeLamports: 5_000,
 	}, 10_000_000)
 	if err != nil {
 		t.Fatal(err)
@@ -222,7 +222,7 @@ func TestLedgerRefusesUnrepresentableAmountsInsteadOfWrapping(t *testing.T) {
 		return
 	}
 	_, err = ledger.Apply(Fill{
-		Filled: true, SpentUnits: 1, ReceivedUnits: ^uint64(0), FeeLamports: 1,
+		Filled: true, Sell: true, SpentUnits: 1, ReceivedUnits: ^uint64(0), FeeLamports: 1,
 	}, 1)
 	if err == nil {
 		t.Fatal("an unrepresentable trade was booked instead of refused")
@@ -262,7 +262,7 @@ func TestRepeatedBuysAtOnePriceDoNotDriftTheCostBasis(t *testing.T) {
 	// Buy 1 devUSDC worth of SOL at exactly $21, twenty times over.
 	for round := range 20 {
 		ledger, err = ledger.Apply(Fill{
-			Filled: true, SpentUnits: 1_000_000,
+			Filled: true, Sell: false, SpentUnits: 1_000_000,
 			ReceivedUnits: 47_619_047, FeeLamports: 5_000,
 		}, price)
 		if err != nil {
@@ -291,7 +291,7 @@ func TestSellingEverythingLeavesNoCostBasisBehind(t *testing.T) {
 	}
 	// Sell all but the fee.
 	after, err := ledger.Apply(Fill{
-		Filled: true, SpentUnits: 999_995_000, ReceivedUnits: 20_000_000, FeeLamports: 5_000,
+		Filled: true, Sell: true, SpentUnits: 999_995_000, ReceivedUnits: 20_000_000, FeeLamports: 5_000,
 	}, 20_000_000)
 	if err != nil {
 		t.Fatal(err)

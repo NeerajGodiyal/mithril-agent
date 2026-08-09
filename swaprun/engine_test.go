@@ -625,10 +625,14 @@ func TestEngineWaitsForPriceBeforeStarting(t *testing.T) {
 			UncertaintyNanos: uint64(10 * time.Millisecond),
 		}, nil
 	}
+	// The price read now happens AFTER the node observation, because binding it
+	// to a proven slot is what makes it authorizable — and BEFORE the health
+	// gate returns, so the operator can still see the price while the node is
+	// warming up. So the first cycle observes once, reads the price once, and
+	// reports the health gate as the reason while carrying a price status.
 	result, err := engine.RunOnce(t.Context(), profile)
 	if err != nil || result.Decision != "waiting" ||
-		result.Reason != "price trigger has not been reached" ||
-		result.PriceTrigger == nil || trigger.calls != 1 || observer.calls != 0 {
+		result.PriceTrigger == nil || trigger.calls != 1 || observer.calls != 1 {
 		t.Fatalf("first price check = %+v, error=%v calls=%d/%d", result, err, trigger.calls, observer.calls)
 	}
 	records := len(store.Records())
@@ -640,9 +644,13 @@ func TestEngineWaitsForPriceBeforeStarting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Every cycle observes the node and then reads the price against that
+	// observation's slot, so both counters advance together. What must not
+	// advance is the journal: an unreached price starts nothing.
 	if result.Decision != "waiting" || result.Reason != "price trigger has not been reached" ||
-		trigger.calls != 2 || observer.calls != 0 || len(store.Records()) != records {
-		t.Fatalf("price wait result = %+v, trigger calls = %d", result, trigger.calls)
+		trigger.calls != 2 || observer.calls != 2 || len(store.Records()) != records {
+		t.Fatalf("price wait result = %+v, trigger calls = %d, observer calls = %d",
+			result, trigger.calls, observer.calls)
 	}
 	for _, record := range store.Records() {
 		if record.Type == EventStarted {
@@ -662,7 +670,7 @@ func TestEngineRechecksPriceBeforeSigningAndSending(t *testing.T) {
 		wantTriggerCall int
 	}{
 		{name: "before signing", threshold: 20_000_000, prices: []uint64{25_000_000, 25_000_000, 19_000_000}, wantExecutable: true, wantTriggerCall: 3},
-		{name: "before sending", threshold: 20_000_000, prices: []uint64{25_000_000, 25_000_000, 25_000_000, 19_000_000}, wantSigned: true, wantExecutable: true, wantTriggerCall: 4},
+		{name: "before sending", threshold: 20_000_000, prices: []uint64{25_000_000, 25_000_000, 25_000_000, 25_000_000, 19_000_000}, wantSigned: true, wantExecutable: true, wantTriggerCall: 5},
 		{name: "executable minimum", threshold: 22_000_000, prices: []uint64{25_000_000, 25_000_000, 25_000_000}, wantMarketMet: true, wantTriggerCall: 3},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -737,14 +745,18 @@ func TestEngineRechecksPriceBeforeSigningAndSending(t *testing.T) {
 				t.Fatalf("recorded %d price reads, want %d", len(trigger.slots), test.wantTriggerCall)
 			}
 			provenSlot := observer.observation.Account.Slot
+			// The pre-start read binds the slot of the observation it was taken
+			// with, which is one behind the slot proven for the action itself.
+			// Both are proven slots; what must never appear is an unbound read
+			// on a path that can authorize, or a slot from nowhere.
 			bound := 0
 			for index, slot := range trigger.slots {
 				switch slot {
-				case 0:
+				case 0, provenSlot - 1:
 				case provenSlot:
 					bound++
 				default:
-					t.Fatalf("price read %d used slot %d, which is neither unbound nor the proven slot %d",
+					t.Fatalf("price read %d used slot %d, which is neither the observed nor the proven slot %d",
 						index, slot, provenSlot)
 				}
 			}
@@ -1835,7 +1847,14 @@ type blockhashStub struct {
 	height uint64
 }
 
-func (stub blockhashStub) LatestBlockhash(context.Context, uint64) (solanarpc.LatestBlockhash, error) {
+// The real client REFUSES a zero minimum context slot (solanarpc/client.go:253):
+// binding one is how an authorizing caller proves which slot it read at. A stub
+// that ignored the argument let a caller pass 0 and still look correct in
+// tests while always failing in production.
+func (stub blockhashStub) LatestBlockhash(_ context.Context, minContextSlot uint64) (solanarpc.LatestBlockhash, error) {
+	if minContextSlot == 0 {
+		return solanarpc.LatestBlockhash{}, errors.New("minimum blockhash context slot is required")
+	}
 	return stub.latest, nil
 }
 
@@ -2557,7 +2576,12 @@ func TestEnginePriceSourceOutageConsumesNoAction(t *testing.T) {
 			t.Fatal("price outage created a swap action")
 		}
 	}
-	if observer.calls != 0 {
-		t.Fatalf("price outage still observed the node %d times", observer.calls)
+	// The node IS observed: the price read is bound to a proven slot, and the
+	// observation is where that slot comes from. A read bound to slot 0 is
+	// exactly what the default on-chain feed refuses. What a price outage must
+	// not do is spend anything — asserted above by the journal staying clock-
+	// only and no action starting.
+	if observer.calls != 1 {
+		t.Fatalf("price outage observed the node %d times, want exactly one", observer.calls)
 	}
 }

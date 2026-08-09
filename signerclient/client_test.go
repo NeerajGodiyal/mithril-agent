@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -190,6 +191,107 @@ func TestClientInvokesSignerBinary(t *testing.T) {
 		response.MessageSHA256 != expected.MessageSHA256 ||
 		response.TransactionSHA256 != expected.TransactionSHA256 {
 		t.Fatal("signer process returned a different signed transaction")
+	}
+
+	// A refusal has to arrive as a REFUSAL. Collapsed into "signer process
+	// failed" it was indistinguishable from a missing binary: the proposer held
+	// its built transaction, the blockhash aged out about a minute later, and
+	// the operator was told the blockhash had expired. That cost hours of
+	// looking at the wrong subsystem on Devnet on 2026-08-06.
+	//
+	// A schedule window that has already closed is a genuine refusal — the bound
+	// working — and the right operator response is to wait for the next window.
+	second := request
+	second.ScheduleWindowStartUnix = request.ScheduleWindowStartUnix - 7200
+	second.ScheduleWindowEndUnix = request.ScheduleWindowStartUnix - 3600
+	_, err = client.Sign(t.Context(), second)
+	if !errors.Is(err, ErrSignerRefused) {
+		t.Fatalf("a closed schedule window = %v, want ErrSignerRefused", err)
+	}
+	// The signer's own sentence has to survive, or the operator knows a bound
+	// was hit but not which one, and so not whether to wait or to reconfigure.
+	reason := strings.TrimPrefix(err.Error(), ErrSignerRefused.Error()+": ")
+	if reason == "" || reason == err.Error() {
+		t.Errorf("refusal lost the signer's reason: %v", err)
+	}
+	// It is the signer's message, not the client's prefix re-stated.
+	if strings.Contains(reason, "mithril-agent-signer:") {
+		t.Errorf("refusal kept the child's program prefix: %q", reason)
+	}
+	// Whatever crosses the boundary stays printable and bounded.
+	if len(err.Error()) > maxRefusalBytes {
+		t.Errorf("refusal text is unbounded: %d bytes", len(err.Error()))
+	}
+	for _, b := range []byte(err.Error()) {
+		if b < 0x20 || b >= 0x7f {
+			t.Fatalf("refusal text carries a non-printable byte %#x: %q", b, err.Error())
+		}
+	}
+
+	// The other half of the distinction, and the reason the marker exists: a
+	// FAULT must not wear the refusal's clothes. An action ID the policy cannot
+	// have produced means something is broken, not that a budget is spent — and
+	// reported as a refusal it would tell the operator to wait until tomorrow
+	// for a condition that will never clear on its own.
+	broken := request
+	broken.ActionID = strings.Repeat("b", len(request.ActionID))
+	_, err = client.Sign(t.Context(), broken)
+	if err == nil {
+		t.Fatal("a request outside the policy was signed")
+	}
+	if errors.Is(err, ErrSignerRefused) {
+		t.Errorf("a fault was reported as a policy refusal: %v", err)
+	}
+}
+
+// A signer that fails for any OTHER reason must not have its output read: those
+// messages can name the policy or keypair path.
+func TestNonRefusalFailuresStayOpaque(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds a stub signer")
+	}
+	temp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(temp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Exits 1 — a fault, not a refusal — while printing something path-like.
+	source := filepath.Join(temp, "stub.go")
+	stub := "package main\n\nimport (\n\t\"fmt\"\n\t\"os\"\n)\n\n" +
+		"func main() {\n\tfmt.Fprintln(os.Stderr, \"read policy: open /private/key.json: denied\")\n" +
+		"\tos.Exit(1)\n}\n"
+	if err := os.WriteFile(source, []byte(stub), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(temp, "stub-signer")
+	if output, err := exec.Command("go", "build", "-o", binary, source).CombinedOutput(); err != nil {
+		t.Fatalf("build stub: %v\n%s", err, output)
+	}
+	if err := os.Chmod(binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	policyPath := filepath.Join(temp, "policy.json")
+	keyPath := filepath.Join(temp, "keypair.json")
+	writePrivateJSON(t, policyPath, signer.Policy{})
+	writePrivateJSON(t, keyPath, []uint16{})
+
+	client, err := New(Config{Command: binary, PolicyPath: policyPath, KeypairPath: keyPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := clientFixture(t)
+	_, err = client.Sign(t.Context(), request)
+	if err == nil {
+		t.Fatal("a failing signer was accepted")
+	}
+	if errors.Is(err, ErrSignerRefused) {
+		t.Fatalf("a fault was reported as a policy refusal: %v", err)
+	}
+	if strings.Contains(err.Error(), "/private/key.json") ||
+		strings.Contains(err.Error(), "denied") {
+		t.Fatalf("a non-refusal failure leaked the signer's output: %v", err)
 	}
 }
 
