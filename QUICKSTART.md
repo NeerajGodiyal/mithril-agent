@@ -24,7 +24,7 @@ The current end-to-end candidate is the public Mithril integration branch:
 ```text
 repository: https://github.com/NeerajGodiyal/mithril
 branch:     koro/agent-node-integration-wip
-commit:     73497e69faed01e4952f61ae241a76958916b1bc
+commit:     94718096a9d8ab02e38725a94a253ff105c0ed89
 ```
 
 That candidate combines the MCP, RPC-evidence, and node-monitoring branches
