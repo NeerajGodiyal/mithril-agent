@@ -327,7 +327,7 @@ func runStrategySetup(ctx context.Context, args []string, output io.Writer) (fai
 	// existed; there was no reason this command should not.
 	home, _ := os.UserHomeDir()
 	if *directory == "" {
-		*directory = filepath.Join(firstNonEmpty(home, "."), ".mithril-agent", "strategy")
+		*directory = defaultStrategyDirectory(home)
 	}
 	if *walletKeypair == "" {
 		*walletKeypair = filepath.Join(filepath.Dir(*directory), "agent-account.json")
@@ -535,6 +535,13 @@ func runStrategySetup(ctx context.Context, args []string, output io.Writer) (fai
 		return fmt.Errorf("sweep: %w", err)
 	}
 	createdDirectories = append(createdDirectories, sweepDir)
+	if *fromFile != "" {
+		if err := recordStrategyProof(
+			*fromFile, sweepDir, *activationDelay, given["activation-delay"],
+		); err != nil {
+			return fmt.Errorf("save the destination proof: %w", err)
+		}
+	}
 
 	paths := strategyPaths{
 		sell: sell.ConfigPath, sweep: filepath.Join(sweepDir, "config.json"),
@@ -569,6 +576,34 @@ func runStrategySetup(ctx context.Context, args []string, output io.Writer) (fai
 			"  2. mithril-agent start                 (says what is left to do)\n",
 		paths.sell, paths.sweep)
 	return err
+}
+
+func defaultStrategyDirectory(home string) string {
+	// ~/.mithril-agent/strategy is the existing strategy pointer file. Generated
+	// legs need their own directory or a fresh guided setup succeeds until its
+	// final record step, then tries to replace that directory with the pointer.
+	return filepath.Join(firstNonEmpty(home, "."), ".mithril-agent", "strategy-data")
+}
+
+func recordStrategyProof(path, sweepDir string, activationDelay time.Duration, delayGiven bool) error {
+	file, err := readStrategyFile(path)
+	if err != nil {
+		return err
+	}
+	proof, err := readDestinationProof(sweepDir)
+	if err != nil {
+		return err
+	}
+	if proof.Destination != file.Sweep.To {
+		return errors.New("the saved destination does not match the verified proof")
+	}
+	file.Sweep.ProofNonce = proof.Nonce
+	file.Sweep.ProofIssued = proof.IssuedAt
+	file.Sweep.ProofSignature = proof.SignatureBase58
+	if delayGiven {
+		file.Sweep.ActivationDelay = activationDelay.String()
+	}
+	return writeStrategyFile(path, file)
 }
 
 func cleanupIncompleteStrategy(failure error, complete bool, directories []string) {

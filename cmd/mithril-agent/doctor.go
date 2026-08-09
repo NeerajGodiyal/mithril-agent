@@ -76,7 +76,7 @@ func buildDoctorReport(ctx context.Context, configPath string) readiness.Report 
 	// nothing new.
 	strategyCheck := doctorStrategyCheck(time.Now)
 	checks := []readiness.Check{
-		doctorClockCheck(), doctorTelegramCheck(), strategyCheck,
+		doctorClockCheck(), doctorTelegramCheck(),
 	}
 
 	if configPath == "" {
@@ -102,6 +102,9 @@ func buildDoctorReport(ctx context.Context, configPath string) readiness.Report 
 	checks = append(checks,
 		doctorAccountCheck(ctx, cfg.Signer.KeypairPath),
 		doctorFundingCheck(ctx, cfg.Signer.KeypairPath),
+		// Funding comes before authority: start must never tell an operator to
+		// arm a strategy whose own reserve check already says it cannot run.
+		strategyCheck,
 		doctorTradingCheck(cfg, configPath, strategyCheck.State != readiness.Skipped),
 	)
 	return readiness.NewReport(checks)

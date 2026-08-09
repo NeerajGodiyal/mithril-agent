@@ -127,8 +127,8 @@ required, and a Devnet profile. This command cannot read the wallet, private
 configuration, RPC credentials, or raw journal. It receives only bounded
 journal counters through the status snapshot.
 
-For a no-trade review, run the path-free readiness command as the service
-identity. Systemd loads the protected environment without exposing it to the
+For a no-trade review, run the path-free local setup check as the service
+identity. Systemd loads the protected environment without adding it to the
 operator shell:
 
 ```sh
@@ -141,7 +141,21 @@ sudo systemd-run --quiet --wait --pipe --collect \
   /usr/local/libexec/mithril-agent/mithril-agent start
 ```
 
-Continue only when it reports that everything is ready. `strategy show` is the
+Then run the live read-only gate through the same protected wrapper:
+
+```sh
+sudo systemd-run --quiet --wait --pipe --collect \
+  --uid=mithril-agent --gid=mithril-agent \
+  --setenv=HOME=/var/lib/mithril-agent \
+  -p 'EnvironmentFile=/etc/mithril-agent/rpc.env' \
+  -p 'EnvironmentFile=/etc/mithril-agent/quote.env' \
+  -p 'EnvironmentFile=-/etc/mithril-agent/mcp.env' \
+  -p 'EnvironmentFile=-/etc/mithril-agent/price.env' \
+  /usr/local/libexec/mithril-agent/mithril-agent check \
+  --config /var/lib/mithril-agent/.mithril-agent/strategy-data/sell/config.json
+```
+
+Continue only when it returns `"status":"ready"`. `strategy show` is the
 reviewable, non-secret summary of both trade directions, amounts, triggers,
 daily caps, sweep bounds, and current grants.
 
@@ -217,12 +231,13 @@ sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
   /usr/local/bin/mithril-agent strategy show
 ```
 
-The operator runs the protected, no-trade `start` command from the earlier
-section. When every check is ready, it prints bounded `strategy enable`
-arguments, including `--allow-any-price` when the operator intentionally
-configured market-price legs. Review the duration and maximum trades, replace
-`TEXT` with the review reason, and run those arguments once through the
-`sudo -u mithril-agent env HOME=/var/lib/mithril-agent` wrapper in QUICKSTART.
+The operator runs the local `start` check from the earlier section, then runs
+the protected live gate once for the sell config and once for the buy config.
+When `start` has no local blocker and both gates return `"status":"ready"`,
+review the bounded `strategy enable` arguments. Include `--allow-any-price`
+only when the operator intentionally configured market-price legs, replace
+`TEXT` with the review reason, and run the arguments once through the `sudo -u
+mithril-agent env HOME=/var/lib/mithril-agent` wrapper in QUICKSTART.
 
 The runner then watches the configured rules without an open terminal. A sell,
 buy, and sweep happen only when their own trigger, funding, schedule, evidence,
@@ -286,7 +301,7 @@ sudo systemctl stop mithril-agent-run.service
 for leg in sell buy sweep; do
   sudo -u mithril-agent \
     /usr/local/libexec/mithril-agent/mithril-agent journal verify \
-    --path "/var/lib/mithril-agent/.mithril-agent/strategy/$leg/state/events.jsonl" \
+    --path "/var/lib/mithril-agent/.mithril-agent/strategy-data/$leg/state/events.jsonl" \
     || exit 1
 done
 sudo systemctl start mithril-agent-run.service

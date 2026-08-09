@@ -290,13 +290,17 @@ sudo systemd-run --quiet --wait --pty --collect \
   --mithril-command /usr/local/bin/mithril \
   --node-command /usr/local/libexec/mithril-agent/node \
   --quote-script /usr/local/libexec/mithril-agent/quote.mjs \
-  --quote-socket /run/mithril-agent-quote/quote.sock
+  --quote-socket /run/mithril-agent-quote/quote.sock \
+  --activation-delay 0s
 ```
 
 Choose **yes** when setup asks whether Telegram alerts are enabled. For a quick
 mechanics demonstration, choose no price conditions. For a market
 rule, set both a sell price and a lower buy price. Setting only one is refused.
 Choose a small trade size and a small `trades_per_day` bound for the first run.
+The zero sweep delay is only for this Devnet pilot, so its complete cycle can
+be reviewed immediately. Leave `--activation-delay` out of a production setup;
+the default delay gives the operator time to stop an unintended destination.
 
 The setup writes sell and sweep first. A fresh wallet has no devUSDC token
 account, so the buy leg is intentionally pending until the first sell creates
@@ -347,7 +351,7 @@ The first runner exposes sell metrics on `127.0.0.1:9310` and sweep metrics on
 
 ## 10. Bootstrap the buy leg once
 
-Run the path-free readiness command as the service identity:
+Run the path-free local setup check as the service identity:
 
 ```sh
 sudo systemd-run --quiet --wait --pipe --collect \
@@ -360,9 +364,25 @@ sudo systemd-run --quiet --wait --pipe --collect \
   /usr/local/bin/mithril-agent start
 ```
 
-When it reports ready, use the same arguments it prints through the service
-identity. Use one trade per leg for bootstrap and include `--allow-any-price`
-only when `start` printed it:
+Before granting authority, run the live read-only gate. This confirms the
+Mithril node, MCP observation, independent providers, quote, simulation, and
+current slot are all usable now:
+
+```sh
+sudo systemd-run --quiet --wait --pipe --collect \
+  --uid=mithril-agent --gid=mithril-agent \
+  --setenv=HOME=/var/lib/mithril-agent \
+  -p 'EnvironmentFile=/etc/mithril-agent/rpc.env' \
+  -p 'EnvironmentFile=/etc/mithril-agent/quote.env' \
+  -p 'EnvironmentFile=-/etc/mithril-agent/mcp.env' \
+  -p 'EnvironmentFile=-/etc/mithril-agent/price.env' \
+  /usr/local/bin/mithril-agent check \
+  --config /var/lib/mithril-agent/.mithril-agent/strategy-data/sell/config.json
+```
+
+Continue only when it returns `"status":"ready"`. Then use the arguments
+printed by `start` through the service identity. Use one trade per leg for
+bootstrap and include `--allow-any-price` only when `start` printed it:
 
 ```sh
 sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
@@ -412,10 +432,13 @@ the service restart.
 
 ## 11. Run and operate the complete strategy
 
-Run the readiness command from step 10 again. Review its bounded enable
-arguments, then run `strategy enable` through the same `sudo -u mithril-agent
-env HOME=...` wrapper shown in step 10. The supervised runner continues after
-SSH closes and trades only while that grant remains valid.
+Run the local `start` check from step 10 again. Then run its protected live
+`check` command once with the sell config and once with the buy config by
+replacing `sell` with `buy` in the path. Continue only when both return
+`"status":"ready"`. Review the bounded enable arguments, then run `strategy
+enable` through the same `sudo -u mithril-agent env HOME=...` wrapper shown in
+step 10. The supervised runner continues after SSH closes and trades only while
+that grant remains valid.
 
 Read-only operator commands:
 
@@ -477,7 +500,7 @@ sudo systemctl stop mithril-agent-run.service
 for leg in sell buy sweep; do
   sudo -u mithril-agent \
     /usr/local/bin/mithril-agent journal verify \
-    --path "/var/lib/mithril-agent/.mithril-agent/strategy/$leg/state/events.jsonl" \
+    --path "/var/lib/mithril-agent/.mithril-agent/strategy-data/$leg/state/events.jsonl" \
     || exit 1
 done
 sudo systemctl start mithril-agent-run.service

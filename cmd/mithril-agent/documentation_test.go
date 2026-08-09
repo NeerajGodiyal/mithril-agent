@@ -22,6 +22,10 @@ func TestFullStrategyDocumentationMatchesGeneratedLayout(t *testing.T) {
 		"127.0.0.1:9312",
 		"sudo -u mithril-agent env HOME=/var/lib/mithril-agent",
 		"EnvironmentFile=/etc/mithril-agent/telegram-operator.env",
+		"--activation-delay 0s",
+		"/usr/local/bin/mithril-agent check",
+		"replacing `sell` with `buy`",
+		`"status":"ready"`,
 	} {
 		if !strings.Contains(quick, want) {
 			t.Errorf("QUICKSTART.md is missing generated-layout fact %q", want)
@@ -42,7 +46,8 @@ func TestFullStrategyDocumentationMatchesGeneratedLayout(t *testing.T) {
 		"legacy single-leg only",
 		"mithril-agent-run.service",
 		"/run/mithril-agent-status-sell.sock",
-		"/var/lib/mithril-agent/.mithril-agent/strategy/$leg/state/events.jsonl",
+		"/var/lib/mithril-agent/.mithril-agent/strategy-data/$leg/state/events.jsonl",
+		"/usr/local/libexec/mithril-agent/mithril-agent check",
 	} {
 		if !strings.Contains(demo, want) {
 			t.Errorf("DEMO.md is missing full-strategy review fact %q", want)

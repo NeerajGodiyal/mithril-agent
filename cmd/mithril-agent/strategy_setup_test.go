@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"math"
 	"os"
@@ -73,6 +74,71 @@ func TestStrategyPlanRefusesHalfAPricePair(t *testing.T) {
 	// The sweep minimum must still be reachable, or the profit cannot leave.
 	if plan.gainLamports != 2*defaultSweepFee {
 		t.Fatalf("market sweep minimum = %d, want the fee floor", plan.gainLamports)
+	}
+}
+
+func TestDefaultStrategyDirectoryDoesNotCollideWithPointer(t *testing.T) {
+	home := t.TempDir()
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	directory := defaultStrategyDirectory(home)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordStrategy(strategyPaths{sell: writeLeg(t, directory, "sell")}); err != nil {
+		t.Fatalf("record strategy beside the default generated directory: %v", err)
+	}
+	pointer, err := strategyPointerPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pointer == directory {
+		t.Fatalf("strategy pointer and generated directory both use %s", pointer)
+	}
+}
+
+func TestStrategySetupRecordsTheVerifiedDestinationProof(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	strategyPath := filepath.Join(dir, "strategy.json")
+	if err := writeStrategyFile(strategyPath, strategyFile{
+		SizeSOL: "0.05",
+		Sweep:   strategyFileSweep{Enabled: true, To: "destination"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sweepDir := filepath.Join(dir, "sweep")
+	if err := os.MkdirAll(sweepDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	proof := destinationProof{
+		Version: 1, Destination: "destination", Nonce: "nonce",
+		IssuedAt: "2026-08-09T00:00:00Z", SignatureBase58: "signature",
+	}
+	raw, err := json.Marshal(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sweepDir, "destination-proof.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordStrategyProof(strategyPath, sweepDir, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readStrategyFile(strategyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Sweep.ProofNonce != proof.Nonce || got.Sweep.ProofIssued != proof.IssuedAt ||
+		got.Sweep.ProofSignature != proof.SignatureBase58 {
+		t.Fatal("the editable strategy did not retain the verified destination proof")
+	}
+	if got.Sweep.ActivationDelay != "0s" {
+		t.Fatalf("activation delay = %q, want 0s", got.Sweep.ActivationDelay)
 	}
 }
 
