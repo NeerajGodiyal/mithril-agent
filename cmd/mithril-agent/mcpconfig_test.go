@@ -13,7 +13,8 @@ import (
 // exists.
 func TestMCPConfigPrintsOnlyTheReadOnlySurface(t *testing.T) {
 	var out bytes.Buffer
-	if err := runMCPConfig(nil, &out); err == nil {
+	missingSocket := filepath.Join(t.TempDir(), "missing.sock")
+	if err := runMCPConfig([]string{"--socket", missingSocket}, &out); err == nil {
 		t.Fatal("a missing socket must be an error, never a --config fallback")
 	}
 	socket := filepath.Join(t.TempDir(), "status.sock")

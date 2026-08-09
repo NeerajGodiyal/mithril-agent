@@ -5,11 +5,14 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Overclock-Validator/mithril-agent/orcaswap"
 	"github.com/Overclock-Validator/mithril-agent/signer"
 	"github.com/Overclock-Validator/mithril-agent/solana"
 )
@@ -17,6 +20,12 @@ import (
 func solanaEncodeForTest(key ed25519.PublicKey) string { return solana.Encode(key) }
 
 func signerLoadForTest(path string) (ed25519.PrivateKey, error) { return signer.LoadKeypair(path) }
+
+type walletRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f walletRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
 
 // writeTestWallet creates a keypair file in the standard solana-keygen layout.
 // This is a TEST helper on purpose: the product does not generate keys.
@@ -184,5 +193,37 @@ func TestWalletCheckRejectsUnsafeInput(t *testing.T) {
 		if err := runWalletCheck(t.Context(), args[1:], &bytes.Buffer{}); err == nil {
 			t.Errorf("accepted unsafe input %v", args)
 		}
+	}
+}
+
+func TestWalletTokenBalanceDistinguishesEmptyFromMissing(t *testing.T) {
+	_, owner, _ := writeTestWallet(t, t.TempDir())
+	original := walletHTTP
+	t.Cleanup(func() { walletHTTP = original })
+
+	for _, test := range []struct {
+		name   string
+		body   string
+		exists bool
+	}{
+		{"empty account", `{"jsonrpc":"2.0","id":1,"result":{"value":{"amount":"0"}}}`, true},
+		{"missing account", `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Invalid param: could not find account"}}`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			walletHTTP = &http.Client{Transport: walletRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(test.body)),
+				}, nil
+			})}
+			amount, exists, err := walletTokenBalance(t.Context(), owner, orcaswap.DevnetUSDCMint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if amount != 0 || exists != test.exists {
+				t.Fatalf("balance = %d, exists = %v; want 0, %v", amount, exists, test.exists)
+			}
+		})
 	}
 }

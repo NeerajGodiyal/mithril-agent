@@ -105,7 +105,7 @@ func TestProviderFailureStillConsumesBudgetReservation(t *testing.T) {
 	}
 	service, err := New(Config{
 		Bot: &botStub{}, Cursor: &cursorStub{},
-		Status: &statusStub{snapshot: testSnapshot(now)}, AllowedChatIDs: []int64{123},
+		Sources: []StatusReader{&statusStub{snapshot: testSnapshot(now)}}, AllowedChatIDs: []int64{123},
 		Explainer: explainer, ExplanationBudget: budget, Now: func() time.Time { return now },
 	})
 	if err != nil {

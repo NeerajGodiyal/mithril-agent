@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -91,12 +93,12 @@ func TestDoctorRejectsPositionalArguments(t *testing.T) {
 	}
 }
 
-// Stopped is the safe default and must read as waiting, not as a fault. An
-// operator who sees "BLOCKED" for a correctly-stopped agent will try to "fix"
-// something that is working as designed.
-func TestDoctorTreatsStoppedTradingAsWaitingNotBlocked(t *testing.T) {
+// An agent with no control state configured has nothing to report about
+// trading. That is "does not apply", not "stopped" — and an optional check
+// that demands an action would block a demonstration that never needed one.
+func TestDoctorSkipsTradingWithNoControlState(t *testing.T) {
 	var cfg config
-	check := doctorTradingCheck(cfg)
+	check := doctorTradingCheck(cfg, "/tmp/x.json", false)
 	if check.State != readiness.Skipped {
 		t.Fatalf("unconfigured control state = %q, want skipped", check.State)
 	}
@@ -178,5 +180,44 @@ func TestDoctorSendsPeopleToTheGuidedCommand(t *testing.T) {
 			t.Errorf("blocker %q does not name the guided command: %q",
 				check.Title, check.Action)
 		}
+	}
+}
+
+// "Ready" next to a balance smaller than the floor on the same screen is the
+// most dangerous shape this report can take: the operator goes away, the sweep
+// can never fire, the trades start failing for insufficient balance, and every
+// check says the account is fine.
+func TestFundingIsNotReadyBelowTheSweepFloor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sweep := t.TempDir()
+	writeSweepFloorConfig(t, sweep, 166_600_000)
+	if err := recordStrategy(strategyPaths{sweep: filepath.Join(sweep, "config.json")}); err != nil {
+		t.Fatal(err)
+	}
+	floor, ok := configuredSweepFloor()
+	if !ok || floor != 166_600_000 {
+		t.Fatalf("floor = %d, %v; want the recorded sweep reserve", floor, ok)
+	}
+}
+
+// Most deployments have no sweep. Inventing a floor for them would block every
+// one of them, so the absence has to stay silent.
+func TestNoSweepMeansNoFloorToCompareAgainst(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if _, ok := configuredSweepFloor(); ok {
+		t.Error("a floor was reported with no sweep configured")
+	}
+}
+
+func writeSweepFloorConfig(t *testing.T, dir string, reserve uint64) {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"profile": map[string]any{"reserve_lamports": reserve},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

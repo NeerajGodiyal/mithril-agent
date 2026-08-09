@@ -36,7 +36,7 @@ func TestRunBuildsReadOnlyTelegramServiceWithoutExposingInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if captured.Bot == nil || captured.Cursor == nil || captured.Status == nil ||
+	if captured.Bot == nil || captured.Cursor == nil || len(captured.Sources) == 0 ||
 		captured.Explainer != nil || captured.ExplanationBudget != nil ||
 		len(captured.AllowedChatIDs) != 2 {
 		t.Fatalf("config = %+v", captured)
@@ -182,5 +182,164 @@ func TestLinkRequiresTheTokenFromEnvironmentOnly(t *testing.T) {
 	}
 	if err := run(t.Context(), []string{"link", "extra"}, io.Discard, func(string) string { return "" }); err == nil {
 		t.Fatal("link with arguments must be refused")
+	}
+}
+
+type testBotStub struct {
+	sent    map[int64]string
+	failFor map[int64]error
+}
+
+func (b *testBotStub) Poll(context.Context, int64, time.Duration) ([]telegramoperator.Update, error) {
+	return nil, errors.New("test must never poll")
+}
+
+func (b *testBotStub) Send(_ context.Context, chatID int64, message string) error {
+	if err := b.failFor[chatID]; err != nil {
+		return err
+	}
+	if b.sent == nil {
+		b.sent = map[int64]string{}
+	}
+	b.sent[chatID] = message
+	return nil
+}
+
+func withTestBot(t *testing.T, bot telegramoperator.Bot) {
+	t.Helper()
+	previous := newTestBot
+	newTestBot = func(string) (telegramoperator.Bot, error) { return bot, nil }
+	t.Cleanup(func() { newTestBot = previous })
+}
+
+// The command exists to answer "will I actually get the message?", so a chat
+// that cannot receive must be named individually and must make the command
+// fail. A single pass/fail would hide the case where one of two chats works,
+// which is the one an operator is most likely to trust by mistake.
+func TestTelegramTestReportsEveryChatAndFailsOnAnyLoss(t *testing.T) {
+	bot := &testBotStub{failFor: map[int64]error{-456: errors.New("chat not found")}}
+	withTestBot(t, bot)
+	var output bytes.Buffer
+	err := run(t.Context(), []string{"test"}, &output, func(key string) string {
+		return map[string]string{
+			telegramoperator.BotTokenEnvironment:   commandTestToken,
+			telegramoperator.AllowedIDsEnvironment: "123,-456",
+		}[key]
+	})
+	if err == nil {
+		t.Fatal("a chat that could not receive the test still reported success")
+	}
+	text := output.String()
+	if !strings.Contains(text, "chat 123: delivered") {
+		t.Errorf("the working chat was not reported: %s", text)
+	}
+	if !strings.Contains(text, "chat -456: FAILED") {
+		t.Errorf("the failing chat was not named: %s", text)
+	}
+	// The working chat is still attempted; one bad ID must not silence the rest.
+	if bot.sent[123] == "" {
+		t.Error("the working chat was skipped after the other failed")
+	}
+	if strings.Contains(text, commandTestToken) {
+		t.Error("the token leaked into the output")
+	}
+}
+
+// Nothing about trades may reach this path: it must be safe to run before any
+// setup exists, and it must never imply a trade happened.
+func TestTelegramTestSendsOnlyTheFixedLine(t *testing.T) {
+	bot := &testBotStub{}
+	withTestBot(t, bot)
+	var output bytes.Buffer
+	if err := run(t.Context(), []string{"test"}, &output, func(key string) string {
+		return map[string]string{
+			telegramoperator.BotTokenEnvironment:   commandTestToken,
+			telegramoperator.AllowedIDsEnvironment: "123",
+		}[key]
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if bot.sent[123] != testMessage {
+		t.Fatalf("sent %q, want the fixed test line", bot.sent[123])
+	}
+	if !strings.Contains(testMessage, "No trade happened") {
+		t.Error("the test line does not say that no trade happened")
+	}
+}
+
+// An unset variable must say so. Both are read before any network call, so this
+// is the first thing an operator hits and it has to point somewhere.
+func TestTelegramTestNamesMissingConfiguration(t *testing.T) {
+	for name, environment := range map[string]map[string]string{
+		"no token": {telegramoperator.AllowedIDsEnvironment: "123"},
+		"no chats": {telegramoperator.BotTokenEnvironment: commandTestToken},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var output bytes.Buffer
+			err := run(t.Context(), []string{"test"}, &output, func(key string) string {
+				return environment[key]
+			})
+			if err == nil {
+				t.Fatal("missing configuration was accepted")
+			}
+			if !strings.Contains(err.Error(), "not set") {
+				t.Errorf("error did not say the variable is unset: %v", err)
+			}
+		})
+	}
+}
+
+// Telegram answers a distinct status for each common misconfiguration, and each
+// one has a different fix. Collapsing them into one sentence is what made
+// "telegram is not working" unanswerable.
+func TestTelegramTestNamesTheCauseNotJustTheFailure(t *testing.T) {
+	for name, test := range map[string]struct {
+		status int
+		want   string
+	}{
+		"never pressed start": {403, "press Start"},
+		"wrong chat id":       {400, "link"},
+		"bad token":           {401, telegramoperator.BotTokenEnvironment},
+		"rate limited":        {429, "rate limiting"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			bot := &testBotStub{failFor: map[int64]error{
+				123: telegramoperator.StatusError{Status: test.status},
+			}}
+			withTestBot(t, bot)
+			var output bytes.Buffer
+			err := run(t.Context(), []string{"test"}, &output, func(key string) string {
+				return map[string]string{
+					telegramoperator.BotTokenEnvironment:   commandTestToken,
+					telegramoperator.AllowedIDsEnvironment: "123",
+				}[key]
+			})
+			if err == nil {
+				t.Fatal("a refused delivery reported success")
+			}
+			if !strings.Contains(output.String(), test.want) {
+				t.Errorf("HTTP %d did not name the fix (%q):\n%s",
+					test.status, test.want, output.String())
+			}
+		})
+	}
+}
+
+// An error that is not a Telegram status must still be reported, not swallowed
+// by the classifier's default.
+func TestTelegramTestStillReportsUnclassifiedFailures(t *testing.T) {
+	bot := &testBotStub{failFor: map[int64]error{123: errors.New("network unreachable")}}
+	withTestBot(t, bot)
+	var output bytes.Buffer
+	if err := run(t.Context(), []string{"test"}, &output, func(key string) string {
+		return map[string]string{
+			telegramoperator.BotTokenEnvironment:   commandTestToken,
+			telegramoperator.AllowedIDsEnvironment: "123",
+		}[key]
+	}); err == nil {
+		t.Fatal("an unclassified failure reported success")
+	}
+	if !strings.Contains(output.String(), "network unreachable") {
+		t.Errorf("the underlying error was lost:\n%s", output.String())
 	}
 }

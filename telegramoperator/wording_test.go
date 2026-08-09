@@ -3,6 +3,8 @@ package telegramoperator
 import (
 	"strings"
 	"testing"
+
+	"github.com/Overclock-Validator/mithril-agent/internal/operatorstatus"
 )
 
 // Every state the engine can report must have operator language. An unmapped
@@ -58,5 +60,74 @@ func TestActionableStatesReadAsActionable(t *testing.T) {
 	// An unresolved send is the one an operator must never blindly retry.
 	if !strings.Contains(strings.ToLower(describeVerdict("unresolved")), "do not retry") {
 		t.Errorf("unresolved outcome omits the do-not-retry instruction: %q", describeVerdict("unresolved"))
+	}
+}
+
+// The three things this agent does read very differently to the person holding
+// the phone, and every one of them used to be called a "trade". A buy reported
+// "Sold 0.10 devUSDC" — backwards — and a transfer to the operator's own wallet
+// reported "Trade complete", which it was not.
+func TestBuySellAndTransferEachReadCorrectly(t *testing.T) {
+	for _, c := range []struct {
+		name       string
+		result     operatorstatus.Result
+		wantHead   string
+		wantSpent  string
+		mustNotSay []string
+	}{
+		{
+			name: "sell",
+			result: operatorstatus.Result{
+				Decision: "complete", Verdict: "finalized",
+				InputAsset: "SOL", OutputAsset: "devUSDC",
+			},
+			wantHead: "Sold SOL — confirmed on-chain", wantSpent: "Sold",
+			mustNotSay: []string{"Bought", "your wallet"},
+		},
+		{
+			name: "buy",
+			result: operatorstatus.Result{
+				Decision: "complete", Verdict: "finalized",
+				InputAsset: "devUSDC", OutputAsset: "SOL",
+			},
+			wantHead: "Bought SOL — confirmed on-chain", wantSpent: "Spent",
+			mustNotSay: []string{"Sold", "your wallet"},
+		},
+		{
+			name: "transfer to your wallet",
+			result: operatorstatus.Result{
+				Decision: "complete", Verdict: "finalized",
+				AmountLamports: 1_000_000,
+			},
+			wantHead: "Sent to your wallet — confirmed on-chain", wantSpent: "Sent",
+			mustNotSay: []string{"Sold", "Bought", "Trade complete"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			kind := kindOf(c.result)
+			head := tradeHeadline(kind, c.result.Decision, c.result.Verdict, c.result.Submitted)
+			if head != c.wantHead {
+				t.Errorf("headline = %q, want %q", head, c.wantHead)
+			}
+			if got := kind.spentLabel(); got != c.wantSpent {
+				t.Errorf("spent label = %q, want %q", got, c.wantSpent)
+			}
+			for _, forbidden := range c.mustNotSay {
+				if strings.Contains(head, forbidden) {
+					t.Errorf("headline %q says %q, which is the wrong action", head, forbidden)
+				}
+			}
+		})
+	}
+
+	// A failure has to name the right action too, or an operator chasing a
+	// failed buy goes looking through their sales.
+	buy := operatorstatus.Result{Decision: "canceled", InputAsset: "devUSDC", OutputAsset: "SOL"}
+	if got := tradeHeadline(kindOf(buy), buy.Decision, "", false); !strings.HasPrefix(got, "Buy canceled") {
+		t.Errorf("canceled buy = %q, want it to name the buy", got)
+	}
+	sweep := operatorstatus.Result{Decision: "failed", AmountLamports: 5}
+	if got := tradeHeadline(kindOf(sweep), sweep.Decision, "", false); !strings.HasPrefix(got, "Transfer failed") {
+		t.Errorf("failed transfer = %q, want it to name the transfer", got)
 	}
 }

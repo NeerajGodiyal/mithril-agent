@@ -295,7 +295,7 @@ func TestShadowEndpointAllowsLoopbackHTTPOnly(t *testing.T) {
 		}
 	}
 	for _, refused := range []string{
-		"", "http://example.invalid", "http://10.0.0.5:8899",
+		"", "http://example.invalid", "http://192.0.2.5:8899",
 		"ftp://127.0.0.1", "https://user:pass@rpc.invalid", "not a url",
 		"http://127.0.0.1.evil.invalid",
 	} {

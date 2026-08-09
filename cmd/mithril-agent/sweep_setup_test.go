@@ -187,3 +187,75 @@ func readStrictJSONFile(path string, out any) error {
 	}
 	return strictjson.Decode(raw, out)
 }
+
+// A zero delay must still produce a legal anchor — midnight-aligned and
+// positive — while leaving the current window already open, so a Devnet test
+// does not have to wait for tomorrow to see the mechanism work.
+func TestZeroActivationDelayAnchorsInTheOpenWindow(t *testing.T) {
+	now := time.Date(2026, 8, 5, 10, 50, 52, 0, time.UTC)
+	anchor := mostRecentMidnight(now)
+	if anchor.After(now) {
+		t.Fatalf("anchor %s must not be in the future", anchor)
+	}
+	if anchor.Unix()%86_400 != 0 {
+		t.Fatalf("anchor %s is not midnight-aligned; both validators would refuse it", anchor)
+	}
+	if anchor.Unix() <= 0 {
+		t.Fatal("anchor must be positive")
+	}
+	// And the delayed form must still be strictly later than the open one.
+	delayed := firstMidnightAfter(now.Add(24 * time.Hour))
+	if !delayed.After(anchor) {
+		t.Fatal("a delayed anchor must be later than an immediate one")
+	}
+}
+
+// The issue time is inside the signed bytes; if it is never checked it is
+// decorative. These are the bounds that make it mean something.
+func TestProofFreshnessBounds(t *testing.T) {
+	now := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name    string
+		issued  string
+		wantErr bool
+	}{
+		{"just signed", now.Format(time.RFC3339), false},
+		{"a week old", now.Add(-7 * 24 * time.Hour).Format(time.RFC3339), false},
+		{"just inside the age bound", now.Add(-29 * 24 * time.Hour).Format(time.RFC3339), false},
+		{"beyond the age bound", now.Add(-31 * 24 * time.Hour).Format(time.RFC3339), true},
+		{"slightly ahead, tolerated as clock skew", now.Add(2 * time.Minute).Format(time.RFC3339), false},
+		{"far in the future", now.Add(48 * time.Hour).Format(time.RFC3339), true},
+		{"not a timestamp", "yesterday", true},
+		{"empty", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkProofFreshness(tc.issued, now)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("got err=%v, want error=%v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// Re-verification of a stored proof must NOT apply the age bound: the proof
+// was valid when made, and reporting it as invalid later would look like
+// tampering when nothing has changed.
+func TestStoredProofVerificationIgnoresAge(t *testing.T) {
+	agentAccount, _ := sweepTestKey(t)
+	destination, destinationKey := sweepTestKey(t)
+	nonce := strings.Repeat("ab", 16)
+	ancient := "2020-01-01T00:00:00Z"
+	challenge := sweepChallenge(agentAccount, destination, nonce, ancient)
+	sealed, err := offchainmsg.Envelope(challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := solana.Encode(ed25519.Sign(destinationKey, sealed))
+	if err := verifySweepDestinationProof(agentAccount, destination, nonce, ancient, signature); err != nil {
+		t.Fatalf("a stored proof must still verify regardless of age: %v", err)
+	}
+	if err := checkProofFreshness(ancient, time.Now().UTC()); err == nil {
+		t.Fatal("but accepting one that old as NEW must be refused")
+	}
+}

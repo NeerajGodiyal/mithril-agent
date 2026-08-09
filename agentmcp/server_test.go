@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,21 @@ func (providerStub) Info() (Info, error) {
 
 func (providerStub) OperatorGuide() OperatorGuide {
 	return localOperatorGuide()
+}
+
+// The stub returns a fully populated settings block so the disclosure test has
+// something real to assert the absence of an address against.
+func (providerStub) Strategy() (StrategySettings, error) {
+	return StrategySettings{
+		Configured: true, Direction: "sell SOL for devUSDC",
+		InputPerAction: "0.005000000 SOL", DailyCap: "0.048600000 SOL",
+		MaxFee: "0.000100000 SOL", FundedTradesPerDay: 6,
+		PriceRule:       "sell_at_or_above $250.000000",
+		ControlMode:     "stopped",
+		SweepConfigured: true, SweepProofValid: true,
+		SweepKeepBehind: "0.127500000 SOL", SweepMaxPerSend: "1.000000000 SOL",
+		SweepDailyCap: "2.000000000 SOL",
+	}, nil
 }
 
 type buyProviderStub struct{ providerStub }
@@ -117,12 +133,13 @@ func TestServerWorksWithAStandardMCPClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed.Tools) != 3 {
+	if len(listed.Tools) != 4 {
 		t.Fatalf("tool count = %d", len(listed.Tools))
 	}
 	wantTools := map[string]bool{
 		"mithril_agent_info":           true,
 		"mithril_agent_status":         true,
+		"mithril_agent_strategy":       true,
 		"mithril_agent_operator_guide": true,
 	}
 	for _, tool := range listed.Tools {
@@ -311,5 +328,46 @@ func TestBuyStatusRoundTripsThroughAStandardMCPClient(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("MCP server did not stop after buy client disconnect")
+	}
+}
+
+// The settings surface answers "what am I configured to do" for an assistant an
+// operator is talking to. It must not become a way to read the wallet: Info
+// promises to describe the agent "without exposing endpoints, accounts, or
+// credentials", and a sweep destination is an account.
+//
+// Whether a destination is configured and whether its proof still verifies
+// answers every operational question without naming it.
+func TestStrategySettingsNeverCarryAnAddress(t *testing.T) {
+	settings, err := providerStub{}.Strategy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(encoded)
+
+	// A base58 Solana address is 32-44 chars of the base58 alphabet. Anything
+	// that long and that shaped in this payload is an account leaking out.
+	address := regexp.MustCompile(`[1-9A-HJ-NP-Za-km-z]{32,44}`)
+	if found := address.FindString(body); found != "" {
+		t.Errorf("settings payload contains an address-shaped string %q:\n%s", found, body)
+	}
+	for _, forbidden := range []string{
+		"destination", "keypair", "token", "secret", "api-key", "/var/", "/home/", "http",
+	} {
+		if strings.Contains(strings.ToLower(body), forbidden) {
+			t.Errorf("settings payload mentions %q, which it must not:\n%s", forbidden, body)
+		}
+	}
+	// But it must still answer the questions it exists for.
+	if !settings.Configured || settings.FundedTradesPerDay == 0 ||
+		settings.PriceRule == "" || settings.DailyCap == "" {
+		t.Errorf("settings payload answers nothing useful: %+v", settings)
+	}
+	if !settings.SweepConfigured || !settings.SweepProofValid {
+		t.Errorf("settings must still say a sweep exists and is proven: %+v", settings)
 	}
 }

@@ -10,10 +10,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/agent"
 	"github.com/Overclock-Validator/mithril-agent/execution"
 	"github.com/Overclock-Validator/mithril-agent/internal/control"
 	"github.com/Overclock-Validator/mithril-agent/internal/operatorstatus"
 	"github.com/Overclock-Validator/mithril-agent/journal"
+	"github.com/Overclock-Validator/mithril-agent/orcaswap"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 )
 
@@ -65,6 +67,7 @@ type botStub struct {
 	updates     [][]Update
 	sent        []Update
 	sendErr     error
+	unreachable int64
 	cancelAfter int
 	cancel      context.CancelFunc
 }
@@ -119,6 +122,11 @@ func (b *botStub) Send(_ context.Context, chatID int64, text string) error {
 	defer b.mu.Unlock()
 	if b.sendErr != nil {
 		return b.sendErr
+	}
+	// One unreachable chat among several is the ordinary misconfiguration: a
+	// blocked bot, a mistyped ID, a group it was removed from.
+	if b.unreachable != 0 && chatID == b.unreachable {
+		return errors.New("forbidden: bot was blocked by the user")
 	}
 	b.sent = append(b.sent, Update{ChatID: chatID, Text: text})
 	return nil
@@ -183,11 +191,10 @@ func TestDeterministicCommandsUseOnlyBoundedOperatorStatus(t *testing.T) {
 	now = now.Add(time.Second)
 	trade, ok := service.Reply(t.Context(), 123, "/last_trade")
 	for _, expected := range []string{
-		"Last trade: complete", "Outcome: Confirmed on-chain", "Submitted: yes",
-		"Input: 0.001000000 SOL", "Output: 1200 base units (minimum 1100 base units)",
-		"Signature: public-signature",
-		"Explorer: https://explorer.solana.com/tx/public-signature?cluster=devnet",
-		"Trade observed: 2026-08-02T11:59:40Z",
+		"Sent to your wallet — confirmed on-chain",
+		"Sent      0.001000000 SOL", "Received  1200 base units",
+		"https://explorer.solana.com/tx/public-signature?cluster=devnet",
+		"devnet ·",
 	} {
 		if !ok || !strings.Contains(trade, expected) {
 			t.Fatalf("last trade %q omitted %q", trade, expected)
@@ -203,6 +210,42 @@ func TestDeterministicCommandsUseOnlyBoundedOperatorStatus(t *testing.T) {
 	}
 	if reader.reads != 3 {
 		t.Fatalf("unauthorized chat read status; reads=%d", reader.reads)
+	}
+}
+
+func TestPromptedCommandsReportEveryStrategyLeg(t *testing.T) {
+	now := time.Date(2026, time.August, 2, 12, 0, 0, 0, time.UTC)
+	sell := testSnapshot(now)
+	buy := testSnapshot(now)
+	buy.Profile, buy.ProfileVersion = orcaswap.BuyProfileName, orcaswap.BuyProfileVersion
+	sweep := testSnapshot(now)
+	sweep.Profile = agent.ProfileTreasurySweepV1
+
+	service, err := New(Config{
+		Bot: &botStub{}, Cursor: &cursorStub{}, AllowedChatIDs: []int64{123},
+		Sources: []StatusReader{
+			&statusStub{snapshot: sell}, &statusStub{snapshot: buy}, &statusStub{snapshot: sweep},
+		},
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, command := range []string{"/status", "/price", "/last_trade"} {
+		reply, ok := service.Reply(t.Context(), 123, command)
+		if !ok {
+			t.Fatalf("%s produced no reply", command)
+		}
+		for _, leg := range []string{"Sell\n", "Buy\n", "Sweep\n"} {
+			if !strings.Contains(reply, leg) {
+				t.Errorf("%s omitted %s:\n%s", command, strings.TrimSpace(leg), reply)
+			}
+		}
+		if len(reply) > maxOutputBytes {
+			t.Fatalf("%s exceeded Telegram's output bound", command)
+		}
+		now = now.Add(time.Second)
 	}
 }
 
@@ -227,7 +270,7 @@ func TestStatusExplicitlyReportsStaleAndUnknown(t *testing.T) {
 	reader.err = nil
 	reader.snapshot = testSnapshot(now.Add(6 * time.Second))
 	reply, ok = service.Reply(t.Context(), 123, "/last_trade")
-	if !ok || !strings.Contains(reply, "Last trade: unknown") ||
+	if !ok || !strings.Contains(reply, "Trade status unavailable") ||
 		!strings.Contains(reply, "timestamp is in the future") {
 		t.Fatalf("future status = %q", reply)
 	}
@@ -290,10 +333,17 @@ func TestLastTradeUsesExplicitBuyAssets(t *testing.T) {
 	snapshot.ProfileVersion = 2
 	service := testService(t, &statusStub{snapshot: snapshot}, nil, &now)
 	reply, ok := service.Reply(t.Context(), 123, "/last_trade")
-	if !ok || !strings.Contains(reply, "Input: 0.100000 devUSDC") ||
-		!strings.Contains(reply, "Output: 0.000001200 SOL (minimum 0.000001100 SOL)") ||
-		strings.Contains(reply, "Input: 0 lamports") {
+	// A BUY spends dollars to acquire SOL. This used to assert "Sold ... devUSDC"
+	// — the test named itself after buy assets and then enshrined the backwards
+	// wording, so the bug was protected rather than caught.
+	if !ok || !strings.Contains(reply, "Bought SOL") ||
+		!strings.Contains(reply, "Spent     0.100000 devUSDC") ||
+		!strings.Contains(reply, "Received  0.000001200 SOL") ||
+		strings.Contains(reply, "0 lamports") {
 		t.Fatalf("buy last trade = %q", reply)
+	}
+	if strings.Contains(reply, "Sold") {
+		t.Errorf("a buy was described as a sale: %q", reply)
 	}
 }
 
@@ -344,7 +394,7 @@ func TestExplanationBudgetFailurePreventsProviderCall(t *testing.T) {
 	budget := &budgetStub{err: errors.New("private budget is corrupt")}
 	service, err := New(Config{
 		Bot: &botStub{}, Cursor: &cursorStub{},
-		Status: &statusStub{snapshot: testSnapshot(now)}, AllowedChatIDs: []int64{123},
+		Sources: []StatusReader{&statusStub{snapshot: testSnapshot(now)}}, AllowedChatIDs: []int64{123},
 		Explainer: explainer, ExplanationBudget: budget, Now: func() time.Time { return now },
 	})
 	if err != nil {
@@ -363,7 +413,7 @@ func TestExplanationTimeoutAndOutputAreBounded(t *testing.T) {
 	wait := make(chan struct{})
 	explainer := &explainerStub{wait: wait}
 	service, err := New(Config{
-		Bot: &botStub{}, Cursor: &cursorStub{}, Status: reader, AllowedChatIDs: []int64{123},
+		Bot: &botStub{}, Cursor: &cursorStub{}, Sources: []StatusReader{reader}, AllowedChatIDs: []int64{123},
 		Explainer: explainer, ExplanationBudget: &budgetStub{},
 		Now:             func() time.Time { return now },
 		MinimumInterval: 100 * time.Millisecond, ExplanationLimit: 100 * time.Millisecond,
@@ -400,7 +450,7 @@ func TestRunUsesOneConsumerAndAdvancesOnlyAfterSendAcknowledgement(t *testing.T)
 	}
 	cursor := &cursorStub{}
 	service, err := New(Config{
-		Bot: bot, Cursor: cursor, Status: &statusStub{snapshot: testSnapshot(now)},
+		Bot: bot, Cursor: cursor, Sources: []StatusReader{&statusStub{snapshot: testSnapshot(now)}},
 		AllowedChatIDs: []int64{123}, Now: func() time.Time { return now },
 	})
 	if err != nil {
@@ -426,7 +476,7 @@ func TestRunUsesOneConsumerAndAdvancesOnlyAfterSendAcknowledgement(t *testing.T)
 	}
 	failedCursor := &cursorStub{}
 	failed, err := New(Config{
-		Bot: failedBot, Cursor: failedCursor, Status: &statusStub{snapshot: testSnapshot(now)},
+		Bot: failedBot, Cursor: failedCursor, Sources: []StatusReader{&statusStub{snapshot: testSnapshot(now)}},
 		AllowedChatIDs: []int64{123}, Now: func() time.Time { return now },
 	})
 	if err != nil {
@@ -452,7 +502,7 @@ func TestRunCoalescesIgnoredUpdateCursorWritesPerPoll(t *testing.T) {
 	}
 	cursor := &cursorStub{}
 	service, err := New(Config{
-		Bot: bot, Cursor: cursor, Status: &statusStub{}, AllowedChatIDs: []int64{123},
+		Bot: bot, Cursor: cursor, Sources: []StatusReader{&statusStub{}}, AllowedChatIDs: []int64{123},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -471,7 +521,7 @@ func TestRunCoalescesIgnoredUpdateCursorWritesPerPoll(t *testing.T) {
 func TestRunRejectsASecondConsumer(t *testing.T) {
 	bot := &blockingBot{started: make(chan struct{})}
 	service, err := New(Config{
-		Bot: bot, Cursor: &cursorStub{}, Status: &statusStub{},
+		Bot: bot, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
 		AllowedChatIDs: []int64{123},
 	})
 	if err != nil {
@@ -537,7 +587,7 @@ func testService(
 ) *Service {
 	t.Helper()
 	service, err := New(Config{
-		Bot: &botStub{}, Cursor: &cursorStub{}, Status: reader, AllowedChatIDs: []int64{123},
+		Bot: &botStub{}, Cursor: &cursorStub{}, Sources: []StatusReader{reader}, AllowedChatIDs: []int64{123},
 		Explainer: explainer, Now: func() time.Time { return *now },
 		ExplanationBudget: explanationBudgetFor(explainer),
 	})
@@ -571,3 +621,224 @@ func testSnapshot(observedAt time.Time) operatorstatus.Snapshot {
 		Control: control.Status{Mode: control.ModeNoNewActions},
 	}
 }
+
+// A stopped agent does not read the price at all: the read is bound to a slot
+// it only proves when it is about to act, and proving one every cycle would
+// spawn a node subprocess for a number nobody asked for. Reporting that as
+// "temporarily unavailable" makes a deliberately idle agent look broken to the
+// one person who most needs a clear answer — the operator deciding whether to
+// arm it. It must say what is true and what to do instead.
+func TestPriceExplainsAStoppedAgentRatherThanLookingBroken(t *testing.T) {
+	now := time.Date(2026, time.August, 2, 12, 0, 0, 0, time.UTC)
+	snapshot := testSnapshot(now.Add(-5 * time.Second))
+	snapshot.Result.Decision = "stopped"
+	snapshot.Result.PriceTrigger = &pricetrigger.Status{
+		Feed:            pricetrigger.FeedSOLUSD,
+		Direction:       pricetrigger.SellAtOrAbove,
+		ThresholdMicros: 150_000_000,
+		Available:       false,
+	}
+	reader := &statusStub{snapshot: snapshot}
+	service := testService(t, reader, nil, &now)
+
+	reply, ok := service.Reply(t.Context(), 123, "/price")
+	if !ok {
+		t.Fatal("price command produced no reply")
+	}
+	if strings.Contains(reply, "temporarily unavailable") {
+		t.Errorf("a stopped agent was reported as a broken feed: %q", reply)
+	}
+	for _, expected := range []string{"Target: $150.00", "no trades are authorised", "swap check"} {
+		if !strings.Contains(reply, expected) {
+			t.Errorf("price reply omitted %q: %q", expected, reply)
+		}
+	}
+}
+
+// A genuine feed outage while the agent IS armed must still read as a fault,
+// not be softened into the stopped explanation.
+func TestPriceStillReportsARealOutageWhenArmed(t *testing.T) {
+	now := time.Date(2026, time.August, 2, 12, 0, 0, 0, time.UTC)
+	snapshot := testSnapshot(now.Add(-5 * time.Second))
+	snapshot.Result.Decision = "waiting"
+	snapshot.Result.PriceTrigger = &pricetrigger.Status{
+		Feed:            pricetrigger.FeedSOLUSD,
+		Direction:       pricetrigger.SellAtOrAbove,
+		ThresholdMicros: 150_000_000,
+		Available:       false,
+	}
+	reader := &statusStub{snapshot: snapshot}
+	service := testService(t, reader, nil, &now)
+
+	reply, ok := service.Reply(t.Context(), 123, "/price")
+	if !ok || !strings.Contains(reply, "temporarily unavailable") {
+		t.Errorf("an armed agent's feed outage was not reported as one: %q", reply)
+	}
+}
+
+// /start is the first thing anyone presses, and pressing it is what makes
+// Telegram willing to deliver to that chat at all. Answering "unknown" there is
+// the first impression of a bot the operator is about to trust with money.
+func TestStartAnswersLikeHelp(t *testing.T) {
+	service := announceService(t, &statusStub{snapshot: testSnapshot(time.Unix(1_700_000_000, 0).UTC())}, &botStub{}, 7)
+	start, ok := service.Reply(t.Context(), 7, "/start")
+	if !ok {
+		t.Fatal("/start was ignored")
+	}
+	if strings.Contains(start, "unknown") {
+		t.Fatalf("/start answered as an unknown command: %s", start)
+	}
+	// It must be the same answer as /help, not a second thing to maintain.
+	// (A second Reply would hit the per-chat rate limit, so compare the source.)
+	if help := bounded(service.help(service.now().UTC())); start != help {
+		t.Errorf("/start and /help disagree:\n%s\n---\n%s", start, help)
+	}
+}
+
+// strings.Split("", ",") yields one EMPTY element, so an unset variable used to
+// report "contains an empty value" — sending the operator hunting for a stray
+// comma in a variable they had never set.
+func TestUnsetChatAllowlistSaysItIsUnset(t *testing.T) {
+	for _, value := range []string{"", "   "} {
+		_, err := ParseAllowedChatIDs(value)
+		if err == nil {
+			t.Fatalf("an empty allowlist %q was accepted", value)
+		}
+		if !strings.Contains(err.Error(), "is not set") {
+			t.Errorf("unset allowlist reported as %q", err)
+		}
+	}
+	// A genuinely malformed value must still say so rather than "not set".
+	if _, err := ParseAllowedChatIDs("7,,8"); err == nil ||
+		strings.Contains(err.Error(), "is not set") {
+		t.Errorf("a stray comma reported as unset: %v", err)
+	}
+}
+
+// flakyPollBot fails its first `failures` polls, then serves one update and
+// lets the context cancel. It models the transient network error that took the
+// deployed operator down seven times in one night.
+type flakyPollBot struct {
+	botStub
+	failures int
+	polls    int
+}
+
+func (b *flakyPollBot) Poll(context.Context, int64, time.Duration) ([]Update, error) {
+	b.polls++
+	if b.polls <= b.failures {
+		return nil, StatusError{Status: 502}
+	}
+	b.cancel()
+	return nil, context.Canceled
+}
+
+// A read-only observer must ride out a blip. Exiting on the FIRST poll error
+// meant a momentary outage killed the process, and once systemd's start limit
+// was reached it stopped trying — alerts then went missing with no signal.
+func TestTransientPollFailuresDoNotKillTheOperator(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	now := time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC)
+	bot := &flakyPollBot{failures: maxConsecutivePollFailures - 1}
+	bot.cancel = cancel
+	service, err := New(Config{
+		Bot: bot, Cursor: &cursorStub{},
+		Sources: []StatusReader{&statusStub{snapshot: testSnapshot(now)}}, AllowedChatIDs: []int64{123},
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.pollRetryDelay = time.Millisecond
+	if err := service.Run(ctx); err != nil {
+		t.Fatalf("the operator died on transient poll failures: %v", err)
+	}
+	if bot.polls <= bot.failures {
+		t.Fatalf("polled %d times, want more than the %d failures", bot.polls, bot.failures)
+	}
+}
+
+// It must still give up eventually: a revoked token or a deleted bot has to
+// surface as a failed unit, not as a process retrying forever in silence.
+func TestSustainedPollFailuresStillFail(t *testing.T) {
+	now := time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC)
+	bot := &flakyPollBot{failures: maxConsecutivePollFailures + 5}
+	bot.cancel = func() {}
+	service, err := New(Config{
+		Bot: bot, Cursor: &cursorStub{},
+		Sources: []StatusReader{&statusStub{snapshot: testSnapshot(now)}}, AllowedChatIDs: []int64{123},
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.pollRetryDelay = time.Millisecond
+	if err := service.Run(t.Context()); err == nil {
+		t.Fatal("a permanently broken bot retried forever instead of failing")
+	}
+	if bot.polls != maxConsecutivePollFailures {
+		t.Errorf("gave up after %d polls, want %d", bot.polls, maxConsecutivePollFailures)
+	}
+}
+
+// A chat that permanently rejects a reply must not stall the cursor: Telegram
+// redelivers the same update, the process fails the same way, systemd loops it,
+// and because announce() runs after this loop every other chat loses its trade
+// alerts too. A group migrating to a supergroup causes this unaided.
+func TestAPermanentlyRejectedReplyDoesNotStallTheCursor(t *testing.T) {
+	for name, test := range map[string]struct {
+		status    int
+		wantStall bool
+	}{
+		"chat gone (400)":    {400, false},
+		"bot blocked (403)":  {403, false},
+		"rate limited (429)": {429, true},
+		"server error (500)": {500, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			now := time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC)
+			ctx, cancel := context.WithCancel(t.Context())
+			bot := &botStub{
+				updates:     [][]Update{{{ID: 7, ChatID: 123, Text: "/status"}}},
+				sendErr:     StatusError{Status: test.status},
+				cancelAfter: 2,
+				cancel:      cancel,
+			}
+			cursor := &cursorStub{}
+			service, err := New(Config{
+				Bot: bot, Cursor: cursor,
+				Sources: []StatusReader{&statusStub{snapshot: testSnapshot(now)}}, AllowedChatIDs: []int64{123},
+				Now: func() time.Time { return now },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			service.pollRetryDelay = time.Millisecond
+			runErr := service.Run(ctx)
+
+			if test.wantStall {
+				// Transient: the reply is still owed, so the cursor must not move.
+				if len(cursor.stores) != 0 {
+					t.Errorf("a retryable failure advanced the cursor to %v", cursor.stores)
+				}
+				if runErr == nil {
+					t.Error("a retryable failure was swallowed")
+				}
+				return
+			}
+			if len(cursor.stores) == 0 {
+				t.Fatal("a permanent rejection left the update unconsumed; it will redeliver forever")
+			}
+			if cursor.stores[len(cursor.stores)-1] != 8 {
+				t.Errorf("cursor = %v, want it past update 7", cursor.stores)
+			}
+		})
+	}
+}
+
+// Only failures were logged, so an empty journal meant either "announced fine"
+// or "never fired" — indistinguishable. That ambiguity produced a confident
+// wrong diagnosis on a real host: five trades WERE announced, the journal was
+// empty, and the conclusion was that alerting was broken.
+//
+// Silence must mean nothing happened.

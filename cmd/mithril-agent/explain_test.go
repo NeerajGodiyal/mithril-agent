@@ -22,8 +22,11 @@ func TestExplainStatesTheLimitsAReviewerMustKnow(t *testing.T) {
 		// now be false, and a false reassurance is worse than none.
 		"no Mainnet execution path",
 		"holds no key",
-		"at most ONE swap",
-		"no strategy",
+		"one bounded demo",
+		"maximum action count",
+		"daily caps",
+		"no built-in market strategy",
+		"may act automatically",
 		"NOT custody separation",
 		"read and report",
 	} {

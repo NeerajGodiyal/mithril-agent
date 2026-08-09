@@ -163,6 +163,11 @@ func TestDevnetOnceComposesRealProcessesAndRPCClients(t *testing.T) {
 	t.Setenv("MITHRIL_AGENT_SECONDARY_RPC_URL", secondary.URL)
 	t.Setenv("MITHRIL_MCP_PROFILE", "integration-test-helper")
 	t.Setenv("MITHRIL_RPC_URL", "")
+	statePath := filepath.Join(temp, "mithril_state.json")
+	if err := os.WriteFile(statePath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MITHRIL_STATE_PATH", statePath)
 
 	cfg := config{Profile: profile}
 	cfg.MCP.Command = mcpCommand

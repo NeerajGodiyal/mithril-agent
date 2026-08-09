@@ -23,7 +23,7 @@ func TestSeparateServicesCannotShareFileCursorConsumer(t *testing.T) {
 	}
 	firstBot := &blockingBot{started: make(chan struct{})}
 	first, err := New(Config{
-		Bot: firstBot, Cursor: cursor, Status: &statusStub{},
+		Bot: firstBot, Cursor: cursor, Sources: []StatusReader{&statusStub{}},
 		AllowedChatIDs: []int64{123},
 	})
 	if err != nil {
@@ -31,7 +31,7 @@ func TestSeparateServicesCannotShareFileCursorConsumer(t *testing.T) {
 	}
 	secondBot := &blockingBot{started: make(chan struct{})}
 	second, err := New(Config{
-		Bot: secondBot, Cursor: cursor, Status: &statusStub{},
+		Bot: secondBot, Cursor: cursor, Sources: []StatusReader{&statusStub{}},
 		AllowedChatIDs: []int64{123},
 	})
 	if err != nil {

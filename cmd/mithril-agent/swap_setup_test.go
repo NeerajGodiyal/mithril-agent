@@ -310,13 +310,13 @@ func TestParseUSDThreshold(t *testing.T) {
 	for input, want := range map[string]uint64{
 		"1": 1_000_000, "20.5": 20_500_000, "73.134928": 73_134_928,
 	} {
-		got, err := parseUSDThreshold(input)
+		got, err := parseUSDThreshold(input, "sell price")
 		if err != nil || got != want {
 			t.Fatalf("parse %q = %d, %v; want %d", input, got, err, want)
 		}
 	}
 	for _, input := range []string{"", "0", " 1", "1 ", "-1", "+1", "1e2", ".5", "1.0000001"} {
-		if _, err := parseUSDThreshold(input); err == nil {
+		if _, err := parseUSDThreshold(input, "sell price"); err == nil {
 			t.Fatalf("accepted invalid threshold %q", input)
 		}
 	}

@@ -17,6 +17,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
+	"github.com/Overclock-Validator/mithril-agent/txflow"
 )
 
 func TestSwapDemoRunsOneActionAndStops(t *testing.T) {
@@ -223,7 +224,9 @@ func TestSwapDemoExplainsStaleMithrilRPCBinding(t *testing.T) {
 	configPath := writeSwapDemoConfig(t)
 	withSwapDemoStubs(t,
 		func(context.Context, string) error {
-			return errors.New("Mithril node RPC is unavailable or not ready")
+			// The real sentinel, not a same-worded errors.New: this test used to
+			// build a lookalike and pass because the classifier compared strings.
+			return txflow.ErrNodeUnavailable
 		},
 		func(string, time.Duration) error { return nil },
 		func(string) (operatorstatus.View, error) { return operatorstatus.View{}, nil },

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -18,8 +20,10 @@ import (
 func TestSetupNeverBlocksWhenNotATerminal(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "setup")
 	var out bytes.Buffer
-	if err := runSetup(t.Context(), []string{"--dir", dir, "--yes"}, &out); err != nil {
-		t.Fatalf("non-interactive setup failed: %v", err)
+	// It reports that it wrote no profile — the floor needs a person — but the
+	// point here is that it RETURNS rather than waiting on a prompt forever.
+	if err := runSetup(t.Context(), []string{"--dir", dir, "--yes"}, &out); err == nil {
+		t.Fatal("a non-interactive run wrote a trading profile with nobody to agree to the floor")
 	}
 	if !strings.Contains(out.String(), "default") {
 		t.Error("non-interactive run does not show that defaults were taken")
@@ -30,9 +34,9 @@ func TestSetupNeverBlocksWhenNotATerminal(t *testing.T) {
 // and must leave an existing one alone.
 func TestSetupCreatesAnAccountOnceAndNeverReplacesIt(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "setup")
-	if err := runSetup(t.Context(), []string{"--dir", dir, "--yes"}, &bytes.Buffer{}); err != nil {
-		t.Fatal(err)
-	}
+	// The profile is skipped without a terminal; the account still must exist,
+	// which is exactly what this test is about.
+	_ = runSetup(t.Context(), []string{"--dir", dir, "--yes"}, &bytes.Buffer{})
 	account := filepath.Join(dir, "agent-account.json")
 	first, err := os.ReadFile(account)
 	if err != nil {
@@ -47,9 +51,9 @@ func TestSetupCreatesAnAccountOnceAndNeverReplacesIt(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := runSetup(t.Context(), []string{"--dir", dir, "--yes"}, &out); err != nil {
-		t.Fatal(err)
-	}
+	// A --yes run cannot agree to a floor, so no profile is written and setup
+	// reports that. What it PRINTS is this test's subject.
+	_ = runSetup(t.Context(), []string{"--dir", dir, "--yes"}, &out)
 	second, err := os.ReadFile(account)
 	if err != nil {
 		t.Fatal(err)
@@ -67,9 +71,8 @@ func TestSetupCreatesAnAccountOnceAndNeverReplacesIt(t *testing.T) {
 func TestSetupNeverAuthorisesATrade(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "setup")
 	var out bytes.Buffer
-	if err := runSetup(t.Context(), []string{"--dir", dir, "--yes"}, &out); err != nil {
-		t.Fatal(err)
-	}
+	// Skipping the profile is expected here; what it SAYS is the subject.
+	_ = runSetup(t.Context(), []string{"--dir", dir, "--yes"}, &out)
 	text := out.String()
 	if !strings.Contains(text, "did not authorise") {
 		t.Error("setup does not state that it authorised nothing")
@@ -86,8 +89,8 @@ func TestSetupNeverAuthorisesATrade(t *testing.T) {
 func TestSetupReportsMissingHostPrerequisites(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "setup")
 	var out bytes.Buffer
-	if err := runSetup(t.Context(), []string{"--dir", dir, "--yes"}, &out); err != nil {
-		t.Fatal(err)
+	if err := runSetup(t.Context(), []string{"--dir", dir, "--yes"}, &out); err == nil {
+		t.Fatal("setup reported success with host prerequisites missing")
 	}
 	text := out.String()
 	// The Orca adapter cannot exist in a fresh temp directory.
@@ -149,9 +152,9 @@ func TestSetupNeverPromptsForTheTelegramToken(t *testing.T) {
 	t.Setenv(telegramoperator.AllowedIDsEnvironment, "")
 	dir := filepath.Join(t.TempDir(), "setup")
 	var out bytes.Buffer
-	if err := runSetup(t.Context(), []string{"--dir", dir, "--yes"}, &out); err != nil {
-		t.Fatal(err)
-	}
+	// A --yes run cannot agree to a floor, so no profile is written and setup
+	// reports that. What it PRINTS is this test's subject.
+	_ = runSetup(t.Context(), []string{"--dir", dir, "--yes"}, &out)
 	text := out.String()
 	if !strings.Contains(text, "shell history") {
 		t.Error("setup does not explain why it will not take the token")
@@ -181,9 +184,9 @@ func TestSetupSaysTelegramIsReadOnlyWhenConfigured(t *testing.T) {
 	t.Setenv(telegramoperator.AllowedIDsEnvironment, "111")
 	dir := filepath.Join(t.TempDir(), "setup")
 	var out bytes.Buffer
-	if err := runSetup(t.Context(), []string{"--dir", dir, "--yes"}, &out); err != nil {
-		t.Fatal(err)
-	}
+	// A --yes run cannot agree to a floor, so no profile is written and setup
+	// reports that. What it PRINTS is this test's subject.
+	_ = runSetup(t.Context(), []string{"--dir", dir, "--yes"}, &out)
 	text := out.String()
 	if !strings.Contains(text, "read-only") {
 		t.Error("setup does not state Telegram is read-only")
@@ -239,6 +242,7 @@ func guidedProfileFixture(t *testing.T, answers string, minOutput uint64) (
 func TestGuidedSetupConfirmsTheLiveQuoteWithoutReQuoting(t *testing.T) {
 	const floor = uint64(21_525)
 	choices, p, out, calls := guidedProfileFixture(t, "\n\ny\n", floor)
+	choices.quoteSocket = "/run/mithril-agent-quote/quote.sock"
 
 	configPath, err := configureSwapProfile(t.Context(), p, choices, out)
 	if err != nil {
@@ -253,6 +257,13 @@ func TestGuidedSetupConfirmsTheLiveQuoteWithoutReQuoting(t *testing.T) {
 	if _, err := os.Lstat(configPath); err != nil {
 		t.Fatalf("configuration is not on disk: %v", err)
 	}
+	cfg, err := readConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Quote.SocketPath != choices.quoteSocket {
+		t.Fatalf("quote socket = %q, want %q", cfg.Quote.SocketPath, choices.quoteSocket)
+	}
 	// The operator must have been shown the floor in readable units, not raw
 	// integer units they cannot sanity-check.
 	if !strings.Contains(out.String(), "0.021525 devUSDC") {
@@ -260,6 +271,29 @@ func TestGuidedSetupConfirmsTheLiveQuoteWithoutReQuoting(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "0.001000000 SOL") {
 		t.Errorf("the amount spent was not shown in readable units:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), `"status":"configured"`) ||
+		strings.Contains(out.String(), `"plan_argv"`) {
+		t.Errorf("guided setup printed internal JSON:\n%s", out.String())
+	}
+}
+
+func TestGuidedSetupRediscoversAnExistingProfile(t *testing.T) {
+	choices, p, out, _ := guidedProfileFixture(t, "\n\ny\n", 21_525)
+	configPath, err := configureSwapProfile(t.Context(), p, choices, out)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newHome := t.TempDir()
+	t.Setenv("HOME", newHome)
+	if _, err := configureSwapProfile(
+		t.Context(), newPrompter(strings.NewReader(""), out, true), choices, out,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := recordedConfig(); got != configPath {
+		t.Fatalf("recorded config = %q, want %q", got, configPath)
 	}
 }
 
@@ -550,9 +584,8 @@ func TestSetupCanBeDrivenFromAScript(t *testing.T) {
 		"--quote-script", config,
 		"--yes",
 	}, &out)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Scripted runs still skip the profile: the floor needs a person.
+	_ = err
 	text := out.String()
 	// Every supplied value must appear as the chosen answer, not the default.
 	for _, want := range []string{"buy", config, node} {
@@ -600,8 +633,8 @@ func TestSetupNextStepMatchesTheActualState(t *testing.T) {
 		"--dir", filepath.Join(root, "a"), "--mithril-command", node,
 		"--mithril-config", config, "--node-command", node,
 		"--quote-script", config, "--yes",
-	}, &complete); err != nil {
-		t.Fatal(err)
+	}, &complete); err == nil {
+		t.Fatal("a non-interactive run wrote a profile nobody agreed to")
 	}
 	if strings.Contains(complete.String(), "Still needed") {
 		t.Fatalf("a fully specified setup reported missing inputs:\n%s", complete.String())
@@ -614,8 +647,8 @@ func TestSetupNextStepMatchesTheActualState(t *testing.T) {
 	var incomplete bytes.Buffer
 	if err := runSetup(t.Context(), []string{
 		"--dir", filepath.Join(root, "b"), "--yes",
-	}, &incomplete); err != nil {
-		t.Fatal(err)
+	}, &incomplete); err == nil {
+		t.Fatal("an incomplete setup reported success")
 	}
 	if !strings.Contains(incomplete.String(), "Still needed") {
 		t.Fatalf("an incomplete setup reported nothing missing:\n%s", incomplete.String())
@@ -694,8 +727,13 @@ func TestDetectionCarriesNoSiteSpecificPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Test files are scanned too. Skipping them left the largest hole: fixtures
+	// are where a real address, endpoint or host gets pasted in "just to make
+	// the test run", and a public repository ships them exactly like source.
+	// One did — a payout wallet sat in a strategy fixture for a whole day.
 	for _, name := range entries {
-		if strings.HasSuffix(name, "_test.go") {
+		// Only this file, which has to contain the needles to search for them.
+		if name == "setup_test.go" {
 			continue
 		}
 		source, err := os.ReadFile(name)
@@ -707,5 +745,58 @@ func TestDetectionCarriesNoSiteSpecificPaths(t *testing.T) {
 				t.Errorf("%s contains a site-specific reference: %q", name, leaked)
 			}
 		}
+		// A routable IP literal is somebody's real machine. Standard private
+		// ranges are allowed only as systemd deny rules; every other literal must
+		// be loopback or an RFC 5737 documentation address.
+		for line := range strings.SplitSeq(string(source), "\n") {
+			if strings.Contains(line, "IPAddressDeny=") {
+				continue
+			}
+			for _, address := range ipv4Literal.FindAllString(line, -1) {
+				if allowedExampleIP(address) {
+					continue
+				}
+				t.Errorf("%s names a routable address %q; use a 192.0.2.x documentation address", name, address)
+			}
+		}
+	}
+}
+
+var ipv4Literal = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+
+// allowedExampleIP permits the addresses that are safe to publish: loopback,
+// "any", and the three ranges RFC 5737 reserves for documentation.
+func allowedExampleIP(address string) bool {
+	parsed := net.ParseIP(address)
+	if parsed == nil || parsed.IsLoopback() || parsed.IsUnspecified() {
+		return true
+	}
+	for _, block := range []string{"192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24"} {
+		_, network, err := net.ParseCIDR(block)
+		if err == nil && network.Contains(parsed) {
+			return true
+		}
+	}
+	return false
+}
+
+// Setup that wrote no trading profile must not exit 0. It printed a cheerful
+// "Next" list either way, so a zero status was the only thing distinguishing
+// "your agent is configured" from "nothing was written", and it said the wrong
+// one.
+func TestSetupThatWroteNoProfileFails(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "setup")
+	var out bytes.Buffer
+	err := runSetup(t.Context(), []string{"--dir", dir, "--yes"}, &out)
+	if err == nil {
+		t.Fatal("setup exited successfully having written no trading profile")
+	}
+	if !strings.Contains(err.Error(), "no trading profile") {
+		t.Errorf("the failure does not name what is missing: %v", err)
+	}
+	// And the reason must already be on screen — an error naming nothing
+	// actionable is its own dead end.
+	if !strings.Contains(out.String(), "Still needed") {
+		t.Errorf("setup failed without explaining why:\n%s", out.String())
 	}
 }

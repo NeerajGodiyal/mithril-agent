@@ -23,6 +23,14 @@ func TestExplainStageCoversTheRealGateTokens(t *testing.T) {
 	if got := explainStage(""); got != "" {
 		t.Errorf("empty stage produced %q", got)
 	}
+	for _, stage := range []string{
+		"catalog", "info", "genesis", "state_call", "state_tool", "state_identity", "diagnosis", "account",
+	} {
+		got := explainStage("mithril_observation_" + stage)
+		if strings.Contains(got, "See the operator guide") {
+			t.Errorf("MCP %s stage fell back to the generic explanation: %q", stage, got)
+		}
+	}
 }
 
 // An unrecognised stage must not be described as if it were understood, and

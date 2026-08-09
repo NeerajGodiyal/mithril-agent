@@ -551,6 +551,25 @@ func (r *unavailableDependencyRuntime) CheckDependencies(context.Context) error 
 	return nil
 }
 
+// stallingCycleRuntime lets the step deadline pass and then reports a failure
+// in its OWN words, the way a provider client that gave up does. Nothing in the
+// error says "deadline", so the loop's reading of the step context is the only
+// thing that can classify it.
+type stallingCycleRuntime struct {
+	recoveringCycleRuntime
+}
+
+func (r *stallingCycleRuntime) Step(
+	ctx context.Context,
+) (execution.Result, journal.Stats, error) {
+	r.calls++
+	<-ctx.Done()
+	if r.calls == 2 {
+		r.cancel()
+	}
+	return execution.Result{}, journal.Stats{}, errors.New("quote provider gave up")
+}
+
 func (r *recoveringCycleRuntime) Step(
 	context.Context,
 ) (execution.Result, journal.Stats, error) {
@@ -947,6 +966,31 @@ func TestDevnetLoopStaysObservableAcrossCycleFailures(t *testing.T) {
 	}
 }
 
+// A provider that gives up after the step deadline reports a failure in its own
+// words, with nothing in the error saying "deadline". Only the step context can
+// classify it, and without that read it lands in "operation_failed" — the one
+// reason that says nothing about what to fix — so the timeout alert never
+// fires and a hung dependency looks like a broken agent.
+func TestAStalledStepIsReportedAsATimeoutNotAGenericFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	runtime := &stallingCycleRuntime{recoveringCycleRuntime{cancel: cancel}}
+	var output bytes.Buffer
+	if err := runDevnetCycles(
+		ctx, runtime, runmetrics.New(time.Now().UTC()), make(chan error), &output,
+		time.Millisecond, 20*time.Millisecond,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var result execution.Result
+	first := strings.SplitN(strings.TrimSpace(output.String()), "\n", 2)[0]
+	if err := json.Unmarshal([]byte(first), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Reason != "operation_timeout" {
+		t.Fatalf("stalled cycle reason = %q, want operation_timeout", result.Reason)
+	}
+}
+
 func TestDevnetLoopReportsQuoteServiceLossWhileStopped(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	runtime := &unavailableDependencyRuntime{
@@ -1254,22 +1298,36 @@ func TestSwapOperatorCommandsExposeReadOnlyBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer activeJournal.Close()
-	if err := run([]string{
-		"swap", "enable", "--config", configPath,
-		"--duration", "5m", "--max-actions", "2", "--reason", "operator test",
-	}, io.Discard); err == nil || !strings.Contains(err.Error(), "exactly one action") {
-		t.Fatalf("multi-action swap activation error = %v", err)
+	// An activation may grant several trades, which is what makes the agent
+	// autonomous, but the grant itself stays bounded at both ends.
+	for _, invalid := range []string{"0", "101"} {
+		if err := run([]string{
+			"swap", "enable", "--config", configPath,
+			"--duration", "5m", "--max-actions", invalid, "--reason", "operator test",
+		}, io.Discard); err == nil || !strings.Contains(err.Error(), "between 1 and 100") {
+			t.Fatalf("--max-actions %s error = %v", invalid, err)
+		}
 	}
 	var enabled bytes.Buffer
 	if err := run([]string{
 		"swap", "enable", "--config", configPath,
-		"--duration", "5m", "--reason", "operator test",
+		"--duration", "3h", "--max-actions", "3", "--reason", "operator test",
 	}, &enabled); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(enabled.String(), `"mode":"devnet_enabled"`) ||
+		!strings.Contains(enabled.String(), `"max_actions":3`) ||
 		strings.Contains(enabled.String(), cfg.Swap.Route.Owner) {
 		t.Fatalf("swap enable output = %s", enabled.String())
+	}
+	// A live activation may not be silently replaced: raising the grant has to
+	// go through an explicit stop, so authority never widens by accident.
+	if err := run([]string{
+		"swap", "enable", "--config", configPath,
+		"--duration", "3h", "--max-actions", "4", "--reason", "operator test",
+	}, io.Discard); err == nil ||
+		!strings.Contains(err.Error(), "stop the current activation") {
+		t.Fatalf("re-enabling over a live activation = %v", err)
 	}
 	err = run([]string{
 		"swap", "acknowledge", "--config", configPath,
@@ -1728,7 +1786,11 @@ func testSwapProfile(owner string) swaprun.Profile {
 		},
 		InputLamports: 1_000_000, SlippageBPS: 100,
 		ReserveLamports: 50_000_000, MaxFeeLamports: 100_000,
-		DailyDebitCapLamports:     4_100_000,
+		// Six trades' worth (6 x 4_100_000), matching what setup now writes. It
+		// used to be exactly one trade, which stopped being representative once
+		// the daily caps started funding several — and left the fixture unable
+		// to exercise any test that arms more than one action.
+		DailyDebitCapLamports:     24_600_000,
 		ScheduleWindowSeconds:     3_600,
 		ScheduleAnchorUnix:        time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC).Unix(),
 		MaxClockUncertaintyMillis: 100, MaxObservationAgeSeconds: 30,
