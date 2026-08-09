@@ -70,6 +70,14 @@ func discoverCurrentConfig() string {
 	if recorded := recordedConfig(); recorded != "" {
 		return recorded
 	}
+	// A strategy records its legs in its own pointer and nothing else. Without
+	// this fallback, `doctor`, `preflight`, `strategy show/alerts` and the swap
+	// read-only commands all reported "nothing configured" while a real strategy
+	// was armed and able to trade — the diagnostic surface blind exactly when it
+	// was needed. The sell leg is the strategy's primary config.
+	if strategy, _ := discoverStrategy(); strategy.sell != "" {
+		return strategy.sell
+	}
 	if usableConfigPath(installedConfigPath) {
 		return installedConfigPath
 	}

@@ -16,6 +16,17 @@ var stageMeaning = map[string]string{
 		"so this stops before anything else. Check the time-sync service.",
 	"genesis": "The Mithril node did not answer, or answered for the wrong cluster. " +
 		"Confirm the node is running and serving Devnet.",
+	"mithril_observation_catalog": "The Mithril MCP tool list is missing or incompatible. " +
+		"Use the Mithril binary this setup was built and tested with.",
+	"mithril_observation_info":       "The MCP server identity or its Mithril RPC binding did not match this setup.",
+	"mithril_observation_genesis":    "The MCP server could not prove that its node is on Devnet.",
+	"mithril_observation_state_call": "The MCP state check did not complete. Confirm the local MCP process can start and finish.",
+	"mithril_observation_state_tool": "The configured Mithril state file is missing or unreadable. " +
+		"A restarted node may still be rebuilding it; otherwise check the exact state path and its read permission.",
+	"mithril_observation_state_identity": "The Mithril state file was read but did not prove a ready Devnet node. " +
+		"Wait for bootstrap to finish; investigate any schema, cluster, shutdown, clock, or corruption warning.",
+	"mithril_observation_diagnosis": "The node's health evidence was incomplete or inconsistent, so the agent stopped.",
+	"mithril_observation_account":   "The node could not return a valid reading for the agent wallet.",
 
 	"observation_freshness": "The node's account reading was too old to rely on. " +
 		"This usually means the node is not keeping up.",

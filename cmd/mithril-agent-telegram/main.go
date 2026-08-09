@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 const usage = `Usage:
   mithril-agent-telegram --status-socket PATH --cursor PATH [--explanations off|openai|local] [--explanation-budget PATH]
   mithril-agent-telegram link    discover your chat ID (read-only; see link --help)
+  mithril-agent-telegram test    send one test message to every allowed chat
 
 Environment:
   MITHRIL_AGENT_TELEGRAM_BOT_TOKEN  Telegram bot token
@@ -65,15 +67,34 @@ func run(
 	output io.Writer,
 	getenv func(string) string,
 ) error {
+	// One help arm for every subcommand, so a third cannot forget it — `link`
+	// had none while `test` did, and `link --help` errored while the top-level
+	// usage told operators to run it.
+	if len(args) > 1 && (args[1] == "-h" || args[1] == "--help") {
+		usage := map[string]string{"link": linkUsage, "test": testUsage}[args[0]]
+		if usage == "" {
+			return errors.New("unknown subcommand")
+		}
+		_, err := fmt.Fprintln(output, usage)
+		return err
+	}
 	if len(args) > 0 && args[0] == "link" {
 		if len(args) > 1 {
 			return errors.New("link takes no arguments")
 		}
 		return runLink(ctx, output, getenv)
 	}
+	if len(args) > 0 && args[0] == "test" {
+		if len(args) > 1 {
+			return errors.New("test takes no arguments")
+		}
+		return runTest(ctx, output, getenv)
+	}
 	flags := flag.NewFlagSet("mithril-agent-telegram", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	statusSocketPath := flags.String("status-socket", "", "bounded operator status socket")
+	var statusSockets socketPaths
+	flags.Var(&statusSockets, "status-socket",
+		"bounded operator status socket; repeat once per strategy leg")
 	cursorPath := flags.String("cursor", "", "private Telegram update cursor")
 	explanations := flags.String("explanations", "", "off, openai, or local")
 	explanationBudgetPath := flags.String("explanation-budget", "", "private daily explanation request budget")
@@ -84,11 +105,13 @@ func run(
 		}
 		return err
 	}
-	if flags.NArg() != 0 || !cleanAbsolutePath(*statusSocketPath) || !cleanAbsolutePath(*cursorPath) {
+	if flags.NArg() != 0 || len(statusSockets) == 0 || !cleanAbsolutePath(*cursorPath) {
 		return errors.New("--status-socket and --cursor must be distinct clean absolute paths")
 	}
-	if *statusSocketPath == *cursorPath {
-		return errors.New("--status-socket and --cursor must be distinct clean absolute paths")
+	for _, socket := range statusSockets {
+		if !cleanAbsolutePath(socket) || socket == *cursorPath {
+			return errors.New("--status-socket and --cursor must be distinct clean absolute paths")
+		}
 	}
 	if getenv == nil {
 		return errors.New("environment reader is required")
@@ -128,10 +151,10 @@ func run(
 		return err
 	}
 	if explanationBudget != nil &&
-		(resolvedBudgetPath == *statusSocketPath || resolvedBudgetPath == *cursorPath) {
+		(statusSockets.contains(resolvedBudgetPath) || resolvedBudgetPath == *cursorPath) {
 		return errors.New("explanation budget path must be distinct from status socket and cursor paths")
 	}
-	statusReader, err := statussocket.NewReader(*statusSocketPath)
+	sources, err := statusReaders(statusSockets)
 	if err != nil {
 		return err
 	}
@@ -144,7 +167,13 @@ func run(
 	}
 	return runTelegramService(ctx, telegramoperator.Config{
 		Bot: bot, Cursor: telegramoperator.FileCursor(*cursorPath),
-		Status:         statusReader,
+		Sources: sources,
+		// Derived from the cursor rather than taking a flag of its own: it is
+		// the same private state directory, already validated absolute, and a
+		// sibling name cannot collide with it. That also means an existing
+		// install needs no new flag, credential, or unit change to stop
+		// repeating announcements after a restart.
+		AnnouncedPath:  filepath.Join(filepath.Dir(*cursorPath), "announced-actions.json"),
 		AllowedChatIDs: chatIDs, Explainer: explainer,
 		ExplanationBudget: explanationBudget,
 	})
@@ -222,4 +251,45 @@ func boundedHTTPClient() *http.Client {
 	transport.MaxIdleConns = 2
 	transport.MaxIdleConnsPerHost = 2
 	return &http.Client{Transport: transport, Timeout: 60 * time.Second}
+}
+
+// socketPaths collects --status-socket given more than once: a strategy has a
+// sell leg, a buy leg and a sweep, and one bot token permits exactly one
+// long-poller, so one process has to read them all.
+type socketPaths []string
+
+func (p *socketPaths) String() string { return strings.Join(*p, ",") }
+
+func (p *socketPaths) Set(value string) error {
+	if !cleanAbsolutePath(value) {
+		return errors.New("--status-socket must be a clean absolute path")
+	}
+	for _, existing := range *p {
+		if existing == value {
+			return errors.New("--status-socket was given the same path twice")
+		}
+	}
+	*p = append(*p, value)
+	return nil
+}
+
+func (p socketPaths) contains(candidate string) bool {
+	for _, existing := range p {
+		if existing == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func statusReaders(paths socketPaths) ([]telegramoperator.StatusReader, error) {
+	readers := make([]telegramoperator.StatusReader, 0, len(paths))
+	for _, path := range paths {
+		reader, err := statussocket.NewReader(path)
+		if err != nil {
+			return nil, err
+		}
+		readers = append(readers, reader)
+	}
+	return readers, nil
 }

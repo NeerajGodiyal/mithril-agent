@@ -19,11 +19,31 @@ const (
 	maxRequestBytes = 64 << 10
 )
 
+// refusalExitCode marks "the policy said no" as distinct from "the signer could
+// not run". Both used to exit 1, so a daily cap reached at noon was reported to
+// the operator exactly like a crashed binary: the caller discards this process's
+// stderr, and the proposer then sat on a built transaction until its blockhash
+// aged out and reported THAT instead. One exit code carries the distinction
+// without the caller having to trust anything this process writes.
+//
+// Only genuine REFUSALS use it — a spent daily cap, a closed schedule window.
+// AuthorizeAndSign also returns faults: a malformed policy, an unwritable
+// authorization ledger, a lock it could not take. Those are not "wait until
+// tomorrow", they are "something is broken", and they must not wear the same
+// exit code. Errors raised before AuthorizeAndSign can additionally name a
+// policy or keypair PATH, and those must stay unread by the caller entirely.
+const refusalExitCode = 3
+
 func main() {
-	if err := run(os.Args[1:], os.Stdin, os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, "mithril-agent-signer:", err)
-		os.Exit(1)
+	err := run(os.Args[1:], os.Stdin, os.Stdout)
+	if err == nil {
+		return
 	}
+	fmt.Fprintln(os.Stderr, "mithril-agent-signer:", err)
+	if signer.IsRefusal(err) {
+		os.Exit(refusalExitCode)
+	}
+	os.Exit(1)
 }
 
 func run(args []string, input io.Reader, output io.Writer) error {
@@ -89,6 +109,9 @@ func runAt(
 	}
 	response, err := signer.AuthorizeAndSign(policy, privateKey, request, now())
 	if err != nil {
+		// Returned unchanged: signer.IsRefusal tells main whether this was the
+		// policy declining or the signer failing, and only the former earns the
+		// refusal exit code.
 		return err
 	}
 	encoder := json.NewEncoder(output)

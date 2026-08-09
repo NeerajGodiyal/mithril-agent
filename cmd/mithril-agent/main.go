@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -28,6 +29,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
 	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/mcpobserve"
+	"github.com/Overclock-Validator/mithril-agent/orcaswap"
 	"github.com/Overclock-Validator/mithril-agent/policyclient"
 	"github.com/Overclock-Validator/mithril-agent/signerclient"
 	"github.com/Overclock-Validator/mithril-agent/solanarpc"
@@ -40,6 +42,10 @@ import (
 
 const rootUsage = `Mithril Agent — bounded Solana Devnet pilot
 
+If you read one line of this, read this one. It says where you are and the
+single next thing to do, from any state, and changes nothing:
+  mithril-agent start
+
 Installed supervised pilot:
   mithril-agent status --status-socket /run/mithril-agent-status.sock
   sudo systemctl start --wait mithril-agent-demo.service
@@ -51,11 +57,23 @@ Nothing installed? These two need no wallet, no server, no account:
 
 On a prepared host, the demonstration is three steps:
   mithril-agent setup            guided; press Enter to accept each default
-  mithril-agent swap run --config PATH    the runner; leave it going
+  mithril-agent service install --output "$HOME/.mithril-agent/mithril-agent-run.service"
+                                 prints the review and install steps
   mithril-agent demo             arms ONE bounded trade for the runner to make
 
 The runner executes; demo only authorises. Without a running runner, demo has
 nothing to act for it and says so.
+
+Trading at a price, and getting the profit out:
+  mithril-agent setup            asks the price to trade at (blank = no condition)
+  mithril-agent setup strategy --sell-at-usd P --buy-at-usd P --to ADDRESS
+                                 one round trip: sell high, buy back, sweep profit
+  mithril-agent setup sweep --wallet PATH --to ADDRESS   profit to YOUR wallet
+  mithril-agent strategy show [--config PATH]   everything currently configured
+
+Alerts on your phone are a separate process:
+  mithril-agent-telegram link    find your chat ID (Telegram never shows it)
+  mithril-agent-telegram test    prove a message reaches you, before a trade does
 
   mithril-agent doctor           is it ready? what to do if not  [--json]
   mithril-agent wallet check --file PATH   check a wallet you already have
@@ -76,6 +94,7 @@ the agent may do should have to name what they are changing.
   mithril-agent shadow policy --out PATH --observe ADDR --sell-at-usd N
   mithril-agent shadow run --policy PATH --dir PATH
   mithril-agent shadow report --policy PATH --dir PATH
+  mithril-agent shadow backtest --policy PATH --dir PATH --buy-at-usd N
   mithril-agent journal verify --path ABSOLUTE_PATH
   mithril-agent clock-check --config PATH
   mithril-agent version
@@ -253,11 +272,18 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		return runExplain(args[1:], output)
 	case "walkthrough":
 		return runWalkthrough(ctx, args[1:], output)
+	case "service":
+		return runService(args[1:], output)
+	case "start":
+		return runStart(ctx, args[1:], output)
 	case "doctor":
 		return runDoctor(ctx, args[1:], output)
 	case "setup":
 		if len(args) > 1 && args[1] == "sweep" {
 			return runSweepSetup(ctx, args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "strategy" {
+			return runStrategySetup(ctx, args[2:], output)
 		}
 		return runSetup(ctx, args[1:], output)
 	case "wallet":
@@ -284,6 +310,9 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		if len(args) > 1 && args[1] == "policy" {
 			return runShadowPolicy(args[2:], output)
 		}
+		if len(args) > 1 && args[1] == "backtest" {
+			return runShadowBacktest(args[2:], output)
+		}
 		return runShadow(args[1:], output)
 	case "devnet-once":
 		return runDevnetOnce(ctx, args[1:], output)
@@ -298,7 +327,7 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 	case "swap":
 		return runSwap(ctx, args[1:], output)
 	case "strategy":
-		return runStrategy(args[1:], output)
+		return runStrategy(ctx, args[1:], output)
 	case "journal":
 		return runJournal(args[1:], output)
 	case "status":
@@ -709,6 +738,65 @@ type operatorProvider struct {
 	now        func() time.Time
 }
 
+// Strategy answers "what am I configured to do" from the config this provider
+// already holds. It reuses strategyShow's own view so the assistant surface and
+// the terminal screen can never drift into describing different settings.
+//
+// It carries no address: the sweep destination is an account, and this surface
+// promises not to expose accounts.
+func (p *operatorProvider) Strategy() (agentmcp.StrategySettings, error) {
+	settings := agentmcp.StrategySettings{}
+	if p.config.Swap == nil {
+		return settings, nil
+	}
+	swap := p.config.Swap
+	settings.Configured = true
+	settings.Direction = "sell SOL for devUSDC"
+	settings.InputPerAction = formatUnits(swap.InputLamports, 9) + " SOL"
+	settings.DailyCap = formatUnits(swap.DailyDebitCapLamports, 9) + " SOL"
+	if swap.IsBuy() {
+		settings.Direction = "buy SOL with devUSDC"
+		settings.InputPerAction = formatUnits(swap.InputTokenAmount, 6) + " devUSDC"
+		settings.DailyCap = formatUnits(swap.DailyInputTokenCap, 6) + " devUSDC"
+	}
+	settings.MaxFee = formatUnits(swap.MaxFeeLamports, 9) + " SOL"
+	settings.FundedTradesPerDay = swap.FundedTradesPerDay()
+	if trigger := swap.PriceTrigger; trigger != nil {
+		settings.PriceRule = string(trigger.Direction) + " $" + formatUnits(trigger.ThresholdMicros, 6)
+	}
+	var live bool
+	settings.ControlMode, settings.ControlGrant, live = controlGrantAt(p.config.Control.StatePath)
+	if settings.ControlGrant != "" && !live {
+		settings.ControlGrant += " (cannot act)"
+	}
+	if strategy, _ := discoverStrategy(); strategy.sweep != "" {
+		if cfg, err := readConfig(strategy.sweep); err == nil && cfg.hasLegacyProfile() {
+			settings.SweepConfigured = true
+			settings.SweepKeepBehind = formatUnits(cfg.Profile.ReserveLamports, 9) + " SOL"
+			settings.SweepMaxPerSend = formatUnits(cfg.Profile.MaxTransferLamports, 9) + " SOL"
+			settings.SweepDailyCap = formatUnits(cfg.Profile.DailyCapLamports, 9) + " SOL"
+			settings.SweepActiveAfter = time.Unix(cfg.Profile.ScheduleAnchorUnix, 0).
+				UTC().Format(time.RFC3339)
+			// Re-verified here, not trusted from the file: a registration that
+			// no longer verifies is exactly what an operator needs told.
+			if proof, err := readDestinationProof(filepath.Dir(strategy.sweep)); err == nil {
+				settings.SweepProofValid = verifySweepDestinationProof(
+					proof.AgentAccount, proof.Destination,
+					proof.Nonce, proof.IssuedAt, proof.SignatureBase58,
+				) == nil && proof.Destination == cfg.Profile.Destination
+			}
+		}
+	}
+	return settings, nil
+}
+
+// Strategy on the socket provider reports "not configured": that provider reads
+// a bounded status socket and never sees a config file, and inventing settings
+// it cannot observe would be worse than saying nothing.
+func (p *socketOperatorProvider) Strategy() (agentmcp.StrategySettings, error) {
+	return agentmcp.StrategySettings{}, nil
+}
+
 func (c config) activeProfile() (string, uint32, string, string, error) {
 	if err := c.validateProfileSelection(); err != nil {
 		return "", 0, "", "", err
@@ -1021,10 +1109,12 @@ func runDevnetCycles(
 				stepErr = checker.CheckDependencies(stepCtx)
 			}
 		}
+		// Read before cancelling reads naturally, though either order is correct:
+		// a context latches its first cause, so a later cancel cannot rewrite an
+		// expired deadline into Canceled.
 		stepTimedOut := errors.Is(stepCtx.Err(), context.DeadlineExceeded)
 		cancel()
-		terminal := result.ActionID != "" &&
-			(result.Decision == "failed" || result.Decision == "halted")
+		terminal := terminalForControl(result)
 		if terminal {
 			if err := runtime.StopNewActions(result.ActionID, result.Decision); err != nil {
 				return errors.New("stop new actions after terminal result")
@@ -1040,10 +1130,16 @@ func runDevnetCycles(
 				return errors.New("inspect journal after failed cycle")
 			}
 			if !terminal {
-				result = execution.Result{
-					Decision: "failed",
-					Reason:   cycleFailureReason(stepErr, stepTimedOut),
-				}
+				reason := cycleFailureReason(stepErr, stepTimedOut)
+				// The CATEGORY is bounded on purpose — it becomes a metric label,
+				// and an unbounded one collapses the dashboard to "unknown". The
+				// LOG has no such constraint, and dropping the error there is what
+				// made "operation_failed" mean nothing: the same eight characters
+				// covered a stale clock, a dead node, a spent cap and a genuine
+				// bug, and every diagnosis this week began by running preflight by
+				// hand to recover the sentence that was already in memory here.
+				log.Printf("cycle failed [%s]: %v", reason, stepErr)
+				result = execution.Result{Decision: "failed", Reason: reason}
 			}
 		}
 		controlStatus, statusErr := runtime.ControlStatus()
@@ -1097,12 +1193,94 @@ func dependencyProbeSafe(result execution.Result) bool {
 	}
 }
 
+// terminalForControl decides whether a cycle's outcome should latch the control
+// state, which is a decision the operator cannot undo: AcknowledgeTerminal
+// refuses "halted" outright, and the devnet command set has no acknowledge verb
+// at all.
+//
+// A halt for a transaction that was never broadcast is not that. A quarantined
+// transaction was signed and kept — the engine resolves it to "canceled" as
+// soon as the blockhash expires — so there is no ambiguous on-chain outcome to
+// protect against, because nothing reached the chain. Latching it meant that
+// pressing stop between signing and submission permanently bricked the setup.
+//
+// Submitted is the discriminator precisely because it is the fact that makes
+// the outcome uncertain in the first place.
+func terminalForControl(result operatorstatus.Result) bool {
+	if result.ActionID == "" {
+		return false
+	}
+	switch result.Decision {
+	case "failed":
+		return true
+	case "halted":
+		// Either signal means the bytes left this agent. A reconciliation
+		// verdict can only exist for something that was broadcast — it is set
+		// only when state.reconciliation is non-nil — so it is evidence of
+		// submission even where a caller has not set the flag. A quarantine has
+		// neither, which is exactly what makes it recoverable.
+		return result.Submitted || result.Verdict != ""
+	default:
+		return false
+	}
+}
+
 func cycleFailureReason(err error, timedOut bool) string {
 	if timedOut || errors.Is(err, context.DeadlineExceeded) {
 		return "operation_timeout"
 	}
 	if errors.Is(err, swapbuilder.ErrQuoteTemporarilyUnavailable) {
 		return "quote_unavailable"
+	}
+	// The market being below the operator's floor is the one routine reason a
+	// healthy runner sits idle. Left unnamed it reads as "operation_failed"
+	// every cycle, which is indistinguishable from a broken agent.
+	if errors.Is(err, orcaswap.ErrQuoteBelowFloor) {
+		return "price_below_floor"
+	}
+	// The same problem for a freshly configured sweep: its anchor is 24-48h out
+	// by default, so a CORRECT setup spends its first day reporting this.
+	if errors.Is(err, agent.ErrBeforeScheduleAnchor) {
+		return "before_schedule_anchor"
+	}
+	// Built but not submitted in time. Retryable, and the next cycle rebuilds —
+	// so it must not look like the agent failing.
+	if errors.Is(err, swaprun.ErrBlockhashExpired) {
+		return "blockhash_expired"
+	}
+	// The signer declining under its own policy — a daily cap spent, a window
+	// closed. The bounds working, not the agent breaking. Unnamed, it read as
+	// operation_failed every cycle for the rest of the UTC day, and the visible
+	// symptom became the expired blockhash of the transaction nobody would sign.
+	if errors.Is(err, signerclient.ErrSignerRefused) {
+		return "signer_refused"
+	}
+	// The agent's own Mithril node not answering. Entirely actionable — start
+	// the node — but reported as a generic failure it looked like broken
+	// trading code. A node that died mid-run on 2026-08-06 produced nothing but
+	// operation_failed on all three legs for as long as it stayed down.
+	if errors.Is(err, txflow.ErrNodeUnavailable) {
+		return "node_unavailable"
+	}
+	// The pre-trade observation not meeting policy: wallet below the reserve,
+	// evidence gone stale, the node's cross-check behind, health degraded. The
+	// engine reports all of these in full at engine.go:525 when they are seen at
+	// the START of an action, and returned them raw from validateBeforeSend —
+	// so the identical condition read as a named, readable "degraded" one moment
+	// and as operation_failed the next.
+	//
+	// ONE bounded category, deliberately: the stage token is composed from live
+	// status and issue names ("mithril_health_status_degraded_..."), so using it
+	// as a metric label would collapse to "unknown" — worse than what it replaces.
+	if swaprun.ObservationFailure(err) != "" {
+		return "observation_not_ready"
+	}
+	// The HOST's clock, not the agent. An NTP poll interval that let the
+	// kernel's uncertainty bound drift past policy produced nothing but
+	// operation_failed on all three legs for five minutes, and the fix — one
+	// timesyncd setting — was invisible until preflight was run by hand.
+	if errors.Is(err, clockcheck.ErrClockUnusable) {
+		return "clock_unusable"
 	}
 	return "operation_failed"
 }
@@ -1121,7 +1299,8 @@ func startMetrics(
 	}
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
-		return nil, nil, nil, errors.New("listen for agent metrics")
+		return nil, nil, nil, errors.New("listen for agent metrics on " + address +
+			"; another runner may already use it — pass --metrics-address")
 	}
 	metrics := runmetrics.New(time.Now().UTC())
 	server := &http.Server{
@@ -1377,7 +1556,27 @@ func runShadow(args []string, output io.Writer) error {
 	journalPath := flags.String("journal", "", "append-only journal JSONL")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent shadow --config PATH --observation PATH --journal PATH")
+			// The subcommands are the ones anyone reaches for; the flag form
+			// below is the older single-shot shadow kept for existing scripts.
+			// Listing only the flag form meant `shadow --help` never mentioned
+			// the commands that do the work, so they could not be found at all.
+			_, writeErr := fmt.Fprintln(output, `Usage:
+  mithril-agent shadow policy --out PATH --observe ADDR --sell-at-usd N
+                                       write a shadow policy to score against
+  mithril-agent shadow run --policy PATH --dir PATH
+                                       watch a live market, record what the rule
+                                       would have done. Holds no key.
+  mithril-agent shadow report --policy PATH --dir PATH [--day DATE] [--json]
+                                       score one recorded day, one direction
+  mithril-agent shadow backtest --policy PATH --dir PATH --buy-at-usd N
+                                [--spread-bps N] [--day DATE] [--json]
+                                       score a sell-then-buy-back ROUND TRIP over
+                                       recorded prices, on one set of books
+
+Each subcommand takes --help of its own.
+
+Legacy single-shot form, kept for existing scripts:
+  mithril-agent shadow --config PATH --observation PATH --journal PATH`)
 			return writeErr
 		}
 		return err

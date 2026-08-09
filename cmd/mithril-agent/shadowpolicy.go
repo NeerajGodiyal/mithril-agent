@@ -102,7 +102,7 @@ func buildShadowPolicy(
 	if sellAt == "" {
 		direction, threshold = pricetrigger.BuyAtOrBelow, buyAt
 	}
-	micros, err := parseUSDThreshold(threshold)
+	micros, err := parseUSDThreshold(threshold, "price threshold")
 	if err != nil {
 		return shadow.Policy{}, err
 	}

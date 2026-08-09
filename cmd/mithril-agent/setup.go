@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -37,6 +36,7 @@ or submitted, and no trade is authorised at any point.
   --mithril-config PATH   the Mithril node's config.toml
   --node-command PATH     the pinned Node.js runtime (24.18+)
   --quote-script PATH     the Orca quote adapter
+  --quote-socket PATH     protected runtime quote socket for supervised use
   --yes                   do not ask; use the values given and the defaults
 
 Any value given as a flag becomes that question's answer, so the same run can
@@ -51,6 +51,12 @@ type setupChoices struct {
 	mithrilConfig  string
 	nodeCommand    string
 	quoteScript    string
+	quoteSocket    string
+	// priceMicros is the USD price the trade waits for, 0 meaning "no condition".
+	// Without this question the wizard could only ever write a trigger-less
+	// profile, so the one thing a trader actually wants to say — "not below
+	// $250" — was reachable only by running swap setup by hand.
+	priceMicros uint64
 }
 
 // A supervised installation puts everything the agent needs in one directory.
@@ -154,6 +160,7 @@ func runSetup(ctx context.Context, args []string, output io.Writer) error {
 	flags.StringVar(&given.mithrilConfig, "mithril-config", "", "Mithril node config.toml")
 	flags.StringVar(&given.nodeCommand, "node-command", "", "Node.js runtime")
 	flags.StringVar(&given.quoteScript, "quote-script", "", "Orca quote adapter")
+	flags.StringVar(&given.quoteSocket, "quote-socket", "", "protected runtime quote socket")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, setupUsage)
@@ -254,10 +261,30 @@ func gatherSetupChoices(p *prompter, given setupChoices) (setupChoices, error) {
 		return setupChoices{}, err
 	}
 
+	// Asked LAST, and blank-by-default: an unconditional trade is a real choice
+	// for a demonstration, and a price nobody typed must never be invented.
+	condition := "sells only at or ABOVE this price"
+	if direction == "buy" {
+		condition = "buys only at or BELOW this price"
+	}
+	priceText, err := p.ask(
+		"Only trade when SOL reaches a price, in US dollars?"+
+			"\n  (blank = trade whenever you allow it; e.g. 250 "+condition+")", "")
+	if err != nil {
+		return setupChoices{}, err
+	}
+	var priceMicros uint64
+	if strings.TrimSpace(priceText) != "" {
+		if priceMicros, err = parseUSDThreshold(priceText, "trade price"); err != nil {
+			return setupChoices{}, err
+		}
+	}
+
 	return setupChoices{
 		directory: directory, direction: direction, accountKeypair: account,
 		mithrilCommand: mithril, mithrilConfig: mithrilConfig,
-		nodeCommand: node, quoteScript: quote,
+		nodeCommand: node, quoteScript: quote, quoteSocket: given.quoteSocket,
+		priceMicros: priceMicros,
 	}, nil
 }
 
@@ -290,6 +317,15 @@ func guideTelegramLink(p *prompter) error {
 	if tokenSet && chatsSet {
 		p.sayf("\nTelegram: configured. It is read-only — it can report status but")
 		p.sayf("cannot enable, sign, or submit anything.")
+		p.sayf("")
+		// Saying "configured" and stopping was the whole bug: the variables being
+		// set starts nothing. Alerts come from a SEPARATE process, and until it is
+		// running the operator waits for a message nothing exists to send.
+		p.sayf("Nothing sends alerts yet — that is a separate process. Check it")
+		p.sayf("works, then leave it running:")
+		p.sayf("")
+		p.sayf("  mithril-agent-telegram test")
+		p.sayf("  mithril-agent-telegram --status-socket PATH --cursor PATH")
 		return nil
 	}
 
@@ -304,6 +340,10 @@ func guideTelegramLink(p *prompter) error {
 	p.sayf("")
 	p.sayf("  %s=<token from @BotFather>", telegramoperator.BotTokenEnvironment)
 	p.sayf("  %s=<your numeric chat id>", telegramoperator.AllowedIDsEnvironment)
+	p.sayf("")
+	p.sayf("`mithril-agent-telegram link` prints your chat ID; Telegram never")
+	p.sayf("shows it. Then `mithril-agent-telegram test` proves a message can")
+	p.sayf("actually reach you, before a real trade depends on it.")
 	p.sayf("")
 	p.sayf("Only the chat IDs you list can talk to it, and it never accepts a")
 	p.sayf("command that would authorise a trade.")
@@ -346,7 +386,14 @@ func configureSwapProfile(
 		return "", errors.New("could not create the setup directory")
 	}
 	if _, err := os.Lstat(profileDir); err == nil {
+		if !usableConfigPath(configPath) {
+			return "", errors.New("trading profile directory exists but config.json is missing")
+		}
 		p.sayf("\nTrading profile: already configured, leaving it alone.")
+		if err := recordCurrentConfig(configPath); err != nil {
+			p.sayf("Could not note this location, so later commands will need")
+			p.sayf("--config %s", configPath)
+		}
 		return configPath, nil
 	}
 	if os.Getenv("MITHRIL_AGENT_PRIMARY_RPC_URL") == "" ||
@@ -372,16 +419,27 @@ func configureSwapProfile(
 		return "", err
 	}
 
+	// The direction the operator already chose picks the field. Asking them to
+	// name "sell_at_or_above" as well would be one more way to get it backwards.
+	var sellAt, buyAt uint64
+	if choices.direction == "buy" {
+		buyAt = choices.priceMicros
+	} else {
+		sellAt = choices.priceMicros
+	}
+
 	p.sayf("\nReading a live Devnet quote (read-only — nothing is signed)...")
 	options := swapSetupOptions{
 		directory: profileDir, direction: choices.direction,
 		walletKeypair:  choices.accountKeypair,
 		mithrilCommand: choices.mithrilCommand, mithrilConfig: choices.mithrilConfig,
 		nodeCommand: choices.nodeCommand, quoteScript: choices.quoteScript,
+		quoteSocket:   choices.quoteSocket,
 		inputLamports: defaultSwapInputLamports, slippageBPS: 100,
 		reserveLamports: defaultSwapReserve, maxFeeLamports: defaultSwapMaxFee,
 		scheduleWindow: time.Hour,
 		primaryTrust:   primary, secondaryTrust: secondary,
+		sellAtMicros: sellAt, buyAtMicros: buyAt,
 		confirmQuote: func(quote quoteConfirmation) error {
 			return confirmQuoteWithOperator(p, quote)
 		},
@@ -405,9 +463,6 @@ func configureSwapProfile(
 		}
 		return "", err
 	}
-	if err := json.NewEncoder(output).Encode(result); err != nil {
-		return "", err
-	}
 	// Recording where this went is a convenience, not a requirement: if it
 	// fails the operator can still pass --config, so say so and carry on.
 	if err := recordCurrentConfig(result.ConfigPath); err != nil {
@@ -418,6 +473,28 @@ func configureSwapProfile(
 }
 
 var errQuoteDeclined = errors.New("the quote was not confirmed")
+
+// quoteDeclined distinguishes the two ways a confirmation fails, because they
+// are opposite facts wearing one sentence.
+//
+// Interactively, "no" is an ANSWER: the operator read the floor and rejected
+// it, and there is nothing further to say. Non-interactively nobody was ever
+// asked — the prompt defaulted to no against a closed stdin — and "the quote
+// was not confirmed" is then a dead end. That is how a scripted setup ends with
+// a true statement the operator cannot act on.
+//
+// The value the run would have written is known right here, so the refusal
+// carries it: an operator can paste the flag and continue instead of working
+// out which number the tool wanted.
+func quoteDeclined(interactive bool, flag string, value uint64) error {
+	if interactive {
+		return errQuoteDeclined
+	}
+	return fmt.Errorf(
+		"%w: nothing could ask you, because this run has no terminal. "+
+			"Confirm the floor this quote produced by re-running with:  %s %d",
+		errQuoteDeclined, flag, value)
+}
 
 // confirmQuoteWithOperator shows the floor in the operator's units and asks.
 // It defaults to no: holding Enter through the wizard must never write a
@@ -483,9 +560,29 @@ func finishGuidedSetup(p *prompter, choices setupChoices, configPath string) err
 		p.sayf("  2. Deal with the reason the trading profile was skipped,")
 		p.sayf("     shown above, then run: mithril-agent setup")
 	}
-	p.sayf("  3. When doctor reports ready, a demonstration is a separate,")
-	p.sayf("     explicit command. This setup did not authorise one.")
-	return nil
+	if configPath != "" {
+		// The runner is the only long-lived process here, and demo has nothing
+		// to act for it without one. Listing the commands you run and stop
+		// while omitting the one you leave running is why the runner was the
+		// step people missed.
+		p.sayf("  3. Leave the runner going in another terminal:")
+		p.sayf("     mithril-agent swap run --config %s", configPath)
+		p.sayf("  4. Then, and only then, a demonstration is a separate explicit")
+		p.sayf("     command. This setup did not authorise one.")
+	} else {
+		p.sayf("  3. When doctor reports ready, a demonstration is a separate,")
+		p.sayf("     explicit command. This setup did not authorise one.")
+	}
+	if configPath != "" {
+		// The trading profile is the thing setup exists to write. Reporting
+		// success without it let a wizard that skipped the profile end with a
+		// cheerful "Next" list and exit 0, which reads as "it worked".
+		p.sayf("")
+		p.sayf("  Alerts are a separate process. Prove it can reach you:")
+		p.sayf("    mithril-agent-telegram test")
+		return nil
+	}
+	return errors.New("setup wrote no trading profile; the reason is above")
 }
 
 // missingSetupInputs names the host prerequisites that are absent. It checks

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/agent"
@@ -38,13 +39,15 @@ const swapUsage = `Usage:
   mithril-agent swap check --config PATH
   mithril-agent swap demo --config PATH [--timeout DURATION] [--json]
   mithril-agent swap run --config PATH [--interval DURATION] [--metrics-address ADDRESS]
+                           [--quote-socket PATH]
   mithril-agent swap enable --config PATH --duration DURATION [--max-actions N] --reason TEXT
   mithril-agent swap stop --config PATH --reason TEXT
   mithril-agent swap acknowledge --config PATH --action-id SHA256 --outcome failed|halted --reason TEXT
   mithril-agent swap drain --config PATH [--timeout DURATION] --reason TEXT
   mithril-agent swap status --config PATH
   mithril-agent swap fingerprint --config PATH
-  mithril-agent swap discover --direction sell|buy (--owner ADDRESS | --wallet-keypair PATH) --node-command PATH --quote-script PATH [amount options] [--slippage-bps N]`
+  mithril-agent swap discover --direction sell|buy (--owner ADDRESS | --wallet-keypair PATH) --node-command PATH --quote-script PATH [amount options] [--slippage-bps N] [--floor-tolerance-bps N]
+  mithril-agent swap challenge (--wallet PATH | --agent ADDRESS) --to ADDRESS [--json]`
 
 const swapSetupUsage = `Usage: mithril-agent swap setup [options]
 
@@ -72,7 +75,8 @@ Optional limits:
   --daily-native-fee-cap-lamports N
   --schedule-window DURATION
   --sell-at-usd PRICE
-  --buy-at-usd PRICE`
+  --buy-at-usd PRICE
+  --floor-tolerance-bps N`
 
 const swapStepTimeout = 2 * time.Minute
 
@@ -108,6 +112,8 @@ func runSwap(ctx context.Context, args []string, output io.Writer) error {
 		return runSwapFingerprint(args[1:], output)
 	case "discover":
 		return runSwapDiscover(ctx, args[1:], output)
+	case "challenge":
+		return runSweepChallenge(args[1:], output)
 	default:
 		return fmt.Errorf("unknown swap command %q; run mithril-agent swap --help", args[0])
 	}
@@ -124,9 +130,16 @@ func runSwapDiscover(ctx context.Context, args []string, output io.Writer) error
 	inputLamports := flags.Uint64("input-lamports", defaultSwapInputLamports, "exact Devnet input amount")
 	spendUSDC := flags.String("spend-usdc", "", "exact Devnet devUSDC amount")
 	slippageBPS := flags.Uint("slippage-bps", 100, "maximum slippage in basis points")
+	// Setup writes the floor this prints, so discovery has to apply the same
+	// tolerance. Otherwise the operator confirms one number and a different,
+	// looser one is signed into the policy.
+	floorToleranceBPS := flags.Uint(
+		"floor-tolerance-bps", 0,
+		"how far below the quote the route floor may sit; must match swap setup",
+	)
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent swap discover --direction sell|buy (--owner ADDRESS | --wallet-keypair PATH) --node-command PATH --quote-script PATH [amount options] [--slippage-bps N]")
+			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent swap discover --direction sell|buy (--owner ADDRESS | --wallet-keypair PATH) --node-command PATH --quote-script PATH [amount options] [--slippage-bps N] [--floor-tolerance-bps N]")
 			return writeErr
 		}
 		return err
@@ -159,6 +172,11 @@ func runSwapDiscover(ctx context.Context, args []string, output io.Writer) error
 	if *slippageBPS == 0 || *slippageBPS > 500 {
 		return errors.New("swap discover slippage must be between 1 and 500 basis points")
 	}
+	// Bound before the uint16 cast, so a typo cannot truncate into a real
+	// concession. Must match the bound swap setup enforces.
+	if *floorToleranceBPS > 2_000 {
+		return errors.New("swap discover floor tolerance must be at most 2000 basis points")
+	}
 	discoveredOwner := *owner
 	if *walletKeypair != "" {
 		walletPath, err := cleanExistingPath(*walletKeypair)
@@ -184,6 +202,12 @@ func runSwapDiscover(ctx context.Context, args []string, output io.Writer) error
 		if err != nil {
 			return err
 		}
+		policy.MinOutputLamports, err = relaxRouteFloor(
+			policy.MinOutputLamports, uint16(*floorToleranceBPS),
+		)
+		if err != nil {
+			return err
+		}
 		return json.NewEncoder(output).Encode(struct {
 			Direction string               `json:"direction"`
 			Spend     uint64               `json:"input_token_amount"`
@@ -193,6 +217,12 @@ func runSwapDiscover(ctx context.Context, args []string, output io.Writer) error
 	policy, err := swapSetupDiscover(
 		ctx, discoveredOwner, *nodeCommand, *quoteScript,
 		*inputLamports, uint16(*slippageBPS),
+	)
+	if err != nil {
+		return err
+	}
+	policy.MinOutputAmount, err = relaxRouteFloor(
+		policy.MinOutputAmount, uint16(*floorToleranceBPS),
 	)
 	if err != nil {
 		return err
@@ -336,12 +366,19 @@ func runSwapFingerprint(args []string, output io.Writer) error {
 	}{ProfileSHA256: fingerprint})
 }
 
+// maxSwapActionsPerActivation matches the control state machine's own ceiling
+// (internal/control.maxActivationActions). Keeping the two equal means an
+// activation this command accepts is one the state machine will also accept:
+// a larger number here would be refused later, after the operator believed it
+// had been granted.
+const maxSwapActionsPerActivation = 100
+
 func runSwapEnable(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("swap enable", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	configPath := flags.String("config", "", "agent config JSON")
 	duration := flags.Duration("duration", 0, "bounded activation lifetime")
-	maxActions := flags.Uint("max-actions", 1, "must be 1 for the Devnet pilot")
+	maxActions := flags.Uint("max-actions", 1, "trades this activation permits, 1..100")
 	reason := flags.String("reason", "", "operator reason")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -356,12 +393,53 @@ func runSwapEnable(args []string, output io.Writer) error {
 	if *duration < time.Minute || *duration > 24*time.Hour {
 		return errors.New("swap activation must last between 1 minute and 24 hours")
 	}
-	if *maxActions != 1 {
-		return errors.New("the Devnet swap pilot allows exactly one action per activation")
+	// An activation is the only thing standing between a configured agent and
+	// an autonomous one, so its bound is the operator's real risk dial: at
+	// most this many trades, for at most this long, and nothing after either
+	// runs out without a fresh deliberate activation.
+	//
+	// Every other limit still applies underneath and none of them is relaxed
+	// here — per-trade input and fee caps, the signer's durable daily debit
+	// ledger, the price trigger, and the schedule window. This bound is a
+	// ceiling on top of those, never a replacement for them.
+	if *maxActions == 0 || *maxActions > maxSwapActionsPerActivation {
+		return fmt.Errorf(
+			"an activation must permit between 1 and %d trades",
+			maxSwapActionsPerActivation)
 	}
 	cfg, err := readSwapConfig(*configPath)
 	if err != nil {
 		return err
+	}
+	// A trade's identity is derived from its schedule window, so one window
+	// yields at most one trade and an activation can never spend more slots
+	// than it contains windows. Granting more would read to the operator as
+	// permission they have, and quietly never be usable — a dial that lies
+	// about its own range is worse than a smaller dial.
+	// An activation always overlaps the window already in progress, so the
+	// windows it can touch is one more than the whole windows it spans.
+	windows := uint(duration.Seconds())/uint(cfg.Swap.ScheduleWindowSeconds) + 1
+	if *maxActions > windows {
+		return fmt.Errorf(
+			"a %s activation reaches at most %d schedule windows of %ds, and a window permits one "+
+				"trade; ask for at most %d, lengthen --duration, or set a shorter --schedule-window at setup",
+			*duration, windows, cfg.Swap.ScheduleWindowSeconds, windows)
+	}
+	// The same reasoning as the window bound above, against the other limit an
+	// activation cannot exceed: the signer's daily caps. Granting more trades
+	// than they fund is a dial that lies about its range, and it lies silently —
+	// the signer refuses each extra trade, the refusal is a category rather than
+	// a sentence, and the operator sees an expired blockhash a minute later.
+	//
+	// It lives HERE, not only in strategy enable, because this is the function
+	// every arming path routes through: `swap enable` by hand, `swap demo`, and
+	// each leg of `strategy enable`. Guarding only the strategy caller left the
+	// documented single-leg path with no bound at all.
+	if funded := cfg.Swap.FundedTradesPerDay(); uint64(*maxActions) > funded {
+		return fmt.Errorf(
+			"this profile's daily caps fund %d trade(s) per day, not %d; ask for at most %d, "+
+				"or run setup again with a higher --trades-per-day",
+			funded, *maxActions, funded)
 	}
 	fingerprint, err := cfg.Swap.Fingerprint()
 	if err != nil {
@@ -626,7 +704,9 @@ func runSwapDrain(ctx context.Context, args []string, output io.Writer) error {
 	for {
 		status, err := stateFile.Status()
 		if err != nil {
-			return errors.New("new actions are stopped, but control status cannot be read")
+			// Naming the cause matters more here than anywhere: this is the brake,
+			// and an operator who is told only that it failed has nothing to act on.
+			return fmt.Errorf("new actions are stopped, but control status cannot be read: %w", err)
 		}
 		view, err := operatorstatus.CurrentView(
 			operatorstatus.Path(cfg.Journal.Path),
@@ -637,7 +717,7 @@ func runSwapDrain(ctx context.Context, args []string, output io.Writer) error {
 			time.Now().UTC(),
 		)
 		if err != nil {
-			return errors.New("new actions are stopped, but runner status cannot be read")
+			return fmt.Errorf("new actions are stopped, but runner status cannot be read: %w", err)
 		}
 		switch swapDrainState(view, stopRequestedAt) {
 		case "drained":
@@ -679,9 +759,10 @@ func runSwapLoop(ctx context.Context, args []string, output io.Writer) (runErr e
 	configPath := flags.String("config", "", "agent config JSON")
 	interval := flags.Duration("interval", 10*time.Second, "delay between lifecycle steps")
 	metricsAddress := flags.String("metrics-address", "127.0.0.1:9191", "loopback Prometheus listen address")
+	quoteSocket := flags.String("quote-socket", "", "override quote transport with this local socket")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent swap run --config PATH [--interval DURATION] [--metrics-address ADDRESS]")
+			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent swap run --config PATH [--interval DURATION] [--metrics-address ADDRESS] [--quote-socket PATH]")
 			return writeErr
 		}
 		return err
@@ -692,10 +773,14 @@ func runSwapLoop(ctx context.Context, args []string, output io.Writer) (runErr e
 	if *interval < time.Second || *interval > 30*time.Second {
 		return errors.New("swap interval must be between 1 and 30 seconds")
 	}
-	if checkPreflight(*configPath).Status != preflightOK {
+	if *quoteSocket != "" &&
+		(!filepath.IsAbs(*quoteSocket) || filepath.Clean(*quoteSocket) != *quoteSocket) {
+		return errors.New("quote socket must be an absolute clean path")
+	}
+	if !swapPreflightAllowsStartup(checkPreflight(*configPath)) {
 		return errors.New("swap preflight failed; run mithril-agent preflight for details")
 	}
-	runtime, err := openSwapRuntime(*configPath, true)
+	runtime, err := openSwapRuntime(*configPath, true, *quoteSocket)
 	if err != nil {
 		return err
 	}
@@ -708,6 +793,19 @@ func runSwapLoop(ctx context.Context, args []string, output io.Writer) (runErr e
 	return runDevnetCycles(
 		ctx, runtime, metrics, serverErrors, output, *interval, swapStepTimeout,
 	)
+}
+
+// A node still building its first snapshot has no state file for MCP to read.
+// The runtime can safely start in that state: every cycle remains fail-closed,
+// publishes why it is waiting, and recovers when the node becomes ready. No
+// other failed preflight is allowed through.
+func swapPreflightAllowsStartup(summary preflightSummary) bool {
+	if summary.Status == preflightOK {
+		return true
+	}
+	mcpPending := summary.Checks.MCPInputs == preflightFailed
+	summary.Checks.MCPInputs = preflightOK
+	return mcpPending && allPreflightChecksOK(summary.Checks)
 }
 
 func runSwapStatus(args []string, output io.Writer) error {
@@ -856,11 +954,14 @@ func quoteBuilderConfig(cfg config) swapbuilder.Config {
 	}
 }
 
-func openSwapRuntime(configPath string, requireFreshActivation bool) (*swapRuntime, error) {
+func openSwapRuntime(
+	configPath string, requireFreshActivation bool, quoteSocket string,
+) (*swapRuntime, error) {
 	cfg, err := readSwapConfig(configPath)
 	if err != nil {
 		return nil, err
 	}
+	applyQuoteSocketOverride(&cfg, quoteSocket)
 	fingerprint, err := cfg.Swap.Fingerprint()
 	if err != nil {
 		return nil, err
@@ -923,6 +1024,15 @@ func openSwapRuntime(configPath string, requireFreshActivation bool) (*swapRunti
 	}, nil
 }
 
+func applyQuoteSocketOverride(cfg *config, quoteSocket string) {
+	if quoteSocket == "" {
+		return
+	}
+	cfg.Quote.Command = ""
+	cfg.Quote.ScriptPath = ""
+	cfg.Quote.SocketPath = quoteSocket
+}
+
 // Alerts re-reads the current alert slots so a threshold edit takes effect
 // without restarting the runner. On any read or validation failure it reports
 // no alerts configured: for a notify-only feature, silence plus the
@@ -980,7 +1090,6 @@ func (runtime *swapRuntime) ControlStatus() (control.Status, error) { return run
 func (runtime *swapRuntime) StopNewActions(actionID, outcome string) error {
 	return runtime.control.StopForTerminal(actionID, outcome)
 }
-
 func (runtime *swapRuntime) RecordStatus(
 	at time.Time,
 	result execution.Result,
@@ -1171,6 +1280,9 @@ func runSwapCheck(ctx context.Context, args []string, output io.Writer) (returnE
 	stage = "mithril_observation"
 	observation, err := dependencies.observer.Observe(checkCtx, profile.Owner())
 	if err != nil {
+		if failure := mcpobserve.FailureStage(err); failure != "" {
+			stage += "_" + failure
+		}
 		return err
 	}
 	if comparison := observation.Health.CrossCheck; comparison != nil {
@@ -1199,7 +1311,14 @@ func runSwapCheck(ctx context.Context, args []string, output io.Writer) (returnE
 	var priceStatus *pricetrigger.Status
 	if dependencies.prices != nil {
 		stage = "price_evidence"
-		evidence, err := dependencies.prices.Evaluate(checkCtx, *profile.PriceTrigger)
+		// The default feed is an on-chain account read through this operator's
+		// own node, and such a source refuses a read that names no proved slot.
+		// The observation above has already been validated, so bind to it: an
+		// unbound read here would report the rule as unreadable on a node that
+		// is in fact healthy.
+		evidence, err := dependencies.prices.EvaluateAtSlot(
+			checkCtx, *profile.PriceTrigger, observation.Account.Slot,
+		)
 		if err != nil {
 			return errors.New("price evidence is unavailable")
 		}
@@ -1361,7 +1480,11 @@ func runSwapCheck(ctx context.Context, args []string, output io.Writer) (returnE
 		PriceTrigger  *pricetrigger.Status `json:"price_trigger,omitempty"`
 	}{
 		"ready", profile.Cluster, checkNode(observation, lagSlots, lagThreshold),
-		profile.Route.Pool, describePriceSource(profile.PriceTrigger),
+		// Route.Pool is empty on a buy by construction — Validate requires the
+		// sell route to be the zero value there — so reading the field directly
+		// printed a blank pool on the one screen an operator checks before
+		// arming. The accessor resolves the direction.
+		profile.Pool(), describePriceSource(profile.PriceTrigger),
 		checkPolicy(profile), quote.TokenMinOut, fee.Lamports, simulation.ContextSlot,
 		simulation.UnitsConsumed, routeRent, priceStatus,
 	})

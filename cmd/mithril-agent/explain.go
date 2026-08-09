@@ -10,15 +10,15 @@ import (
 // installing anything.
 const explainText = `What this is
 ------------
-A deterministic program that performs ONE token swap on Solana Devnet, only
-after an operator explicitly allows it, and then returns itself to a stopped
-state. Devnet is a test network: the tokens on it have no monetary value.
+A deterministic Solana Devnet trading runner. It can perform one bounded demo
+swap, or run explicitly configured sell, buy, and sweep legs within short-lived
+grants and daily spending caps. Devnet tokens have no monetary value.
 
 What it can do
 --------------
   - Swap between SOL and devUSDC on one fixed, pre-reviewed Orca pool.
-  - Perform at most ONE swap per explicit grant. The grant is short-lived and
-    is consumed by the attempt, not by success.
+  - Perform one swap in demo mode. Strategy mode declares a short duration and
+    a maximum action count for each leg; the signer applies separate daily caps.
   - Wait for an optional price condition before acting, then re-check the
     market and the route again immediately before sending.
   - Report what it did: status, last trade, current price rule, and a sealed
@@ -31,10 +31,11 @@ What it cannot do
   - Its trading side cannot touch Mainnet. There is no Mainnet execution path,
     and a wrong network stops it before anything is signed.
   - It cannot trade a token or venue other than the one fixed pair above.
-  - It cannot act twice on one grant, or resume acting after a restart. It
-    always restarts stopped.
-  - It has no strategy. It does not decide what or when to trade; a human sets
-    the rule and allows each action.
+  - It cannot exceed a grant's duration or action count, its schedule window,
+    or the signer's daily caps. It always restarts stopped.
+  - It has no built-in market strategy. A human sets the price and size rules
+    and grants a bounded window; configured legs may act automatically inside
+    that window, action count, schedule, and the signer's daily caps.
   - No language model can authorize, price, approve, sign, submit, or confirm
     anything. Model output is optional explanation text only.
   - Telegram and MCP can only read and report. There is no command, button, or

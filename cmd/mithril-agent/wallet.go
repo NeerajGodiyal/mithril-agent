@@ -12,10 +12,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
+	"github.com/Overclock-Validator/mithril-agent/orcaswap"
 	"github.com/Overclock-Validator/mithril-agent/solana"
 )
 
@@ -37,6 +39,8 @@ const (
 	walletUsage = `Usage:
   mithril-agent wallet check --file PATH    check the account the agent will use
   mithril-agent wallet new   --file PATH    create a DEVNET-ONLY agent account
+  mithril-agent wallet verify --session SESSION
+                                             verify a payout wallet from your Mac
 
 The agent uses a dedicated account, never your own wallet. Fund that account
 from your own wallet with only the amount you are willing to put at risk; the
@@ -66,6 +70,8 @@ func runWallet(ctx context.Context, args []string, output io.Writer) error {
 		return runWalletCheck(ctx, args[1:], output)
 	case "new":
 		return runWalletNew(args[1:], output)
+	case "verify":
+		return runWalletVerify(ctx, args[1:], output)
 	default:
 		return fmt.Errorf("unknown wallet command %q; run mithril-agent wallet --help", args[0])
 	}
@@ -238,8 +244,113 @@ func walletRPC(ctx context.Context, method string, params []any, out any) error 
 		return errors.New("the Devnet endpoint could not be reached")
 	}
 	defer response.Body.Close()
-	if err := json.NewDecoder(io.LimitReader(response.Body, walletMaxResponse)).Decode(out); err != nil {
+	body, err = io.ReadAll(io.LimitReader(response.Body, walletMaxResponse))
+	if err != nil {
+		return errors.New("the Devnet endpoint returned an unreadable response")
+	}
+	return decodeWalletResponse(body, out)
+}
+
+// decodeWalletResponse rejects a JSON-RPC error before decoding the result.
+// Decoding only the result made a provider failure — a rate limit, most often,
+// and the public endpoint rate-limits readily — indistinguishable from a
+// successful "no such account": the caller saw a nil value and no error. That
+// is how the sweep setup told an operator their destination did not exist on
+// Devnet while it held 8.55 SOL. An unknown answer must stay unknown.
+func decodeWalletResponse(body []byte, out any) error {
+	var envelope struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return errors.New("the Devnet endpoint returned an unreadable response")
+	}
+	if envelope.Error != nil {
+		// The provider's own text is echoed, bounded; the endpoint is not, so
+		// nothing about the operator's configuration leaks into a log.
+		message := envelope.Error.Message
+		if len(message) > 120 {
+			message = message[:120]
+		}
+		return fmt.Errorf("the Devnet endpoint refused the read (%d): %s", envelope.Error.Code, message)
+	}
+	if err := json.Unmarshal(body, out); err != nil {
 		return errors.New("the Devnet endpoint returned an unreadable response")
 	}
 	return nil
+}
+
+// walletLamports reads the native balance from the pinned public Devnet
+// endpoint. It is advisory: nothing authorizes on it, so it is deliberately not
+// routed through the agent's own node or its evidence gates.
+func walletLamports(ctx context.Context, address string) (uint64, error) {
+	var result struct {
+		Result struct {
+			Value uint64 `json:"value"`
+		} `json:"result"`
+	}
+	if err := walletRPC(ctx, "getBalance", []any{address}, &result); err != nil {
+		return 0, err
+	}
+	return result.Result.Value, nil
+}
+
+// walletTokenBalance reads the wallet's canonical associated token account.
+// Exists stays separate from amount because an empty account is still usable
+// by a buy profile, while a missing account is not.
+func walletTokenBalance(ctx context.Context, owner, mint string) (amount uint64, exists bool, err error) {
+	account, err := orcaswap.AssociatedTokenAddress(owner, mint)
+	if err != nil {
+		return 0, false, errors.New("derive the wallet's token account")
+	}
+	var result struct {
+		Result struct {
+			Value struct {
+				Amount string `json:"amount"`
+			} `json:"value"`
+		} `json:"result"`
+	}
+	if err := walletRPC(ctx, "getTokenAccountBalance", []any{account}, &result); err != nil {
+		// An account that has never existed is the ordinary starting state and
+		// reads as zero. Anything else is a provider failure and must NOT: this
+		// is the same trap that made the sweep setup announce that every
+		// destination was absent, because it could not tell a rate limit from
+		// an empty answer. Reporting zero here would tell an operator their
+		// round trip cannot fund its buy leg when in fact nothing was read.
+		if isAccountNotFound(err) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	if result.Result.Value.Amount == "" {
+		return 0, false, errors.New("the Devnet endpoint returned a token balance with no amount")
+	}
+	amount, err = strconv.ParseUint(result.Result.Value.Amount, 10, 64)
+	if err != nil {
+		return 0, false, errors.New("the token balance is not a whole number of base units")
+	}
+	return amount, true, nil
+}
+
+// walletTokenAmount keeps balance callers simple. A missing account is zero,
+// which is the right answer for funding and status checks.
+func walletTokenAmount(ctx context.Context, owner, mint string) (uint64, error) {
+	amount, _, err := walletTokenBalance(ctx, owner, mint)
+	return amount, err
+}
+
+// isAccountNotFound distinguishes "this account has never existed" from every
+// other failure. The endpoint reports an unknown account as a JSON-RPC error
+// rather than an empty result, so without this a rate limit and an empty wallet
+// are the same answer — and the safe reading of the two is opposite.
+func isAccountNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	// ONLY this phrase. Matching bare "not found" or "invalid param" swallowed
+	// "-32601 Method not found" and reported a broken endpoint as an empty
+	// wallet, which is the very confusion this function exists to prevent.
+	return strings.Contains(strings.ToLower(err.Error()), "could not find account")
 }

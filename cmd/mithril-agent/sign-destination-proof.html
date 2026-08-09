@@ -1,0 +1,207 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mithril Agent — verify your payout wallet</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  Proving control of the sweep destination previously had exactly one route:
+  `solana sign-offchain-message -k YOUR_WALLET_KEYPAIR`. That asks for a keypair
+  FILE, which somebody holding their wallet in Solflare or Phantom does not
+  have and should not be made to export. The Go verifier already accepts a raw
+  browser signMessage signature (internal/offchainmsg/offchainmsg.go:63-73), so
+  the capability was there with no way to invoke it. This page is that way.
+
+  It is deliberately one static file with no dependencies, fonts, images, or
+  third-party network calls. The wallet extension is the only external object
+  it talks to, and it only asks for a signature over text shown in full.
+-->
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0 auto; padding: clamp(1rem, 3vw, 2.5rem); max-width: 54rem;
+    font: 500 clamp(0.95rem, 0.9rem + 0.2vw, 1.05rem)/1.6 ui-sans-serif, system-ui, sans-serif;
+  }
+  h1 { font-size: clamp(1.3rem, 1.1rem + 1vw, 1.9rem); line-height: 1.2; margin: 0 0 0.5rem; }
+  p.lede { margin: 0 0 2rem; opacity: 0.8; }
+  section { margin: 0 0 1.75rem; }
+  h2 { font-size: 1rem; letter-spacing: 0.02em; text-transform: uppercase; opacity: 0.65; margin: 0 0 0.6rem; }
+  textarea, output {
+    display: block; width: 100%; box-sizing: border-box; padding: 0.75rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem;
+    line-height: 1.5; word-break: break-all; border: 1px solid; border-radius: 8px;
+    background: canvas; color: canvastext; min-height: 3rem;
+  }
+  textarea { min-height: 7rem; resize: vertical; }
+  button {
+    font: inherit; font-weight: 600; padding: 0.7rem 1.2rem; min-height: 44px;
+    border-radius: 8px; border: 1px solid; cursor: pointer;
+    background: canvastext; color: canvas;
+  }
+  button[disabled] { opacity: 0.45; cursor: not-allowed; }
+  .served .manual-only { display: none; }
+  .row { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
+  .note { font-size: 0.9rem; opacity: 0.75; margin: 0.6rem 0 0; }
+  .bad { color: #b3261e; font-weight: 600; }
+  .good { color: #146c2e; font-weight: 600; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.35rem 1rem; margin: 0; }
+  dt { opacity: 0.65; }
+  dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; word-break: break-all; }
+</style>
+
+<h1>Verify your payout wallet</h1>
+<p class="lede">
+  This proves you control the wallet where the agent may send profit. It does
+  not give the agent access to this wallet, sign a transaction, or move funds.
+</p>
+
+<section class="manual-only">
+  <h2>Challenge</h2>
+  <textarea id="challenge" spellcheck="false"
+    placeholder="mithril-agent sweep destination proof v1|agent:…|destination:…|nonce:…|issued:…"></textarea>
+  <p class="note" id="parsed">Paste the exact line the setup command printed.</p>
+</section>
+
+<section>
+  <h2>Review</h2>
+  <dl>
+    <dt>Destination</dt><dd id="destination">—</dd>
+    <dt>Agent account</dt><dd id="agent">—</dd>
+    <dt>Your wallet</dt><dd id="connected">not connected</dd>
+  </dl>
+  <p class="note">
+    The destination must equal your wallet. If they differ, stop — you would be
+    authorising an account you do not control.
+  </p>
+</section>
+
+<section>
+  <h2>Verify</h2>
+  <div class="row">
+    <button id="phantom">Use Phantom</button>
+    <button id="solflare">Use Solflare</button>
+    <button id="sign" disabled>Verify payout wallet</button>
+  </div>
+  <p class="note" id="status"></p>
+</section>
+
+<section class="manual-only">
+  <h2>Copy the signature</h2>
+  <output id="signature">—</output>
+  <p class="note">Paste this into the setup command as <code>--proof-signature</code>.</p>
+</section>
+
+<script>
+// base58, implemented here because this file loads nothing from anywhere.
+const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+function base58(bytes) {
+  const digits = [0];
+  for (const byte of bytes) {
+    let carry = byte;
+    for (let i = 0; i < digits.length; i++) {
+      carry += digits[i] << 8;
+      digits[i] = carry % 58;
+      carry = (carry / 58) | 0;
+    }
+    while (carry > 0) { digits.push(carry % 58); carry = (carry / 58) | 0; }
+  }
+  let out = "";
+  for (const byte of bytes) { if (byte === 0) { out += "1"; } else { break; } }
+  for (let i = digits.length - 1; i >= 0; i--) { out += ALPHABET[digits[i]]; }
+  return out;
+}
+
+const $ = (id) => document.getElementById(id);
+let wallet = null;
+let provider = null;
+
+// Parsed and displayed field by field, so the destination is read rather than
+// assumed. A challenge is only meaningful if the signer checked it.
+function field(text, name) {
+  const match = text.match(new RegExp("\\\\|" + name + ":([^|]+)"));
+  return match ? match[1].trim() : "";
+}
+
+function refresh() {
+  const text = $("challenge").value.trim();
+  const destination = field(text, "destination");
+  const agent = field(text, "agent");
+  $("destination").textContent = destination || "—";
+  $("agent").textContent = agent || "—";
+
+  const wellFormed = text.startsWith("mithril-agent sweep destination proof v1|") &&
+    destination && agent && field(text, "nonce") && field(text, "issued");
+  if (!text) {
+    $("parsed").textContent = "Paste the exact line the setup command printed.";
+    $("parsed").className = "note";
+  } else if (!wellFormed) {
+    $("parsed").textContent = "That does not look like a destination proof challenge.";
+    $("parsed").className = "note bad";
+  } else if (wallet && destination !== wallet) {
+    $("parsed").textContent = "STOP: the destination is not the wallet you connected.";
+    $("parsed").className = "note bad";
+  } else {
+    $("parsed").textContent = "Challenge looks well formed.";
+    $("parsed").className = "note good";
+  }
+  $("sign").disabled = !(wellFormed && wallet && destination === wallet);
+}
+
+$("challenge").addEventListener("input", refresh);
+
+async function connectWallet(nextProvider, name) {
+  provider = nextProvider;
+  if (!provider) {
+    $("status").textContent = name + " is not available in this browser.";
+    $("status").className = "note bad";
+    return;
+  }
+  try {
+    await provider.connect();
+    wallet = provider.publicKey.toString();
+    $("connected").textContent = wallet;
+    $("status").textContent = "";
+    refresh();
+  } catch (error) {
+    $("status").textContent = walletError(error, "The wallet did not connect.");
+    $("status").className = "note bad";
+  }
+}
+
+function walletError(error, fallback) {
+  switch (error && error.code) {
+    case 4001: return "The request was cancelled in the wallet.";
+    case 4100: return "The wallet has not authorised this page. Choose it again.";
+    case -32002: return "The wallet already has a request open. Finish or close it, then try again.";
+    default: return fallback;
+  }
+}
+
+$("phantom").addEventListener("click", () => {
+  const phantom = window.phantom?.solana ||
+    (window.solana?.isPhantom ? window.solana : null);
+  connectWallet(phantom, "Phantom");
+});
+
+$("solflare").addEventListener("click", () => {
+  const solflare = window.solflare ||
+    (window.solana?.isSolflare ? window.solana : null);
+  connectWallet(solflare, "Solflare");
+});
+
+$("sign").addEventListener("click", async () => {
+  const text = $("challenge").value.trim();
+  try {
+    // The raw UTF-8 bytes: exactly what the Go verifier's second form checks.
+    const signed = await provider.signMessage(
+      new TextEncoder().encode(text), "utf8");
+    const bytes = signed.signature ?? signed;
+    $("signature").textContent = base58(bytes);
+    $("status").textContent = document.body.classList.contains("served")
+      ? "Signed. Waiting for the agent to verify it."
+      : "Signed. Copy the signature below.";
+    $("status").className = "note good";
+  } catch (error) {
+    $("status").textContent = walletError(error, "The wallet could not sign the message.");
+    $("status").className = "note bad";
+  }
+});
+</script>

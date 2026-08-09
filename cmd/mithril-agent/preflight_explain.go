@@ -23,7 +23,7 @@ var preflightMeaning = map[string]string{
 	"journal_path":             "The audit journal is missing or not privately owned.",
 	"path_separation":          "Two components share a path that must stay separate, so one could overwrite the other's state.",
 	"providers":                "The configured read providers are missing, malformed, or not two independent sources.",
-	"mcp_inputs":               "The service user cannot read the Mithril node state it needs. Grant read access to the state file and the directory needed to reach it — not to the accounts database, logs, wallets, or keys. Re-check this after node maintenance, which can replace the file.",
+	"mcp_inputs":               "The service user cannot read the Mithril node state it needs. Use the dedicated node-state reader group described in the operator guide; grant it to the state file, not to the accounts database, logs, wallets, or keys.",
 	"price_source":             "The configured price sources are incomplete or unusable.",
 	"clock":                    "The host clock is not provably accurate. Signing needs trusted time. Check the time-synchronisation service; this check requires Linux and cannot pass on macOS.",
 }

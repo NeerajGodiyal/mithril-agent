@@ -36,6 +36,11 @@ const (
 	defaultSwapReserve       = uint64(50_000_000)
 	defaultSwapMaxFee        = uint64(100_000)
 	maxSetupFileBytes        = int64(64 << 10)
+	// defaultTradesPerDay funds a few round trips a day. It used to be one,
+	// which meant an unattended strategy made a single trade and then spent the
+	// rest of the UTC day failing invisibly. Still a hard bound, still written
+	// into the fingerprinted profile — just no longer the smallest one possible.
+	defaultTradesPerDay = uint64(6)
 )
 
 var (
@@ -58,22 +63,46 @@ type swapSetupOptions struct {
 	inputTokenAmount   uint64
 	confirmedMinOut    uint64
 	slippageBPS        uint16
+	floorToleranceBPS  uint16
 	reserveLamports    uint64
 	maxFeeLamports     uint64
 	dailyDebitCap      uint64
 	dailyInputTokenCap uint64
 	dailyNativeFeeCap  uint64
-	scheduleWindow     time.Duration
-	primaryTrust       string
-	secondaryTrust     string
-	sellAtMicros       uint64
-	buyAtMicros        uint64
+	// tradesPerDay sizes any daily cap the caller left at zero. Zero here means
+	// one, which is what the caps used to be pinned at unconditionally.
+	tradesPerDay   uint64
+	scheduleWindow time.Duration
+	primaryTrust   string
+	secondaryTrust string
+	sellAtMicros   uint64
+	buyAtMicros    uint64
 	// confirmQuote, when set, replaces the numeric confirmation with a live one
 	// against the route that was just discovered. Both paths enforce the same
 	// property — a human agreed to this exact number — but the callback closes
 	// the window in which the market can move between an operator reading a
 	// quote in one command and setup re-reading it in the next.
 	confirmQuote func(quoteConfirmation) error
+}
+
+// dailyCapFor turns one trade's cost into a whole day's allowance. Both
+// directions size their caps through here so a strategy cannot end up with a
+// grant for several trades and caps that fund one — the mismatch was silent,
+// because the signer's refusal is discarded at the process boundary and only
+// resurfaces a minute later as an expired blockhash.
+//
+// It refuses on overflow rather than saturating: a cap that wrapped to a small
+// number would look like a working strategy that stops after one trade, which
+// is the exact failure this exists to prevent.
+func (o swapSetupOptions) dailyCapFor(perTrade uint64) (uint64, error) {
+	trades := o.tradesPerDay
+	if trades == 0 {
+		trades = 1
+	}
+	if perTrade != 0 && trades > ^uint64(0)/perTrade {
+		return 0, errors.New("daily cap overflows; lower --trades-per-day")
+	}
+	return perTrade * trades, nil
 }
 
 // quoteConfirmation is what an operator is agreeing to: the floor that will be
@@ -94,24 +123,45 @@ func (o swapSetupOptions) confirmMinimumOutput(quote quoteConfirmation) error {
 		return o.confirmQuote(quote)
 	}
 	if o.confirmedMinOut != quote.MinOutput {
-		return errors.New("confirmed minimum output does not match the current read-only quote")
+		// The pool moves between reading a quote and confirming it, so this
+		// mismatch is ordinary rather than exceptional. Refusing is right — the
+		// operator must confirm the floor actually being written, not a stale
+		// one — but naming only the disagreement made the retry a re-derivation:
+		// discover again, parse again, paste again, and race the pool again.
+		//
+		// The current number is in hand at the point of refusal, so it is given.
+		return fmt.Errorf(
+			"confirmed minimum output does not match the current read-only quote: "+
+				"you confirmed %d, the pool now gives %d. The pool moves between reading a "+
+				"quote and confirming it, so re-run with:  --confirm-min-output-amount %d",
+			o.confirmedMinOut, quote.MinOutput, quote.MinOutput)
 	}
 	return nil
 }
 
 type swapSetupResult struct {
-	Status        string   `json:"status"`
-	ConfigPath    string   `json:"config_path"`
-	ProfileSHA256 string   `json:"profile_sha256"`
-	InputLamports uint64   `json:"input_lamports"`
-	InputAmount   uint64   `json:"input_amount"`
-	InputAsset    string   `json:"input_asset"`
-	OutputAsset   string   `json:"output_asset"`
-	MinimumOutput uint64   `json:"minimum_output"`
-	PlanArgv      []string `json:"plan_argv"`
-	PreflightArgv []string `json:"preflight_argv"`
-	LiveCheckArgv []string `json:"live_check_argv"`
-	DemoArgv      []string `json:"demo_argv"`
+	Status        string `json:"status"`
+	ConfigPath    string `json:"config_path"`
+	ProfileSHA256 string `json:"profile_sha256"`
+	InputLamports uint64 `json:"input_lamports"`
+	InputAmount   uint64 `json:"input_amount"`
+	InputAsset    string `json:"input_asset"`
+	OutputAsset   string `json:"output_asset"`
+	MinimumOutput uint64 `json:"minimum_output"`
+	// FundedTradesPerDay is what the written caps actually pay for. It is
+	// reported because it is the number that decides whether an unattended
+	// strategy keeps working after its first trade, and it was previously
+	// derivable only by reading the generated profile and doing the division.
+	FundedTradesPerDay uint64   `json:"funded_trades_per_day"`
+	PlanArgv           []string `json:"plan_argv"`
+	PreflightArgv      []string `json:"preflight_argv"`
+	LiveCheckArgv      []string `json:"live_check_argv"`
+	DemoArgv           []string `json:"demo_argv"`
+	// RunArgv is the one command that must be LEFT RUNNING. Setup emitted the
+	// four commands you run and stop, and omitted the only long-lived one — so
+	// the runner was the single thing the operator was never handed a path for,
+	// and demo has nothing to act for it without one.
+	RunArgv []string `json:"run_argv"`
 }
 
 type swapSetupCommands struct {
@@ -138,9 +188,21 @@ func runSwapSetup(ctx context.Context, args []string, output io.Writer) error {
 		"confirm-min-output-amount", 0, "confirm the current discovered minimum output",
 	)
 	slippageBPS := flags.Uint("slippage-bps", 100, "maximum slippage in basis points")
+	// The route floor is otherwise pinned to the exact quote seen at setup, so
+	// any adverse move — including the price impact of this agent's own trade —
+	// disqualifies every later quote and the agent stops trading. Slippage does
+	// not help: it scales the live quote and the frozen floor equally, so it
+	// cancels. This is the separate, explicit question: how far may the market
+	// move against me before I stop?
+	floorToleranceBPS := flags.Uint(
+		"floor-tolerance-bps", 0,
+		"how far below the confirmed quote the route floor may sit; 0 stops trading on any adverse move",
+	)
 	reserveLamports := flags.Uint64("reserve-lamports", defaultSwapReserve, "wallet reserve")
 	maxFeeLamports := flags.Uint64("max-fee-lamports", defaultSwapMaxFee, "maximum transaction fee")
 	dailyDebitCap := flags.Uint64("daily-debit-cap-lamports", 0, "daily input plus fee cap")
+	tradesPerDay := flags.Uint64("trades-per-day", defaultTradesPerDay,
+		"how many trades a day the daily caps must fund, when they are not named")
 	dailySpendUSDC := flags.String("daily-spend-usdc", "", "daily devUSDC input cap")
 	dailyNativeFeeCap := flags.Uint64(
 		"daily-native-fee-cap-lamports", 0, "daily native transaction-fee cap",
@@ -168,6 +230,19 @@ func runSwapSetup(ctx context.Context, args []string, output io.Writer) error {
 	if *slippageBPS == 0 || *slippageBPS > 500 {
 		return errors.New("swap setup slippage must be between 1 and 500 basis points")
 	}
+	// The same ceiling the strategy file enforces, and the same one the control
+	// state machine puts on actions per grant. Unbounded here, this flag wrote
+	// an arbitrarily large daily spend into the fingerprinted signer policy —
+	// the "count too high" direction, which is the unsafe one.
+	if *tradesPerDay == 0 || *tradesPerDay > maxTradesPerDay {
+		return fmt.Errorf("--trades-per-day must be between 1 and %d", maxTradesPerDay)
+	}
+	// Bound before the uint16 cast below, like the slippage check above. A typed
+	// 70000 would otherwise truncate to 4464 and silently become a real 44.6%
+	// floor concession rather than an error.
+	if *floorToleranceBPS > 2_000 {
+		return errors.New("swap setup floor tolerance must be at most 2000 basis points")
+	}
 	explicit := make(map[string]bool)
 	flags.Visit(func(item *flag.Flag) { explicit[item.Name] = true })
 	var sellAtMicros, buyAtMicros, inputTokenAmount, dailyInputTokenCap uint64
@@ -182,8 +257,16 @@ func runSwapSetup(ctx context.Context, args []string, output io.Writer) error {
 		if err != nil {
 			return err
 		}
+		// A buy has TWO daily caps, and each used to be pinned at one trade's
+		// worth independently. The token cap could then fund six trades while the
+		// fee cap funded one, so the leg stopped after its first trade of the UTC
+		// day with no indication which bound it hit. Both derive from the same
+		// count unless the operator names them.
+		sizing := swapSetupOptions{tradesPerDay: *tradesPerDay}
 		if *dailySpendUSDC == "" {
-			dailyInputTokenCap = inputTokenAmount
+			if dailyInputTokenCap, err = sizing.dailyCapFor(inputTokenAmount); err != nil {
+				return err
+			}
 		} else if dailyInputTokenCap, err = parseDecimalUnits(*dailySpendUSDC, "daily devUSDC spend", ^uint64(0)); err != nil {
 			return err
 		}
@@ -191,10 +274,16 @@ func runSwapSetup(ctx context.Context, args []string, output io.Writer) error {
 			return errors.New("daily devUSDC spend must cover one configured trade")
 		}
 		if *dailyNativeFeeCap == 0 {
-			*dailyNativeFeeCap = *maxFeeLamports
+			// Sized from the trades the TOKEN cap actually funds, not from the
+			// requested count, so an explicit --daily-spend-usdc cannot leave the
+			// fee budget short of the trades it pays for.
+			funded := swapSetupOptions{tradesPerDay: dailyInputTokenCap / inputTokenAmount}
+			if *dailyNativeFeeCap, err = funded.dailyCapFor(*maxFeeLamports); err != nil {
+				return err
+			}
 		}
 		if *buyAtUSD != "" {
-			buyAtMicros, err = parseDecimalUnits(*buyAtUSD, "buy price", pricetrigger.MaxPriceMicros)
+			buyAtMicros, err = parseUSDThreshold(*buyAtUSD, "buy price")
 			if err != nil {
 				return err
 			}
@@ -208,7 +297,7 @@ func runSwapSetup(ctx context.Context, args []string, output io.Writer) error {
 	}
 	if *sellAtUSD != "" {
 		var err error
-		sellAtMicros, err = parseUSDThreshold(*sellAtUSD)
+		sellAtMicros, err = parseUSDThreshold(*sellAtUSD, "sell price")
 		if err != nil {
 			return err
 		}
@@ -236,8 +325,10 @@ func runSwapSetup(ctx context.Context, args []string, output io.Writer) error {
 		quoteScript: *quoteScript, quoteSocket: *quoteSocket,
 		inputLamports: *inputLamports, inputTokenAmount: inputTokenAmount,
 		confirmedMinOut: *confirmedMinOut,
-		slippageBPS:     uint16(*slippageBPS), reserveLamports: *reserveLamports,
-		maxFeeLamports: *maxFeeLamports, dailyDebitCap: *dailyDebitCap,
+		slippageBPS:     uint16(*slippageBPS), floorToleranceBPS: uint16(*floorToleranceBPS),
+		reserveLamports: *reserveLamports,
+		maxFeeLamports:  *maxFeeLamports, dailyDebitCap: *dailyDebitCap,
+		tradesPerDay:       *tradesPerDay,
 		dailyInputTokenCap: dailyInputTokenCap, dailyNativeFeeCap: *dailyNativeFeeCap,
 		scheduleWindow: *scheduleWindow, primaryTrust: *primaryTrust,
 		secondaryTrust: *secondaryTrust,
@@ -338,13 +429,22 @@ func createSwapSetup(ctx context.Context, options swapSetupOptions) (swapSetupRe
 		if err != nil {
 			return swapSetupResult{}, fmt.Errorf("discover Orca buy route: %w", err)
 		}
-		if err := options.confirmMinimumOutput(quoteConfirmation{
-			Direction:  "buy",
-			InputText:  formatUnits(options.inputTokenAmount, 6) + " devUSDC",
-			OutputText: formatUnits(route.MinOutputLamports, 9) + " SOL",
-			MinOutput:  route.MinOutputLamports, SlippageBPS: options.slippageBPS,
-		}); err != nil {
+		route.MinOutputLamports, err = options.agreeOnFloor(
+			route.MinOutputLamports, "buy",
+			formatUnits(options.inputTokenAmount, 6)+" devUSDC", "SOL", 9,
+		)
+		if err != nil {
 			return swapSetupResult{}, err
+		}
+		if options.dailyInputTokenCap == 0 {
+			if options.dailyInputTokenCap, err = options.dailyCapFor(options.inputTokenAmount); err != nil {
+				return swapSetupResult{}, err
+			}
+		}
+		if options.dailyNativeFeeCap == 0 {
+			if options.dailyNativeFeeCap, err = options.dailyCapFor(options.maxFeeLamports); err != nil {
+				return swapSetupResult{}, err
+			}
 		}
 		profile.Name, profile.Version = orcaswap.BuyProfileName, orcaswap.BuyProfileVersion
 		profile.BuyRoute = &route
@@ -359,12 +459,11 @@ func createSwapSetup(ctx context.Context, options swapSetupOptions) (swapSetupRe
 		if err != nil {
 			return swapSetupResult{}, fmt.Errorf("discover Orca route: %w", err)
 		}
-		if err := options.confirmMinimumOutput(quoteConfirmation{
-			Direction:  "sell",
-			InputText:  formatUnits(options.inputLamports, 9) + " SOL",
-			OutputText: formatUnits(route.MinOutputAmount, 6) + " devUSDC",
-			MinOutput:  route.MinOutputAmount, SlippageBPS: options.slippageBPS,
-		}); err != nil {
+		route.MinOutputAmount, err = options.agreeOnFloor(
+			route.MinOutputAmount, "sell",
+			formatUnits(options.inputLamports, 9)+" SOL", "devUSDC", 6,
+		)
+		if err != nil {
 			return swapSetupResult{}, err
 		}
 		if options.dailyDebitCap == 0 {
@@ -372,8 +471,11 @@ func createSwapSetup(ctx context.Context, options swapSetupOptions) (swapSetupRe
 				options.inputLamports+options.maxFeeLamports > ^uint64(0)-route.MaxOutputAccountRentLamports {
 				return swapSetupResult{}, errors.New("swap setup debit cap overflows")
 			}
-			options.dailyDebitCap = options.inputLamports + options.maxFeeLamports +
+			perTrade := options.inputLamports + options.maxFeeLamports +
 				route.MaxOutputAccountRentLamports
+			if options.dailyDebitCap, err = options.dailyCapFor(perTrade); err != nil {
+				return swapSetupResult{}, err
+			}
 		}
 		profile.Name, profile.Version = orcaswap.ProfileName, orcaswap.ProfileVersion
 		profile.Route = route
@@ -527,15 +629,62 @@ func finishSwapSetup(
 		Status: "configured", ConfigPath: paths.config, ProfileSHA256: fingerprint,
 		InputLamports: profile.InputLamports, InputAmount: profile.InputAmount(),
 		InputAsset: inputAsset, OutputAsset: outputAsset, MinimumOutput: minimumOutput,
-		PlanArgv:      []string{commands.agent, "swap", "plan", "--config", paths.config},
-		PreflightArgv: []string{commands.agent, "preflight", "--config", paths.config},
-		LiveCheckArgv: []string{commands.agent, "swap", "check", "--config", paths.config},
-		DemoArgv:      []string{commands.agent, "swap", "demo", "--config", paths.config},
+		FundedTradesPerDay: profile.FundedTradesPerDay(),
+		PlanArgv:           []string{commands.agent, "swap", "plan", "--config", paths.config},
+		PreflightArgv:      []string{commands.agent, "preflight", "--config", paths.config},
+		LiveCheckArgv:      []string{commands.agent, "swap", "check", "--config", paths.config},
+		DemoArgv:           []string{commands.agent, "swap", "demo", "--config", paths.config},
+		RunArgv:            []string{commands.agent, "swap", "run", "--config", paths.config},
 	}, nil
 }
 
-func parseUSDThreshold(value string) (uint64, error) {
-	return parseDecimalUnits(value, "sell price", pricetrigger.MaxPriceMicros)
+// agreeOnFloor relaxes a discovered floor and obtains agreement to that same
+// number, returning what the policy must record. Relaxing and confirming are
+// bound together here because doing them in the wrong order once already
+// signed a floor the operator never saw: they confirmed 21312 and the policy
+// received 20246. Separated, the ordering is a convention a maintainer can
+// break; joined, there is no way to confirm one number and write another.
+func (o swapSetupOptions) agreeOnFloor(
+	discovered uint64, direction, inputText, outputUnit string, outputDecimals uint,
+) (uint64, error) {
+	relaxed, err := relaxRouteFloor(discovered, o.floorToleranceBPS)
+	if err != nil {
+		return 0, err
+	}
+	if err := o.confirmMinimumOutput(quoteConfirmation{
+		Direction:  direction,
+		InputText:  inputText,
+		OutputText: formatUnits(relaxed, outputDecimals) + " " + outputUnit,
+		MinOutput:  relaxed, SlippageBPS: o.slippageBPS,
+	}); err != nil {
+		return 0, err
+	}
+	return relaxed, nil
+}
+
+// relaxRouteFloor lowers a discovered floor by the operator's tolerance.
+//
+// Without it the floor is pinned to the exact quote seen at setup, and the
+// price impact of this agent's own trade is enough to disqualify every later
+// quote. Widening slippage does not help: it scales the live quote and the
+// frozen floor by the same factor, so it cancels out of the comparison.
+func relaxRouteFloor(discovered uint64, toleranceBPS uint16) (uint64, error) {
+	if toleranceBPS == 0 {
+		return discovered, nil
+	}
+	if toleranceBPS >= 10_000 {
+		return 0, errors.New("floor tolerance must be below 100 percent")
+	}
+	remaining := uint64(10_000 - toleranceBPS)
+	relaxed := discovered/10_000*remaining + discovered%10_000*remaining/10_000
+	if relaxed == 0 {
+		return 0, errors.New("floor tolerance would erase the route floor")
+	}
+	return relaxed, nil
+}
+
+func parseUSDThreshold(value, description string) (uint64, error) {
+	return parseDecimalUnits(value, description, pricetrigger.MaxPriceMicros)
 }
 
 func parseDecimalUnits(value, description string, maximum uint64) (uint64, error) {
@@ -599,7 +748,14 @@ func cleanNewSetupPath(path string) (string, error) {
 	}
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		if err == nil {
-			return "", errors.New("swap setup directory already exists")
+			// Refusing to write into an existing directory is right: a half-built
+			// leg mixed with a previous one is unrecoverable. But saying only
+			// that it exists leaves the operator guessing, and the usual cause is
+			// a run that failed a later check and left the directory behind.
+			return "", fmt.Errorf(
+				"%s already exists, and setup will not write into a directory it did not create. "+
+					"Pass a new --dir, or remove that one if it is left over from a failed run",
+				path)
 		}
 		return "", errors.New("inspect swap setup directory")
 	}

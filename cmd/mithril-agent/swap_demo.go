@@ -15,6 +15,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/internal/control"
 	"github.com/Overclock-Validator/mithril-agent/internal/operatorstatus"
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
+	"github.com/Overclock-Validator/mithril-agent/txflow"
 )
 
 const (
@@ -330,7 +331,10 @@ func writeDemoProgress(output io.Writer, jsonOutput bool, message string) error 
 func explainDemoCheckError(err error) error {
 	message := err.Error()
 	switch {
-	case strings.Contains(message, "Mithril node RPC is unavailable"):
+	// Matched on the sentinel, not the sentence: this used to compare strings,
+	// so rewording the error would have quietly dropped the one hint that names
+	// the fix.
+	case errors.Is(err, txflow.ErrNodeUnavailable):
 		return fmt.Errorf("%w; verify MITHRIL_AGENT_MITHRIL_RPC_URL points to the live loopback RPC", err)
 	case strings.Contains(message, "quote"):
 		return fmt.Errorf("%w; verify the quote service is running and its socket is available", err)

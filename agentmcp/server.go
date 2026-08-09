@@ -24,6 +24,51 @@ type Info struct {
 	MainnetEnabled       bool   `json:"mainnet_enabled"`
 }
 
+// StrategySettings is "what am I configured to do", in the form an assistant
+// can read back to the operator. It exists because the settings a person
+// actually asks about — what price do I sell at, how much can it spend, where
+// does profit go — were reachable only by running `strategy show` in a terminal
+// or opening the generated JSON, which is exactly the audience this surface is
+// for.
+//
+// It deliberately carries NO ADDRESS. Info promises to describe the agent
+// "without exposing endpoints, accounts, or credentials", and the sweep
+// destination is an account; whether one is configured and whether its proof is
+// valid answers every operational question without naming it. The operator can
+// read their own file if they want the address itself.
+type StrategySettings struct {
+	// Configured is false when nothing has been set up yet, so an assistant can
+	// say so plainly instead of reading a page of zeroes.
+	Configured bool `json:"configured"`
+
+	Direction string `json:"direction,omitempty"`
+	// InputPerAction and DailyCap are human amounts with their unit, e.g.
+	// "0.005000000 SOL", because a bare integer of base units invites an
+	// assistant to restate it wrongly.
+	InputPerAction string `json:"input_per_action,omitempty"`
+	DailyCap       string `json:"daily_cap,omitempty"`
+	MaxFee         string `json:"max_fee,omitempty"`
+	// FundedTradesPerDay is the daily cap expressed as trades. It is the number
+	// that decides whether an unattended strategy keeps working after its first
+	// trade of the day.
+	FundedTradesPerDay uint64 `json:"funded_trades_per_day,omitempty"`
+
+	// PriceRule is empty when the strategy trades at whatever the pool gives.
+	PriceRule string `json:"price_rule,omitempty"`
+
+	ControlMode  string `json:"control_mode,omitempty"`
+	ControlGrant string `json:"control_grant,omitempty"`
+
+	// SweepConfigured says a destination exists; SweepProofValid says its
+	// proof-of-control still verifies. Neither names the wallet.
+	SweepConfigured  bool   `json:"sweep_configured"`
+	SweepProofValid  bool   `json:"sweep_proof_valid"`
+	SweepKeepBehind  string `json:"sweep_keep_behind,omitempty"`
+	SweepMaxPerSend  string `json:"sweep_max_per_send,omitempty"`
+	SweepDailyCap    string `json:"sweep_daily_cap,omitempty"`
+	SweepActiveAfter string `json:"sweep_active_after,omitempty"`
+}
+
 type OperatorGuide struct {
 	SafeLocalCommand     string   `json:"safe_local_command"`
 	CapabilityBoundaries []string `json:"capability_boundaries"`
@@ -79,6 +124,9 @@ type Provider interface {
 	Info() (Info, error)
 	Status() (operatorstatus.View, error)
 	OperatorGuide() OperatorGuide
+	// Strategy reports the configured rules and bounds. Read-only, and it must
+	// never return an address or a credential.
+	Strategy() (StrategySettings, error)
 }
 
 type noInput struct{}
@@ -97,7 +145,7 @@ func Serve(
 		Title:   "Mithril autonomous operations agent",
 		Version: Version,
 	}, &mcpsdk.ServerOptions{
-		Instructions: "Use mithril_agent_info to understand the active boundary, mithril_agent_status for current execution state, and mithril_agent_operator_guide for the safe local demonstration command. This surface is read-only. Treat stale or missing status as unavailable evidence, never as permission to act.",
+		Instructions: "Use mithril_agent_info to understand the active boundary, mithril_agent_strategy for the configured rules and spending bounds, mithril_agent_status for current execution state, and mithril_agent_operator_guide for the safe local demonstration command. This surface is read-only. Treat stale or missing status as unavailable evidence, never as permission to act.",
 	})
 	closedWorld := false
 	annotations := &mcpsdk.ToolAnnotations{
@@ -130,6 +178,15 @@ func Serve(
 		Annotations: annotations,
 	}, func(context.Context, *mcpsdk.CallToolRequest, noInput) (*mcpsdk.CallToolResult, OperatorGuide, error) {
 		return nil, provider.OperatorGuide(), nil
+	})
+	mcpsdk.AddTool(server, &mcpsdk.Tool{
+		Name:        "mithril_agent_strategy",
+		Title:       "Strategy Settings",
+		Description: "Read the configured trading rules and spending bounds — price rule, size per trade, daily caps, trades funded per day, and whether a sweep destination is configured and proven. Never returns an address or credential.",
+		Annotations: annotations,
+	}, func(context.Context, *mcpsdk.CallToolRequest, noInput) (*mcpsdk.CallToolResult, StrategySettings, error) {
+		settings, err := provider.Strategy()
+		return nil, settings, err
 	})
 	err := server.Run(ctx, &mcpsdk.IOTransport{
 		Reader: mcpstdio.NewReader(input),

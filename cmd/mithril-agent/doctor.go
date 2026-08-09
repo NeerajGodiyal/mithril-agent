@@ -72,7 +72,12 @@ func runDoctor(ctx context.Context, args []string, output io.Writer) error {
 // is missing, because a partial picture is what an operator needs while they
 // are still setting things up.
 func buildDoctorReport(ctx context.Context, configPath string) readiness.Report {
-	checks := []readiness.Check{doctorClockCheck()}
+	// Skipped when no strategy is configured, so single-leg deployments see
+	// nothing new.
+	strategyCheck := doctorStrategyCheck(time.Now)
+	checks := []readiness.Check{
+		doctorClockCheck(), doctorTelegramCheck(), strategyCheck,
+	}
 
 	if configPath == "" {
 		checks = append(checks, readiness.Check{
@@ -97,8 +102,7 @@ func buildDoctorReport(ctx context.Context, configPath string) readiness.Report 
 	checks = append(checks,
 		doctorAccountCheck(ctx, cfg.Signer.KeypairPath),
 		doctorFundingCheck(ctx, cfg.Signer.KeypairPath),
-		doctorTradingCheck(cfg),
-		doctorTelegramCheck(),
+		doctorTradingCheck(cfg, configPath, strategyCheck.State != readiness.Skipped),
 	)
 	return readiness.NewReport(checks)
 }
@@ -139,16 +143,52 @@ func doctorFundingCheck(ctx context.Context, keypairPath string) readiness.Check
 			Action: "Fund " + address + " at https://faucet.solana.com (Devnet SOL has no value)",
 		}
 	}
+	// A balance that is merely non-zero is not a working agent. The sweep floor
+	// reserves what every configured leg needs behind it, and below that floor
+	// the trades start failing for insufficient balance and the sweep can never
+	// run at all — while this check happily reported "ready" with the number
+	// right next to a larger floor on the same screen.
+	//
+	// Resting AT the floor is the correct state after a successful sweep, so
+	// only being UNDER it is a fault.
+	if floor, ok := configuredSweepFloor(); ok && lamports < floor {
+		short := floor - lamports
+		return readiness.Check{
+			Name: "funding", Title: "Account funding", State: readiness.Blocked,
+			Detail: fmt.Sprintf(
+				"%s SOL is below the %s SOL this strategy keeps behind its legs",
+				formatUnits(lamports, 9), formatUnits(floor, 9)),
+			Action: fmt.Sprintf(
+				"send at least %s SOL to %s, or run setup again with a smaller --size-sol",
+				formatUnits(short, 9), address),
+		}
+	}
 	return readiness.Check{
 		Name: "funding", Title: "Account funding", State: readiness.Ready,
 		Detail: fmt.Sprintf("%d.%09d SOL", lamports/lamportsPerSOL, lamports%lamportsPerSOL),
 	}
 }
 
+// configuredSweepFloor reads the balance the recorded sweep keeps behind the
+// legs. It is silent rather than wrong when no sweep is configured: most
+// deployments have none, and inventing a floor would block them all.
+func configuredSweepFloor() (uint64, bool) {
+	paths, _ := discoverStrategy()
+	if paths.sweep == "" {
+		return 0, false
+	}
+	cfg, err := readConfig(paths.sweep)
+	if err != nil || cfg.Profile.ReserveLamports == 0 {
+		return 0, false
+	}
+	return cfg.Profile.ReserveLamports, true
+}
+
 // doctorTradingCheck reports the control state. Stopped is the correct default
-// and is reported as waiting, not as a problem: an agent that is not armed is
-// behaving properly.
-func doctorTradingCheck(cfg config) readiness.Check {
+// AND a dead end: the agent is behaving properly and will keep doing nothing
+// until somebody authorises an action, so the check names that action rather
+// than implying a condition is on its way to being met.
+func doctorTradingCheck(cfg config, configPath string, strategyOwnsArming bool) readiness.Check {
 	unreadable := readiness.Check{
 		Name: "trading", Title: "Trading", State: readiness.Unknown,
 		Detail: "control state unreadable",
@@ -179,9 +219,31 @@ func doctorTradingCheck(cfg config) readiness.Check {
 		}
 	}
 	if blocked {
+		// On a strategy, arming is a property of the STRATEGY, not of whichever
+		// leg happened to be the discovered config. Reporting it here too said
+		// the same thing twice and pointed at `swap enable`, which would arm one
+		// leg by hand and leave the other two dark.
+		if strategyOwnsArming {
+			return readiness.Check{
+				Name: "trading", Title: "Trading", State: readiness.Skipped,
+				Detail: "the strategy decides when to trade; see Strategy legs",
+			}
+		}
+		// Stopped IS the safe default, and it is also permanent until somebody
+		// authorises an action. Waiting claims the opposite — that a condition
+		// will be met — so it read as "it is coming" to an operator sitting in
+		// front of an agent that was never going to do anything.
 		return readiness.Check{
-			Name: "trading", Title: "Trading", State: readiness.Waiting,
+			Name: "trading", Title: "Trading", State: readiness.Blocked,
 			Detail: "stopped — no action is authorised (the safe default)",
+			// The REAL path, never a placeholder. doctor has already resolved the
+			// config to reach this check, so printing "--config PATH" hands the
+			// operator a command that fails when pasted — and the whole point of
+			// an action line is that it can be pasted.
+			Action: fmt.Sprintf(
+				"start the one-action demonstration when the runner is ready: "+
+					"mithril-agent demo --config %s",
+				orPlaceholder(configPath, "PATH")),
 		}
 	}
 	return readiness.Check{
@@ -192,17 +254,29 @@ func doctorTradingCheck(cfg config) readiness.Check {
 
 // doctorTelegramCheck reports only whether the operator surface is configured.
 // It never reads, prints, or validates the token itself.
+//
+// It checks DOCTOR'S OWN environment, which is the only thing it can see — and
+// on a real deployment the token lives in a root-owned file read by the service
+// unit, not in the shell running doctor. So "not configured" here means "not in
+// this shell", never "your bot is broken", and the answer that actually matters
+// comes from a command that talks to Telegram.
 func doctorTelegramCheck() readiness.Check {
 	if os.Getenv(telegramoperator.BotTokenEnvironment) == "" ||
 		os.Getenv(telegramoperator.AllowedIDsEnvironment) == "" {
 		return readiness.Check{
 			Name: "telegram", Title: "Telegram", State: readiness.Skipped,
-			Detail: "not configured (optional)",
+			// Folded into Detail: readiness refuses a non-blocking check that
+			// carries an Action, and render only prints Action when blocking —
+			// so it was both invalid and invisible.
+			Detail: "not set in this shell (optional; the service reads its own " +
+				"environment). To check delivery for real: mithril-agent-telegram test",
 		}
 	}
 	return readiness.Check{
 		Name: "telegram", Title: "Telegram", State: readiness.Ready,
-		Detail: "configured (read-only status only)",
+		Detail: "set in this shell (read-only status only); setting these starts " +
+			"nothing — the alert process is separate. Prove delivery: " +
+			"mithril-agent-telegram test",
 	}
 }
 
@@ -304,4 +378,13 @@ func doctorAccountCheck(ctx context.Context, keypairPath string) readiness.Check
 		Name: "account", Title: "Agent account", State: readiness.Ready,
 		Detail: address,
 	}
+}
+
+// orPlaceholder keeps an action line pasteable when a real value is known, and
+// obviously incomplete when it is not.
+func orPlaceholder(value, placeholder string) string {
+	if value == "" {
+		return placeholder
+	}
+	return value
 }

@@ -1,0 +1,157 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+// strategyRun supervises every leg of a strategy in one process, because "leave
+// the runner going" was previously one terminal per leg and the runner is
+// already the step people miss. It starts the SAME loops `swap run` and
+// `devnet-run` start; it does not reimplement any of them.
+//
+// It grants nothing. A runner executes only what a separate, explicit
+// `strategy enable` has already authorised, so starting three loops here can
+// never move funds on its own.
+var (
+	// Replaceable in tests: the real loops need a chain, a node and five child
+	// processes per leg.
+	runSwapLegLoop  = runSwapLoop
+	runSweepLegLoop = runDevnetLoop
+)
+
+// legMetricsOffset pins each leg to a FIXED port. Numbering by position in the
+// configured list looked equivalent and was not: a strategy without its buy leg
+// yet — the ordinary state until the first sell creates the devUSDC account —
+// puts the sweep on the second port, and `setup strategy --resume` then moves it
+// to the third. Any pinned Prometheus scrape would silently start reading a
+// different leg.
+var legMetricsOffset = map[string]int{"sell": 0, "buy": 1, "sweep": 2}
+
+func strategyRun(ctx context.Context, args []string, output io.Writer) error {
+	flags := flag.NewFlagSet("strategy run", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	interval := flags.Duration("interval", 0, "delay between lifecycle steps, per leg")
+	// All three runners default to 9191, so starting a second one used to fail
+	// with an error that never mentioned ports.
+	basePort := flags.Int("metrics-base-port", 9191, "first loopback metrics port; each leg has a fixed offset")
+	quoteSocket := flags.String("quote-socket", "", "override swap quote transport with this local socket")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			_, writeErr := fmt.Fprintln(output, strategyUsage)
+			return writeErr
+		}
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("strategy run takes no arguments")
+	}
+	if *basePort < 1024 || *basePort > 65_000 {
+		return errors.New("the metrics base port must be between 1024 and 65000")
+	}
+	if *quoteSocket != "" &&
+		(!filepath.IsAbs(*quoteSocket) || filepath.Clean(*quoteSocket) != *quoteSocket) {
+		return errors.New("quote socket must be an absolute clean path")
+	}
+
+	paths, unreadable := discoverStrategy()
+	if len(unreadable) != 0 {
+		return fmt.Errorf("the recorded strategy is incomplete: %s cannot be read", strings.Join(unreadable, ", "))
+	}
+	if paths.empty() {
+		return errors.New("no configured strategy was found; run mithril-agent setup strategy first")
+	}
+	legs := paths.configured()
+
+	if _, err := fmt.Fprintln(output, "Strategy runners (nothing is armed by starting these):"); err != nil {
+		return err
+	}
+	for _, leg := range legs {
+		if _, err := fmt.Fprintf(output, "  %-6s 127.0.0.1:%d  %s\n",
+			leg.leg, *basePort+legMetricsOffset[leg.leg], leg.path); err != nil {
+			return err
+		}
+	}
+
+	// Every leg writes JSON lines to one writer. Three encoders on one io.Writer
+	// interleave mid-line and produce output nothing can parse, so the writer is
+	// serialised and each line is labelled with the leg that produced it —
+	// otherwise three identical-looking cycle results are indistinguishable.
+	var outputMu sync.Mutex
+
+	var group sync.WaitGroup
+	failures := make([]error, len(legs))
+	legCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	for index, leg := range legs {
+		group.Add(1)
+		go func(index int, name, path string) {
+			defer group.Done()
+			// One leg stopping must bring the others down rather than leaving a
+			// half-running strategy that looks healthy from the outside.
+			defer cancel()
+			legArgs := []string{
+				"--config", path,
+				"--metrics-address", "127.0.0.1:" + strconv.Itoa(*basePort+legMetricsOffset[name]),
+			}
+			if *interval != 0 {
+				legArgs = append(legArgs, "--interval", interval.String())
+			}
+			run := runSwapLegLoop
+			if name == "sweep" {
+				run = runSweepLegLoop
+			} else if *quoteSocket != "" {
+				legArgs = append(legArgs, "--quote-socket", *quoteSocket)
+			}
+			failures[index] = run(legCtx, legArgs, legWriter{mu: &outputMu, out: output, leg: name})
+		}(index, leg.leg, leg.path)
+	}
+	group.Wait()
+
+	// Context cancellation is the ordinary way this ends — Ctrl-C, or one leg
+	// finishing — and must not be reported as a failure.
+	if ctx.Err() != nil {
+		return nil
+	}
+	return errors.Join(failures...)
+}
+
+// legWriter serialises several legs onto one output and tags each line with the
+// leg that produced it. json.Encoder issues exactly one Write per value, so a
+// Write is a whole record and can be wrapped without re-parsing it.
+//
+// Without this, three encoders on one io.Writer interleave mid-line and produce
+// output nothing can parse, and three identical-looking cycle results are
+// indistinguishable anyway.
+type legWriter struct {
+	mu  *sync.Mutex
+	out io.Writer
+	leg string
+}
+
+func (w legWriter) Write(record []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	trimmed := bytes.TrimRight(record, "\r\n")
+	if len(trimmed) == 0 {
+		return len(record), nil
+	}
+	// A non-JSON line (a usage message, an error) is passed through labelled
+	// rather than wrapped, so it stays readable instead of becoming invalid JSON.
+	format := "{\"leg\":%q,\"cycle\":%s}\n"
+	if trimmed[0] != '{' {
+		format = "[%s] %s\n"
+	}
+	if _, err := fmt.Fprintf(w.out, format, w.leg, trimmed); err != nil {
+		return 0, err
+	}
+	return len(record), nil
+}

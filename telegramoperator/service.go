@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"strconv"
 	"strings"
@@ -15,7 +16,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/Overclock-Validator/mithril-agent/agent"
 	"github.com/Overclock-Validator/mithril-agent/internal/operatorstatus"
+	"github.com/Overclock-Validator/mithril-agent/orcaswap"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 )
 
@@ -76,9 +79,12 @@ type Explainer interface {
 }
 
 type Config struct {
-	Bot               Bot
-	Cursor            Cursor
-	Status            StatusReader
+	Bot     Bot
+	Cursor  Cursor
+	Sources []StatusReader
+	// AnnouncedPath persists which actions have been announced so a restart
+	// does not repeat them. Empty keeps dedup in memory only.
+	AnnouncedPath     string
 	AllowedChatIDs    []int64
 	Explainer         Explainer
 	ExplanationBudget ExplanationBudget
@@ -90,10 +96,19 @@ type Config struct {
 
 // Service has one sequential long-poll consumer. Read-only commands do not
 // depend on the optional explanation provider.
+const (
+	// maxConsecutivePollFailures bounds how long a broken configuration hides
+	// behind retries. Ten failures spaced by the delay below is roughly a
+	// minute of outage absorbed, which covers a restart of the far side without
+	// masking a revoked token for long.
+	maxConsecutivePollFailures = 10
+	defaultPollRetryDelay      = 5 * time.Second
+)
+
 type Service struct {
 	bot               Bot
 	cursor            Cursor
-	status            StatusReader
+	sources           []StatusReader
 	allowed           map[int64]struct{}
 	explainer         Explainer
 	explanationBudget ExplanationBudget
@@ -101,14 +116,26 @@ type Service struct {
 	pollTimeout       time.Duration
 	minInterval       time.Duration
 	explainTimeout    time.Duration
+	// pollRetryDelay spaces out retries after a failed poll. A field rather
+	// than a constant only so tests need not sleep.
+	pollRetryDelay time.Duration
 
 	rateMu  sync.Mutex
 	next    map[int64]time.Time
 	running atomic.Bool
+
+	// announcedAction is the last action already reported unprompted. It is
+	// seeded from whatever is current when the consumer starts, so a restart
+	// re-announces nothing: an operator who has already been told about a trade
+	// should not hear about it again because the process bounced.
+	announcedAction map[string]string
+	announceSeeded  map[string]bool
+	// announced survives restarts; announcedAction does not.
+	announced *announcedStore
 }
 
 func New(config Config) (*Service, error) {
-	if config.Bot == nil || config.Cursor == nil || config.Status == nil {
+	if config.Bot == nil || config.Cursor == nil || len(config.Sources) == 0 {
 		return nil, errors.New("Telegram bot, cursor, and operator status reader are required")
 	}
 	allowed := make(map[int64]struct{}, len(config.AllowedChatIDs))
@@ -149,9 +176,12 @@ func New(config Config) (*Service, error) {
 		return nil, errors.New("explanation timeout must be between 100 milliseconds and 15 seconds")
 	}
 	return &Service{
-		bot: config.Bot, cursor: config.Cursor, status: config.Status, allowed: allowed,
+		bot: config.Bot, cursor: config.Cursor, sources: config.Sources, allowed: allowed,
+		announcedAction: map[string]string{}, announceSeeded: map[string]bool{},
+		announced: loadAnnouncedStore(config.AnnouncedPath),
 		explainer: config.Explainer, explanationBudget: config.ExplanationBudget, now: config.Now,
 		pollTimeout: config.PollTimeout, minInterval: config.MinimumInterval,
+		pollRetryDelay: defaultPollRetryDelay,
 		explainTimeout: config.ExplanationLimit, next: make(map[int64]time.Time),
 	}, nil
 }
@@ -179,14 +209,34 @@ func (s *Service) Run(ctx context.Context) error {
 	if offset < 0 {
 		return errors.New("Telegram update cursor is invalid")
 	}
+	pollFailures := 0
 	for {
 		updates, err := s.bot.Poll(ctx, offset, s.pollTimeout)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			return errors.New("poll Telegram updates")
+			// A read-only observer must survive a network blip. Exiting on the
+			// FIRST failure produced seven crash-loops in one night, each from a
+			// transient error, with systemd papering over them — and a unit that
+			// stops trying altogether once its start limit is reached. Alerts
+			// then go missing with no signal that anything is wrong.
+			pollFailures++
+			log.Printf("telegram: poll failed (%d/%d): %v",
+				pollFailures, maxConsecutivePollFailures, err)
+			if pollFailures >= maxConsecutivePollFailures {
+				// Still give up eventually: a bad token or a revoked bot must
+				// surface as a failed unit, not as a process retrying in silence.
+				return errors.New("poll Telegram updates")
+			}
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(s.pollRetryDelay):
+			}
+			continue
 		}
+		pollFailures = 0
 		deferredOffset := int64(0)
 		for _, update := range updates {
 			if update.ID < offset {
@@ -201,7 +251,22 @@ func (s *Service) Run(ctx context.Context) error {
 					if ctx.Err() != nil {
 						return nil
 					}
-					return errors.New("send Telegram reply")
+					// A PERMANENT rejection must not stall the cursor. Returning
+					// here left the update unconsumed, so Telegram redelivered it,
+					// the process failed identically, and systemd looped it — and
+					// because announce() runs after this loop, every other chat
+					// lost its trade alerts too. A group migrating to a supergroup
+					// does this on its own, with no operator error.
+					//
+					// Transient failures still stop the batch: retrying is what
+					// gets the reply delivered, and the cursor must not skip past
+					// an update that a 429 or a 5xx would have answered.
+					var status StatusError
+					if !errors.As(err, &status) || !permanentSendRejection(status.Status) {
+						return errors.New("send Telegram reply")
+					}
+					log.Printf("telegram: chat %d permanently rejected a reply (HTTP %d); "+
+						"skipping that update", update.ChatID, status.Status)
 				}
 			}
 			nextOffset := update.ID + 1
@@ -227,6 +292,173 @@ func (s *Service) Run(ctx context.Context) error {
 				return errors.New("store Telegram update cursor")
 			}
 		}
+		// Poll returns on its own timeout as well as on traffic, so this runs on
+		// a regular tick without a second goroutine — the one sequential
+		// consumer stays one sequential consumer.
+		s.announce(ctx)
+	}
+}
+
+// announce reports a finished action nobody asked about. It is the only
+// unprompted message the operator sends, and it still cannot authorize
+// anything: it reads the same bounded status the read-only commands read.
+//
+// Only settled outcomes are announced. Waiting, stopped, and degraded are the
+// steady state of a healthy agent that has nothing to do, and narrating them
+// would train the operator to ignore the channel that carries the real events.
+func (s *Service) announce(ctx context.Context) {
+	for index, source := range s.sources {
+		s.announceSource(ctx, index, source)
+	}
+}
+
+// announceSource reports one leg. The dedup state is per SOURCE, so a restart
+// re-announces nothing on any leg and two legs sharing a profile name cannot
+// overwrite each other.
+func (s *Service) announceSource(ctx context.Context, index int, source StatusReader) {
+	snapshot, err := source.Read()
+	if err != nil {
+		// An unreadable status is already surfaced by /status and by the
+		// metrics alerts. Staying quiet here keeps a transient read failure
+		// from becoming a message storm.
+		return
+	}
+	// Seed on the FIRST readable status, even when it carries no action yet.
+	// Seeding only once a non-empty action appears would treat a fresh setup's
+	// very first trade as history and never report it — and an empty status at
+	// startup is the ordinary case, because the operator can start before the
+	// runner has written anything.
+	// Keyed by the SOURCE, not by the profile name: two legs can legitimately
+	// carry the same profile — a strategy's sell leg and a standalone agent are
+	// both orca_devnet_swap_v1 — and keying on the name made them share one
+	// dedup slot, so each overwrote the other and both re-announced every
+	// cycle. That is a message every ten seconds, forever.
+	leg := strconv.Itoa(index)
+	if !s.announceSeeded[leg] {
+		// Seed only a SETTLED action. An action still in flight has not been
+		// announced yet — announcements fire on settlement — so claiming it as
+		// history means its outcome is deduped away and the operator never
+		// hears about the trade they started the bot to watch.
+		if announceWorthy(snapshot.LastAction.Result.Decision) {
+			s.announcedAction[leg] = announceKey(snapshot.LastAction.Result)
+		}
+		s.announceSeeded[leg] = true
+		return
+	}
+	action := snapshot.LastAction
+	if !announceWorthy(action.Result.Decision) {
+		return
+	}
+	key := announceKey(action.Result)
+	if key == s.announcedAction[leg] {
+		return
+	}
+	// The in-memory map above is per-process; this survives a restart. Without
+	// it, a restart landing while an action is in flight seeds nothing (seeding
+	// takes only settled actions, deliberately), so the new process re-announces
+	// that action when it settles. See announced.go.
+	if s.announced.announced(action.Result.ActionID) {
+		s.announcedAction[leg] = key
+		return
+	}
+	// Render from the snapshot this decision was gated on, never a second read:
+	// a fresh read can disagree and put "No trade — agent is idle" in the body
+	// of a trade announcement. The report already leads with the outcome, so no
+	// prefix is added — prompted and unprompted messages read identically.
+	message := bounded(s.tradeReport(snapshot, s.now()))
+	// Every allowed chat is attempted even when one of them fails. A blocked
+	// bot or a mistyped ID is an ordinary misconfiguration, and it must not
+	// silence the chats that do work, nor take the agent down: an announcement
+	// is auxiliary, and the metric alerts that carry health do not depend on
+	// Telegram being reachable at all.
+	delivered := 0
+	for chatID := range s.allowed {
+		if err := s.bot.Send(ctx, chatID, message); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			// The WIRE stays silent — replying to unknown chats would let anyone
+			// enumerate the allowlist. The LOG must not: with no record at all, a
+			// chat that never receives anything is indistinguishable from no trade
+			// having happened, which is the failure mode the operator is least
+			// able to diagnose and most likely to trust.
+			log.Printf("telegram: announcement to chat %d failed: %v", chatID, err)
+			continue
+		}
+		delivered++
+	}
+	// Record only once somebody has actually been told. If no chat could be
+	// reached the announcement stays pending and the next cycle retries it,
+	// rather than being marked as delivered to nobody and lost. Recording after
+	// a partial delivery is the deliberate trade: the alternative re-sends to
+	// the chats that already received it, every cycle, forever.
+	if delivered > 0 {
+		// Successes were silent while only failures logged, so an empty journal
+		// meant either "announced fine" or "never fired" — indistinguishable.
+		// That ambiguity produced a confident wrong diagnosis: five real trades
+		// were announced, the log showed nothing, and the conclusion was that
+		// alerting was broken. One line per announcement, not per chat, so a
+		// busy day stays readable.
+		log.Printf("telegram: announced %s action %s to %d chat(s)",
+			action.Result.Decision, shortActionID(key), delivered)
+		s.announcedAction[leg] = key
+		// Never blocks: the message is already sent, so a write failure costs a
+		// possible duplicate after a restart, not a lost announcement.
+		if err := s.announced.record(action.Result.ActionID); err != nil {
+			log.Printf("telegram: %v", err)
+		}
+	}
+	return
+}
+
+// announceKey identifies an outcome for deduplication.
+//
+// A refusal that happens BEFORE an action is minted — an exhausted daily cap, a
+// signer rejection, a policy mismatch — settles as failed with no action ID at
+// all. Keying on the ID alone dropped those entirely, which made the failures
+// most likely to strand an unattended agent the only ones that never reached
+// the operator: the runner refused every ten seconds and Telegram stayed quiet.
+//
+// They cannot dedup on an ID that does not exist, and announcing every cycle is
+// a message every ten seconds forever. The outcome and its reason are the
+// identity instead, so the operator is told once and told again only when the
+// reason itself changes.
+func announceKey(result operatorstatus.Result) string {
+	if result.ActionID != "" {
+		return result.ActionID
+	}
+	return result.Decision + "/" + result.Reason
+}
+
+// shortActionID trims an action ID to something a human can compare across a
+// log line and a journal entry without reading 64 hex characters.
+func shortActionID(id string) string {
+	const shown = 12
+	if len(id) <= shown {
+		return id
+	}
+	return id[:shown]
+}
+
+// announceWorthy names the outcomes worth interrupting an operator for.
+// "canceled" is deliberately absent: a window whose price triggers but never
+// clears the executable minimum ends canceled every schedule window while the
+// market hovers near the threshold, which is exactly the noise this filter
+// exists to prevent.
+// permanentSendRejection names the statuses no amount of retrying fixes: the
+// chat is gone, the bot was blocked or removed, or the request could never be
+// accepted. Everything else — timeouts, 429, 5xx — is worth retrying, so it
+// deliberately does NOT appear here.
+func permanentSendRejection(status int) bool {
+	return status == 400 || status == 403
+}
+
+func announceWorthy(decision string) bool {
+	switch decision {
+	case "complete", "failed", "halted":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -234,6 +466,11 @@ func (s *Service) Run(ctx context.Context) error {
 // update is intentionally ignored (unauthorized chat or local rate limit).
 func (s *Service) Reply(ctx context.Context, chatID int64, text string) (string, bool) {
 	if _, allowed := s.allowed[chatID]; !allowed {
+		// Silent to the sender by design; recorded here because the overwhelmingly
+		// common cause is the operator's OWN chat ID being wrong, and from their
+		// side that looks like a bot that simply never answers.
+		log.Printf("telegram: message from chat %d ignored: not in %s",
+			chatID, AllowedIDsEnvironment)
 		return "", false
 	}
 	now := s.now().UTC()
@@ -245,24 +482,23 @@ func (s *Service) Reply(ctx context.Context, chatID int64, text string) (string,
 	}
 	command, argument := parseCommand(text)
 	switch command {
-	case "/help":
+	case "/start", "/help":
 		return bounded(s.help(now)), true
 	case "/status":
 		if argument != "" {
 			return bounded("Usage: /status\n" + footer(now)), true
 		}
-		report, _, _, _ := s.statusReport(now)
-		return bounded(report), true
+		return bounded(s.statusReports(now)), true
 	case "/last_trade":
 		if argument != "" {
 			return bounded("Usage: /last_trade\n" + footer(now)), true
 		}
-		return bounded(s.lastTrade(now)), true
+		return bounded(s.lastTrades(now)), true
 	case "/price":
 		if argument != "" {
 			return bounded("Usage: /price\n" + footer(now)), true
 		}
-		return bounded(s.price(now)), true
+		return bounded(s.prices(now)), true
 	case "/explain":
 		return bounded(s.explain(ctx, argument, now)), true
 	default:
@@ -281,18 +517,23 @@ func (s *Service) allowAt(chatID int64, now time.Time) bool {
 }
 
 func (s *Service) help(now time.Time) string {
-	commands := "/help — show this read-only command list\n/status — current bounded operator status\n/price — current price rule and observation\n/last_trade — most recent recorded trade"
+	commands := "/help — show this read-only command list\n/status — current status for every configured leg\n/price — current price rule and observation for every leg\n/last_trade — most recent recorded action for every leg"
 	if s.explainer != nil {
 		commands += "\n/explain QUESTION — optional explanation of the same bounded status"
 	}
 	return "Mithril operator — read only\n" + commands +
-		"\nAlerts arrive only for faults needing action. Restarts, completed" +
-		"\nactions and price targets are not sent; ask with the commands above.\n" +
+		"\nUnprompted messages arrive when a trade settles: completed, failed," +
+		"\nor halted. Restarts, price targets, and a waiting agent are not sent;" +
+		"\nask with the commands above.\n" +
 		"This process cannot enable, sign, submit, stop, or configure actions.\n" + footer(now)
 }
 
 func (s *Service) statusReport(now time.Time) (string, operatorstatus.Snapshot, bool, bool) {
-	snapshot, err := s.status.Read()
+	return statusReportFor(s.primary(), now)
+}
+
+func statusReportFor(source StatusReader, now time.Time) (string, operatorstatus.Snapshot, bool, bool) {
+	snapshot, err := source.Read()
 	if err != nil {
 		return "Status: unknown\nReason: operator status is unavailable or invalid\n" + footer(now), operatorstatus.Snapshot{}, false, false
 	}
@@ -320,11 +561,32 @@ func (s *Service) statusReport(now time.Time) (string, operatorstatus.Snapshot, 
 	return report, snapshot, true, freshness == "stale"
 }
 
+func (s *Service) statusReports(now time.Time) string {
+	if len(s.sources) == 1 {
+		report, _, _, _ := s.statusReport(now)
+		return report
+	}
+	reports := make([]string, 0, len(s.sources))
+	for index, source := range s.sources {
+		report, snapshot, _, _ := statusReportFor(source, now)
+		reports = append(reports, sourceLabel(index, snapshot.Profile)+"\n"+report)
+	}
+	return strings.Join(reports, "\n\n")
+}
+
 func (s *Service) price(now time.Time) string {
-	snapshot, err := s.status.Read()
+	return priceFor(s.primary(), now)
+}
+
+func priceFor(source StatusReader, now time.Time) string {
+	snapshot, err := source.Read()
 	if err != nil {
 		return "Price: unknown\nReason: operator status is unavailable or invalid\n" + footer(now)
 	}
+	return priceSnapshot(snapshot, now)
+}
+
+func priceSnapshot(snapshot operatorstatus.Snapshot, now time.Time) string {
 	freshness, age, usable := snapshotFreshness(snapshot, now)
 	if !usable {
 		return "Price: unknown\nReason: operator status timestamp is in the future\n" +
@@ -342,7 +604,17 @@ func (s *Service) price(now time.Time) string {
 		triggerDirection(*trigger), formatUSDMicros(trigger.ThresholdMicros), freshness, age,
 	)
 	if !trigger.Available {
-		report += "\nPrice: temporarily unavailable"
+		// A stopped agent does not read the price at all. The read is bound to
+		// a slot it only proves when it is about to act, and proving one every
+		// cycle would spawn a node subprocess for a number nobody asked for.
+		// Calling that "unavailable" made a deliberately idle agent look broken
+		// to the person deciding whether to arm it.
+		if snapshot.Result.Decision == "stopped" {
+			report += "\nPrice: not being read while no trades are authorised" +
+				"\nArm the strategy to start watching it, or run `swap check` for a one-off reading"
+		} else {
+			report += "\nPrice: temporarily unavailable"
+		}
 	} else {
 		report += "\nConservative price: " + formatUSDMicros(trigger.ConservativePrice) +
 			"\nCondition: " + triggerState(*trigger) +
@@ -357,6 +629,23 @@ func (s *Service) price(now time.Time) string {
 		}
 	}
 	return report + "\n" + observedFooter(snapshot.ObservedAt, now)
+}
+
+func (s *Service) prices(now time.Time) string {
+	if len(s.sources) == 1 {
+		return s.price(now)
+	}
+	reports := make([]string, 0, len(s.sources))
+	for index, source := range s.sources {
+		snapshot, err := source.Read()
+		label := sourceLabel(index, snapshot.Profile)
+		if err != nil {
+			reports = append(reports, label+"\nPrice: unknown\nReason: operator status is unavailable or invalid\n"+footer(now))
+			continue
+		}
+		reports = append(reports, label+"\n"+priceSnapshot(snapshot, now))
+	}
+	return strings.Join(reports, "\n\n")
 }
 
 func triggerState(trigger pricetrigger.Status) string {
@@ -400,13 +689,50 @@ func formatMicroUnits(value uint64) string {
 }
 
 func (s *Service) lastTrade(now time.Time) string {
-	snapshot, err := s.status.Read()
+	snapshot, err := s.primary().Read()
 	if err != nil {
-		return "Last trade: unknown\nReason: operator status is unavailable or invalid\n" + footer(now)
+		return "Trade status unavailable\nThe operator status could not be read.\n" + footer(now)
 	}
+	return s.tradeReport(snapshot, now)
+}
+
+func (s *Service) lastTrades(now time.Time) string {
+	if len(s.sources) == 1 {
+		return s.lastTrade(now)
+	}
+	reports := make([]string, 0, len(s.sources))
+	for index, source := range s.sources {
+		snapshot, err := source.Read()
+		label := sourceLabel(index, snapshot.Profile)
+		if err != nil {
+			reports = append(reports, label+"\nTrade status unavailable\nThe operator status could not be read.\n"+footer(now))
+			continue
+		}
+		reports = append(reports, label+"\n"+s.tradeReport(snapshot, now))
+	}
+	return strings.Join(reports, "\n\n")
+}
+
+func sourceLabel(index int, profile string) string {
+	switch profile {
+	case orcaswap.ProfileName:
+		return "Sell"
+	case orcaswap.BuyProfileName:
+		return "Buy"
+	case agent.ProfileTreasurySweepV1:
+		return "Sweep"
+	default:
+		return fmt.Sprintf("Setup %d", index+1)
+	}
+}
+
+// tradeReport renders one snapshot. announce() gates on a snapshot and must
+// render that same one; reading again between the decision and the text lets
+// the two disagree.
+func (s *Service) tradeReport(snapshot operatorstatus.Snapshot, now time.Time) string {
 	freshness, age, usable := snapshotFreshness(snapshot, now)
 	if !usable {
-		return "Last trade: unknown\nReason: operator status timestamp is in the future\n" +
+		return "Trade status unavailable\nThe status timestamp is in the future.\n" +
 			observedFooter(snapshot.ObservedAt, now)
 	}
 	action := snapshot.LastAction
@@ -415,37 +741,149 @@ func (s *Service) lastTrade(now time.Time) string {
 	}
 	if action.Result.ActionID == "" {
 		return fmt.Sprintf(
-			"Last trade: unknown\nReason: no recorded trade\nFreshness: %s (%ds old)\n%s",
+			"No trades yet\nThis setup has not made a trade.\n%s, checked %ds ago\n%s",
 			freshness, age, observedFooter(snapshot.ObservedAt, now),
 		)
 	}
 	result := action.Result
-	report := fmt.Sprintf(
-		"Last trade: %s\nFreshness: %s (%ds old)\nSubmitted: %s",
-		safeField(result.Decision, 32), freshness, age, yesNo(result.Submitted),
-	)
-	if result.Verdict != "" {
-		report += "\nOutcome: " + safeField(describeVerdict(result.Verdict), 64)
+	// Outcome first, then the two numbers that answer "what did it do", then
+	// one link that proves it. A reader on a phone should not have to parse a
+	// field list to learn whether their money moved.
+	kind := kindOf(result)
+	report := tradeHeadline(kind, result.Decision, result.Verdict, result.Submitted)
+	if reason := safeField(result.Reason, 96); reason != "" && result.Decision != "complete" {
+		report += "\n" + reason
 	}
+	// Whether the setup is actually stuck is a property of the control state,
+	// not of this one outcome. Reading the latch means the sentence is right
+	// for a setup locked by an earlier action and absent for a halt that left
+	// the setup free to keep going.
+	if snapshot.Control.TerminalActionID != "" {
+		report += "\nThis setup is locked and needs you."
+	}
+	report += "\n"
 	if result.InputAmount != 0 && result.InputAsset != "" {
-		report += "\nInput: " + operatorstatus.FormatAmount(result.InputAmount, result.InputAsset)
+		report += "\n" + amountLine(kind.spentLabel(), result.InputAmount, result.InputAsset)
 	} else if result.AmountLamports != 0 {
-		report += "\nInput: " + operatorstatus.FormatAmount(result.AmountLamports, "SOL")
+		report += "\n" + amountLine("Sent", result.AmountLamports, "SOL")
 	}
-	if result.MinimumOutput != 0 || result.OutputAmount != 0 {
-		report += "\nOutput: " + operatorstatus.FormatAmount(result.OutputAmount, result.OutputAsset) +
-			" (minimum " + operatorstatus.FormatAmount(result.MinimumOutput, result.OutputAsset) + ")"
+	if result.OutputAmount != 0 {
+		report += "\n" + amountLine("Received", result.OutputAmount, result.OutputAsset)
+	} else if result.MinimumOutput != 0 {
+		report += "\n" + amountLine("At least", result.MinimumOutput, result.OutputAsset)
 	}
-	if result.Signature != "" {
-		report += "\nSignature: " + safeField(result.Signature, 128)
-		if snapshot.Cluster == "devnet" {
-			report += "\nExplorer: https://explorer.solana.com/tx/" +
-				safeField(result.Signature, 128) + "?cluster=devnet"
-		}
+	// The signature itself is 88 characters of noise once a link carries it.
+	// Only devnet gets a link because that is the only cluster this agent
+	// trades on; naming the cluster keeps a mainnet reader from assuming one.
+	if result.Signature != "" && snapshot.Cluster == "devnet" {
+		report += "\n\nhttps://explorer.solana.com/tx/" +
+			safeField(result.Signature, 128) + "?cluster=devnet"
+	} else if result.Signature != "" {
+		report += "\n\nSignature " + safeField(result.Signature, 128)
 	}
-	report += "\nTrade observed: " + action.ObservedAt.UTC().Format(time.RFC3339) +
+	report += "\n\n" + safeField(snapshot.Cluster, 16) +
+		fmt.Sprintf(" · %s, checked %ds ago", freshness, age) +
 		"\n" + observedFooter(snapshot.ObservedAt, now)
 	return report
+}
+
+// amountLine pads the label so the numbers line up in a monospace-ish column,
+// which is what makes a two-line trade readable at a glance.
+func amountLine(label string, amount uint64, asset string) string {
+	return fmt.Sprintf("%-9s %s", label, operatorstatus.FormatAmount(amount, asset))
+}
+
+// tradeHeadline states the outcome in the reader's terms. The decision and
+// verdict are internal vocabulary; "complete/finalized" means the money moved
+// and the chain agrees, and that is what the sentence should say.
+// actionKind names what the agent actually did, in the words the operator
+// thinks in. Every outcome used to be called a "trade": a BUY read as
+// "Sold 0.10 devUSDC", which is backwards, and a sweep to the operator's own
+// wallet read as "Trade complete", which is not a trade at all.
+//
+// The three are distinguishable from the result itself: a sweep moves lamports
+// and names no input asset, a buy ends holding SOL, everything else is a sell.
+type actionKind uint8
+
+const (
+	kindSell actionKind = iota
+	kindBuy
+	kindSweep
+)
+
+func kindOf(result operatorstatus.Result) actionKind {
+	if result.InputAsset == "" && result.AmountLamports != 0 {
+		return kindSweep
+	}
+	if result.OutputAsset == "SOL" {
+		return kindBuy
+	}
+	return kindSell
+}
+
+// did is the past-tense verb phrase for a completed action.
+func (k actionKind) did() string {
+	switch k {
+	case kindBuy:
+		return "Bought SOL"
+	case kindSweep:
+		return "Sent to your wallet"
+	default:
+		return "Sold SOL"
+	}
+}
+
+// attempted names the action for outcomes where nothing completed, so a
+// canceled buy does not read as a canceled sale.
+func (k actionKind) attempted() string {
+	switch k {
+	case kindBuy:
+		return "Buy"
+	case kindSweep:
+		return "Transfer"
+	default:
+		return "Sale"
+	}
+}
+
+// spentLabel is what left the wallet, which differs by direction: a sale gives
+// up SOL, a buy spends dollars, a sweep sends SOL out.
+func (k actionKind) spentLabel() string {
+	switch k {
+	case kindBuy:
+		return "Spent"
+	case kindSweep:
+		return "Sent"
+	default:
+		return "Sold"
+	}
+}
+
+func tradeHeadline(kind actionKind, decision, verdict string, submitted bool) string {
+	switch decision {
+	case "complete":
+		if verdict == "finalized" {
+			return kind.did() + " — confirmed on-chain"
+		}
+		return kind.did()
+	case "canceled":
+		return kind.attempted() + " canceled before it was sent"
+	case "halted":
+		// Only a broadcast transaction can have an unresolved on-chain
+		// outcome. A halt before submission left the wallet untouched, and
+		// since such a halt no longer latches the control state, calling it
+		// "locked" told the operator to go fix something that was not stuck.
+		if submitted || verdict != "" {
+			return kind.attempted() + " halted — it was sent and the outcome is unconfirmed"
+		}
+		return kind.attempted() + " halted before it was sent — nothing left your wallet"
+	case "failed":
+		return kind.attempted() + " failed"
+	case "waiting", "stopped", "degraded":
+		return "No trade — agent is idle"
+	default:
+		return kind.attempted() + " " + safeField(decision, 32)
+	}
 }
 
 func (s *Service) explain(ctx context.Context, question string, now time.Time) string {
@@ -505,6 +943,10 @@ func (s *Service) explain(ctx context.Context, question string, now time.Time) s
 }
 
 func ParseAllowedChatIDs(value string) ([]int64, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, errors.New(AllowedIDsEnvironment +
+			" is not set; run `mithril-agent-telegram link` to find your chat ID")
+	}
 	parts := strings.Split(value, ",")
 	ids := make([]int64, 0, len(parts))
 	seen := make(map[int64]struct{}, len(parts))
@@ -604,3 +1046,7 @@ func truncateUTF8(value string, limit int) string {
 	}
 	return value[:cut] + "…"
 }
+
+// primary is the first configured source. A single-leg deployment and the
+// optional explanation provider keep the exact original report shape.
+func (s *Service) primary() StatusReader { return s.sources[0] }

@@ -134,7 +134,12 @@ func (b *HTTPBot) call(ctx context.Context, method string, requestBody, result a
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxTelegramBodyBytes))
-		return errors.New("Telegram API rejected the request")
+		// The body stays discarded and the URL — which carries the token — is
+		// never quoted. Only the status code travels, and an integer cannot leak
+		// a credential. Without it every cause collapsed into one sentence:
+		// a wrong token, a wrong chat ID, a user who never pressed Start, a
+		// blocked bot and a rate limit were indistinguishable.
+		return StatusError{Status: response.StatusCode}
 	}
 	limited := io.LimitReader(response.Body, maxTelegramBodyBytes+1)
 	data, err := io.ReadAll(limited)
@@ -196,4 +201,11 @@ func validBotToken(token string) bool {
 		}
 	}
 	return true
+}
+
+// StatusError reports the HTTP status Telegram answered with, and nothing else.
+type StatusError struct{ Status int }
+
+func (e StatusError) Error() string {
+	return "Telegram API rejected the request (HTTP " + strconv.Itoa(e.Status) + ")"
 }
