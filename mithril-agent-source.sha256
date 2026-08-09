@@ -1,7 +1,8 @@
 b08f9c453a664cb3f00ce19d2683252798ba96cb9f6fc5ded81fc9c3173b8d7d  ./.gitignore
-a921a06c96e24f45f666de3fee126c7b09c1535c9c03de2bdad95924fc6f3a3d  ./DEMO.md
-7533c3c79c2976481f6d19df60594badad7d775a9b0a58766809deb118f03f59  ./Makefile
-009e83f5b7e5649859c63b5668aa5ebf275427929c6b620a3bdcd8495253ab79  ./README.md
+f2d377dec1d8c67d8aaa9f841257609e06a3604e3a1c39d2214b1d30a3c1f4f7  ./DEMO.md
+305dd02038b475838c1fbb8a70dea9f2c545eccdcf731a2a3046893bb6f815ec  ./Makefile
+83896ed4213809f5b18593c3d2e843c646dd191120f0352ff0ba35c230990b1a  ./QUICKSTART.md
+9b1073f2e9042e9671a453dd48da246904afb46f302a758f8e1084a9abbc3eda  ./README.md
 3688881cc51845e928c69243b25a2ba0d073d7e1350a1740ea7765bc1bf244cb  ./adapters/orca-mainnet/quote.mjs
 bfcd6726440d914b4070637a2d4de34cbf9b17a1f566d29816e6165c1cf89f4a  ./adapters/orca/package-lock.json
 57ced315005c1edb13df550c1d16f2ea45869c92c532a77bb59d087451233af3  ./adapters/orca/package.json
@@ -43,6 +44,7 @@ e84274cfc4c655bb9b56f1a5deac6e3fc896ffa8de3226ed29dcf8212f31041a  ./cmd/mithril-
 d53ac9839fbe784a1655a799f97c843bf9fcd4c5dd8d71838010f0b41dddf903  ./cmd/mithril-agent/doctor_telegram_test.go
 89db733e6890b3ec8236f1899876d9fc500afaad82ba4331ce116f25ba1fb389  ./cmd/mithril-agent/doctor_test.go
 519267fdaa4647298c383b54cb24127010e9bb600ae334317012d3db45b12cd6  ./cmd/mithril-agent/doctor_trading_test.go
+ff2df3b907be6c5f766921de709558c3b8afcced78961c9301c4ed1ab7299f20  ./cmd/mithril-agent/documentation_test.go
 86e5491bf0023c55b952f957b5cba5891d4f1e901c611517b12e31a0ae23447f  ./cmd/mithril-agent/explain.go
 60edd1f7cdf7d4c294c61cbe18dc1e984aeab2e0be1f5bd7dfc90fc0106495c9  ./cmd/mithril-agent/explain_stage.go
 f15b882356164dffeb951ec746cc9d3d046af5d2cff8afdc4a4f636d54228874  ./cmd/mithril-agent/explain_stage_test.go
@@ -55,8 +57,8 @@ b52b9a5ff4044613b6b83026cbea3fc3778856c752b5cc674e9a7e0b2a5406a9  ./cmd/mithril-
 39baf12ab1ab429368967d34c517ec459aff5516f0477084fa6820e1df649783  ./cmd/mithril-agent/hostpaths_test.go
 e6b0361c514efeb0ab612c6be6036cb27ad6f5b55773ce1a62fe42e144909b94  ./cmd/mithril-agent/journal.go
 a231f8e63c8d16e027362818c17852387e70aea6ecfca4db0f2eeddb47a1f139  ./cmd/mithril-agent/journal_test.go
-8550ea7236c495d11890ec414e6c9cdb926457d80d07e7ff56331e068df79748  ./cmd/mithril-agent/main.go
-3b99a11b70f790339ef86fbc52bb15b596e4e62e5e07db21c747412f5240305c  ./cmd/mithril-agent/main_test.go
+21a16644e28caec34e371df65aafc8ceba3d2a10171b52e6b0d373529f23d352  ./cmd/mithril-agent/main.go
+309057c77e3f0a32ff6ed5dbf682a726f7cff678b29aaa2894de9bf17d24ef64  ./cmd/mithril-agent/main_test.go
 0d06b22931ea508f8903992dcb6ed2a4da68bd3c692447775ae9bc513f9047dd  ./cmd/mithril-agent/mcpconfig.go
 7d382534e1dea48e54366363ea6cb9218f5f2f374853dc7e73c2679fe0288593  ./cmd/mithril-agent/mcpconfig_test.go
 fe0d5f2b0ffe27087c9ab2b3cc7a4c23d61ae20eb912e8d5219c13a726361324  ./cmd/mithril-agent/preflight.go
@@ -69,9 +71,9 @@ e684d5123cac52bac61019486354ab54b68fa2a76f9c827dd13cb28ca77dd1b8  ./cmd/mithril-
 275e39af3eeef21c349fc78f57a9d480f404744663b4976dbf19bd7ec8e11165  ./cmd/mithril-agent/refusals_test.go
 9a77e93cec4a07b5c7007dab745edca582bb3fb1684f5cbef60d30f91d41eecb  ./cmd/mithril-agent/roundtrip.go
 60ac4c716325c1b577eb309e62579a53c6b823bf3c18808fbb1d24b635c70b34  ./cmd/mithril-agent/roundtrip_test.go
-cb67edf9caba03817cd9704c80c18b221da70e29a054807f182ff4d054db1ef2  ./cmd/mithril-agent/service.go
-9c90e4117f4a11f4de1be3e32155f4f8054e315dd4c8153d94dad7a10bb7fc2d  ./cmd/mithril-agent/service_test.go
-24df9b4e644d5dd4fa567807afd0a87bbd5964e708732fbf44379e73d5fd9946  ./cmd/mithril-agent/setup.go
+464586ebcbda1199bcddc0042e47cead46c26613e01594389d0ebbfb5cd5ebed  ./cmd/mithril-agent/service.go
+10a56b428be0cae3d041bb3595462f3bbe6c9229cdce78920813d5fdfd61dc7f  ./cmd/mithril-agent/service_test.go
+a6718ad90a467ac1a5861d85171f9eebf7903c42e16c824691d957efc56a2b66  ./cmd/mithril-agent/setup.go
 a7d95c384bb91deb8b5182dffcc1f76d0074302d6a45753788c5bc8c936dee90  ./cmd/mithril-agent/setup_price_test.go
 2ebeeedd0ac3bc897eec6ec1e47b1aa6e6b2f93b99f3aac0c44ebc09700f4166  ./cmd/mithril-agent/setup_test.go
 21e19a9dad24b614e5f4abe71b9296e8148872c1fcd11e4a38a4050154a85880  ./cmd/mithril-agent/shadowbacktest.go
@@ -101,7 +103,7 @@ b423f6eeb603102e00d9359d4b9ab8606c5224564b2bd7debf4b4c87e8a87777  ./cmd/mithril-
 f7e4c1accaa908d2d16469e86875260c1a94b9974841c2bd33061d5f6f0defe6  ./cmd/mithril-agent/strategy_pointer_test.go
 877656e2360a431178c89dcccb0a632936386c8ec058ff50eb6ad0176a25075c  ./cmd/mithril-agent/strategy_run.go
 67aeeb68687e34b68fa72df826269cfeeade94f337822b2b4aceda820e4a249a  ./cmd/mithril-agent/strategy_run_test.go
-409b5eeb6d1e3fa5776605c3f9d4d09e2f0e8774733f60a1815897a99211d86e  ./cmd/mithril-agent/strategy_setup.go
+a87dc8e35446ea77b075ca361345c60a5a1903651f08a877b0643e450725d4dc  ./cmd/mithril-agent/strategy_setup.go
 34833668b0f5138d1156193c29dffb60a6be3655809dd6d8220b0fb0504689de  ./cmd/mithril-agent/strategy_setup_test.go
 b41c9a1b3628d8806e1299de6b3de6eedca97ec87affcf7e920db26ee8edc9d8  ./cmd/mithril-agent/strategy_show_test.go
 96be38fa14ad47b2a936b4f24173ec82dec5b7df56500c3d05772413809bb084  ./cmd/mithril-agent/strategy_sizing.go
