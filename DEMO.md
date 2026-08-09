@@ -15,16 +15,19 @@ The pilot can:
 - return to stopped mode and preserve a hash-chained audit record;
 - expose bounded status through MCP, Telegram, and Prometheus.
 
-It does not enable Mainnet trading, arbitrary tokens, recurring strategies, or
-trade approval from Telegram or an LLM. Shadow mode does *read* Mainnet, but it
-holds no key and cannot sign; see "Watching a real market" below.
+It does not enable Mainnet trading, arbitrary tokens, or trade approval from
+Telegram or an LLM. The complete strategy can repeat only within an explicit
+time, action-count, schedule, and daily-spend grant. Shadow mode does *read*
+Mainnet, but it holds no key and cannot sign; see "Watching a real market"
+below.
 
 ## Handing this to someone non-technical
 
-Split it in two: an administrator prepares the host once, then the reviewer runs
-two commands. The reviewer needs no path, no flag, and no configuration file.
+Split it in two: an operator prepares and validates the host once, then the
+reviewer uses the bounded status and demo commands. A reviewer must never be
+asked to find a private path, edit an environment file, or debug a service.
 
-**One-time, by an administrator with root** (about five minutes):
+**One-time, by an administrator with root:**
 
 ```sh
 # 1. Put the command on PATH, so nobody has to type /usr/local/libexec/...
@@ -34,36 +37,55 @@ sudo ln -sfn /usr/local/libexec/mithril-agent/mithril-agent /usr/local/bin/mithr
 sudo usermod -aG mithril-agent-status REVIEWER
 # The reviewer must log out and back in for the group to take effect.
 
-# 3. Run the guided setup as the reviewer, once.
-sudo -u REVIEWER mithril-agent setup
+# 3. Finish the supervised installation and guided strategy setup from README.
+#    Run setup as the mithril-agent service identity with its protected
+#    environment; do not run it from a normal login shell.
 ```
 
-Step 3 is where an administrator is genuinely needed. Setup finds the node
-runtime, the quote adapter and the Mithril executable by itself, but it asks for
-one path it cannot discover: the Mithril node's own `config.toml`, which lives
-in a directory a reviewer is not permitted to read. An administrator knows it;
-a reviewer never will. Running setup as the reviewer records the result in
-their home, so everything afterwards works without a path.
+The operator must install the complete runtime: all seven Go binaries, the
+pinned Node.js executable, `quote.mjs`, and its installed `node_modules`, plus
+an accessible Mithril executable. Copying only the main `mithril-agent`
+executable is incomplete and setup will refuse it. Keep one wallet, one saved
+strategy and its destination proof together: the proof binds that exact agent
+account to that exact payout wallet and cannot be borrowed from another setup
+attempt.
 
 Without step 1 the reviewer types an absolute path; without step 2 even
 read-only status is refused. Neither weakens anything: the socket stays
 read-only and the group grants nothing but reading it.
 
-**Then the reviewer runs two things** — the runner, left going, and the
-authorisation:
+Before handoff, the operator must prove all of these:
 
 ```sh
-mithril-agent swap run --config PATH    # leave this running
-mithril-agent demo                      # arms ONE bounded trade
+mithril-agent strategy show             # sell and sweep are listed
+systemctl is-active mithril-agent-run.service
 ```
 
-`demo` authorises; the runner executes. If the runner is not going, `demo` says
-so and names the command that starts it.
+Then run the supervised no-trade check shown below and require `status:
+ready`. Do not run `mithril-agent check` from a login shell that lacks the
+protected service environment.
 
-`setup` recorded where it put things and `demo` finds it, which is why no path
-is needed. If anything is wrong, `mithril-agent doctor` says what and prints the
-command that fixes it. Note that `demo` uses only the configuration this user's
-own setup recorded — it will not reach for the installed production one.
+After the first sell, the operator runs `mithril-agent setup strategy --resume`,
+reinstalls the generated service, and repeats the same checks until `strategy
+show` lists sell, buy and sweep. A fresh wallet therefore needs this one-time
+bootstrap before it can be left unattended. Process exit alone is never proof
+of a usable setup; the generated artifacts and read-only gate are the
+acceptance evidence.
+
+**Then the reviewer runs two path-free commands:**
+
+```sh
+mithril-agent strategy show
+mithril-agent demo
+```
+
+`demo` authorises at most one bounded Devnet action; the supervised runner
+executes it and returns to stopped mode. If the runner is not healthy, `demo`
+refuses and names the failed stage.
+
+The guided strategy setup recorded where it put things and `demo` finds it,
+which is why the reviewer needs no path. If anything is wrong,
+`mithril-agent doctor` says what and prints the next safe action.
 
 Before any of that, and needing nothing at all installed, they can run
 `mithril-agent explain` and `mithril-agent walkthrough` on their own laptop.
@@ -74,7 +96,7 @@ From the source directory:
 
 ```sh
 umask 077
-make verify-source   # every file matches the signed manifest
+make verify-source   # every source file matches the recorded manifest
 make test            # full suite, race detector, vet, format
 make explain         # what it can and cannot do, in plain English
 make walkthrough     # watch the real machinery run, on live prices
@@ -84,17 +106,9 @@ make walkthrough     # watch the real machinery run, on live prices
 separate build step. All four need a Go toolchain and nothing else — no wallet,
 no server, no account.
 
-Neither of those needs a wallet, a host, or a configuration. If you are setting
-one up, the guided path is two commands — answer or press Enter through the
-first, and the second finds what the first wrote:
-
-```sh
-./bin/mithril-agent setup
-./bin/mithril-agent doctor
-```
-
-`setup` authorises nothing. `doctor` is read-only and, for anything that is not
-ready, prints the exact command that fixes it.
+Neither command needs a wallet, a host, or a configuration. Creating a strategy
+does need the prepared Linux host and must follow the supervised installation
+in `README.md`; do not improvise a laptop setup and copy its files to the host.
 
 On an installed host, check the bounded operator view:
 
@@ -122,6 +136,7 @@ a provider rate limit.
 sudo systemd-run --quiet --wait --pipe --collect \
   --uid=mithril-agent --gid=mithril-agent \
   -p 'EnvironmentFile=/etc/mithril-agent/rpc.env' \
+  -p 'EnvironmentFile=/etc/mithril-agent/quote.env' \
   -p 'EnvironmentFile=-/etc/mithril-agent/mcp.env' \
   -p 'EnvironmentFile=-/etc/mithril-agent/price.env' \
   /usr/local/libexec/mithril-agent/mithril-agent check \
@@ -189,6 +204,43 @@ or manual stop. Then read the public status and require control mode
 `no_new_actions`; that status is authoritative. Do not rerun while an action is
 pending or the status says attention is required.
 
+## Run the complete bounded strategy
+
+This is the full reviewer path after the operator has completed the one-time
+bootstrap and `strategy show` lists sell, buy, and sweep. The supervised runner
+must already be active; the reviewer does not start a second copy.
+
+```sh
+mithril-agent strategy show
+mithril-agent start
+```
+
+`start` changes nothing. When every check is ready, it prints the exact bounded
+`strategy enable` command for this saved setup, including `--allow-any-price`
+when the operator intentionally configured market-price legs. Review the
+duration and maximum trades, replace `TEXT` with the review reason, and run
+that command once.
+
+The runner then watches the configured rules without an open terminal. A sell,
+buy, and sweep happen only when their own trigger, funding, schedule, evidence,
+and spending gates pass. Check all three from either surface:
+
+```sh
+mithril-agent strategy show
+# In Telegram: /status, /price, /last_trade
+```
+
+For an immediate demonstration the operator must have prepared market-price
+legs; a price-triggered strategy can correctly remain waiting. Stop the whole
+strategy at any time with:
+
+```sh
+mithril-agent strategy stop --reason 'review finished'
+```
+
+Afterward, `strategy show` must report every leg stopped. Do not infer success
+or failure from SSH, a terminal, or a missing Telegram message.
+
 ## MCP and Telegram
 
 Configure any MCP client to launch:
@@ -198,8 +250,9 @@ command: /usr/local/libexec/mithril-agent/mithril-agent
 args:    mcp --status-socket /run/mithril-agent-status.sock
 ```
 
-The MCP process waiting for input is normal. It exposes only information,
-status, and the operator guide. It cannot authorize, sign, or submit a trade.
+The MCP process waiting for input is normal. It exposes information, status,
+the configured strategy, and the operator guide. It cannot authorize, sign, or
+submit a trade.
 
 Telegram is also read-only. The useful reviewer commands are:
 

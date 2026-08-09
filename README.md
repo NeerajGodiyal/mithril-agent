@@ -1,19 +1,198 @@
 # Mithril Agent
 
-## Quick start — you already run Mithril
+## Quick source check — you already run Mithril
 
 This is a component that sits beside your Mithril node. If you have a node
-running, this is the whole path:
+running, first verify the checkout without installing or authorising anything:
 
 ```sh
 make prereqs     # everything this needs, checked at once
 make build       # seven binaries into ./bin
 make adapter     # the Orca quote adapter (checks your Node version first)
-
-./bin/mithril-agent setup     # guided; press Enter through it
-./bin/mithril-agent doctor    # what is missing, and the command that fixes it
-./bin/mithril-agent demo      # one bounded Devnet trade, then back to stopped
+make test        # format, vet, tests, race detector and isolation checks
+make walkthrough # read-only prices plus a local audit/recovery walkthrough
 ```
+
+Keep all seven files produced by `make build` together. `mithril-agent` starts
+the policy, signer, submitter, quote, status and Telegram helpers from beside
+its own executable; copying only the main binary creates an incomplete runtime
+that setup correctly refuses.
+
+For a live unattended agent, complete [Fresh supervised Linux installation](#fresh-supervised-linux-installation)
+before the strategy flow below. That installs the restricted OS identities,
+protected quote sidecar, environment files and runtime paths the generated
+runner expects. Skipping it is refused rather than producing a half-working
+service.
+
+## One strategy: bootstrap once, then run unattended
+
+These commands run after the supervised host installation above. The quote
+socket keeps Node.js out of the process that can sign and submit.
+`service install` also supplies that socket explicitly, so an older Devnet
+profile can use the safer layout without rewriting its policy, keys or journal.
+The short commands show the workflow; on a live host, run setup and resume with
+the supervised command shapes in the installation section. Do not source the
+protected environment files into a login shell.
+
+A strategy is a sell leg, a buy leg, and a sweep on one wallet. You enter the
+settings once. On a fresh wallet, the first setup writes the sell and sweep;
+after that sell creates the devUSDC account, one resume command writes the buy.
+
+This is the recommended path to a full unattended cycle (sell, optional buy
+back, then sweep). A brand-new wallet cannot complete that cycle in one launch:
+its first sell creates the devUSDC account that the buy leg must pin. Treat that
+first sell as a one-time bootstrap, run `--resume`, and only then leave the
+complete strategy unattended.
+
+```bash
+mithril-agent setup strategy \
+  --quote-socket /run/mithril-agent-quote/quote.sock
+                                  # guided; use the supervised service environment
+mithril-agent service install --output "$HOME/.mithril-agent/mithril-agent-run.service"
+                                    # once per host; review generated unit + install commands
+mithril-agent strategy enable --duration 12h --max-trades 1 --reason 'create buy funds'
+```
+
+Bootstrap phase one is complete only when `mithril-agent strategy show` lists
+the sell and sweep legs and the read-only check passes. A zero process exit by
+itself is not acceptance evidence. Do not combine a strategy file, destination
+proof or wallet from different setup attempts: the proof deliberately binds one
+exact agent account to one exact payout address.
+
+After the first sell completes, finish the same saved setup and reinstall the
+generated service so it includes the buy leg:
+
+```bash
+mithril-agent setup strategy --resume
+mithril-agent service install --output "$HOME/.mithril-agent/mithril-agent-run.service"
+mithril-agent strategy enable --duration 12h --max-trades 1 --reason 'one round trip'
+```
+
+The unattended setup is complete only when `strategy show` lists sell, buy and
+sweep, both swap legs pass the read-only gate, and the generated runner exposes
+sell, buy and sweep on `BASE`, `BASE+1` and `BASE+2`. Those offsets never change;
+an absent buy leg leaves `BASE+1` unused rather than moving the sweep.
+
+`setup strategy` with no strategy options asks plain questions, saves the
+answers to `~/.mithril-agent/strategy.json`, shows the exact trade it will
+configure, and walks you through proving you own the wallet that profit goes
+to. A prior setup supplies its recorded host paths; a fresh host supplies the
+wallet and Mithril paths in the supervised command below. Change your mind
+later with `strategy edit PATH` (the same questions, pre-filled) or `strategy
+edit PATH --raw` to open the file in `$EDITOR`.
+
+For a non-technical setup, run once and never touch per-leg flags again:
+
+```bash
+mithril-agent setup strategy \
+  --sell-at-usd 75.00 \
+  --buy-at-usd 73.00 \
+  --trades-per-day 4 \
+  --keep-sol 0.25 \
+  --to YOUR_WALLET_ADDRESS \
+  --quote-socket /run/mithril-agent-quote/quote.sock
+```
+
+Then use the bootstrap enable, resume, reinstall, and final enable commands
+above. The saved buy settings carry through; you do not enter the per-leg flags
+again.
+
+After the resume step, one enable covers all three bounded legs:
+- Sell when the sell trigger hits.
+- Buy when the buy trigger hits (after the sell creates devUSDC).
+- Sweep when the balance floor is above the keep amount at the configured time.
+
+`--max-trades` is per leg. Use `1` for one sell plus one buy. Raise it only if
+you want each leg to trade more than once during the same grant.
+
+### Full AFK cycle check
+
+After resume + enable, verify your strategy state before you go offline:
+
+```bash
+mithril-agent strategy show
+```
+
+You should see both `sell` and `buy` legs armed for a full round trip. If only
+sell is armed, you will only get a sell alert and no buy event.
+
+Prices are optional. Set BOTH a sell and a buy price to trade only at prices you
+choose, or NEITHER to trade at whatever the pool gives — arming market-price
+legs then requires `strategy enable --allow-any-price`, which prints
+`NO PRICE CONDITION` per leg so it is never silent.
+
+**The price you set is a floor on the fill, not just a signal.** The agent
+refuses to sell below it however high the oracle reads, so a threshold the pool
+cannot reach is refused at setup rather than waiting forever.
+
+### How much it may spend, and what it keeps
+
+Two numbers bound an unattended strategy, and both live in the same file.
+
+`trades_per_day` (default 6) sizes the signer's daily caps. It is a **spending
+bound, not a target**: the agent trades when the rules say so and never more
+often than this allows. It matters more than it looks, because the caps and the
+control grant are independent bounds — `strategy enable --max-trades N` is now
+refused when `N` exceeds what the caps actually fund, rather than granting
+authority the signer will spend the rest of the day declining.
+
+`keep_sol` is what stays in the agent wallet; everything above it is swept to
+`sweep.to`. Leave it empty and the agent keeps exactly what the trades need. It
+can only ever **raise** that floor — asking to keep less than the legs require
+is refused at setup, because a sweep that drains the wallet under the trader
+turns every later trade into an insufficient-balance failure a long way from
+its cause.
+
+```bash
+mithril-agent setup strategy --trades-per-day 6 --keep-sol 0.25
+```
+
+See what a configured strategy actually funds:
+
+```bash
+mithril-agent strategy show     # ... funds 6 trade(s) per day; cap resets 00:00 UTC
+```
+
+The buy leg is written after the first sell, because it pins the devUSDC account
+that sell creates:
+
+```bash
+mithril-agent setup strategy --resume
+```
+
+The sweep floor already reserves the buy leg, so resuming costs no second
+destination proof.
+
+### Verify a browser wallet from a remote host
+
+Setup never asks for your wallet key. When it needs proof that you control the
+payout address, it waits on the server and prints one command for your Mac or
+Linux desktop:
+
+```sh
+mithril-agent wallet verify --session SHORT_LIVED_SESSION
+```
+
+Run that command where Phantom or Solflare is installed. It asks for your
+normal SSH host or alias, opens a temporary `http://127.0.0.1/...` page in that
+browser, and closes the SSH tunnel after the server verifies the signature.
+It never prints a server-local file link and never receives the wallet key.
+The Solana CLI signature path remains available when no browser wallet is used.
+
+Stop everything at once, at any time:
+
+```bash
+mithril-agent strategy stop --reason TEXT
+```
+
+`strategy show` prints every leg, its trigger, its grant and where the profit
+goes. Nothing above arms anything except `strategy enable`, which is bounded:
+at most 24 hours, 1..100 trades, one action per schedule window.
+
+`setup` asks for the price to trade at. Leave it blank for an unconditional
+demonstration, or give a number — a sell fires at or above it, a buy at or
+below it. `setup sweep` configures sending profit to your own wallet, and
+`strategy show` prints everything currently configured.
 
 `setup` looks for your node's `config.toml` where you would actually have it —
 the working directory, where `mithril config init` writes it, then `~/.mithril`
@@ -32,7 +211,10 @@ To configure a trade you also need **three RPC endpoints** in the environment:
   https endpoints from **different providers**, so no single provider is the
   only witness to what happened.
 
-They are read from the environment and never written to disk.
+Setup reads them from the environment and never copies them into the generated
+strategy or trading profile. A supervised installation keeps them separately
+in the root-owned, mode-`0600` `/etc/mithril-agent/rpc.env` file described
+below.
 
 Your node also has to have **replayed far enough to see the agent's account**.
 It reports what it has actually verified, so a node still catching up will
@@ -56,7 +238,8 @@ For a short reviewer walkthrough of the existing Devnet pilot, see
 reference.
 
 Mithril Agent is a self-hosted application layer beside a Mithril full node.
-The current pilot can execute one tightly bounded Orca swap on Solana Devnet.
+The current pilot can run bounded sell, buy, and sweep legs on Solana Devnet;
+its separate demo command still permits only one swap.
 It is intentionally separate from the public Mithril node repository: node
 verification and RPC stay in Mithril, while wallet policy, signing, alerts, and
 application releases stay here.
@@ -70,7 +253,7 @@ Do not grant an assistant shell or service-control access to the deployment.
 
 The current demonstration is designed to exercise the autonomous mechanics
 for one fixed SOL-to-devUSDC sell or devUSDC-to-SOL buy after an explicit
-one-action grant.
+bounded grant.
 It is not a Mainnet flow or a Telegram-controlled bot.
 
 ## Current flow
@@ -114,7 +297,7 @@ not asked to verify itself.
 
 ### Optional price rule
 
-The Devnet pilot can monitor SOL/USD and start its one allowed sell or buy only
+The Devnet pilot can monitor SOL/USD and start the sells or buys its grant allows only
 after an operator-set target is reached. It requires fresh, agreeing observations
 from Pyth and Coinbase, applies each source's uncertainty conservatively, and
 uses integer arithmetic. An ordinary price miss is a waiting state, creates no
@@ -127,7 +310,7 @@ below the ceiling. A market observation therefore cannot authorize a worse
 pool rate. This is a Devnet test proxy, not proof that devUSDC is worth one US
 dollar; a production stablecoin route also needs independent stablecoin/USD
 evidence. Only the evidence used for an attempted action is durable. The rule
-never rearms itself; another action requires a new explicit one-action grant.
+never rearms itself; once a grant is spent another requires a new explicit one.
 
 The runner polls on its configured one-to-thirty-second interval and defaults
 to ten seconds. It is a bounded conditional action, not an exchange-native
@@ -143,12 +326,19 @@ production trading. Mainnet, arbitrary pairs, production market-data SLAs,
 recurring strategies, and Telegram write controls require additional policy
 and route work.
 
-Pyth requires authenticated Hermes access from August 18, 2026. The adapter
-already uses the upgraded endpoint and requires `MITHRIL_AGENT_PYTH_API_KEY`
-whenever a price rule is configured. Keep that bearer credential in the
-protected service environment, never in the config, journal, metrics, MCP
-output, or command line. An immediate demonstration with no price rule does
-not require it.
+The DEFAULT price source is the on-chain Pyth push feed, read through your own
+node. It needs no credential, so an ordinary price rule costs nothing extra.
+
+Only the optional Hermes adapter requires `MITHRIL_AGENT_PYTH_API_KEY`. Pyth's
+own documentation carries the banner "Pyth Core upgrade August 18, 2026. Every
+Core user will need an API Key", so from that date the Hermes source does not
+work without one. The on-chain push feed is unaffected: it is a Solana account
+read through your node, not an HTTP API.
+
+`NewPyth` already refuses an empty key, so a Hermes-configured agent fails
+closed rather than trading on a feed it cannot read. If you select that source,
+keep the bearer credential in the protected service environment, never in the
+config, journal, metrics, MCP output, or command line.
 
 ## Implemented safety boundary
 
@@ -208,6 +398,15 @@ execution. The minimum Go patch release includes security fixes used by the
 agent's network paths. macOS can build and run most tests, but the execution
 gate requires Linux kernel clock evidence.
 
+Build the deployment bundle on the target Linux host. If you deliberately
+cross-compile, set the target explicitly and verify every output before it is
+transported; a macOS executable copied to Linux is not a candidate:
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 make build
+file ./bin/*                         # every file must be Linux x86-64/ELF
+```
+
 Record the exact source before building. Keep the manifest outside the source
 tree and preserve its hash with the validation evidence; the development
 version string is a release label, not source provenance.
@@ -239,8 +438,10 @@ sha256sum ./bin/* > /absolute/private/validation/binaries.sha256
 
 After assembling the complete candidate runtime (the seven binaries, pinned
 Node.js, `quote.mjs`, and `node_modules`), create one manifest for every file
-and symlink target. Keep the manifest outside the runtime tree, verify it before
-transport, and run the same check from the transported staging directory:
+and symlink target. The Mithril executable is a separate prerequisite and must
+also be installed at the path passed to setup. Keep the manifest outside the
+runtime tree, verify it before transport, and run the same check from the
+transported staging directory:
 
 ```sh
 cd /absolute/runtime-staging
@@ -255,6 +456,12 @@ sha256sum -c /absolute/private/validation/runtime.sha256
 Regenerate and compare `runtime-symlinks.txt` after transport as well; hashing
 only each symlink's current target content does not prove that the link itself
 was preserved.
+
+Staging is not an executable runtime. Do not run setup from `/tmp`, `/mnt`, a
+home directory, or any tree owned by the login user. After verification,
+install the complete bundle into the root-owned `/usr/local/libexec` tree shown
+below; executable validation intentionally refuses replaceable directory
+ancestry.
 
 Hash the supplied sysusers, systemd, timesync, and Prometheus files into a
 separate deployment-assets manifest. Verify that manifest before installation,
@@ -414,11 +621,29 @@ Omit `--sell-at-usd` for the existing immediate one-action demonstration. When
 it is set, the runner keeps observing the rule while stopped and exposes it via
 `swap status`, MCP, Prometheus, and Telegram `/price`. Reaching the target while
 stopped sends an informational alert; it does not grant execution authority.
-After the operator enables exactly one action, a satisfied market rule and
+After the operator enables a bounded number of actions, a satisfied market rule and
 satisfied minimum swap rate allow the normal bounded swap flow to
 continue.
 
-For a buy, the wallet must already have its canonical devUSDC token account.
+If you only see a sell notification, this is usually expected for this
+one-action path. For a full AFK round trip setup (sell -> buy -> sweep), both
+sell and buy legs must be enabled. `--max-trades 1` allows one action on each
+leg: one sell and one buy. If a leg is not armed, failed health checks, or funds are not
+available, that leg will stay silent and `strategy show` will show why.
+
+For a full run, `send_started_records` and `submitted_records` and Telegram
+messages should move in this order:
+- Sell executed (if sell leg fires)
+- Buy executed (if buy leg fires)
+- Sweep executed (if balance is above floor and route is healthy)
+
+If one leg is healthy but waiting on market conditions, status stays active and
+Telegram remains quiet until the trigger condition is actually met.
+
+For a buy, the wallet must already have its canonical devUSDC token account —
+and the devUSDC to spend. Run the sell leg once first: it creates that account
+and produces the devUSDC the buy spends. A buy set up on a fresh wallet is
+refused, because the instruction sequence has no account to spend from.
 Amounts use ordinary decimal devUSDC at the command line and exact six-decimal
 base units in the generated policy:
 
@@ -453,6 +678,9 @@ Omit `--buy-at-usd` for an immediate one-action demonstration. A configured
 buy target means “buy SOL at or below this price”; it has the same two-source
 freshness, executable-rate, one-action, and stopped-by-default controls as the
 sell target.
+
+Use `strategy enable --max-trades` and `strategy show` to verify both legs are
+actually armed before expecting a buy and sweep notification.
 
 The target directory must not exist. Setup repeats the live read-only quote and
 fails if its current minimum no longer equals the confirmed value. It validates
@@ -569,6 +797,7 @@ sudo install -o root -g root -m 0755 /absolute/pinned/node \
   /usr/local/libexec/mithril-agent/node
 sudo install -o root -g root -m 0644 adapters/orca/quote.mjs \
   /usr/local/libexec/mithril-agent/quote.mjs
+# The payout-wallet verification page is embedded in the mithril-agent binary.
 sudo install -d -o root -g root -m 0755 \
   /usr/local/libexec/mithril-agent/node_modules
 sudo cp -a adapters/orca/node_modules/. \
@@ -579,6 +808,11 @@ sudo chmod -R go-w /usr/local/libexec/mithril-agent
 sudo install -d -o root -g root -m 0700 /etc/mithril-agent
 sudo install -d -o mithril-agent -g mithril-agent -m 0700 \
   /var/lib/mithril-agent /var/lib/mithril-agent/private
+
+# Give the restricted agent its own private copy. Do not use a symlink.
+# Repeat this after an intentional Mithril config change.
+sudo install -o mithril-agent -g mithril-agent -m 0600 \
+  /absolute/path/to/mithril/config.toml /var/lib/mithril-agent/node.toml
 ```
 
 Create the environment files without replacing an existing file, then edit
@@ -621,11 +855,52 @@ Install the Devnet keypair at
 `/var/lib/mithril-agent/private/devnet-keypair.json`, owned by
 `mithril-agent:mithril-agent` with mode `0600`. Run the discovery and setup
 commands from the Configuration section as the `mithril-agent` identity,
-loading the protected environments through the service manager. The setup
-directory must be `/var/lib/mithril-agent/agent`, and the supervised setup must
-use `/usr/local/libexec/mithril-agent/node`, the installed `quote.mjs`, and
-`--quote-socket /run/mithril-agent-quote/quote.sock`. For example, prefix the
-documented `swap discover` or `swap setup` arguments with `systemd-run`.
+loading the protected environments through the service manager. A legacy
+single-leg setup uses `/var/lib/mithril-agent/agent`; the guided strategy uses
+its private root below the service account's `HOME`. Both use
+`/usr/local/libexec/mithril-agent/node`, the installed `quote.mjs`, and
+`--quote-socket /run/mithril-agent-quote/quote.sock`.
+
+For the guided strategy path, use this exact supervised shape. Replace only the
+Mithril executable path if this host installs it elsewhere:
+
+```sh
+sudo systemd-run --quiet --wait --pty --collect \
+  --uid=mithril-agent --gid=mithril-agent \
+  --setenv=HOME=/var/lib/mithril-agent \
+  --property=UMask=0077 \
+  --property=EnvironmentFile=/etc/mithril-agent/rpc.env \
+  --property=EnvironmentFile=/etc/mithril-agent/quote.env \
+  --property=EnvironmentFile=-/etc/mithril-agent/mcp.env \
+  --property=EnvironmentFile=-/etc/mithril-agent/price.env \
+  /usr/local/libexec/mithril-agent/mithril-agent setup strategy \
+  --wallet-keypair /var/lib/mithril-agent/private/devnet-keypair.json \
+  --mithril-command /usr/local/bin/mithril \
+  --node-command /usr/local/libexec/mithril-agent/node \
+  --quote-script /usr/local/libexec/mithril-agent/quote.mjs \
+  --quote-socket /run/mithril-agent-quote/quote.sock
+```
+
+After the bootstrap sell, repeat that command with `--resume` appended. Keep
+all four environment-file entries: `quote.env` is required while setup obtains
+the buy route, and the leading `-` makes the optional files non-fatal when they
+are absent. `HOME` is required because it holds the strategy pointer. Do not
+replace this with an ad-hoc `systemd-run` command assembled from memory.
+
+After initial setup and again after resume, regenerate the runner and alert
+units from that same strategy pointer:
+
+```sh
+sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
+  /usr/local/libexec/mithril-agent/mithril-agent service install \
+  --output /var/lib/mithril-agent/.mithril-agent/mithril-agent-run.service
+```
+
+Review and run the privileged install commands it prints. Do not hand-edit the
+unit or omit an environment file: the generated service is the source of truth
+for leg paths, writable state, fixed metrics ports, status sockets and Telegram
+bridges.
+
 For the supervised immediate-sell pilot, these are the complete command shapes;
 replace only the confirmed minimum and any intentionally reviewed limits:
 
@@ -668,6 +943,12 @@ sudo systemd-run --quiet --wait --pipe --collect \
 One setup pins one direction. Create separate isolated setup and state paths
 for buy and sell; do not edit one setup back and forth or run two runners over
 the same state.
+
+These are the generic units, kept for a single-leg deployment and for review.
+For a strategy, do not hand-install the runner or the alert path: `mithril-agent
+service install` generates both from the legs setup recorded, so they name your
+actual paths and cannot drift from them. It prints the privileged commands to
+run, including the ones that create the alert account and group.
 
 Install and validate the supplied units and clock policy only after setup is
 complete:
@@ -760,7 +1041,7 @@ Start the hardened demonstration unit from another terminal and wait for it:
 sudo systemctl start --wait mithril-agent-demo.service
 ```
 
-The unit records progress, repeats the live gate, grants exactly one bounded
+The unit records progress, repeats the live gate, grants a bounded
 Devnet action, waits for final confirmation, and stops new actions before it
 reports success. Its sandbox matches the runner's filesystem, process, network,
 and executable-memory restrictions. `ExecStopPost` attempts to revoke new
@@ -781,6 +1062,7 @@ those files in an operator terminal:
 sudo systemd-run --quiet --wait --pipe --collect \
   --uid=mithril-agent --gid=mithril-agent \
   -p 'EnvironmentFile=/etc/mithril-agent/rpc.env' \
+  -p 'EnvironmentFile=/etc/mithril-agent/quote.env' \
   -p 'EnvironmentFile=-/etc/mithril-agent/mcp.env' \
   -p 'EnvironmentFile=-/etc/mithril-agent/price.env' \
   /usr/local/libexec/mithril-agent/mithril-agent swap check \
@@ -814,7 +1096,7 @@ From another terminal, grant one short-lived Devnet action:
   --reason 'bounded Devnet swap'
 ```
 
-The single action is consumed before the send boundary, so control
+Each action is consumed before the send boundary, so control
 automatically returns to `no_new_actions`. Do not run `swap enable` a second
 time. Poll `swap status` until it reaches a terminal result, then issue an
 explicit `swap stop` even after a successful automatic stop.
@@ -956,9 +1238,11 @@ journal, RPC environments, or wallet. `--config` remains available for a local
 developer who already owns those private files; it is not the normal client
 setup.
 
-The server exposes three standard read-only tools:
+The server exposes four standard read-only tools:
 
 - `mithril_agent_info` — active profile and disabled authority boundaries;
+- `mithril_agent_strategy` — configured rules and bounded spending settings,
+  without wallet addresses or credentials;
 - `mithril_agent_status` — current runner cycle, most recent action, journal,
   and control state.
 - `mithril_agent_operator_guide` — the safe local demonstration command and
@@ -993,6 +1277,31 @@ MITHRIL_AGENT_TELEGRAM_BOT_TOKEN=BOT_TOKEN
 MITHRIL_AGENT_TELEGRAM_CHAT_IDS=NUMERIC_CHAT_ID
 MITHRIL_AGENT_TELEGRAM_EXPLANATIONS=off
 ```
+
+Telegram never shows you your own chat ID. `mithril-agent-telegram link`
+prints the IDs your bot has heard from — message the bot, then run it.
+
+Alert expectation:
+
+- Telegram alerts are sent per enabled leg, not per strategy name.
+- If you are in one-action demo mode, one alert path is expected.
+- For the all-in-one strategy (sell + buy + sweep), you should see each leg only
+  when it is enabled, funded, and passes all gates.
+- `/status`, `/price`, and `/last_trade` label every configured leg, so one
+  healthy leg cannot hide a stopped or failed sibling.
+- `strategy show` shows the live leg state if one leg is not producing output.
+
+Setting these variables starts nothing: alerts come from a separate process.
+Prove it can reach you before a trade depends on it:
+
+```bash
+mithril-agent-telegram test    # one message to every allowed chat, per-chat result
+mithril-agent-telegram --status-socket PATH --cursor PATH   # leave running
+```
+
+A chat that fails `test` fails silently for a real trade. The usual cause is
+that nobody has pressed Start in that chat — Telegram refuses to deliver to a
+user who has not started the bot.
 
 The fresh supervised installation above already installs the bridge and
 Telegram binaries, units, identities, and protected environment file. A
@@ -1042,6 +1351,19 @@ alerts, the node, or execution. Explanation requests consume a private durable
 daily request-count budget before the provider call; the default is 20 requests
 per UTC day. This limits request volume, not the provider's monetary charge;
 choose provider-side spending limits separately.
+
+The surface exposes four read-only tools: `mithril_agent_info` (what the agent
+is and what it deliberately cannot do), `mithril_agent_strategy` (the configured
+rules and spending bounds), `mithril_agent_status` (the current cycle and last
+action), and `mithril_agent_operator_guide` (the boundary plus the one safe
+local command).
+
+`mithril_agent_strategy` answers "what am I configured to do" — direction, size
+per trade, daily cap, trades funded per day, the price rule, and whether a sweep
+destination is configured and its proof still verifies. It carries **no
+address**: a sweep destination is an account, and this surface promises not to
+expose accounts. Whether one exists and whether its proof is valid answers every
+operational question without naming the wallet.
 
 ## Alerts
 
@@ -1166,26 +1488,31 @@ node service writes to journald. It still requires Mithril's structured RPC,
 metrics, state, verification, divergence, provenance, and host checks.
 
 The service identity therefore needs only narrow filesystem evidence access.
-Grant traverse permission on the configured accounts, snapshot, and shredstore
-ancestry so MCP can inspect filesystem capacity; grant list and traverse on the
-configured log directory so divergence artifact names can be checked; and
-grant read access only to `mithril_state.json` and `replay_timings.jsonl`. Do
-not grant the agent read access to the raw node log or the AccountsDB. For
-example, adapt these paths to the active node deployment and apply the same
-policy whenever a new run directory is created:
+Mithril replaces `mithril_state.json` atomically, so a one-time ACL on that file
+does not survive. Use the dedicated state-reader group instead: the setgid
+accounts directory gives replacement files that group, while mode `2710`
+allows traversal without listing and Mithril writes only the state file as
+group-readable (`0640`). Other AccountsDB files stay private under the node's
+restrictive umask. Adapt these paths to the active deployment:
 
 ```sh
+sudo groupadd -f --system mithril-node-state
+sudo usermod -aG mithril-node-state mithril-agent
 sudo setfacl -m u:mithril-agent:--x NODE_STORAGE_ANCESTOR
-sudo setfacl -m u:mithril-agent:r-x NODE_ACCOUNTS_DIRECTORY
-sudo setfacl -m u:mithril-agent:r-- NODE_ACCOUNTS_DIRECTORY/mithril_state.json
+sudo chgrp mithril-node-state NODE_ACCOUNTS_DIRECTORY
+sudo chmod 2710 NODE_ACCOUNTS_DIRECTORY
+sudo chgrp mithril-node-state NODE_ACCOUNTS_DIRECTORY/mithril_state.json
+sudo chmod 0640 NODE_ACCOUNTS_DIRECTORY/mithril_state.json
 sudo setfacl -m u:mithril-agent:r-x NODE_LOG_DIRECTORY
 sudo setfacl -m u:mithril-agent:r-- NODE_LOG_DIRECTORY/replay_timings.jsonl
 ```
 
-Mithril replaces its state file atomically. If the node runs with a restrictive
-umask, reapply the state-file ACL after a state save or publish that one file
-through a dedicated monitoring group. Preflight reports `mcp_inputs=failed`
-when the configured state input is absent or unreadable.
+Install `deploy/sysusers/mithril-agent-status.conf` before the units; it creates
+the group and adds the standard agent account. The runner units request that
+supplementary group explicitly. A Mithril build older than the `0640` state
+writer can still replace the file as `0600`; upgrade it before relying on
+unattended monitoring. Preflight reports `mcp_inputs=failed` when the state
+input is absent or unreadable.
 
 Verify the final permissions as `mithril-agent`: storage `statfs`, divergence
 directory listing, and replay-timing reads must work, while opening the raw
@@ -1440,6 +1767,34 @@ property to save a file.
 loopback, so it can read the operator's own verifying node; anything off-box
 must be HTTPS. `MITHRIL_AGENT_QUOTE_RPC_URL` supplies the quote adapter and is
 HTTPS only.
+
+### Scoring a round trip
+
+`shadow report` scores ONE direction: "was selling at this price good". That is
+half the question. The other half — "and could I buy back low enough for the
+round trip to clear its own costs" — cannot be answered by running the legs
+separately, because the second leg spends exactly what the first produced and
+the spread plus two fees comes out of one book.
+
+```bash
+mithril-agent shadow backtest --policy PATH --dir PATH \
+  --buy-at-usd 200 --spread-bps 250
+```
+
+It replays a sell-then-buy-back over the prices the observer actually recorded,
+on one set of books, with the same ledger and report the live run uses — so a
+round-trip result is directly comparable with a one-directional one and with the
+hold benchmark.
+
+**It models the pool, and says so.** A recorded tick carries the price, not the
+quote that was available at the time, so the fill is derived from `--spread-bps`
+rather than observed. The report states that in its own output and in its JSON
+(`"pool_modelled": true`), because a modelled number presented as an observed
+one is worse than no backtest — somebody will size a real position on it. Read
+the pool's real spread with `swap discover` and set the flag from what you see.
+
+The model is deliberately pessimistic: it always fills worse than the oracle, in
+both directions, and a wider spread always fills worse than a narrow one.
 
 Why it is safe to point at mainnet: the `shadow` package declares no signer, no
 submitter, and no field that could name a key, so "shadow mode cannot trade" is

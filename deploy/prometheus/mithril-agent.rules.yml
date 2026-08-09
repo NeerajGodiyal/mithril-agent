@@ -147,6 +147,8 @@ groups:
           unless on(instance)
           mithril_agent_last_failure{category="quote_unavailable"} == 1
           unless on(instance)
+          mithril_agent_last_failure{category="price_below_floor"} == 1
+          unless on(instance)
           (mithril_agent_reconciliation_timeout_seconds > 0
             and
             mithril_agent_oldest_pending_reconciliation_age_seconds
@@ -168,6 +170,35 @@ groups:
           severity: warning
         annotations:
           summary: "Quotes are unavailable; no new swap can start"
+
+      - alert: MithrilAgentPriceBelowFloor
+        expr: >-
+          mithril_agent_last_failure{category="price_below_floor"} == 1
+        # Excluded from the AttentionRequired umbrella because a market that has
+        # not reached the operator's price is not a fault. It still needs a home:
+        # sustained for an hour it means the frozen route floor no longer matches
+        # the market, which --floor-tolerance-bps exists to correct.
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Quotes have stayed under the route floor for an hour; consider re-running setup with --floor-tolerance-bps"
+
+      - alert: MithrilAgentActionHalted
+        expr: >-
+          mithril_agent_last_result{decision="halted"} == 1
+        # A halt before submission no longer latches the control state, so it no
+        # longer raises MithrilAgentActionTerminal. It also self-resolves to
+        # "canceled" once the blockhash expires, which clears attention_required
+        # well inside AttentionRequired's 5m window — so without this rule a
+        # signed-but-unsent transaction is invisible to Prometheus entirely.
+        # No long "for": the event is the point, and it is brief by construction.
+        for: 30s
+        labels:
+          severity: warning
+          lifecycle: state
+        annotations:
+          summary: "A swap halted; check whether it was sent before deciding anything"
 
       - alert: MithrilAgentActionCompleted
         expr: >-
@@ -276,7 +307,7 @@ groups:
         expr: >-
           mithril_agent_journal_record_limit > 0
           and
-          mithril_agent_journal_records
+          mithril_agent_journal_active_records
             / mithril_agent_journal_record_limit >= 0.8
           or
           mithril_agent_journal_byte_limit > 0
@@ -287,7 +318,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Mithril agent journal is near capacity; archive it before enabling execution"
+          summary: "Mithril agent journal segment is near capacity; check that rotation is working"
 
       # Operator-configured notify-only alerts. The agent exports the
       # condition as gauges each cycle; persistence (for), anti-flap

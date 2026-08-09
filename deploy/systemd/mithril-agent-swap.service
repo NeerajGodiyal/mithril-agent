@@ -9,6 +9,7 @@ StartLimitBurst=3
 Type=simple
 User=mithril-agent
 Group=mithril-agent
+SupplementaryGroups=mithril-node-state
 UMask=0077
 EnvironmentFile=/etc/mithril-agent/rpc.env
 EnvironmentFile=-/etc/mithril-agent/mcp.env
@@ -29,7 +30,7 @@ InaccessiblePaths=-/etc/mithril-agent/quote.env
 # re-enabling. Do not remove this line to preserve the marker.
 ExecStartPre=/usr/local/libexec/mithril-agent/mithril-agent swap stop --config /var/lib/mithril-agent/agent/config.json --reason service_start
 ExecStartPre=/usr/local/libexec/mithril-agent/mithril-agent preflight --config /var/lib/mithril-agent/agent/config.json
-ExecStart=/usr/local/libexec/mithril-agent/mithril-agent swap run --config /var/lib/mithril-agent/agent/config.json --interval 10s --metrics-address 127.0.0.1:9191
+ExecStart=/usr/local/libexec/mithril-agent/mithril-agent swap run --config /var/lib/mithril-agent/agent/config.json --interval 10s --metrics-address 127.0.0.1:9191 --quote-socket /run/mithril-agent-quote/quote.sock
 ExecStop=/usr/local/libexec/mithril-agent/mithril-agent swap drain --config /var/lib/mithril-agent/agent/config.json --timeout 16m --reason service_stop
 ExecStopPost=/usr/local/libexec/mithril-agent/mithril-agent swap stop --config /var/lib/mithril-agent/agent/config.json --reason service_stop
 Restart=on-failure

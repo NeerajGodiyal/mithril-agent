@@ -45,14 +45,24 @@ help:
 prereqs:
 	@ok=1; \
 	 if command -v go >/dev/null; then \
-	   echo "  go       $$(go version | awk '{print $$3}')  (need 1.25.12+)"; \
+	   have=$$(go version 2>/dev/null | awk '{print $$3}'); v=$${have#go}; \
+	   if [[ "$$v" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]] && \
+	      (( $${BASH_REMATCH[1]} > 1 || \
+	         ($${BASH_REMATCH[1]} == 1 && $${BASH_REMATCH[2]} > 25) || \
+	         ($${BASH_REMATCH[1]} == 1 && $${BASH_REMATCH[2]} == 25 && $${BASH_REMATCH[3]} >= 12) )); then \
+	     echo "  go       $$have  ok"; \
+	   else echo "  go       $${have:-UNAVAILABLE} — need 1.25.12+"; ok=0; fi; \
 	 else echo "  go       MISSING — needed to build; https://go.dev/dl/"; ok=0; fi; \
 	 if command -v node >/dev/null; then \
 	   v=$$(node --version | sed 's/^v//'); maj=$${v%%.*}; r=$${v#*.}; min=$${r%%.*}; \
 	   if [[ "$$maj" -eq 24 && "$$min" -ge 18 ]]; then echo "  node     v$$v  ok"; \
 	   else echo "  node     v$$v  UNSUPPORTED — the quote adapter needs 24.18+ in the 24.x line"; ok=0; fi; \
 	 else echo "  node     MISSING — only needed for live quotes; https://nodejs.org/en/download"; ok=0; fi; \
-	 if command -v npm >/dev/null; then echo "  npm      $$(npm --version)  (need 11.16+)"; \
+	 if command -v npm >/dev/null; then \
+	   have=$$(npm --version 2>/dev/null || true); \
+	   if [[ "$$have" =~ ^11\.([0-9]+)\. ]] && (( $${BASH_REMATCH[1]} >= 16 )); then \
+	     echo "  npm      $$have  ok"; \
+	   else echo "  npm      $${have:-UNAVAILABLE} — need 11.16+ in the 11.x line"; ok=0; fi; \
 	 else echo "  npm      MISSING — ships with Node"; ok=0; fi; \
 	 if command -v sha256sum >/dev/null || command -v shasum >/dev/null; then \
 	   echo "  checksum present  ok"; \
@@ -79,13 +89,28 @@ prereqs:
 	   echo "Install what is marked above, then re-run: make prereqs"; \
 	   echo "Building and exploring need no wallet and no account. Only"; \
 	   echo "configuring a trade needs RPC endpoints and Devnet SOL."; \
-	 fi
+	 fi; \
+	 exit $$((1-ok))
 
 .PHONY: verify-source
 verify-source:
 	@if [[ ! -f "$(MANIFEST)" ]]; then \
 		echo "No manifest at $(MANIFEST); pass MANIFEST=<path>." >&2; exit 1; \
 	fi
+	@expected=$$(mktemp); listed=$$(mktemp); \
+	 trap 'rm -f "$$expected" "$$listed"' EXIT; \
+	 find . -type f \( -name '*.go' -o -name '*.mjs' -o -name '*.html' -o -name '*.json' \
+	      -o -name '*.md' -o -name 'Makefile' -o -name '*.service' \
+	      -o -name '*.socket' -o -name '*.conf' -o -name '*.yml' \
+	      -o -name 'go.mod' -o -name 'go.sum' -o -name '.gitignore' \) \
+	    -not -path './.git/*' -not -path './bin/*' \
+	    -not -path '*/node_modules/*' -not -name '$(MANIFEST)' \
+	    | LC_ALL=C sort > "$$expected"; \
+	 awk '{print $$2}' "$(MANIFEST)" | LC_ALL=C sort > "$$listed"; \
+	 if ! cmp -s "$$expected" "$$listed"; then \
+	   echo "MISMATCH: the manifest does not list exactly the current source files. Do not run it." >&2; \
+	   exit 1; \
+	 fi
 	@sum=$$(command -v sha256sum || command -v shasum); \
 	 if [[ -z "$$sum" ]]; then \
 	   echo "Cannot verify: neither sha256sum nor shasum is installed." >&2; \
@@ -105,9 +130,10 @@ verify-source:
 # a manifest that silently regenerates itself proves nothing about the source.
 .PHONY: manifest
 manifest:
-	@find . -type f \( -name '*.go' -o -name '*.mjs' -o -name '*.json' \
+	@find . -type f \( -name '*.go' -o -name '*.mjs' -o -name '*.html' -o -name '*.json' \
 	     -o -name '*.md' -o -name 'Makefile' -o -name '*.service' \
-	     -o -name '*.conf' -o -name '*.yml' \) \
+	     -o -name '*.socket' -o -name '*.conf' -o -name '*.yml' \
+	     -o -name 'go.mod' -o -name 'go.sum' -o -name '.gitignore' \) \
 	   -not -path './.git/*' -not -path './bin/*' \
 	   -not -path '*/node_modules/*' -not -name '$(MANIFEST)' \
 	   | LC_ALL=C sort \
@@ -206,16 +232,12 @@ test-short:
 	@go test ./... -count=1 -short
 
 .PHONY: explain
-explain: | $(BIN_DIR)/mithril-agent
-	@$(BIN_DIR)/mithril-agent explain
+explain:
+	@go run ./cmd/mithril-agent explain
 
 .PHONY: walkthrough
-walkthrough: | $(BIN_DIR)/mithril-agent
-	@$(BIN_DIR)/mithril-agent walkthrough
-
-
-$(BIN_DIR)/mithril-agent:
-	@$(MAKE) --no-print-directory build
+walkthrough:
+	@go run ./cmd/mithril-agent walkthrough
 
 .PHONY: install configure setup
 install configure setup:
