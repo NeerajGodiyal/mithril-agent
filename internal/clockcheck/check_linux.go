@@ -4,6 +4,7 @@ package clockcheck
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"strings"
@@ -16,7 +17,7 @@ func SystemSample() (Sample, error) {
 	var timex unix.Timex
 	state, err := unix.Adjtimex(&timex)
 	if err != nil {
-		return Sample{}, errors.New("read kernel clock state")
+		return Sample{}, fmt.Errorf("%w: read kernel clock state", ErrClockUnusable)
 	}
 	offsetNanos, uncertaintyNanos, err := validateTimex(state, timex)
 	if err != nil {
@@ -49,18 +50,18 @@ func SystemSample() (Sample, error) {
 
 func validateTimex(state int, timex unix.Timex) (int64, uint64, error) {
 	if state != unix.TIME_OK || timex.Status&(unix.STA_UNSYNC|unix.STA_CLOCKERR) != 0 {
-		return 0, 0, errors.New("kernel clock is not synchronized with normal leap state")
+		return 0, 0, fmt.Errorf("%w: kernel clock is not synchronized with normal leap state", ErrClockUnusable)
 	}
 	offsetNanos := timex.Offset * int64(time.Microsecond)
 	if timex.Status&unix.STA_NANO != 0 {
 		offsetNanos = timex.Offset
 	}
 	if offsetNanos < -int64(MaxOffset) || offsetNanos > int64(MaxOffset) {
-		return 0, 0, errors.New("kernel clock offset exceeds policy")
+		return 0, 0, fmt.Errorf("%w: kernel clock offset exceeds policy", ErrClockUnusable)
 	}
 	maxErrorMicros := int64(timex.Maxerror)
 	if maxErrorMicros < 0 || uint64(maxErrorMicros) > uint64(MaxUncertaintyCap/time.Microsecond) {
-		return 0, 0, errors.New("kernel clock uncertainty exceeds policy")
+		return 0, 0, fmt.Errorf("%w: kernel clock uncertainty exceeds policy", ErrClockUnusable)
 	}
 	return offsetNanos, uint64(maxErrorMicros) * uint64(time.Microsecond), nil
 }

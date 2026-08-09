@@ -67,6 +67,15 @@ func NewReport(checks []Check) Report {
 			if overall == Ready {
 				overall = Waiting
 			}
+		case Ready, Skipped:
+			// Ready imposes no obstacle; Skipped does not apply here.
+		default:
+			// A state this binary does not recognise — most often one a caller
+			// forgot to set — is less evidence than Unknown, and the rule for
+			// Unknown is that unreadable evidence is not good news. Leaving it
+			// to fall through would let a check added with a missing field
+			// silently permit an action.
+			overall = Unknown
 		}
 	}
 	return Report{Overall: overall, Checks: checks}
@@ -101,6 +110,14 @@ func (r Report) Validate() error {
 		}
 		if check.State == Ready && strings.TrimSpace(check.Action) != "" {
 			return errReadyWithAction
+		}
+		// Name the fault here rather than let a malformed report travel on. The
+		// derivation already refuses to call an unrecognised state ready; this
+		// is the boundary that says why.
+		switch check.State {
+		case Ready, Blocked, Waiting, Unknown, Skipped:
+		default:
+			return errUnknownState
 		}
 	}
 	return nil

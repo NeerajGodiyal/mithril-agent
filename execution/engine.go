@@ -2192,6 +2192,13 @@ func validCancelReason(reason string) bool {
 		"operator_stop_before_submission",
 		"balance_changed_before_signing",
 		"balance_changed_before_submission",
+		// authorizeUnsent returns this when Mithril's health stops agreeing with
+		// what the action was authorised against. Both suffixes were missing, so
+		// cancel — which does not validate before appending — would write the
+		// reason durably and then reject it on every replay afterwards, leaving
+		// a journal the setup cannot read without destroying its own audit trail.
+		"mithril_health_changed_before_signing",
+		"mithril_health_changed_before_submission",
 		"blockhash_expired_before_signing",
 		"blockhash_expired_before_submission":
 		return true
@@ -2208,6 +2215,10 @@ func validQuarantineReason(reason string) bool {
 		"utc_rollover_guard_before_submission",
 		"operator_stop_before_submission",
 		"balance_changed_before_submission",
+		// Refusing this one stranded a SIGNED transaction: quarantine is the only
+		// place a signed-but-unsent action can be parked, and a reason it rejects
+		// leaves the action neither quarantined nor sent.
+		"mithril_health_changed_before_submission",
 		"blockhash_expired_before_submission":
 		return true
 	default:

@@ -25,6 +25,13 @@ const (
 	secondsPerDay              = int64(86_400)
 )
 
+// errLedgerPolicyChanged separates "you edited a cap" from "this file is
+// damaged". Both used to arrive as "invalid or unavailable", which is the one
+// pair an operator most needs told apart: one is something they just did on
+// purpose, the other is a fault. Worse, the two call for opposite reactions,
+// and the reaction to a cap edit has a consequence nothing announced.
+var errLedgerPolicyChanged = errors.New("authorization ledger policy binding does not match")
+
 type authorizationHeader struct {
 	Version      uint32 `json:"version"`
 	PolicySHA256 string `json:"policy_sha256"`
@@ -73,7 +80,7 @@ func AuthorizeAndSign(
 	nowUnix := now.Unix()
 	if nowUnix < request.ScheduleWindowStartUnix ||
 		nowUnix >= request.ScheduleWindowEndUnix {
-		return Response{}, errors.New("signing request schedule window does not include current UTC time")
+		return Response{}, refused("signing request schedule window does not include current UTC time")
 	}
 
 	ledger, err := openAuthorizationLedger(policy, now)
@@ -167,6 +174,23 @@ func openAuthorizationLedger(policy Policy, now time.Time) (*authorizationLedger
 		dailyDebits:  make(map[int64]uint64),
 	}
 	if err := ledger.load(records, policyHash); err != nil {
+		if errors.Is(err, errLedgerPolicyChanged) {
+			_ = store.Close()
+			closeLock()
+			// The exposure is the part an operator cannot work out for
+			// themselves. The day's spend is bound to the caps it was spent
+			// under, so it cannot carry across an edit — a replacement setup
+			// starts the day at zero. That means TIGHTENING a cap partway
+			// through a day raises the total that day allows, which is the
+			// opposite of what tightening is for. Saying only "invalid or
+			// unavailable" left them to discover that by spending.
+			return nil, errors.New(
+				"this ledger recorded today's spending under different caps, so a cap was " +
+					"edited. The day's accumulated spend cannot carry across that edit: a new " +
+					"setup starts today at zero, so tightening a cap now RAISES what today " +
+					"still allows, until 00:00 UTC. Wait for the reset to tighten safely, or " +
+					"accept the wider day deliberately")
+		}
 		return fail()
 	}
 	return ledger, nil
@@ -220,7 +244,7 @@ func (l *authorizationLedger) load(records []journal.Record, policyHash string) 
 	if err := strictjson.Decode(records[0].Payload, &header); err != nil ||
 		header.Version != authorizationLedgerVersion ||
 		header.PolicySHA256 != policyHash {
-		return errors.New("authorization ledger policy binding does not match")
+		return errLedgerPolicyChanged
 	}
 	for _, record := range records[1:] {
 		if record.Type != authorizationReserveType || record.ActionID == "" {
@@ -372,7 +396,7 @@ func (l *authorizationLedger) reserve(
 	total := l.dailyDebits[reservation.DayStartUnix]
 	if total > l.policy.DailyDebitCapLamports ||
 		reservation.DebitLamports > l.policy.DailyDebitCapLamports-total {
-		return errors.New("signer daily debit cap would be exceeded")
+		return refused("signer daily debit cap would be exceeded")
 	}
 	if _, err := l.store.Append(now.UTC(), authorizationReserveType, actionID, reservation); err != nil {
 		return errors.New("authorization reservation could not be made durable")

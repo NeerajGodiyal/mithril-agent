@@ -146,14 +146,21 @@ func ValidateBuyInstructionsV2(
 	}
 	if quote.InputAmount == 0 || quote.InputAmount > policy.MaxInputTokenAmount ||
 		quote.EstimatedOutput == 0 || quote.MinimumOutput > quote.EstimatedOutput ||
-		quote.MinimumOutput < policy.MinOutputLamports || quote.SlippageBPS == 0 ||
-		quote.SlippageBPS > policy.MaxSlippageBPS {
+		quote.SlippageBPS == 0 || quote.SlippageBPS > policy.MaxSlippageBPS {
 		return BuyIntentV2{}, errors.New("Orca buy quote is outside policy")
 	}
 	high, low := bits.Mul64(quote.EstimatedOutput, uint64(10_000-quote.SlippageBPS))
 	minimumAllowed, _ := bits.Div64(high, low, 10_000)
 	if quote.MinimumOutput < minimumAllowed {
 		return BuyIntentV2{}, errors.New("Orca buy minimum output falls below the slippage floor")
+	}
+	// The floor check sits BELOW the slippage check on purpose: a quote whose
+	// minimum contradicts its own estimate and slippage is malformed, and
+	// reporting that as price_below_floor downgrades a tampered adapter from
+	// the critical page to a one-hour warning. Only a structurally sound quote
+	// may be called an ordinary price decline.
+	if quote.MinimumOutput < policy.MinOutputLamports {
+		return BuyIntentV2{}, ErrQuoteBelowFloor
 	}
 	if len(instructions) != 4 {
 		return BuyIntentV2{}, errors.New("Orca buy requires an existing input account and the fixed temporary-WSOL sequence")

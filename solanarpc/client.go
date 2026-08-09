@@ -398,10 +398,14 @@ func (c *Client) AccountSlice(
 	if minContextSlot == 0 || length == 0 || length > 512 || offset > ^uint64(0)-length {
 		return AccountDataSlice{}, errors.New("account data slice is invalid")
 	}
+	commitment := "confirmed"
+	if c.mithril {
+		commitment = "processed"
+	}
 	raw, err := c.call(ctx, "getAccountInfo", []any{
 		address,
 		map[string]any{
-			"commitment":     "confirmed",
+			"commitment":     commitment,
 			"encoding":       "base64",
 			"minContextSlot": minContextSlot,
 			"dataSlice": map[string]uint64{

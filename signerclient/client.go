@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"path/filepath"
@@ -21,7 +22,52 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/solana"
 )
 
-const maxResponseBytes = 64 << 10
+const (
+	maxResponseBytes = 64 << 10
+	// maxRefusalBytes bounds what is read back from a refusing signer. Its
+	// messages are single short sentences; anything longer is not one.
+	maxRefusalBytes = 512
+	// signerRefusalExitCode must match cmd/mithril-agent-signer's own constant.
+	// It means the policy declined, not that the process broke.
+	signerRefusalExitCode = 3
+)
+
+// ErrSignerRefused is the signer declining under its own policy — a daily cap
+// reached, a window closed, a request outside the bound route. It is not a
+// fault: the caller should report it as a refusal and try in the next window,
+// rather than holding a built transaction until its blockhash expires.
+var ErrSignerRefused = errors.New("signer refused under its policy")
+
+// boundedBuffer keeps the first bytes and drops the rest without erroring, so a
+// chatty child can neither fail the write nor grow this process's heap.
+type boundedBuffer struct {
+	data  []byte
+	limit int
+}
+
+func (b *boundedBuffer) Write(data []byte) (int, error) {
+	if room := b.limit - len(b.data); room > 0 {
+		if len(data) < room {
+			room = len(data)
+		}
+		b.data = append(b.data, data[:room]...)
+	}
+	return len(data), nil
+}
+
+// refusalReason is the signer's first line, printable ASCII only. Read solely
+// on the refusal exit code, where every message is one of our own constants.
+func refusalReason(data []byte) string {
+	line, _, _ := bytes.Cut(data, []byte("\n"))
+	line = bytes.TrimPrefix(bytes.TrimSpace(line), []byte("mithril-agent-signer: "))
+	clean := make([]byte, 0, len(line))
+	for _, b := range line {
+		if b >= 0x20 && b < 0x7f {
+			clean = append(clean, b)
+		}
+	}
+	return string(bytes.TrimSpace(clean))
+}
 
 type Config struct {
 	Command     string
@@ -101,12 +147,27 @@ func (c *Client) Sign(ctx context.Context, request signer.Request) (signer.Respo
 	)
 	command.Env = secureexec.MinimalEnvironment(c.config.Env)
 	command.Stdin = bytes.NewReader(input)
-	stderr := &secureexec.DiscardCounter{}
+	// Kept bounded and only ever read on a REFUSAL exit. The signer's other
+	// failures can name a policy or keypair path; its refusals are our own
+	// constant strings and name nothing.
+	stderr := &boundedBuffer{limit: maxRefusalBytes}
 	command.Stderr = stderr
 	var stdout bytes.Buffer
 	command.Stdout = &limitedWriter{writer: &stdout, remaining: maxResponseBytes + 1}
 	command.WaitDelay = time.Second
 	if err := command.Run(); err != nil {
+		// Every signer failure used to collapse to one message, so "the daily cap
+		// is spent, try tomorrow" and "the binary is missing" were the same line.
+		// The proposer then held its built transaction until the blockhash aged
+		// out and reported an expired blockhash — a symptom, one minute and one
+		// wrong diagnosis away from the cause.
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == signerRefusalExitCode {
+			if reason := refusalReason(stderr.data); reason != "" {
+				return signer.Response{}, fmt.Errorf("%w: %s", ErrSignerRefused, reason)
+			}
+			return signer.Response{}, ErrSignerRefused
+		}
 		return signer.Response{}, errors.New("signer process failed")
 	}
 	if stdout.Len() > maxResponseBytes {

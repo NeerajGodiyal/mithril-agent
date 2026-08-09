@@ -21,6 +21,14 @@ type Quote struct {
 // a shadow one, or the shadow result overstates how often the strategy trades.
 type Fill struct {
 	Filled bool `json:"filled"`
+	// Sell records which way THIS fill moved inventory. Direction used to be a
+	// property of the policy, which is true for a one-directional run and false
+	// for a round trip: holding SOL the only possible action is a sell, holding
+	// devUSDC it is a buy, and both happen against one set of books.
+	//
+	// It does NOT decide which asset is "base". That stays policy-level and is
+	// already right either way: base is the asset whose price moves.
+	Sell bool `json:"sell"`
 	// Refusal names why nothing happened, in the same terms the real guard
 	// would have used. Empty when Filled.
 	Refusal string `json:"refusal,omitempty"`
@@ -137,6 +145,15 @@ func QuotedPriceMicros(policy Policy, quote Quote) (uint64, error) {
 // demanded, a real transaction would have been refused by its own slippage
 // guard — so this refuses too, rather than booking an optimistic fill.
 func SettleFill(policy Policy, quote Quote, decisionPrice, settlePrice uint64) (Fill, error) {
+	return SettleFillDirected(policy, quote, decisionPrice, settlePrice, policy.IsSell())
+}
+
+// SettleFillDirected is SettleFill with the direction named explicitly, which a
+// round trip needs: the same books take a sell while holding SOL and a buy
+// while holding devUSDC, so direction cannot come from the policy.
+func SettleFillDirected(
+	policy Policy, quote Quote, decisionPrice, settlePrice uint64, sell bool,
+) (Fill, error) {
 	if decisionPrice == 0 || settlePrice == 0 {
 		return Fill{}, errZeroReference
 	}
@@ -150,13 +167,13 @@ func SettleFill(policy Policy, quote Quote, decisionPrice, settlePrice uint64) (
 	if err != nil {
 		return Fill{}, err
 	}
-	impact, err := AdvantageBPS(decisionPrice, quoted, policy.IsSell())
+	impact, err := AdvantageBPS(decisionPrice, quoted, sell)
 	if err != nil {
 		return Fill{}, err
 	}
 
 	received := new(big.Int).SetUint64(quote.EstimatedOutput)
-	if policy.IsSell() {
+	if sell {
 		received.Mul(received, new(big.Int).SetUint64(settlePrice))
 		received.Div(received, new(big.Int).SetUint64(decisionPrice))
 	} else {
@@ -168,6 +185,7 @@ func SettleFill(policy Policy, quote Quote, decisionPrice, settlePrice uint64) (
 	}
 
 	fill := Fill{
+		Sell:                sell,
 		SpentUnits:          quote.InputAmount,
 		FeeLamports:         policy.FeeLamports,
 		DecisionPriceMicros: decisionPrice,

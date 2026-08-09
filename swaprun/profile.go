@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math/bits"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
@@ -134,6 +135,45 @@ func (p Profile) validateCommon(direction pricetrigger.Direction) error {
 
 func (p Profile) ClockUncertaintyLimit() time.Duration {
 	return time.Duration(p.MaxClockUncertaintyMillis) * time.Millisecond
+}
+
+// FundedTradesPerDay is how many trades this profile's daily caps can actually
+// pay for. The control grant and these caps are independent bounds that nothing
+// reconciled: `strategy enable --max-trades 5` would grant five actions against
+// caps that fund one, and the four the signer refuses are invisible — the
+// refusal is discarded at the process boundary and surfaces, a minute later, as
+// an expired blockhash. Every caller that compares the two bounds routes here.
+//
+// It is a LOWER bound: a sell is charged output-account rent only on the trade
+// that creates the account, so the real count is this or better. Erring low is
+// the safe direction for a refusal.
+func (p Profile) FundedTradesPerDay() uint64 {
+	perTrade := func(cap, cost uint64) uint64 {
+		if cost == 0 {
+			return 0
+		}
+		return cap / cost
+	}
+	if p.isBuy() {
+		trades := perTrade(p.DailyInputTokenCap, p.InputTokenAmount)
+		if fees := perTrade(p.DailyNativeFeeCapLamports, p.MaxFeeLamports); fees < trades {
+			trades = fees
+		}
+		return trades
+	}
+	// A checked add, not a comparison against the addends: a three-term sum can
+	// wrap to a value ABOVE two of them (3 + 3 + MaxUint64-1 wraps to 4), so the
+	// obvious `cost < a || cost < b` guard passes and the division then reports
+	// far MORE funded trades than exist. Erring high here is the one direction
+	// that matters — it re-opens the arming mismatch this whole function closes.
+	cost, carry := bits.Add64(p.InputLamports, p.MaxFeeLamports, 0)
+	if carry != 0 {
+		return 0
+	}
+	if cost, carry = bits.Add64(cost, p.Route.MaxOutputAccountRentLamports, 0); carry != 0 {
+		return 0
+	}
+	return perTrade(p.DailyDebitCapLamports, cost)
 }
 
 func (p Profile) Fingerprint() (string, error) {

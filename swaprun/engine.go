@@ -60,6 +60,13 @@ type observationValidationError struct {
 	message string
 }
 
+// ErrBlockhashExpired reports a transaction that was built but could not be
+// submitted before its blockhash aged out. It is a LATENCY fault, not a broken
+// agent and not a rejected trade: the next cycle simply rebuilds. Flattened
+// into a generic failure it read as "the agent is broken", which is the one
+// conclusion an operator must not draw from a retryable condition.
+var ErrBlockhashExpired = errors.New("transaction blockhash expired before submission")
+
 func (e *observationValidationError) Error() string { return e.message }
 
 // ObservationFailure returns the bounded policy stage for an observation error.
@@ -401,8 +408,34 @@ func (e *Engine) RunOnce(ctx context.Context, profile Profile) (Result, error) {
 		result := Result{Decision: "stopped", Reason: "Devnet actions are not enabled"}
 		if profile.PriceTrigger != nil {
 			// Advisory: this only renders stopped-state status and cannot
-			// authorize anything, so no proven slot is required.
-			_, status, _, priceErr := e.observePrice(ctx, *profile.PriceTrigger, 0)
+			// authorize anything. It still needs A slot, because the default
+			// on-chain feed refuses a zero minimum context slot outright — and
+			// passing zero here meant a stopped agent ALWAYS read the price as
+			// unavailable. That silently disabled the whole notify-only alert
+			// layer: MithrilAgentPriceTargetReached requires stopped AND price
+			// available at once, which were mutually exclusive, and the
+			// price-above/below slots need the same field, so an operator was
+			// never told their target had been reached while they were not
+			// armed — the one moment the alert exists for.
+			//
+			// The slot comes from the blockhash read rather than an observation
+			// because this path must stay cheap: an observation spawns a node
+			// subprocess every cycle, and a stopped agent can idle for days.
+			// A weaker slot is sound here precisely because nothing on this
+			// path can authorize; the authorizing reads bind a cross-checked
+			// observation slot instead.
+			// minContextSlot 1, not 0: the client REFUSES zero outright
+			// (solanarpc/client.go), because an authorizing caller must bind a
+			// slot it actually proved. 1 is the smallest always-satisfiable
+			// bound, so it asks only "answer at whatever slot you are at" and
+			// returns that slot. Sound HERE because nothing on this path can
+			// authorize — it renders stopped-state status. Do not copy this to
+			// a path that signs: there the bound is the whole point.
+			advisorySlot := uint64(0)
+			if latest, latestErr := e.blockhash.LatestBlockhash(ctx, 1); latestErr == nil {
+				advisorySlot = latest.ContextSlot
+			}
+			_, status, _, priceErr := e.observePrice(ctx, *profile.PriceTrigger, advisorySlot)
 			if priceErr != nil {
 				unavailable := pricetrigger.Unavailable(*profile.PriceTrigger)
 				result.PriceTrigger = &unavailable
@@ -456,38 +489,6 @@ func (e *Engine) RunOnce(ctx context.Context, profile Profile) (Result, error) {
 	}
 	var startPriceEvidence *pricetrigger.Evidence
 	var startPriceStatus *pricetrigger.Status
-	if current.started == nil && profile.PriceTrigger != nil {
-		// Advisory: decides only whether to keep waiting. The authorizing
-		// re-check before signing binds to a proven observation slot.
-		evidence, status, evaluatedAt, err := e.observePrice(ctx, *profile.PriceTrigger, 0)
-		if err != nil {
-			return Result{
-				ActionID: actionID, Decision: "degraded",
-				Reason: "price evidence is temporarily unavailable", PriceTrigger: &status,
-			}, nil
-		}
-		if err := e.checkClock(profile, evaluatedAt); err != nil {
-			return Result{}, err
-		}
-		observedWindowStart, observedWindowEnd, err := profile.Window(evaluatedAt)
-		if err != nil {
-			return Result{}, err
-		}
-		if observedWindowStart != windowStart || observedWindowEnd != windowEnd {
-			return Result{
-				Decision: "waiting", Reason: "swap schedule window changed during price observation",
-				PriceTrigger: &status,
-			}, nil
-		}
-		if !evidence.Triggered {
-			return Result{
-				ActionID: actionID, Decision: "waiting",
-				Reason: "price trigger has not been reached", PriceTrigger: &status,
-			}, nil
-		}
-		startPriceEvidence = &evidence
-		startPriceStatus = &status
-	}
 	if current.sendStarted == nil {
 		if err := e.tx.VerifyGenesis(ctx, solana.DevnetGenesisHash); err != nil {
 			return Result{}, err
@@ -515,9 +516,66 @@ func (e *Engine) RunOnce(ctx context.Context, profile Profile) (Result, error) {
 			if appendErr := e.recordObservationFailure(actionID, current, "invalid_observation"); appendErr != nil {
 				return Result{}, appendErr
 			}
-			return Result{Decision: "degraded", Reason: err.Error()}, nil
+			// Carry the trigger through. runmetrics infers "is a price trigger
+			// configured" from this field being non-nil, so dropping it made a
+			// configured trigger read as unconfigured and silenced every
+			// notify-only price alert — exactly while the agent was also paging
+			// critical for the degraded observation.
+			return Result{
+				Decision: "degraded", Reason: err.Error(),
+				PriceTrigger: unavailablePrice(profile),
+			}, nil
 		}
 		e.recordBalance(observation)
+		// The price gate runs BEFORE the sustained-health gate so a cycle that
+		// cannot act writes nothing: sustainedHealthReady journals an observation,
+		// and a trigger can wait days, so recording every wait would grow the
+		// journal for no decision. The cost is that health warms up after the
+		// price is reached rather than during the wait, which also means health
+		// is proven fresh at the moment of action.
+		// Non-authorizing: this decides only whether to keep waiting. It still
+		// binds to a slot ValidateObservation has cross-checked in_sync against
+		// an independent reference, so a stalled node cannot produce it. Binding
+		// matters because this evidence is durable — it is written into the
+		// start record and becomes the baseline the pre-signing progress check
+		// compares against. The authorizing re-check binds to the start record's
+		// slot, which additionally cleared the sustained gate.
+		if profile.PriceTrigger != nil {
+			evidence, status, evaluatedAt, err := e.observePrice(
+				ctx, *profile.PriceTrigger, observation.Account.Slot,
+			)
+			if err != nil {
+				return Result{
+					ActionID: actionID, Decision: "degraded",
+					Reason: "price evidence is temporarily unavailable", PriceTrigger: &status,
+				}, nil
+			}
+			// Held before the health return so a configured trigger keeps
+			// reporting through warmup rather than reading as unconfigured.
+			startPriceStatus = &status
+			if err := e.checkClock(profile, evaluatedAt); err != nil {
+				return Result{}, err
+			}
+			priceWindowStart, priceWindowEnd, err := profile.Window(evaluatedAt)
+			if err != nil {
+				return Result{}, err
+			}
+			if priceWindowStart != windowStart || priceWindowEnd != windowEnd {
+				return Result{
+					Decision: "waiting", Reason: "swap schedule window changed during price observation",
+					PriceTrigger: &status,
+				}, nil
+			}
+			if evidence.Triggered {
+				startPriceEvidence = &evidence
+			}
+		}
+		if profile.PriceTrigger != nil && startPriceEvidence == nil {
+			return Result{
+				ActionID: actionID, Decision: "waiting",
+				Reason: "price trigger has not been reached", PriceTrigger: startPriceStatus,
+			}, nil
+		}
 		ready, err := e.sustainedHealthReady(
 			actionID, profile, current, observation, observationNow,
 		)
@@ -527,7 +585,8 @@ func (e *Engine) RunOnce(ctx context.Context, profile Profile) (Result, error) {
 		if !ready {
 			return Result{
 				ActionID: actionID, Decision: "waiting",
-				Reason: "Mithril health has not met the sustained observation gate",
+				Reason:       "Mithril health has not met the sustained observation gate",
+				PriceTrigger: startPriceStatus,
 			}, nil
 		}
 		startedAt := e.now().UTC()
@@ -601,6 +660,18 @@ func (e *Engine) RunOnce(ctx context.Context, profile Profile) (Result, error) {
 		if quotedIntent.InputAmount != profile.inputAmount() ||
 			quotedIntent.MinimumOutput != quote.TokenMinOut {
 			return Result{}, errors.New("Orca quote does not match the active profile")
+		}
+		// Decide against this quote before turning it into a transaction. Doing
+		// it after the build meant every waiting window paid for a blockhash, a
+		// block height, deployment and rent evidence, a fee quote against both
+		// evidence providers, a simulation, and two journal records — and then
+		// sat on a transaction until its blockhash expired and it was canceled.
+		// A rule that spends most of its life waiting should cost a quote.
+		if profile.PriceTrigger != nil {
+			_, status, err := e.validatePriceForAction(ctx, profile, current, quote.TokenMinOut)
+			if err != nil {
+				return priceWaitResult(actionID, status, err), nil
+			}
 		}
 		latest, err := e.blockhash.LatestBlockhash(ctx, current.started.ObservationSlot)
 		if err != nil {
@@ -712,7 +783,7 @@ func (e *Engine) RunOnce(ctx context.Context, profile Profile) (Result, error) {
 			return Result{}, err
 		}
 		if expired {
-			return e.cancel(actionID, profile, current, "transaction blockhash expired before submission")
+			return e.cancel(actionID, profile, current, ErrBlockhashExpired.Error())
 		}
 	}
 	if current.simulation == nil {
@@ -728,18 +799,11 @@ func (e *Engine) RunOnce(ctx context.Context, profile Profile) (Result, error) {
 	signedBeforeRun := current.signed != nil
 	if current.signed == nil {
 		if profile.PriceTrigger != nil {
-			_, status, err := e.validatePriceForAction(ctx, profile, current)
+			_, status, err := e.validatePriceForAction(
+				ctx, profile, current, current.built.MinimumOutput,
+			)
 			if err != nil {
-				decision := "degraded"
-				reason := "price evidence is temporarily unavailable"
-				if errors.Is(err, errPriceTriggerNotSatisfied) {
-					decision = "waiting"
-					reason = "price trigger or executable minimum is not satisfied"
-				}
-				return Result{
-					ActionID: actionID, Decision: decision, Reason: reason,
-					PriceTrigger: &status,
-				}, nil
+				return priceWaitResult(actionID, status, err), nil
 			}
 		}
 		request := signer.Request{
@@ -885,7 +949,7 @@ func (e *Engine) validateBeforeSend(
 		return nil, nil, err
 	}
 	if expired {
-		return nil, nil, errors.New("transaction blockhash expired before submission")
+		return nil, nil, ErrBlockhashExpired
 	}
 	var priceEvidence *pricetrigger.Evidence
 	var priceStatus *pricetrigger.Status
@@ -1060,19 +1124,41 @@ func (e *Engine) observePrice(
 	policy pricetrigger.Policy,
 	provenSlot uint64,
 ) (pricetrigger.Evidence, pricetrigger.Status, time.Time, error) {
+	// A failed read still has to describe the trigger it failed to read. The
+	// zero Status carries no feed or threshold, so it fails ValidateStatus, and
+	// the runner writes this into operator status every cycle — an invalid one
+	// ends the process. Reporting "unavailable" keeps a routine price outage
+	// from taking the agent down with it.
+	unavailable := pricetrigger.Unavailable(policy)
 	evidence, err := e.priceTrigger.EvaluateAtSlot(ctx, policy, provenSlot)
 	if err != nil {
-		return pricetrigger.Evidence{}, pricetrigger.Status{}, time.Time{}, err
+		return pricetrigger.Evidence{}, unavailable, time.Time{}, err
 	}
 	evaluatedAt := e.now().UTC()
 	if err := validateLivePriceEvidence(policy, evidence, evaluatedAt); err != nil {
-		return pricetrigger.Evidence{}, pricetrigger.Status{}, time.Time{}, err
+		return pricetrigger.Evidence{}, unavailable, time.Time{}, err
 	}
 	status, err := pricetrigger.Project(policy, evidence)
 	if err != nil {
-		return pricetrigger.Evidence{}, pricetrigger.Status{}, time.Time{}, err
+		return pricetrigger.Evidence{}, unavailable, time.Time{}, err
 	}
 	return evidence, status, evaluatedAt, nil
+}
+
+// priceWaitResult maps a price refusal to the operator-facing result. Both the
+// pre-build and pre-signing checks report identically, so an operator cannot
+// tell — and does not need to tell — which one declined.
+func priceWaitResult(actionID string, status pricetrigger.Status, err error) Result {
+	decision := "degraded"
+	reason := "price evidence is temporarily unavailable"
+	if errors.Is(err, errPriceTriggerNotSatisfied) {
+		decision = "waiting"
+		reason = "price trigger or executable minimum is not satisfied"
+	}
+	return Result{
+		ActionID: actionID, Decision: decision, Reason: reason,
+		PriceTrigger: &status,
+	}
 }
 
 func validatePriceEvidenceProgress(initial, current pricetrigger.Evidence) error {
@@ -1084,10 +1170,27 @@ func validatePriceEvidenceProgress(initial, current pricetrigger.Evidence) error
 	return nil
 }
 
+// validatePriceForAction takes the minimum output explicitly so it can be asked
+// the same question about a quote that has only just been fetched, before that
+// quote is turned into a transaction. The value is identical either way — the
+// build record stores exactly the quote's minimum — but the caller that has
+// only the quote can then decline without paying for the rest of the build.
+// unavailablePrice is the trigger's shape with no reading, for paths that
+// cannot produce one. Nil would mean "no trigger configured", which is a
+// different and quieter fact.
+func unavailablePrice(profile Profile) *pricetrigger.Status {
+	if profile.PriceTrigger == nil {
+		return nil
+	}
+	status := pricetrigger.Unavailable(*profile.PriceTrigger)
+	return &status
+}
+
 func (e *Engine) validatePriceForAction(
 	ctx context.Context,
 	profile Profile,
 	current *state,
+	minimumOutput uint64,
 ) (pricetrigger.Evidence, pricetrigger.Status, error) {
 	policy := *profile.PriceTrigger
 	evidence, status, evaluatedAt, err := e.observePrice(ctx, policy, current.started.ObservationSlot)
@@ -1100,7 +1203,7 @@ func (e *Engine) validatePriceForAction(
 	if err := validatePriceEvidenceProgress(*current.started.PriceEvidence, evidence); err != nil {
 		return pricetrigger.Evidence{}, status, err
 	}
-	if err := attachExecutableMinimum(profile, current.built.MinimumOutput, &status); err != nil {
+	if err := attachExecutableMinimum(profile, minimumOutput, &status); err != nil {
 		return pricetrigger.Evidence{}, status, err
 	}
 	if !evidence.Triggered || !status.ExecutableCondition {
@@ -1866,10 +1969,7 @@ func ValidateObservation(profile Profile, observation agent.NodeObservation, now
 		now.Sub(observedAt) > time.Duration(profile.MaxObservationAgeSeconds)*time.Second {
 		return observationError("observation_freshness", "Mithril account observation is stale")
 	}
-	needed := profile.ReserveLamports + profile.MaxFeeLamports + profile.maxRouteRent()
-	if !profile.isBuy() {
-		needed += profile.InputLamports
-	}
+	needed := profile.WalletRequirementLamports()
 	if observation.Account.BalanceLamports < needed {
 		return observationError("wallet_balance", "wallet balance is below the swap reserve")
 	}

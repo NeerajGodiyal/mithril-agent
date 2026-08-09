@@ -8,4 +8,5 @@ var (
 	errMissingIdentity      = errors.New("readiness check needs a name and a title")
 	errBlockedWithoutAction = errors.New("a blocked check must tell the operator what to do")
 	errReadyWithAction      = errors.New("a ready check must not demand an action")
+	errUnknownState         = errors.New("readiness check state is not one of the defined states")
 )

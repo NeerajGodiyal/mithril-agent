@@ -186,6 +186,14 @@ func computeActionID(domain, profileFingerprint string, scheduleWindowStartUnix 
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// ErrQuoteBelowFloor reports a sound quote priced under the operator's minimum
+// output. It is a market condition rather than a fault, and is named so an
+// unattended runner can report which of the two it hit: the bounded reason it
+// prints is otherwise the operator's only signal. The signer's own repeat of
+// this check keeps its generic error, because a refusal there means the builder
+// and the signer disagreed, which is never routine.
+var ErrQuoteBelowFloor = errors.New("Orca quote is below the configured minimum output")
+
 // ValidateInstructions checks the richer SDK output before compilation. The
 // signer repeats the security-relevant checks on the compiled message.
 func ValidateInstructions(
@@ -198,7 +206,6 @@ func ValidateInstructions(
 	}
 	if quote.InputAmount == 0 || quote.InputAmount > policy.MaxInputLamports ||
 		quote.EstimatedOutput == 0 || quote.MinimumOutput > quote.EstimatedOutput ||
-		quote.MinimumOutput < policy.MinOutputAmount ||
 		quote.SlippageBPS == 0 || quote.SlippageBPS > policy.MaxSlippageBPS {
 		return Intent{}, errors.New("Orca quote is outside policy")
 	}
@@ -206,6 +213,14 @@ func ValidateInstructions(
 	minimumAllowed, _ := bits.Div64(high, low, 10_000)
 	if quote.MinimumOutput < minimumAllowed {
 		return Intent{}, errors.New("Orca quote minimum output falls below the slippage floor")
+	}
+	// The floor check sits BELOW the slippage check on purpose: a quote whose
+	// minimum contradicts its own estimate and slippage is malformed, and
+	// reporting that as price_below_floor downgrades a tampered adapter from
+	// the critical page to a one-hour warning. Only a structurally sound quote
+	// may be called an ordinary price decline.
+	if quote.MinimumOutput < policy.MinOutputAmount {
+		return Intent{}, ErrQuoteBelowFloor
 	}
 	if len(instructions) != 5 && len(instructions) != 6 {
 		return Intent{}, errors.New("Orca swap must use the canonical WSOL setup and at most one output-account setup")

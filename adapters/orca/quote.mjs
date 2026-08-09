@@ -28,7 +28,15 @@ function isTemporaryProviderFailure(error) {
 }
 
 function fail(error) {
-  process.stderr.write("Orca quote failed\n");
+  // The message stays fixed for provider failures: an upstream error can carry
+  // URLs, keys and account data, and this text reaches logs and the journal.
+  // A LOCAL precondition is different — it contains nothing secret, and hiding
+  // it left an operator on the wrong Node version reading "Orca quote failed"
+  // with no hint that the runtime was the problem.
+  const reason = error?.message === "unsupported Node.js runtime"
+    ? `Orca quote failed: needs Node 24.18+ in the 24.x line, found ${process.versions.node}`
+    : "Orca quote failed";
+  process.stderr.write(reason + "\n");
   process.exitCode = isTemporaryProviderFailure(error) ? TEMPORARY_PROVIDER_FAILURE : 1;
 }
 

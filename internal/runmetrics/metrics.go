@@ -27,12 +27,45 @@ var decisions = []string{
 	"waiting",
 }
 
+// failureCategories must list every category cycleFailureReason can return.
+// Anything missing is exported as "unknown", so the operator's dashboard is
+// least informative exactly when a new named cause was worth naming. Three were
+// already missing here — a freshly configured sweep spends its first day
+// reporting before_schedule_anchor, and that whole day read as "unknown".
+// TestFailureCategoriesCoverEveryCycleReason keeps the two lists in agreement.
 var failureCategories = []string{
+	// A sweep's anchor is 24-48h out by default, so a CORRECT setup reports this
+	// until its first window opens.
+	"before_schedule_anchor",
+	// Built but not submitted in time. The next cycle rebuilds.
+	"blockhash_expired",
+	// The HOST's clock drifting outside signing policy — not the agent, and
+	// fixable in one NTP setting. It cost five minutes of unreadable
+	// operation_failed on every leg before it was named.
+	"clock_unusable",
 	"control_state_unavailable",
 	"operation_failed",
 	"operation_timeout",
+	// The pre-trade observation not meeting policy (balance, freshness,
+	// cross-check, health). One bounded category: the engine's stage tokens are
+	// composed from live status names and would collapse to "unknown".
+	"observation_not_ready",
+	// The agent's own Mithril node not answering: the fail-closed gate working.
+	"node_unavailable",
+	// The market sitting below the operator's floor is a routine reason for a
+	// healthy agent to be idle. It has to be registered here or it collapses to
+	// "unknown", which is less useful than the "operation_failed" it replaced.
+	"price_below_floor",
 	"quote_unavailable",
+	// The signer declining under its own policy: a bound working, not a fault.
+	"signer_refused",
 	"unknown",
+}
+
+// FailureCategories is the registered set, exposed so the runner's own
+// classifier can be checked against it rather than the two drifting apart.
+func FailureCategories() []string {
+	return append([]string(nil), failureCategories...)
 }
 
 var actionVerdicts = []string{
@@ -468,6 +501,8 @@ func (m *Metrics) ServeHTTP(writer http.ResponseWriter, _ *http.Request) {
 		"mithril_agent_price_trigger_observed_timestamp_seconds %d\n",
 		priceObservedUnix,
 	)
+	_, _ = fmt.Fprintln(writer, "# TYPE mithril_agent_journal_active_records gauge")
+	_, _ = fmt.Fprintf(writer, "mithril_agent_journal_active_records %d\n", stats.ActiveRecords)
 	_, _ = fmt.Fprintln(writer, "# TYPE mithril_agent_journal_records gauge")
 	_, _ = fmt.Fprintf(writer, "mithril_agent_journal_records %d\n", stats.Records)
 	_, _ = fmt.Fprintln(writer, "# TYPE mithril_agent_journal_record_limit gauge")

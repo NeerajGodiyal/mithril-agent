@@ -100,7 +100,14 @@ func Write(path string, snapshot Snapshot) error {
 }
 
 func Read(path string) (Snapshot, error) {
-	data, err := securefile.ReadPrivate(path, maxStatusSize)
+	var data []byte
+	var err error
+	for range 3 {
+		data, err = securefile.ReadPrivate(path, maxStatusSize)
+		if !errors.Is(err, securefile.ErrChanged) {
+			break
+		}
+	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return Snapshot{}, os.ErrNotExist

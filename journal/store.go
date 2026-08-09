@@ -112,6 +112,12 @@ type Store struct {
 }
 
 type Stats struct {
+	// Records is the whole history across every segment. ActiveRecords is the
+	// count in the segment currently being appended to, which is what the
+	// per-file caps below actually bound — dividing Records by MaxRecords
+	// once rotation exists compares a growing total against a per-segment
+	// limit and climbs forever.
+	ActiveRecords      int
 	Records            int
 	Bytes              int64
 	ReservedBytes      int64
@@ -909,8 +915,7 @@ func (s *Store) Stats() (Stats, error) {
 	}
 	sendStarted, submitted := actionEventCounts(s.records)
 	return Stats{
-		// Records counts the whole history; Bytes and the caps describe the
-		// ACTIVE segment, which is what fullness alerting must watch.
+		ActiveRecords:      len(s.records) - s.activeStart,
 		Records:            len(s.records),
 		Bytes:              info.Size(),
 		ReservedBytes:      s.reserveBytes,

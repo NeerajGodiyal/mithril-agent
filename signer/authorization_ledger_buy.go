@@ -53,7 +53,7 @@ func authorizeAndSignBuy(
 	}
 	nowUnix := now.Unix()
 	if nowUnix < request.ScheduleWindowStartUnix || nowUnix >= request.ScheduleWindowEndUnix {
-		return Response{}, errors.New("signing request schedule window does not include current UTC time")
+		return Response{}, refused("signing request schedule window does not include current UTC time")
 	}
 	ledger, err := openBuyAuthorizationLedger(policy, now)
 	if err != nil {
@@ -258,11 +258,11 @@ func (l *buyAuthorizationLedger) reserve(
 	fees := l.dailyFees[reservation.DayStartUnix]
 	if input > l.policy.DailyInputTokenCap ||
 		reservation.InputAmount > l.policy.DailyInputTokenCap-input {
-		return errors.New("signer daily input-token cap would be exceeded")
+		return refused("signer daily input-token cap would be exceeded")
 	}
 	if fees > l.policy.DailyNativeFeeCapLamports ||
 		reservation.FeeLamports > l.policy.DailyNativeFeeCapLamports-fees {
-		return errors.New("signer daily native-debit cap would be exceeded")
+		return refused("signer daily native-debit cap would be exceeded")
 	}
 	if _, err := l.store.Append(now.UTC(), authorizationReserveType, actionID, reservation); err != nil {
 		return errors.New("authorization reservation could not be made durable")

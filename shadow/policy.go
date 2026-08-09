@@ -72,7 +72,21 @@ type Policy struct {
 	// measured against.
 	StartingInputUnits  uint64 `json:"starting_input_units"`
 	StartingOutputUnits uint64 `json:"starting_output_units"`
+
+	// ReturnTrigger makes the run a ROUND TRIP. With it set, Trigger is the
+	// rule for the leg that spends the starting inventory and ReturnTrigger is
+	// the rule for buying back, both scored on one set of books — which is the
+	// only way to answer "does buying low and selling high actually make money
+	// here", because a one-directional run cannot see the round trip's cost.
+	//
+	// Direction on any given tick is not a choice: holding the asset the only
+	// possible action is to sell it, holding the cash the only action is to buy.
+	// Inventory decides, so the two rules can never both fire at once.
+	ReturnTrigger *pricetrigger.Policy `json:"return_trigger,omitempty"`
 }
+
+// RoundTrip reports whether this policy scores both legs on one book.
+func (p Policy) RoundTrip() bool { return p.ReturnTrigger != nil }
 
 const (
 	minTickSeconds   = uint64(5)
@@ -94,6 +108,34 @@ func (p Policy) Validate() error {
 	}
 	if err := p.Trigger.Validate(); err != nil {
 		return err
+	}
+	if p.ReturnTrigger != nil {
+		if err := p.ReturnTrigger.Validate(); err != nil {
+			return err
+		}
+		// Opposite directions, or it is not a round trip — two sell rules on one
+		// book would just be the same leg twice and would report a profit the
+		// inventory could never have produced.
+		if p.ReturnTrigger.Direction == p.Trigger.Direction {
+			return errors.New("a round trip needs opposite directions on its two triggers")
+		}
+		// Same feed and same sources: scoring two legs against two different
+		// price feeds would make the round trip's profit an artefact of the
+		// disagreement between them.
+		if p.ReturnTrigger.Feed != p.Trigger.Feed ||
+			p.ReturnTrigger.PrimarySourceSHA256 != p.Trigger.PrimarySourceSHA256 ||
+			p.ReturnTrigger.SecondarySourceSHA256 != p.Trigger.SecondarySourceSHA256 {
+			return errors.New("a round trip's two triggers must read the same price feed")
+		}
+		// Buy strictly below sell, or one price reading satisfies both and the
+		// books would churn on every tick for a guaranteed loss.
+		sell, buy := p.Trigger, *p.ReturnTrigger
+		if !p.IsSell() {
+			sell, buy = buy, sell
+		}
+		if buy.ThresholdMicros >= sell.ThresholdMicros {
+			return errors.New("a round trip must buy back below the price it sells at")
+		}
 	}
 	if p.Observe == "" {
 		return errors.New("shadow policy needs an address to quote against")

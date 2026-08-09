@@ -55,6 +55,28 @@ type Client struct {
 	now    func() time.Time
 }
 
+type stageError struct {
+	stage string
+	err   error
+}
+
+func (e *stageError) Error() string { return e.err.Error() }
+func (e *stageError) Unwrap() error { return e.err }
+
+// FailureStage returns a bounded phase name without exposing the underlying
+// MCP error to operator surfaces.
+func FailureStage(err error) string {
+	var staged *stageError
+	if errors.As(err, &staged) {
+		return staged.stage
+	}
+	return ""
+}
+
+func failAt(stage string, err error) error {
+	return &stageError{stage: stage, err: err}
+}
+
 func New(config Config, now func() time.Time) (*Client, error) {
 	if config.Cluster != "devnet" {
 		return nil, errors.New("MCP observation is restricted to devnet")
@@ -145,46 +167,46 @@ func (c *Client) Observe(ctx context.Context, source string) (agent.NodeObservat
 
 	if err := requireTools(ctx, session); err != nil {
 		_ = closeSession()
-		return agent.NodeObservation{}, err
+		return agent.NodeObservation{}, failAt("catalog", err)
 	}
 	infoResult, err := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: infoTool})
 	if err != nil {
 		_ = closeSession()
-		return agent.NodeObservation{}, errors.New("call Mithril MCP info tool")
+		return agent.NodeObservation{}, failAt("info", errors.New("call Mithril MCP info tool"))
 	}
 	if infoResult.IsError {
 		_ = closeSession()
-		return agent.NodeObservation{}, errors.New("Mithril MCP info tool returned an error")
+		return agent.NodeObservation{}, failAt("info", errors.New("Mithril MCP info tool returned an error"))
 	}
 	if err := verifyRPCOrigin(infoResult.StructuredContent, c.config.RPCOrigin); err != nil {
 		_ = closeSession()
-		return agent.NodeObservation{}, err
+		return agent.NodeObservation{}, failAt("info", err)
 	}
 	genesisResult, err := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: genesisTool})
 	if err != nil {
 		_ = closeSession()
-		return agent.NodeObservation{}, errors.New("call Mithril genesis tool")
+		return agent.NodeObservation{}, failAt("genesis", errors.New("call Mithril genesis tool"))
 	}
 	if genesisResult.IsError {
 		_ = closeSession()
-		return agent.NodeObservation{}, errors.New("Mithril genesis tool returned an error")
+		return agent.NodeObservation{}, failAt("genesis", errors.New("Mithril genesis tool returned an error"))
 	}
 	if err := verifyGenesisHash(genesisResult.StructuredContent); err != nil {
 		_ = closeSession()
-		return agent.NodeObservation{}, err
+		return agent.NodeObservation{}, failAt("genesis", err)
 	}
 	stateResult, err := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: stateTool})
 	if err != nil {
 		_ = closeSession()
-		return agent.NodeObservation{}, errors.New("call Mithril state tool")
+		return agent.NodeObservation{}, failAt("state_call", errors.New("call Mithril state tool"))
 	}
 	if stateResult.IsError {
 		_ = closeSession()
-		return agent.NodeObservation{}, errors.New("Mithril state tool returned an error")
+		return agent.NodeObservation{}, failAt("state_tool", errors.New("Mithril state tool returned an error"))
 	}
 	if err := verifyNodeIdentity(stateResult.StructuredContent); err != nil {
 		_ = closeSession()
-		return agent.NodeObservation{}, err
+		return agent.NodeObservation{}, failAt("state_identity", err)
 	}
 	// The node service writes to journald. Automation uses the required
 	// structured checks instead of depending on an optional file log.
@@ -197,16 +219,16 @@ func (c *Client) Observe(ctx context.Context, source string) (agent.NodeObservat
 	})
 	if err != nil {
 		_ = closeSession()
-		return agent.NodeObservation{}, errors.New("call Mithril diagnosis tool")
+		return agent.NodeObservation{}, failAt("diagnosis", errors.New("call Mithril diagnosis tool"))
 	}
 	if diagnosisResult.IsError {
 		_ = closeSession()
-		return agent.NodeObservation{}, errors.New("Mithril diagnosis tool returned an error")
+		return agent.NodeObservation{}, failAt("diagnosis", errors.New("Mithril diagnosis tool returned an error"))
 	}
 	health, err := parseDiagnosisResult(diagnosisResult.StructuredContent, c.now().UTC())
 	if err != nil {
 		_ = closeSession()
-		return agent.NodeObservation{}, err
+		return agent.NodeObservation{}, failAt("diagnosis", err)
 	}
 	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
 		Name: accountTool,
@@ -218,18 +240,18 @@ func (c *Client) Observe(ctx context.Context, source string) (agent.NodeObservat
 	})
 	if err != nil {
 		_ = closeSession()
-		return agent.NodeObservation{}, errors.New("call Mithril account tool")
+		return agent.NodeObservation{}, failAt("account", errors.New("call Mithril account tool"))
 	}
 	if result.IsError {
 		_ = closeSession()
-		return agent.NodeObservation{}, errors.New("Mithril account tool returned an error")
+		return agent.NodeObservation{}, failAt("account", errors.New("Mithril account tool returned an error"))
 	}
 	observation, err := parseAccountResult(result.StructuredContent, c.config.Cluster, source, c.now().UTC())
 	if closeErr := closeSession(); err == nil && closeErr != nil {
 		err = closeErr
 	}
 	if err != nil {
-		return agent.NodeObservation{}, err
+		return agent.NodeObservation{}, failAt("account", err)
 	}
 	return agent.NodeObservation{Account: observation, Health: health}, nil
 }

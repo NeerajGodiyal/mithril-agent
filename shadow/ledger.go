@@ -104,7 +104,7 @@ func (l Ledger) Apply(fill Fill, markPriceMicros uint64) (Ledger, error) {
 	next := l
 	baseDecimals, quoteDecimals := l.baseDecimals(), l.quoteDecimals()
 
-	if l.Policy.IsSell() {
+	if fill.Sell {
 		if fill.SpentUnits > l.BaseUnits {
 			return Ledger{}, errInsufficientInventory
 		}

@@ -32,6 +32,16 @@ const (
 
 var errFinalizedEffectsDiverged = errors.New("finalized transaction effects diverged")
 
+// ErrNodeUnavailable is the agent's own Mithril node not answering. It is the
+// fail-closed gate working — the agent will not trade on a chain view it has
+// not verified — and it is entirely actionable: start the node. Reported as a
+// generic failure it was indistinguishable from a broken agent, and a node that
+// died mid-run looked exactly like a bug in the trading code.
+//
+// A sentinel rather than a message: swap demo used to match on the string, so
+// rewording the sentence would have silently broken that classification.
+var ErrNodeUnavailable = errors.New("Mithril node RPC is unavailable or not ready")
+
 type NodeProvider interface {
 	Identity() string
 	GenesisHash(context.Context) (string, error)
@@ -226,7 +236,7 @@ func (l *Lifecycle) VerifyGenesis(ctx context.Context, expected string) error {
 	}
 	nodeHash, err := l.node.GenesisHash(ctx)
 	if err != nil {
-		return errors.New("Mithril node RPC is unavailable or not ready")
+		return ErrNodeUnavailable
 	}
 	if nodeHash != expected {
 		return errors.New("RPC provider genesis hash does not match the configured cluster")

@@ -87,6 +87,20 @@ func (p Profile) maxRouteRent() uint64 {
 	return p.Route.MaxOutputAccountRentLamports
 }
 
+// WalletRequirementLamports is the SOL this profile demands of the wallet
+// before the runner will act. Anything that decides how much SOL may leave the
+// wallet — the sweep floor above all — must ask this rather than rebuild it:
+// the rent term is direction-dependent, and a caller that reaches for the sell
+// route's field on a buy profile silently reads zero and under-reserves by the
+// whole temporary-account rent.
+func (p Profile) WalletRequirementLamports() uint64 {
+	needed := p.ReserveLamports + p.MaxFeeLamports + p.maxRouteRent()
+	if !p.isBuy() {
+		needed += p.InputLamports
+	}
+	return needed
+}
+
 func (p Profile) requestDomain() string {
 	if p.isBuy() {
 		return orcaswap.BuyRequestDomain
@@ -275,4 +289,18 @@ func executablePriceMicros(profile Profile, minimumOutput uint64) (uint64, error
 		return 0, errors.New("price conversion is outside policy")
 	}
 	return priceMicros, nil
+}
+
+// MinimumOutput is the floor in the OUTPUT asset's own units: devUSDC base
+// units for a sell, lamports for a buy. Callers that render it must pair it
+// with the matching decimals, which is why the direction is resolved here
+// rather than at each display site.
+func (p Profile) MinimumOutput() uint64 {
+	if p.isBuy() {
+		if p.BuyRoute == nil {
+			return 0
+		}
+		return p.BuyRoute.MinOutputLamports
+	}
+	return p.Route.MinOutputAmount
 }

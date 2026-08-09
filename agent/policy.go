@@ -220,13 +220,20 @@ func (p Profile) validateObservation(obs Observation, now time.Time) (time.Time,
 	return observedAt, nil
 }
 
+// ErrBeforeScheduleAnchor reports the ordinary state of a freshly configured
+// sweep: its first window has not opened yet. The default activation delay puts
+// the anchor 24-48h out, so this is what a CORRECT setup reports for its first
+// day or two. Flattened into a generic failure it read as a broken agent, and
+// the operator's only evidence was a runner logging failure every cycle.
+var ErrBeforeScheduleAnchor = errors.New("the first sweep window has not opened yet")
+
 func (p Profile) scheduleWindow(now time.Time) (int64, int64, error) {
 	if err := p.Validate(); err != nil {
 		return 0, 0, err
 	}
 	nowUnix := now.UTC().Unix()
 	if nowUnix < p.ScheduleAnchorUnix {
-		return 0, 0, errors.New("schedule anchor is in the future")
+		return 0, 0, ErrBeforeScheduleAnchor
 	}
 	windowSeconds := int64(p.ScheduleWindowSeconds)
 	elapsed := nowUnix - p.ScheduleAnchorUnix

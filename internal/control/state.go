@@ -227,8 +227,8 @@ func (s *StateFile) TerminalLatch() (string, string, error) {
 	return status.TerminalActionID, status.TerminalOutcome, nil
 }
 
-// ClearTerminalForFinalized removes only a matching provisional terminal stop.
-// It keeps execution stopped; it never grants new authority.
+// ClearTerminalForFinalized removes the matching recovery or terminal marker.
+// It preserves the remaining action budget and never grants new authority.
 func (s *StateFile) ClearTerminalForFinalized(actionID string) error {
 	if !validDigest(actionID) {
 		return errors.New("finalized action ID is invalid")
@@ -244,20 +244,31 @@ func (s *StateFile) ClearTerminalForFinalized(actionID string) error {
 		if _, err := s.validateState(*document); err != nil {
 			return err
 		}
-		if document.TerminalActionID == "" && document.TerminalOutcome == "" {
-			return nil
+		switch document.Mode {
+		case ModeDevnetEnabled:
+			if document.RecoveryActionID == "" {
+				return nil
+			}
+			if document.RecoveryActionID != actionID {
+				return errors.New("another action requires recovery")
+			}
+			document.RecoveryActionID = ""
+			return replaceStateDocument(s.path, *document)
+		case ModeNoNewActions:
+			if document.TerminalActionID == "" && document.TerminalOutcome == "" {
+				return nil
+			}
+			if document.TerminalActionID != actionID {
+				return errors.New("another terminal action requires acknowledgement")
+			}
+			return replaceStateDocument(s.path, stateDocument{
+				Version: stateVersion,
+				Mode:    ModeNoNewActions,
+				Reason:  "finalized action reconciled",
+			})
+		default:
+			return errors.New("control state mode is invalid")
 		}
-		if document.Mode != ModeNoNewActions {
-			return errors.New("finalized action requires stopped control state")
-		}
-		if document.TerminalActionID != actionID {
-			return errors.New("another terminal action requires acknowledgement")
-		}
-		return replaceStateDocument(s.path, stateDocument{
-			Version: stateVersion,
-			Mode:    ModeNoNewActions,
-			Reason:  "finalized action reconciled",
-		})
 	})
 }
 
@@ -652,7 +663,7 @@ func WriteDevnetActivationIfRevision(
 			if err := validateStoredStateDocument(*currentDocument, time.Now()); err != nil {
 				return err
 			}
-			if currentDocument.Mode == ModeDevnetEnabled {
+			if blocksReplacement(*currentDocument, time.Now().UTC()) {
 				return errors.New("stop the current activation before enabling another")
 			}
 			if validTerminalLatch(
@@ -718,6 +729,30 @@ func stateRevision(path string) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
+// blocksReplacement reports whether an existing document must not be replaced by
+// a fresh activation. Replacing a LIVE grant would silently restore its spent
+// capacity, so that is refused; an EXHAUSTED one is refused too, because
+// enabling over it would erase a RecoveryActionID belonging to a send that may
+// yet land. A grant whose clock simply ran out authorises nothing and is
+// replaceable — refusing it told operators to stop something already stopped.
+//
+// The RecoveryActionID clause is NOT covered by the exhausted one. A grant can
+// hold an unresolved send and still have actions left: three granted, one
+// spent, that one goes ambiguous, then the clock runs out with two remaining.
+// Blocking only on exhaustion let that document be overwritten, erasing the ID
+// of a send that may yet land — precisely the loss the exhausted case exists to
+// prevent. Expiry says the authority ended, not that the chain agreed on what
+// it did; only an acknowledgement can say that.
+//
+// Both activation writers call this. It was previously the same condition
+// written out twice, and the two copies drifted the moment one was fixed.
+func blocksReplacement(document stateDocument, now time.Time) bool {
+	return document.Mode == ModeDevnetEnabled &&
+		(now.Before(document.ExpiresAt) ||
+			document.RemainingActions == 0 ||
+			document.RecoveryActionID != "")
+}
+
 func writeState(path string, document stateDocument) error {
 	path, err := validateStatePath(path)
 	if err != nil {
@@ -737,6 +772,20 @@ func writeState(path string, document stateDocument) error {
 			}
 			if validTerminalLatch(current.TerminalActionID, current.TerminalOutcome) {
 				return errors.New("terminal action requires acknowledgement")
+			}
+			// Replacing a live activation would silently restore its spent
+			// capacity: a grant of three actions with one left becomes a fresh
+			// grant of three, with nothing recording that it happened. The
+			// bound an operator set is only a bound if widening it requires
+			// stopping first, so this refuses rather than overwrites.
+			//
+			// TWO writers reach a replacement: this one and
+			// WriteDevnetActivationIfRevision, and each carries its own copy of
+			// this check — verify both when adding a third.
+			// WriteNoNewActions deliberately has none: it can only narrow, so
+			// it cannot restore spent capacity.
+			if blocksReplacement(*current, time.Now().UTC()) {
+				return errors.New("stop the current activation before enabling another")
 			}
 		}
 		return replaceStateDocument(path, document)

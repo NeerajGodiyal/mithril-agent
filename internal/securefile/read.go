@@ -11,6 +11,11 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/internal/secureexec"
 )
 
+// ErrChanged means an atomic writer replaced a file while it was being read.
+// Callers that read a projection may retry; callers reading authority or key
+// material should keep failing closed.
+var ErrChanged = errors.New("private file changed")
+
 func ReadPrivate(path string, maxBytes int64) ([]byte, error) {
 	if path == "" || maxBytes <= 0 {
 		return nil, errors.New("private file path and positive size limit are required")
@@ -41,7 +46,7 @@ func ReadPrivate(path string, maxBytes int64) ([]byte, error) {
 		return nil, err
 	}
 	if !os.SameFile(before, after) {
-		return nil, errors.New("private file changed while opening")
+		return nil, fmt.Errorf("%w while opening", ErrChanged)
 	}
 	if !after.Mode().IsRegular() || !fileowner.Trusted(after) ||
 		after.Mode().Perm()&0o077 != 0 {
@@ -63,7 +68,7 @@ func ReadPrivate(path string, maxBytes int64) ([]byte, error) {
 	}
 	if final.Size() != after.Size() || !final.ModTime().Equal(after.ModTime()) ||
 		final.Mode() != after.Mode() {
-		return nil, errors.New("private file changed while reading")
+		return nil, fmt.Errorf("%w while reading", ErrChanged)
 	}
 	return data, nil
 }
