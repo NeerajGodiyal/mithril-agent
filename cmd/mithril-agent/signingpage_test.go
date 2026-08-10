@@ -10,11 +10,11 @@ func TestTheSigningPageIsEmbeddedInTheBinary(t *testing.T) {
 	if !strings.Contains(embeddedSigningPage, "Verify your payout wallet") {
 		t.Fatal("the embedded wallet page is missing or incomplete")
 	}
-	readme, err := os.ReadFile("../../README.md")
+	runbook, err := os.ReadFile("../../OPERATIONS.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(readme), "deploy/"+signingPageName) {
+	if strings.Contains(string(runbook), "deploy/"+signingPageName) {
 		t.Error("the runbook still asks operators to install a separate wallet page")
 	}
 }

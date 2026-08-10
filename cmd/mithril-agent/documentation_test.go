@@ -56,8 +56,29 @@ func TestFullStrategyDocumentationMatchesGeneratedLayout(t *testing.T) {
 	}
 
 	readme := readDocumentation(t, "../../README.md")
-	if !strings.Contains(readme, "[QUICKSTART.md](QUICKSTART.md)") {
-		t.Error("README.md does not send a new operator to the supported quick start")
+	for _, want := range []string{
+		"[QUICKSTART.md](QUICKSTART.md)",
+		"[DEMO.md](DEMO.md)",
+		"[OPERATIONS.md](OPERATIONS.md)",
+		"Give this project to another AI assistant",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("README.md is missing entry-point fact %q", want)
+		}
+	}
+	if lines := strings.Count(readme, "\n") + 1; lines < 250 || lines > 500 {
+		t.Errorf("README.md has %d lines; want a complete 250..500-line orientation", lines)
+	}
+	for name, contents := range map[string]string{"QUICKSTART.md": quick, "DEMO.md": demo} {
+		if !strings.Contains(contents, "OPERATIONS.md") {
+			t.Errorf("%s does not route detailed failures to OPERATIONS.md", name)
+		}
+	}
+	operations := readDocumentation(t, "../../OPERATIONS.md")
+	for _, want := range []string{"# Mithril Agent operations and reference", "[README.md](README.md)", "[QUICKSTART.md](QUICKSTART.md)"} {
+		if !strings.Contains(operations, want) {
+			t.Errorf("OPERATIONS.md is missing reference fact %q", want)
+		}
 	}
 
 	makefile := readDocumentation(t, "../../Makefile")
