@@ -82,7 +82,8 @@ Install the verified runtime:
 ```sh
 sudo install -d -o root -g root -m 0755 /usr/local/libexec/mithril-agent
 sudo install -d -o root -g root -m 0755 /usr/local/share/doc/mithril-agent
-sudo install -o root -g root -m 0644 README.md QUICKSTART.md DEMO.md \
+sudo install -o root -g root -m 0644 \
+  README.md OVERVIEW.md QUICKSTART.md DEMO.md OPERATIONS.md \
   /usr/local/share/doc/mithril-agent/
 sudo install -o root -g root -m 0755 \
   ./bin/mithril-agent \
@@ -523,5 +524,5 @@ Stop and do not enable the strategy when any of these is true:
 - a service restarted unexpectedly.
 
 For upgrades, recovery, provider rotation, monitoring, and incident handling,
-use [README.md](README.md). For a short reviewer walkthrough after this setup is
-complete, use [DEMO.md](DEMO.md).
+use [OPERATIONS.md](OPERATIONS.md). For a short reviewer walkthrough after this
+setup is complete, use [DEMO.md](DEMO.md).

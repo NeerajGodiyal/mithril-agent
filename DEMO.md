@@ -1,7 +1,7 @@
 # Mithril Agent Devnet demonstration
 
 This guide is the short path for reviewing an already installed pilot. A new
-host must first complete [QUICKSTART.md](QUICKSTART.md). `README.md` remains the
+host must first complete [QUICKSTART.md](QUICKSTART.md). `OPERATIONS.md` is the
 detailed operations and recovery reference.
 
 ## What the demonstration proves
@@ -108,7 +108,7 @@ no server, no account.
 
 Neither command needs a wallet, a host, or a configuration. Creating a strategy
 does need the prepared Linux host and must follow the supervised installation
-in `README.md`; do not improvise a laptop setup and copy its files to the host.
+in `OPERATIONS.md`; do not improvise a laptop setup and copy its files to the host.
 
 On an installed full-strategy host, check one bounded leg through its generated
 socket. Use `buy` or `sweep` in place of `sell` for the other legs:
@@ -327,7 +327,7 @@ statuses to become recent and confirm that every leg remains stopped.
   copied into review notes.
 
 For a fresh host installation, upgrades, recovery, alert routing, and the full
-security boundary, follow `README.md`.
+security boundary, follow `OPERATIONS.md`.
 
 ## Watching a real market
 

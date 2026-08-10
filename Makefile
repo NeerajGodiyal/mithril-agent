@@ -33,7 +33,7 @@ help:
 	@echo ""
 	@echo "Track B — prepared Linux host, operator only:"
 	@echo "  make install|configure|setup   prints the runbook; installs nothing."
-	@echo "  Privileged steps are written out in README.md so an operator reads"
+	@echo "  Privileged steps are written out in QUICKSTART.md so an operator reads"
 	@echo "  each change before making it. There is no silent installer."
 	@echo ""
 	@echo "A reviewer needs only Track A to judge the code."
@@ -247,6 +247,6 @@ install configure setup:
 	@echo "silent installer: each privileged step is written out so an operator" >&2
 	@echo "reviews what changes on their machine before it changes." >&2
 	@echo "" >&2
-	@echo "Follow README.md, section 'Fresh supervised Linux installation'." >&2
+	@echo "Follow QUICKSTART.md from top to bottom." >&2
 	@echo "Unit files and users are in deploy/systemd and deploy/sysusers." >&2
 	@exit 2

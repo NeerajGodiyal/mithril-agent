@@ -99,7 +99,7 @@ Choose the path that matches what you are doing:
 3. **Install on a fresh Linux host:** follow [`QUICKSTART.md`](QUICKSTART.md)
    from top to bottom. Do not combine it with older single-trade service
    examples.
-4. **Operate or recover the system:** use [`README.md`](README.md) for the
+4. **Operate or recover the system:** use [`OPERATIONS.md`](OPERATIONS.md) for the
    detailed security, service, journal, monitoring, and recovery reference.
 
 A fresh installation requires a running Mithril full/RPC node near the Devnet
