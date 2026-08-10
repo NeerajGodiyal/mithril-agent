@@ -1,5 +1,8 @@
 # Mithril Agent
 
+> **New to the project?** Read [OVERVIEW.md](OVERVIEW.md) for the short human
+> overview of the Mithril node work, agent flow, current limits, and next docs.
+>
 > **Start here:** [QUICKSTART.md](QUICKSTART.md) is the single supported
 > first-run path for the complete Devnet strategy. This README is the detailed
 > security, recovery, monitoring, and legacy single-leg reference. Do not mix
