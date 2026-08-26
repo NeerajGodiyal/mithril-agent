@@ -169,6 +169,7 @@ ca60c520d94722da8ea8132126d773d40c264e20998fd1cffc090839972d7582  ./cmd/mithril-
 574fa25a99e60b63839f42da2c5dc742ab9ebd8304eaaccf0036c5908b591ab7  ./cmd/mithril-agent/sweep_setup.go
 d553add06839a1506d9178c28871d6cc9b8aab5f39023422b69cfe10444481fc  ./cmd/mithril-agent/sweep_setup_test.go
 77547cd0a41fb5f9d03b90d2208b65df6e8d5522e908675e29623f36fb5b30ed  ./cmd/mithril-agent/terminal_latch_test.go
+54a5012d656a329f406a99fb6f475fae5d8e787fe4477db0248fd117f7fb2ea8  ./cmd/mithril-agent/testmain_test.go
 114f4d2bfbea748288fcd3a639f1563f878c6a48eca63ae0ffc37f06aca3c230  ./cmd/mithril-agent/walkthrough.go
 c61506d07794787dfbd93f03dc7a35166fd02fce31d1dde81531c28b0e17cee2  ./cmd/mithril-agent/walkthrough_test.go
 6848b1e2b90797be9ccefd5abfa1bd41d70a724d3cfc0b2c56e7dc2044c02def  ./cmd/mithril-agent/wallet.go
