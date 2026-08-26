@@ -2,11 +2,15 @@ package operatorstatus
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/agent"
 	"github.com/Overclock-Validator/mithril-agent/internal/control"
 	"github.com/Overclock-Validator/mithril-agent/journal"
+	"github.com/Overclock-Validator/mithril-agent/jupiterswap"
+	"github.com/Overclock-Validator/mithril-agent/orcaswap"
 )
 
 func TestWriteRetainsLastActionAcrossIdleCycles(t *testing.T) {
@@ -101,7 +105,8 @@ func TestWriteDoesNotRetainActionFromAnotherProfile(t *testing.T) {
 	}
 
 	second := validSnapshot(at.Add(time.Second), Result{Decision: "stopped"})
-	second.Profile = "another-profile"
+	second.Profile = orcaswap.BuyProfileName
+	second.ProfileVersion = orcaswap.BuyProfileVersion
 	if err := Write(path, second); err != nil {
 		t.Fatal(err)
 	}
@@ -182,6 +187,109 @@ func TestViewFromSnapshotRevalidatesAndDerivesFreshness(t *testing.T) {
 	}
 }
 
+func TestSnapshotBindsActiveControlModeToCluster(t *testing.T) {
+	now := time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC)
+	active := control.Status{
+		Mode: control.ModeMainnetCanary, ExpectedActionID: strings.Repeat("a", 64),
+		ExpiresAt:  now.Add(time.Minute),
+		MaxActions: 1, RemainingActions: 1,
+	}
+	snapshot := validSnapshot(now, Result{Decision: "waiting"})
+	snapshot.Profile = jupiterswap.ProfileName
+	snapshot.ProfileVersion = jupiterswap.ProfileVersion
+	snapshot.Cluster = "mainnet-beta"
+	snapshot.Control = active
+
+	view, err := ViewFromSnapshot(snapshot, now)
+	if err != nil {
+		t.Fatalf("valid Mainnet canary status was rejected: %v", err)
+	}
+	if view.AttentionRequired {
+		t.Fatal("valid Mainnet canary status required attention")
+	}
+
+	snapshot.Cluster = "devnet"
+	if err := ValidateSnapshot(snapshot); err == nil {
+		t.Fatal("Mainnet canary status was accepted on Devnet")
+	}
+
+	snapshot.Cluster = "mainnet-beta"
+	snapshot.Control.Mode = control.ModeDevnetEnabled
+	if err := ValidateSnapshot(snapshot); err == nil {
+		t.Fatal("Devnet control status was accepted on Mainnet")
+	}
+
+	snapshot.Control = active
+	snapshot.Profile = agent.ProfileTreasurySweepV1
+	snapshot.ProfileVersion = 1
+	if err := ValidateSnapshot(snapshot); err == nil {
+		t.Fatal("Mainnet canary status was accepted for a non-Jupiter profile")
+	}
+}
+
+func TestSnapshotBindsProfileVersionAndCluster(t *testing.T) {
+	at := time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name, profile, cluster string
+		version                uint32
+		valid                  bool
+	}{
+		{name: "Devnet sell", profile: orcaswap.ProfileName, version: orcaswap.ProfileVersion, cluster: "devnet", valid: true},
+		{name: "Devnet buy", profile: orcaswap.BuyProfileName, version: orcaswap.BuyProfileVersion, cluster: "devnet", valid: true},
+		{name: "Devnet sweep", profile: agent.ProfileTreasurySweepV1, version: 1, cluster: "devnet", valid: true},
+		{name: "Mainnet proposal", profile: jupiterswap.ProfileName, version: jupiterswap.ProfileVersion, cluster: "mainnet-beta", valid: true},
+		{name: "Orca on Mainnet", profile: orcaswap.ProfileName, version: orcaswap.ProfileVersion, cluster: "mainnet-beta"},
+		{name: "Jupiter on Devnet", profile: jupiterswap.ProfileName, version: jupiterswap.ProfileVersion, cluster: "devnet"},
+		{name: "wrong version", profile: orcaswap.BuyProfileName, version: orcaswap.BuyProfileVersion + 1, cluster: "devnet"},
+		{name: "unknown profile", profile: "unknown", version: 1, cluster: "devnet"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := validSnapshot(at, Result{Decision: "stopped"})
+			snapshot.Profile, snapshot.ProfileVersion, snapshot.Cluster =
+				test.profile, test.version, test.cluster
+			err := ValidateSnapshot(snapshot)
+			if (err == nil) != test.valid {
+				t.Fatalf("validation error = %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateSnapshotRejectsImpossibleJournalStats(t *testing.T) {
+	at := time.Date(2026, time.August, 3, 0, 0, 0, 0, time.UTC)
+	valid := journal.Stats{
+		ActiveRecords: 2, Records: 4, Bytes: 512, ReservedBytes: 128,
+		MaxRecords: 100, MaxBytes: 1024, SendStartedRecords: 2, SubmittedRecords: 1,
+	}
+	tests := map[string]func(*journal.Stats){
+		"negative active records":       func(stats *journal.Stats) { stats.ActiveRecords = -1 },
+		"active records exceed history": func(stats *journal.Stats) { stats.ActiveRecords = 5 },
+		"active records exceed limit": func(stats *journal.Stats) {
+			stats.ActiveRecords, stats.Records = 101, 101
+		},
+		"bytes exceed limit":    func(stats *journal.Stats) { stats.Bytes = 1025 },
+		"reserve exceeds limit": func(stats *journal.Stats) { stats.ReservedBytes = 1025 },
+		"bytes plus reserve exceed limit": func(stats *journal.Stats) {
+			stats.Bytes, stats.ReservedBytes = 900, 125
+		},
+		"negative sends":           func(stats *journal.Stats) { stats.SendStartedRecords = -1 },
+		"negative submissions":     func(stats *journal.Stats) { stats.SubmittedRecords = -1 },
+		"sends exceed history":     func(stats *journal.Stats) { stats.SendStartedRecords = 5 },
+		"submissions exceed sends": func(stats *journal.Stats) { stats.SubmittedRecords = 3 },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			snapshot := validSnapshot(at, Result{Decision: "stopped"})
+			snapshot.Journal = valid
+			mutate(&snapshot.Journal)
+			if err := ValidateSnapshot(snapshot); err == nil {
+				t.Fatal("impossible journal stats were accepted")
+			}
+		})
+	}
+}
+
 func TestRequiresAttentionCoversPendingAndTerminalStates(t *testing.T) {
 	now := time.Unix(1_000, 0).UTC()
 	stopped := control.Status{Mode: control.ModeNoNewActions}
@@ -254,6 +362,66 @@ func TestSnapshotBindsTradeAssetsToProfile(t *testing.T) {
 				t.Fatalf("validation error = %v", err)
 			}
 		})
+	}
+}
+
+func TestStrategyProjectionIsBoundedAndMatchesTheProfile(t *testing.T) {
+	at := time.Date(2026, time.August, 1, 10, 0, 0, 0, time.UTC)
+	valid := StrategyProjection{
+		Configured: true, Direction: "sell", InputAmount: 50_000_000,
+		DailyCap: 150_300_000, MaxFeeLamports: 100_000, FundedTradesPerDay: 3,
+		PriceDirection: "sell_at_or_above", PriceThresholdMicros: 200_000_000,
+		SweepConfigured: true, SweepProofValid: true,
+		SweepKeepLamports: 100_000_000, SweepMaxLamports: 50_000_000,
+		SweepDailyLamports: 100_000_000, SweepActiveAfter: at,
+	}
+	snapshot := validSnapshot(at, Result{Decision: "stopped"})
+	snapshot.Strategy = valid
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("valid strategy projection was rejected: %v", err)
+	}
+	zeroReserve := valid
+	zeroReserve.SweepKeepLamports = 0
+	snapshot.Strategy = zeroReserve
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("valid zero-reserve sweep was rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*StrategyProjection){
+		"wrong direction":        func(p *StrategyProjection) { p.Direction = "buy" },
+		"zero input":             func(p *StrategyProjection) { p.InputAmount = 0 },
+		"cap below input":        func(p *StrategyProjection) { p.DailyCap = p.InputAmount - 1 },
+		"wrong price rule":       func(p *StrategyProjection) { p.PriceDirection = "buy_at_or_below" },
+		"threshold without rule": func(p *StrategyProjection) { p.PriceDirection = "" },
+		"proof without sweep":    func(p *StrategyProjection) { p.SweepConfigured = false },
+		"zero sweep bound":       func(p *StrategyProjection) { p.SweepMaxLamports = 0 },
+		"impossible trade count": func(p *StrategyProjection) { p.FundedTradesPerDay = 4 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := valid
+			mutate(&changed)
+			snapshot.Strategy = changed
+			if err := ValidateSnapshot(snapshot); err == nil {
+				t.Fatal("invalid strategy projection was accepted")
+			}
+		})
+	}
+	snapshot.Strategy = valid
+	for name, mutate := range map[string]func(*Snapshot){
+		"wrong profile version": func(s *Snapshot) { s.ProfileVersion++ },
+		"wrong cluster":         func(s *Snapshot) { s.Cluster = "mainnet-beta" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := snapshot
+			changed.Strategy = valid
+			mutate(&changed)
+			if err := ValidateSnapshot(changed); err == nil {
+				t.Fatal("strategy with mismatched identity was accepted")
+			}
+		})
+	}
+	snapshot.Strategy = StrategyProjection{SweepProofValid: true}
+	if err := ValidateSnapshot(snapshot); err == nil {
+		t.Fatal("unconfigured strategy carried hidden settings")
 	}
 }
 

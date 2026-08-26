@@ -52,6 +52,105 @@ func TestVerifyJournalReadOnlySummary(t *testing.T) {
 	}
 }
 
+func TestReadRecordsNeverCreatesOrRepairsEvidence(t *testing.T) {
+	directory := t.TempDir()
+	missing := filepath.Join(directory, "missing.jsonl")
+	if _, err := ReadRecords(missing); err == nil {
+		t.Fatal("read-only journal access created a missing journal")
+	}
+	if _, err := os.Lstat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing journal changed on disk: %v", err)
+	}
+
+	path := filepath.Join(directory, "torn.jsonl")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(time.Now().UTC(), "test.event", "", struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(`{"incomplete":`); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadRecords(path); err == nil {
+		t.Fatal("read-only journal access accepted a torn tail")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("read-only journal access repaired the evidence it was asked to inspect")
+	}
+}
+
+func TestReadRecordsReturnsTheVerifiedSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 15, 0, 0, 0, 0, time.UTC)
+	for index := range 2 {
+		if _, err := store.Append(
+			now.Add(time.Duration(index)*time.Second), "test.event", "", index,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	records, err := ReadRecords(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 || records[0].Sequence != 1 || records[1].Sequence != 2 ||
+		records[1].PrevHash != records[0].Hash {
+		t.Fatalf("read snapshot = %+v", records)
+	}
+}
+
+func TestBufferedAppendBecomesDurableAfterExplicitSync(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendBuffered(time.Now().UTC(), "replayable.event", "", struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if records := reopened.Records(); len(records) != 1 || records[0].Type != "replayable.event" {
+		t.Fatalf("buffered records after sync = %+v", records)
+	}
+}
+
 func TestVerifyJournalRejectsActiveWriter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 	store, err := Open(path)

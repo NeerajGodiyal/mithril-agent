@@ -801,6 +801,82 @@ func TestRecoverySendBarrierRequiresLiveBoundedOriginalAuthority(t *testing.T) {
 	}
 }
 
+func TestStoppedBarrierRequiresFullyStoppedControl(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "control.json")
+	fingerprint := strings.Repeat("c", 64)
+	now := time.Now().UTC()
+	if err := WriteDevnetActivation(
+		path, fingerprint, now, now.Add(time.Hour), 1, "one action",
+	); err != nil {
+		t.Fatal(err)
+	}
+	state, err := NewStateFile(path, fingerprint, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	if err := state.WithStoppedBarrier(func() error {
+		called = true
+		return nil
+	}); err == nil || called {
+		t.Fatalf("active maintenance = called %t, error %v", called, err)
+	}
+	if err := state.Stop("operator maintenance"); err != nil {
+		t.Fatal(err)
+	}
+	operationErr := errors.New("maintenance failed")
+	if err := state.WithStoppedBarrier(func() error {
+		called = true
+		return operationErr
+	}); !errors.Is(err, operationErr) || !called {
+		t.Fatalf("stopped maintenance = called %t, error %v", called, err)
+	}
+}
+
+func TestPendingRecoveryBlocksEveryRemainingAction(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "control.json")
+	fingerprint := strings.Repeat("c", 64)
+	now := time.Now().UTC()
+	if err := WriteDevnetActivation(
+		path, fingerprint, now, now.Add(time.Hour), 3, "multi-action test",
+	); err != nil {
+		t.Fatal(err)
+	}
+	state, err := NewStateFile(path, fingerprint, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := strings.Repeat("a", 64)
+	blocked, err := state.WithSendBarrier(first, func() error { return nil })
+	if err != nil || blocked {
+		t.Fatalf("first barrier = blocked %t, error %v", blocked, err)
+	}
+	status, err := state.Status()
+	if err != nil || status.Mode != ModeNoNewActions || !status.RecoveryPending {
+		t.Fatalf("pending recovery status = %+v, error %v", status, err)
+	}
+
+	called := false
+	blocked, err = state.WithSendBarrier(strings.Repeat("b", 64), func() error {
+		called = true
+		return nil
+	})
+	if err != nil || !blocked || called {
+		t.Fatalf("second barrier = blocked %t, called %t, error %v", blocked, called, err)
+	}
+
+	called = false
+	blocked, err = state.WithRecoverySendBarrier(first, func() error {
+		called = true
+		return nil
+	})
+	if err != nil || blocked || !called {
+		t.Fatalf("exact recovery barrier = blocked %t, called %t, error %v", blocked, called, err)
+	}
+}
+
 func TestRecoverySendBarrierDoesNotConsumeRemainingCapacity(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "control.json")
@@ -897,6 +973,57 @@ func TestStopWaitsForSendBarrier(t *testing.T) {
 	}
 }
 
+func TestAutomaticStopWaitsForSendBarrierAndPreservesRecovery(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "control.json")
+	fingerprint := strings.Repeat("c", 64)
+	now := time.Now().UTC()
+	if err := WriteDevnetActivation(
+		path, fingerprint, now.Add(-time.Second), now.Add(time.Hour), 2, "bounded test",
+	); err != nil {
+		t.Fatal(err)
+	}
+	state, err := NewStateFile(path, fingerprint, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	barrierDone := make(chan error, 1)
+	go func() {
+		blocked, err := state.WithSendBarrier(testActionID, func() error {
+			close(entered)
+			<-release
+			return nil
+		})
+		if err == nil && blocked {
+			err = errors.New("enabled state blocked the send barrier")
+		}
+		barrierDone <- err
+	}()
+	<-entered
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- state.StopPreservingRecovery("runner shutdown")
+	}()
+	select {
+	case err := <-stopDone:
+		t.Fatalf("automatic stop returned before the send barrier ended: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-barrierDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-stopDone; !errors.Is(err, ErrRecoveryPending) {
+		t.Fatalf("automatic stop error = %v, want ErrRecoveryPending", err)
+	}
+	status, err := state.Status()
+	if err != nil || !status.RecoveryPending || status.Mode != ModeNoNewActions {
+		t.Fatalf("automatic stop erased recovery: status=%+v error=%v", status, err)
+	}
+}
+
 // A multi-action activation is the autonomy dial: it must permit exactly the
 // number of sends it granted and then stop, without a human intervening to
 // stop it and without any path to a further send.
@@ -930,6 +1057,14 @@ func TestMultiActionActivationSpendsExactlyItsGrant(t *testing.T) {
 			t.Fatalf("send %d was blocked while the activation still had capacity", index+1)
 		}
 		status, err := state.Status()
+		if err != nil || !status.RecoveryPending {
+			t.Fatalf("send %d did not remain blocked pending finality: status=%+v error=%v",
+				index+1, status, err)
+		}
+		if err := state.ClearTerminalForFinalized(actionID); err != nil {
+			t.Fatalf("finalize send %d: %v", index+1, err)
+		}
+		status, err = state.Status()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -977,10 +1112,23 @@ func TestInterruptedSendConsumesCapacityRatherThanReusingIt(t *testing.T) {
 		t.Fatalf("the operation's error must surface: %v", err)
 	}
 	status, err := state.Status()
-	if err != nil {
+	if err != nil || !status.RecoveryPending {
+		t.Fatalf("failed send did not preserve recovery: status=%+v error=%v", status, err)
+	}
+	called := false
+	blocked, err := state.WithSendBarrier(strings.Repeat("e", 64), func() error {
+		called = true
+		return nil
+	})
+	if err != nil || !blocked || called {
+		t.Fatalf("failed send allowed another action: blocked=%t called=%t error=%v",
+			blocked, called, err)
+	}
+	if err := state.ClearTerminalForFinalized(strings.Repeat("d", 64)); err != nil {
 		t.Fatal(err)
 	}
-	if status.RemainingActions != 1 {
+	status, err = state.Status()
+	if err != nil || status.RemainingActions != 1 {
 		t.Fatalf("a failed send must still consume its slot: remaining = %d",
 			status.RemainingActions)
 	}
@@ -1010,6 +1158,9 @@ func TestNoWriterMayReplaceALiveActivation(t *testing.T) {
 	if err := WriteDevnetActivation(path, fingerprint, issued, expires, 100, "widen"); err == nil ||
 		!strings.Contains(err.Error(), "stop the current activation") {
 		t.Fatalf("replacing a live activation must be refused, got %v", err)
+	}
+	if err := state.ClearTerminalForFinalized(strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
 	}
 	status, err := state.Status()
 	if err != nil {

@@ -92,6 +92,67 @@ func TestRotationSealsAndChains(t *testing.T) {
 	}
 }
 
+func TestReadRecordsReturnsTheCompleteRotatedHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "events.jsonl")
+	store := openRotatingForTest(t, path)
+	start := time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC)
+	rotateAfter(t, store, 3, start)
+	forceRotate(t, store)
+	if _, err := store.Append(start.Add(time.Hour), "test.event", "", map[string]any{"n": 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	records, err := ReadRecords(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 5 || records[3].Type != EventRotated || records[4].Sequence != 5 ||
+		records[4].PrevHash != records[3].Hash {
+		t.Fatalf("rotated read snapshot = %+v", records)
+	}
+}
+
+func TestDurablePrefixRemainsReadableWhileAppendingAndAfterRotation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "events.jsonl")
+	store := openRotatingForTest(t, path)
+	start := time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC)
+	for index := range 2 {
+		if _, err := store.Append(start.Add(time.Duration(index)*time.Second), "test.event", "", map[string]int{"n": index}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prefix, err := store.DurablePrefix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(start.Add(2*time.Second), "test.event", "", map[string]int{"n": 2}); err != nil {
+		t.Fatal(err)
+	}
+
+	assertPrefix := func() {
+		t.Helper()
+		records, err := ReadDurablePrefix(path, prefix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(records) != 2 || records[1].Hash != prefix.ChainHeadSHA256 {
+			t.Fatalf("durable prefix = %+v", records)
+		}
+	}
+	assertPrefix()
+	forceRotate(t, store)
+	assertPrefix()
+
+	invalid := prefix
+	invalid.ChainHeadSHA256 = strings.Repeat("0", 64)
+	if _, err := ReadDurablePrefix(path, invalid); err == nil {
+		t.Fatal("mismatched durable prefix chain head was accepted")
+	}
+}
+
 // Reopening must reload every segment, continue the global sequence, and keep
 // enforcing time monotonicity across a boundary.
 func TestRotatedJournalReloadsWholeHistory(t *testing.T) {
@@ -357,6 +418,62 @@ func TestRecordCapAppliesPerSegment(t *testing.T) {
 	}
 	if stats.Records != 4 {
 		t.Fatalf("stats records = %d, want the whole history", stats.Records)
+	}
+}
+
+// Idle records such as the once-per-minute clock anchor are appended without
+// an action capacity reservation. They must still rotate the active segment;
+// otherwise a strategy that never triggers eventually fills its journal.
+func TestIdleAppendRotatesAFullActiveSegment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "events.jsonl")
+	store := openRotatingForTest(t, path)
+	start := time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC)
+	if _, err := store.Append(start, "test.idle", "", map[string]any{"n": 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pretend the one-record fixture has reached the production threshold. This
+	// exercises the real append/rotation path without 32,768 durable writes.
+	store.mu.Lock()
+	store.activeStart = len(store.records) - maxRecords/2
+	store.mu.Unlock()
+	if _, err := store.Append(start.Add(time.Minute), "test.idle", "", map[string]any{"n": 2}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(segmentPath(path, 1)); err != nil {
+		t.Fatalf("idle append did not rotate the full segment: %v", err)
+	}
+	records := store.Records()
+	if len(records) != 3 || records[1].Type != EventRotated || records[2].Type != "test.idle" {
+		t.Fatalf("records after idle rotation = %+v", records)
+	}
+}
+
+func TestAppendDoesNotRotateWhileActionCapacityIsReserved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "events.jsonl")
+	store := openRotatingForTest(t, path)
+	start := time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC)
+	if _, err := store.Append(start, "test.action", "", map[string]any{"n": 1}); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	store.activeStart = len(store.records) - maxRecords/2
+	store.mu.Unlock()
+	if err := store.EnsureCapacity(2, 1024); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(start.Add(time.Minute), "test.action", "", map[string]any{"n": 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(segmentPath(path, 1)); !os.IsNotExist(err) {
+		t.Fatalf("append rotated while action capacity was reserved: %v", err)
+	}
+	if err := store.ReleaseCapacity(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(segmentPath(path, 1)); err != nil {
+		t.Fatalf("release did not rotate the full segment: %v", err)
 	}
 }
 

@@ -59,6 +59,24 @@ func TestMetricsExposeBoundedAttentionState(t *testing.T) {
 	}
 }
 
+func TestMetricsExposePendingRecovery(t *testing.T) {
+	metrics := New(time.Unix(50, 0))
+	metrics.Observe(
+		time.Unix(100, 0),
+		execution.Result{Decision: "stopped"},
+		journal.Stats{},
+		control.Status{Mode: control.ModeNoNewActions, RecoveryPending: true},
+		operatorstatus.Action{},
+	)
+	recorder := httptest.NewRecorder()
+	metrics.ServeHTTP(recorder, httptest.NewRequest("GET", "/metrics", nil))
+	body := recorder.Body.String()
+	if !strings.Contains(body, "mithril_agent_recovery_pending 1") ||
+		!strings.Contains(body, "mithril_agent_attention_required 1") {
+		t.Fatalf("pending recovery is not observable:\n%s", body)
+	}
+}
+
 func TestMetricsBeforeFirstCycleUseZeroTimestamp(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	(&Metrics{}).ServeHTTP(recorder, httptest.NewRequest("GET", "/metrics", nil))

@@ -90,6 +90,10 @@ func TestProposeFailsClosed(t *testing.T) {
 		{"excessive clock uncertainty", func(profile *Profile, _ *Observation) {
 			profile.MaxClockUncertaintyMillis = 2_001
 		}, 0},
+		{"wrapping clock uncertainty", func(profile *Profile, _ *Observation) {
+			// This becomes exactly 100ms if multiplied before it is bounded.
+			profile.MaxClockUncertaintyMillis = 100 + 1<<58
+		}, 0},
 		{"missing lag bound", func(profile *Profile, _ *Observation) { profile.MaxNodeLagSlots = 0 }, 0},
 		{"missing reconciliation bound", func(profile *Profile, _ *Observation) {
 			profile.MaxReconciliationSeconds = 0
