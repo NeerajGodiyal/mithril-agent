@@ -120,19 +120,21 @@ The split between repositories is deliberate.
 
 Repository: <https://github.com/NeerajGodiyal/mithril>
 
-The published trading-pilot integration is [`koro/agent-node-integration-wip`](https://github.com/NeerajGodiyal/mithril/tree/koro/agent-node-integration-wip)
-at commit `94718096a9d8ab02e38725a94a253ff105c0ed89` and predates the current focused branch tips:
+The node prerequisites are being reviewed as focused branches:
 
 - [`feature/mcp`](https://github.com/NeerajGodiyal/mithril/tree/feature/mcp) — read-only MCP monitoring, diagnostics, and local or SSH stdio setup;
 - [`koro/rpc`](https://github.com/NeerajGodiyal/mithril/tree/koro/rpc) — transaction and verification RPC support used by the agent; and
 - [`koro/node-monitoring`](https://github.com/NeerajGodiyal/mithril/tree/koro/node-monitoring) — node monitoring, alert rules, and notifier support.
 
-Rebuild the integration after the focused branches land. The agent's node
-observer requires both `feature/mcp` and `koro/rpc`.
+Land them in that order, followed by the focused replay/rooting and rooted-feed
+branches. The old `koro/agent-node-integration-wip` branch is comparison material,
+not a supported install target.
 
-That commit lacks the newer rooted-event feed. The unpublished handoff is `mithril-walletless-port-20260825-r9.tar.gz` from public source `7e4e8af`, SHA-256 `fdbeffc11fccb8f973fec8e349ba31c7ebad1549a7645058697b1237fb67ae4f`.
-Use it only after `make verify-source`, `make test-walletless`, and `make test-rooted-contract`.
-R9 passes source and contract checks and keeps exact processed-bank identity in simulation responses. Its R8 predecessor passed guarded first-start and graceful-restart acceptance on an isolated Alpenglow lineage. The exact R9 candidate passed classic Devnet required verification, durable rooting, three index backfills, unsigned simulation, program and index MCP, retention-gap refusal, and exact-cursor resume. Do not substitute r4 through r8.
+The current local cross-repository review bundle is
+`mithril-walletless-port-20260826-r12.tar.gz`, SHA-256
+`f98c3e5b60b493a22a5a0c38ccf0ef82f5e97c741a649b62e7ff6c9ce9a88e34`.
+It is an unpublished review artifact, not a release. Verify its source and run
+the walletless and rooted-contract suites before using it for local testing.
 
 ### Mithril Agent
 
@@ -482,8 +484,7 @@ and refuses private runtime artifacts in the source checkout. The shorter loop i
 make test-short
 ```
 
-Every push and pull request verifies the manifest, runs Go and Rust checks, builds all seven release binaries, and runs `govulncheck`. External
-actions are pinned to immutable releases. `make build-route-guard
+Every push and pull request verifies the manifest, runs Go and Rust checks, builds all seven release binaries, and runs `govulncheck`. External actions are pinned to immutable releases. `make build-route-guard
 ROUTE_GUARD_OUT=/absolute/private/path` separately requires Agave CLI 4.2+ and
 neither deploys nor activates the guard.
 
@@ -493,7 +494,6 @@ followed by journal, status, Telegram, and independent confirmation checks.
 
 ## Documentation rule
 
-Keep this README as the complete human orientation, not the exhaustive command reference. Installation belongs in `QUICKSTART.md`; reviewer actions in
-`DEMO.md`; and detailed security, service, monitoring, recovery, and legacy
+Keep this README as the complete human orientation, not the exhaustive command reference. Installation belongs in `QUICKSTART.md`; reviewer actions in `DEMO.md`; and detailed security, service, monitoring, recovery, and legacy
 material in `OPERATIONS.md`. Update this file only when capabilities,
 architecture, the supported path, or a safety boundary changes.

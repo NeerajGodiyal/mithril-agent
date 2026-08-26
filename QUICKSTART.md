@@ -23,18 +23,14 @@ The result is deliberately limited:
 This guide assumes you already know how to run a Mithril full node or RPC node.
 Use a full-node/RPC host, not a voting validator host.
 
-## 1. Use the matching Mithril build
+## 1. Use a matching Mithril build
 
-The current end-to-end candidate is the public Mithril integration branch:
+Do not use the old `koro/agent-node-integration-wip` branch for a new setup.
+Build the reviewed focused branches in order: `feature/mcp`, `koro/rpc`,
+`koro/node-monitoring`, replay/rooting, then rooted RPC/feed. Until those are
+published together, treat this guide as a local integration review rather than
+a production deployment.
 
-```text
-repository: https://github.com/NeerajGodiyal/mithril
-branch:     koro/agent-node-integration-wip
-commit:     94718096a9d8ab02e38725a94a253ff105c0ed89
-```
-
-That candidate combines the MCP, RPC-evidence, and node-monitoring branches
-used by this agent. Build and run that exact Mithril revision for this review.
 Keep Mithril's RPC on a literal loopback address; the agent does not support an
 external submission fallback.
 

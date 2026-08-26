@@ -103,26 +103,17 @@ validator, voter, or withdrawer private key into this setup.
 This path needs Go 1.26.6 or newer. It does not need Node.js, a quote adapter,
 Telegram, a custody account, or any of the optional trading services:
 
-This walletless work is newer than the published trading-pilot integration.
-Until an authorized revision is published, use the reviewed node artifact
-from the operator-supplied source bundle
-`mithril-walletless-port-20260825-r9.tar.gz` (SHA-256
-`fdbeffc11fccb8f973fec8e349ba31c7ebad1549a7645058697b1237fb67ae4f`)
-with an agent checkout that passes its source manifest and walletless tests.
-R9 retains fail-closed AccountsDB process locking, exact rooted-batch digests,
-unsigned-simulation contracts, preservation-first recovery guidance, and exact
-processed-bank identity in every simulation response. Its focused normal,
-race, vet, and cross-repository checks pass. The R8 predecessor passed guarded
-first-start and graceful-restart acceptance on an isolated Alpenglow lineage.
-The exact R9 candidate passed classic Devnet required verification, durable
-rooting, rooted backfill, unsigned simulation, both stdio MCP servers,
-retention-gap refusal, and exact-cursor resume after restart. Do not substitute
-the superseded r4 through r8 archives.
+This walletless work is newer than the published trading pilot. The current
+operator-supplied source bundle is `mithril-walletless-port-20260826-r12.tar.gz` (SHA-256
+`f98c3e5b60b493a22a5a0c38ccf0ef82f5e97c741a649b62e7ff6c9ce9a88e34`).
+It is an unpublished review artifact, not a release. Use it only for local
+cross-repository testing after its source and contract checks pass.
 The Mithril source must contain the `events` command and
 `storage.rooted_events`; the agent source must contain this guide plus the
 `program` and `index` commands. Do not clone the older trading-pilot revision
 and assume it contains these features. The archive is a non-Git review
-artifact, not a published revision.
+artifact, not a published revision. The old `koro/agent-node-integration-wip`
+branch is not a substitute for the focused node prerequisites.
 
 ```sh
 cd /path/to/verified/mithril-agent-source

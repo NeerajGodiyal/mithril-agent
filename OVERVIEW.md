@@ -157,10 +157,7 @@ The project is split on purpose.
 
 Repository: <https://github.com/NeerajGodiyal/mithril>
 
-The published trading-pilot review candidate is
-[`koro/agent-node-integration-wip`](https://github.com/NeerajGodiyal/mithril/tree/koro/agent-node-integration-wip)
-at commit `94718096a9d8ab02e38725a94a253ff105c0ed89` and predates the current
-focused branch tips:
+The node prerequisites are being reviewed as focused branches:
 
 - [`feature/mcp`](https://github.com/NeerajGodiyal/mithril/tree/feature/mcp) —
   read-only MCP monitoring, diagnostics, and local or SSH stdio setup;
@@ -169,8 +166,9 @@ focused branch tips:
 - [`koro/node-monitoring`](https://github.com/NeerajGodiyal/mithril/tree/koro/node-monitoring) —
   node monitoring, alerts, and notifier support.
 
-Rebuild the integration after the focused branches land. The agent's node
-observer requires both `feature/mcp` and `koro/rpc`.
+Land them in order, then add the focused replay/rooting and rooted-feed work.
+The old `koro/agent-node-integration-wip` branch is useful for comparison and
+test extraction, but should not be merged or used for a new deployment.
 
 The Alpenglow rooted-event feed and the corresponding walletless program and
 index commands are newer than that published trading-pilot revision. Until a

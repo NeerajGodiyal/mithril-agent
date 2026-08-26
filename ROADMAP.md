@@ -26,7 +26,7 @@ recovery, and operator messaging outside the language model.
 
 "Walletless" means the read, index, build, and simulation paths do not load a
 signing key. Solana still requires the fee payer and instruction authorities to
-sign any transaction that changes state.
+sign any transaction that changes state, including a fee payer signature.
 
 ## Repository ownership
 
@@ -43,7 +43,8 @@ RPC or MCP.
 
 ## What is implemented
 
-- source-bound rooted transaction and account indexing with exact resume rules;
+- Rooted event feed ingestion with source-bound transaction and account data;
+- a Custom indexer with restart-safe, exact-cursor resume rules;
 - local read-only MCP for index and program queries;
 - canonical Program Metadata interface discovery and content-addressed pinning;
 - reviewed program evidence bound to genesis, processed bank, and deployment;
@@ -72,7 +73,7 @@ of the same work.
 
 ## Limits
 
-- Funded Mainnet execution is disabled.
+- Funded Mainnet stays disabled.
 - Solana version-1 transactions are not supported.
 - The live trading pilot covers one reviewed Devnet route, not arbitrary assets.
 - MCP and Telegram are read only and cannot approve, sign, or submit actions.
