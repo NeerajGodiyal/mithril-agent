@@ -14,15 +14,17 @@ const (
 
 func soundLimit() SpendingLimit {
 	return SpendingLimit{
-		Multisig: testVault, Mint: NativeMint,
+		Multisig: testVault, VaultIndex: 0, Mint: NativeMint,
 		Amount: 500_000_000, Period: Daily, Remaining: 500_000_000,
 		Members: []string{testMember}, Destinations: []string{testAgent},
 	}
 }
 
 func soundExpectation() Expectation {
+	vaultIndex := uint8(0)
 	return Expectation{
-		Multisig: testVault, Destination: testAgent, Mint: NativeMint,
+		Multisig: testVault, VaultIndex: &vaultIndex,
+		Destination: testAgent, Mint: NativeMint,
 		MaxAmount: 1_000_000_000, AllowedPeriods: []Period{Daily, OneTime},
 	}
 }
@@ -76,13 +78,25 @@ func TestExtraDestinationsAreReported(t *testing.T) {
 	}
 }
 
-// A limit belonging to a different vault is protecting somebody else's money.
-func TestALimitOnAnotherVaultIsRejected(t *testing.T) {
+// A limit belonging to a different Multisig config protects different funds.
+func TestALimitOnAnotherMultisigIsRejected(t *testing.T) {
 	limit := soundLimit()
 	limit.Multisig = testOther
 
 	if findings := Verify(limit, soundExpectation()); len(findings) == 0 {
 		t.Fatal("a limit on a different vault was accepted")
+	}
+}
+
+// One Multisig can hold several independent vaults. Verifying only the config
+// address would accept a limit aimed at the wrong asset-holding PDA.
+func TestALimitOnAnotherVaultIndexIsRejected(t *testing.T) {
+	limit := soundLimit()
+	limit.VaultIndex = 1
+
+	findings := Verify(limit, soundExpectation())
+	if !strings.Contains(problems(findings), "different asset-holding vault") {
+		t.Fatalf("a limit on another vault index was accepted: %s", problems(findings))
 	}
 }
 
@@ -111,12 +125,14 @@ func TestAnUnacceptedPeriodIsReported(t *testing.T) {
 // An incomplete expectation must fail loudly. Skipping an unstated field would
 // let a caller get a clean report by asking less.
 func TestAnIncompleteExpectationProvesNothing(t *testing.T) {
+	vaultIndex := uint8(0)
 	for name, expect := range map[string]Expectation{
-		"no vault":       {Destination: testAgent, Mint: NativeMint, MaxAmount: 1, AllowedPeriods: []Period{Daily}},
-		"no destination": {Multisig: testVault, Mint: NativeMint, MaxAmount: 1, AllowedPeriods: []Period{Daily}},
-		"no mint":        {Multisig: testVault, Destination: testAgent, MaxAmount: 1, AllowedPeriods: []Period{Daily}},
-		"no maximum":     {Multisig: testVault, Destination: testAgent, Mint: NativeMint, AllowedPeriods: []Period{Daily}},
-		"no periods":     {Multisig: testVault, Destination: testAgent, Mint: NativeMint, MaxAmount: 1},
+		"no multisig":    {VaultIndex: &vaultIndex, Destination: testAgent, Mint: NativeMint, MaxAmount: 1, AllowedPeriods: []Period{Daily}},
+		"no vault index": {Multisig: testVault, Destination: testAgent, Mint: NativeMint, MaxAmount: 1, AllowedPeriods: []Period{Daily}},
+		"no destination": {Multisig: testVault, VaultIndex: &vaultIndex, Mint: NativeMint, MaxAmount: 1, AllowedPeriods: []Period{Daily}},
+		"no mint":        {Multisig: testVault, VaultIndex: &vaultIndex, Destination: testAgent, MaxAmount: 1, AllowedPeriods: []Period{Daily}},
+		"no maximum":     {Multisig: testVault, VaultIndex: &vaultIndex, Destination: testAgent, Mint: NativeMint, AllowedPeriods: []Period{Daily}},
+		"no periods":     {Multisig: testVault, VaultIndex: &vaultIndex, Destination: testAgent, Mint: NativeMint, MaxAmount: 1},
 		"empty":          {},
 	} {
 		findings := Verify(soundLimit(), expect)
@@ -174,24 +190,5 @@ func TestExposureNoteDescribesTheCapNotTheBalance(t *testing.T) {
 	once.Period = OneTime
 	if note = ExposureNote(once); !strings.Contains(note, "never again") {
 		t.Errorf("a one-time limit does not say it is one-time: %q", note)
-	}
-}
-
-// No cap at all must be named, not printed as a number. "18446744073709551615"
-// reads like a specific very large allowance; it is the absence of a boundary.
-func TestUnlimitedIsNamedRatherThanPrinted(t *testing.T) {
-	limit := soundLimit()
-	limit.Amount = Unlimited
-
-	note := ExposureNote(limit)
-	if !strings.Contains(note, "UNLIMITED") {
-		t.Fatalf("an uncapped limit was not named as unlimited: %q", note)
-	}
-	if strings.Contains(note, "18446744073709551615") {
-		t.Errorf("the sentinel was printed as a number: %q", note)
-	}
-	// It must still be a finding unless the operator explicitly accepts it.
-	if findings := Verify(limit, soundExpectation()); len(findings) == 0 {
-		t.Error("an uncapped limit passed against a bounded expectation")
 	}
 }

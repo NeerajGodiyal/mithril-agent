@@ -16,6 +16,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril-agent/agent"
 	"github.com/Overclock-Validator/mithril-agent/internal/clockcheck"
+	"github.com/Overclock-Validator/mithril-agent/internal/control"
 	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/riskgrant"
 	"github.com/Overclock-Validator/mithril-agent/sealedtx"
@@ -137,6 +138,37 @@ func TestValidateSignedBindsOuterAndSealedBlockhashContext(t *testing.T) {
 		proposed.Proposal, built, signedTransaction{SignerResponse: wrongSignature},
 	); err == nil {
 		t.Fatal("attested invalid Solana signature was accepted")
+	}
+	wrongHash := response
+	wrongHash.TransactionSHA256 = strings.Repeat("a", sha256.Size*2)
+	wrongHash.SealedTransaction.Metadata.TransactionSHA256 = wrongHash.TransactionSHA256
+	wrongHash.SignerAttestation, err = signer.AttestResponse(
+		fixture.signer.key,
+		wrongHash.SignerAttestation.SubmitterPublicKey,
+		wrongHash,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSigned(
+		proposed.Proposal, built, signedTransaction{SignerResponse: wrongHash},
+	); err == nil {
+		t.Fatal("attested false transaction hash was accepted")
+	}
+	wrongRequest := response
+	wrongRequest.RequestSHA256 = strings.Repeat("b", sha256.Size*2)
+	wrongRequest.SignerAttestation, err = signer.AttestResponse(
+		fixture.signer.key,
+		wrongRequest.SignerAttestation.SubmitterPublicKey,
+		wrongRequest,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSigned(
+		proposed.Proposal, built, signedTransaction{SignerResponse: wrongRequest},
+	); err == nil {
+		t.Fatal("attested false signing-request hash was accepted")
 	}
 }
 
@@ -274,9 +306,23 @@ type balanceResponse struct {
 type fakeStopChecker struct {
 	stopped       bool
 	err           error
+	clearErr      error
+	cleared       []string
 	responses     []bool
 	calls         int
 	beforeBarrier func()
+}
+
+func (f *fakeStopChecker) ClearTerminalForFinalized(actionID string) error {
+	if f.clearErr != nil {
+		return f.clearErr
+	}
+	f.cleared = append(f.cleared, actionID)
+	return nil
+}
+
+func (f *fakeStopChecker) StopForTerminal(string, string) error {
+	return nil
 }
 
 func (f *fakeStopChecker) NoNewActions() (bool, error) {
@@ -534,6 +580,22 @@ func TestRunOnceCompletesAndDoesNotRepeatTerminalAction(t *testing.T) {
 	fixture := newExecutionFixture(t)
 	fixture.tx.reconcile = []txflow.Reconciliation{{Verdict: txflow.VerdictFinalized, Slot: 120}}
 	engine := fixture.engine(t)
+	fingerprint, err := fixture.profile.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(t.TempDir(), "control.json")
+	now := time.Now().UTC()
+	if err := control.WriteDevnetActivation(
+		statePath, fingerprint, now, now.Add(time.Hour), 2, "multi-sweep test",
+	); err != nil {
+		t.Fatal(err)
+	}
+	state, err := control.NewStateFile(statePath, fingerprint, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.stop = state
 	first, err := engine.RunOnce(t.Context(), fixture.profile)
 	if err != nil {
 		t.Fatal(err)
@@ -549,6 +611,11 @@ func TestRunOnceCompletesAndDoesNotRepeatTerminalAction(t *testing.T) {
 	if stats.ReservedBytes != 0 {
 		t.Fatalf("terminal execution retained %d reserved bytes", stats.ReservedBytes)
 	}
+	status, err := state.Status()
+	if err != nil || !status.RecoveryPending || status.Mode != control.ModeNoNewActions {
+		t.Fatalf("finalized action did not retain its recovery marker: status=%+v error=%v",
+			status, err)
+	}
 	recordCount := len(fixture.store.Records())
 	second, err := engine.RunOnce(t.Context(), fixture.profile)
 	if err != nil {
@@ -558,6 +625,89 @@ func TestRunOnceCompletesAndDoesNotRepeatTerminalAction(t *testing.T) {
 		fixture.tx.submitCalls != 1 || fixture.signer.calls != 1 ||
 		len(fixture.store.Records()) != recordCount {
 		t.Fatalf("terminal action repeated: %+v, records=%d/%d", second, len(fixture.store.Records()), recordCount)
+	}
+}
+
+func TestFinalizedRecoveryMarkerRepairsAfterRestart(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	fixture.tx.reconcile = []txflow.Reconciliation{{Verdict: txflow.VerdictFinalized, Slot: 120}}
+	first, err := fixture.engine(t).RunOnce(t.Context(), fixture.profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := fixture.profile.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(t.TempDir(), "control.json")
+	now := time.Now().UTC()
+	if err := control.WriteDevnetActivation(
+		statePath, fingerprint, now, now.Add(time.Hour), 2, "restart repair test",
+	); err != nil {
+		t.Fatal(err)
+	}
+	state, err := control.NewStateFile(statePath, fingerprint, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocked, err := state.WithSendBarrier(first.ActionID, func() error { return nil }); err != nil || blocked {
+		t.Fatalf("restore pending marker: blocked=%t error=%v", blocked, err)
+	}
+
+	restarted := fixture.engine(t)
+	restarted.stop = state
+	if _, err := restarted.RunOnce(t.Context(), fixture.profile); err != nil {
+		t.Fatal(err)
+	}
+	status, err := state.Status()
+	if err != nil || !status.RecoveryPending || status.Mode != control.ModeNoNewActions {
+		t.Fatalf("restart did not wait for independent recovery: status=%+v error=%v", status, err)
+	}
+}
+
+func TestFailedReconciliationWritesTerminalLatch(t *testing.T) {
+	fixture := newExecutionFixture(t)
+	fixture.tx.reconcile = []txflow.Reconciliation{{Verdict: txflow.VerdictFailed, Slot: 120}}
+	fingerprint, err := fixture.profile.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(t.TempDir(), "control.json")
+	now := time.Now().UTC()
+	if err := control.WriteDevnetActivation(
+		statePath, fingerprint, now, now.Add(time.Hour), 2, "failed action test",
+	); err != nil {
+		t.Fatal(err)
+	}
+	state, err := control.NewStateFile(statePath, fingerprint, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := fixture.engine(t)
+	engine.stop = state
+	result, err := engine.RunOnce(t.Context(), fixture.profile)
+	if err != nil || result.Verdict != txflow.VerdictFailed {
+		t.Fatalf("failed reconciliation = %+v, error=%v", result, err)
+	}
+	status, err := state.Status()
+	if err != nil || status.RecoveryPending || status.Mode != control.ModeNoNewActions ||
+		status.TerminalActionID != result.ActionID || status.TerminalOutcome != "failed" {
+		t.Fatalf("failed reconciliation did not latch terminal outcome: status=%+v error=%v",
+			status, err)
+	}
+}
+
+func TestTerminalControlOutcome(t *testing.T) {
+	for verdict, want := range map[string]string{
+		txflow.VerdictFinalized:  "",
+		txflow.VerdictFailed:     "failed",
+		txflow.VerdictUnresolved: "halted",
+		txflow.VerdictDiverged:   "halted",
+		txflow.VerdictPending:    "",
+	} {
+		if got := terminalControlOutcome(verdict); got != want {
+			t.Errorf("terminalControlOutcome(%q) = %q, want %q", verdict, got, want)
+		}
 	}
 }
 
@@ -1631,8 +1781,17 @@ func TestObservationFailureResetsHealthGate(t *testing.T) {
 	fixture.observer.err = errors.New("MCP unavailable")
 	if _, err := fixture.engine(t).RunOnce(t.Context(), fixture.profile); err == nil {
 		t.Fatal("observer failure was accepted")
+	} else if !errors.Is(err, ErrObservationUnavailable) {
+		t.Fatalf("observer failure = %v, want ErrObservationUnavailable", err)
 	}
 	fixture.observer.err = nil
+	fixture.observer.observation.Source = ""
+	if _, err := fixture.engine(t).RunOnce(t.Context(), fixture.profile); err == nil {
+		t.Fatal("invalid observer response was accepted")
+	} else if !errors.Is(err, ErrObservationUnavailable) {
+		t.Fatalf("invalid observer response = %v, want ErrObservationUnavailable", err)
+	}
+	fixture.observer.observation.Source = fixture.profile.Source
 	for index := 0; index < 2; index++ {
 		fixture.now = fixture.now.Add(5 * time.Second)
 		fixture.observer.observation.Slot++

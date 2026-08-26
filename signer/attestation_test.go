@@ -2,10 +2,58 @@ package signer
 
 import (
 	"crypto/ed25519"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestResponseAttestationCanUseSeparateServiceIdentity(t *testing.T) {
+	policy, walletKey, request := signerFixture(t)
+	response, err := signAt(
+		policy, walletKey, request,
+		time.Unix(request.ScheduleWindowStartUnix+1, 0).UTC(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attestationKey := signerTestKey("separate response attestor")
+	attestationPublic, err := PublicKey(attestationKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.SignerAttestation, err = AttestResponseWith(
+		attestationPublic, policy.SubmitterPublicKey, response,
+		func(message []byte) ([]byte, error) {
+			return ed25519.Sign(attestationKey, message), nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyResponseAttestation(
+		attestationPublic, policy.SubmitterPublicKey, response,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyResponseAttestation(
+		policy.Source, policy.SubmitterPublicKey, response,
+	); err == nil {
+		t.Fatal("separate attestation verified as the funded wallet")
+	}
+	if _, err := AttestResponseWith(
+		attestationPublic, policy.SubmitterPublicKey, response,
+		func([]byte) ([]byte, error) { return nil, errors.New("unavailable") },
+	); err == nil {
+		t.Fatal("failed attestation backend was accepted")
+	}
+	if _, err := AttestResponseWith(
+		attestationPublic, policy.SubmitterPublicKey, response,
+		func([]byte) ([]byte, error) { return make([]byte, ed25519.SignatureSize), nil },
+	); err == nil {
+		t.Fatal("invalid 64-byte attestation was accepted")
+	}
+}
 
 func TestResponseAttestationBindsSignerSubmitterAndMetadata(t *testing.T) {
 	policy, privateKey, request := signerFixture(t)
@@ -23,6 +71,9 @@ func TestResponseAttestationBindsSignerSubmitterAndMetadata(t *testing.T) {
 	}
 
 	tests := map[string]func(*Response){
+		"request hash": func(value *Response) {
+			value.RequestSHA256 = strings.Repeat("0", 64)
+		},
 		"action": func(value *Response) {
 			value.ActionID = strings.Repeat("0", 64)
 			value.SealedTransaction.Metadata.ActionID = value.ActionID

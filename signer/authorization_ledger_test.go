@@ -110,6 +110,40 @@ func TestAuthorizationLedgerCapsCumulativeDailyDebit(t *testing.T) {
 	}
 }
 
+func TestAuthorizationLedgerKeepsCapsAcrossRotationMarkers(t *testing.T) {
+	policy, privateKey, request := signerFixture(t)
+	policy.DailyDebitCapLamports = 2 * (42 + request.FeeLamports)
+	now := time.Unix(request.ScheduleWindowStartUnix+1, 0).UTC()
+	if _, err := AuthorizeAndSign(policy, privateKey, request, now); err != nil {
+		t.Fatal(err)
+	}
+	records := authorizationRecords(t, policy.AuthorizationLedgerPath)
+	second := records[1]
+	second.ActionID = "second-action-after-rotation"
+	records = append(records, journal.Record{
+		Type: journal.EventRotated,
+	}, second)
+
+	ledger := &authorizationLedger{
+		policy: policy, reservations: make(map[string]authorizationReservation),
+		dailyDebits: make(map[int64]uint64),
+	}
+	policyHash, err := authorizationPolicyHash(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.load(records, policyHash); err != nil {
+		t.Fatal(err)
+	}
+	day := now.Unix() - now.Unix()%secondsPerDay
+	if got := ledger.dailyDebits[day]; got != policy.DailyDebitCapLamports {
+		t.Fatalf("daily debit after rotation = %d, want %d", got, policy.DailyDebitCapLamports)
+	}
+	if len(ledger.reservations) != 2 {
+		t.Fatalf("reservations after rotation = %d, want 2", len(ledger.reservations))
+	}
+}
+
 func TestAuthorizationReservationSurvivesCrashBeforeResponse(t *testing.T) {
 	policy, privateKey, request := signerFixture(t)
 	now := time.Unix(request.ScheduleWindowStartUnix+1, 0).UTC()
@@ -308,6 +342,8 @@ func TestAuthorizationLedgerRejectsPreviousSchema(t *testing.T) {
 	}
 	if _, err := AuthorizeAndSign(policy, privateKey, request, now); err == nil {
 		t.Fatal("authorization ledger from the previous schema was accepted")
+	} else if strings.Contains(err.Error(), "a cap was edited") {
+		t.Fatalf("previous ledger schema was misreported as a cap edit: %v", err)
 	}
 }
 
@@ -385,7 +421,7 @@ func TestPolicyRequiresDurableAuthorizationFields(t *testing.T) {
 
 func authorizationRecords(t *testing.T, path string) []journal.Record {
 	t.Helper()
-	store, err := journal.Open(path)
+	store, err := journal.OpenRotating(path)
 	if err != nil {
 		t.Fatal(err)
 	}

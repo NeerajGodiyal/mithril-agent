@@ -72,3 +72,23 @@ func TestLooseningACapAlsoInvalidatesTheLedger(t *testing.T) {
 		t.Fatal("loosening a cap reused the ledger; that must stay a deliberate act")
 	}
 }
+
+func TestTighteningABuyCapReportsTheDailyReset(t *testing.T) {
+	policy, privateKey, request := buySignerFixture(t)
+	now := time.Unix(request.ScheduleWindowStartUnix+1, 0).UTC()
+	if _, err := AuthorizeAndSign(policy, privateKey, request, now); err != nil {
+		t.Fatalf("first buy authorization: %v", err)
+	}
+
+	tightened := policy
+	tightened.DailyNativeFeeCapLamports--
+	_, err := openBuyAuthorizationLedger(tightened, now)
+	if err == nil {
+		t.Fatal("tightening a buy cap unexpectedly reused the ledger")
+	}
+	for _, want := range []string{"a cap was edited", "RAISES what today still allows", "00:00 UTC"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("buy-cap refusal %q does not contain %q", err, want)
+		}
+	}
+}

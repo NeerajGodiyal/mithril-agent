@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/agent"
+	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
 	"github.com/Overclock-Validator/mithril-agent/riskgrant"
 	"github.com/Overclock-Validator/mithril-agent/sealedtx"
 	"github.com/Overclock-Validator/mithril-agent/solana"
@@ -198,6 +199,10 @@ func TestSignRejectsPolicyAndSemanticDrift(t *testing.T) {
 		"stale fee evidence": func(_ *Policy, request *Request, _ *ed25519.PrivateKey) {
 			request.SecondaryFeeContextSlot = request.FeeMinContextSlot - 1
 		},
+		"widely skewed fee evidence": func(_ *Policy, request *Request, _ *ed25519.PrivateKey) {
+			request.SecondaryFeeContextSlot = request.PrimaryFeeContextSlot +
+				proposalcheck.MaxEvidenceSlotSkew + 1
+		},
 		"fee minimum differs from blockhash": func(_ *Policy, request *Request, _ *ed25519.PrivateKey) {
 			request.FeeMinContextSlot--
 		},
@@ -217,6 +222,17 @@ func TestSignRejectsPolicyAndSemanticDrift(t *testing.T) {
 				t.Fatal("mutated request was signed")
 			}
 		})
+	}
+}
+
+func TestValidateRequestRejectsScheduleOverflow(t *testing.T) {
+	policy, _, request := signerFixture(t)
+	policy.ScheduleAnchorUnix = int64(^uint64(0)>>1) / 86_400 * 86_400
+	request.ScheduleWindowStartUnix = policy.ScheduleAnchorUnix
+	request.ScheduleWindowEndUnix = request.ScheduleWindowStartUnix +
+		int64(policy.ScheduleWindowSeconds)
+	if _, err := ValidateRequest(policy, request); err == nil {
+		t.Fatal("overflowed schedule window validated")
 	}
 }
 
@@ -273,6 +289,15 @@ func TestRiskBindingHashesEveryUnsignedRequestField(t *testing.T) {
 		"recent blockhash":      func(value *Request) { value.RecentBlockhash += "x" },
 		"observed height":       func(value *Request) { value.ObservedBlockHeight++ },
 		"last valid height":     func(value *Request) { value.LastValidBlockHeight++ },
+		"Jupiter candidate": func(value *Request) {
+			value.JupiterCandidate = &proposalcheck.Candidate{Version: 1}
+		},
+		"Jupiter providers": func(value *Request) {
+			value.JupiterProviders = &proposalcheck.ProviderBindings{
+				PrimaryTrustDomain: "primary", PrimaryOriginSHA256: strings.Repeat("1", 64),
+				SecondaryTrustDomain: "secondary", SecondaryOriginSHA256: strings.Repeat("2", 64),
+			}
+		},
 	}
 	if got, want := len(tests)+1, reflect.TypeFor[Request]().NumField(); got != want {
 		t.Fatalf("request hash coverage has %d fields, want %d", got, want)

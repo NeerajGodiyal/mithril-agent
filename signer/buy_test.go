@@ -161,6 +161,41 @@ func TestBuySignerDailyCapsSurviveReopen(t *testing.T) {
 	}
 }
 
+func TestBuyAuthorizationLedgerKeepsCapsAcrossRotationMarkers(t *testing.T) {
+	policy, privateKey, request := buySignerFixture(t)
+	policy.DailyInputTokenCap *= 2
+	policy.DailyNativeFeeCapLamports *= 2
+	now := time.Unix(request.ScheduleWindowStartUnix+1, 0).UTC()
+	if _, err := AuthorizeAndSign(policy, privateKey, request, now); err != nil {
+		t.Fatal(err)
+	}
+	records := authorizationRecords(t, policy.AuthorizationLedgerPath)
+	second := records[1]
+	second.ActionID = "second-buy-after-rotation"
+	records = append(records, journal.Record{
+		Type: journal.EventRotated,
+	}, second)
+
+	ledger := &buyAuthorizationLedger{
+		policy: policy, reservations: make(map[string]buyAuthorizationReservation),
+		dailyInputs: make(map[int64]uint64), dailyFees: make(map[int64]uint64),
+	}
+	policyHash, err := authorizationPolicyHash(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.load(records, policyHash); err != nil {
+		t.Fatal(err)
+	}
+	day := now.Unix() - now.Unix()%secondsPerDay
+	if got := ledger.dailyInputs[day]; got != policy.DailyInputTokenCap {
+		t.Fatalf("daily input after rotation = %d, want %d", got, policy.DailyInputTokenCap)
+	}
+	if got := ledger.dailyFees[day]; got != policy.DailyNativeFeeCapLamports {
+		t.Fatalf("daily fee after rotation = %d, want %d", got, policy.DailyNativeFeeCapLamports)
+	}
+}
+
 func TestBuyAuthorizationReservationSurvivesCrashBeforeResponse(t *testing.T) {
 	policy, privateKey, request := buySignerFixture(t)
 	now := time.Unix(request.ScheduleWindowStartUnix+1, 0).UTC()
@@ -292,6 +327,24 @@ func TestBuyAuthorizationLedgerRejectsPreviousSchema(t *testing.T) {
 	}
 	if _, err := AuthorizeAndSign(policy, privateKey, request, now); err == nil {
 		t.Fatal("buy authorization ledger from the previous schema was accepted")
+	} else if strings.Contains(err.Error(), "a cap was edited") {
+		t.Fatalf("previous buy-ledger schema was misreported as a cap edit: %v", err)
+	}
+}
+
+func TestBuyAuthorizationLedgerEmptyFileReportsRecoverableState(t *testing.T) {
+	policy, privateKey, request := buySignerFixture(t)
+	if err := os.WriteFile(policy.AuthorizationLedgerPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(request.ScheduleWindowStartUnix+1, 0).UTC()
+
+	_, err := AuthorizeAndSign(policy, privateKey, request, now)
+	if err == nil {
+		t.Fatal("empty buy authorization ledger was accepted")
+	}
+	if !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("error %q does not identify the empty buy ledger", err)
 	}
 }
 

@@ -16,7 +16,7 @@ import (
 const mainnetLimitHex = "0ac91ba0dac3de9812d6ea8f464eaef4839cfc30e6643cc3c23b44c7f0fce7a3cfbb030cf8a54a7d5e7f00fb3ad784ff0a720f00d2246f8668c3e6416bc368d4856a6dfdfafcac910000000000000000000000000000000000000000000000000000000000000000000065cd1d00000000010065cd1d000000007e96bb6600000000ff01000000"
 
 // A real devnet limit, same date: a token mint rather than SOL, and a one-time
-// unlimited amount. The two together exercise both branches of every field.
+// maximum-u64 amount. Squads treats that as a finite amount, not a sentinel.
 const devnetLimitHex = "0ac91ba0dac3de981e080025086651da25a34ae3682b2e4f4c5a1efbbb55e425f479b1f53e1b4d60ff5bee127fdf2c3e7a8e365ae55eb7a28df843cc63061c4a94d0f29d0741d99b003b442cb3912157f13a933d0134282d032b5ffecd01a2dbf1b7790608df002ea7ffffffffffffffff00ffffffffffffffff85c1e26900000000ff01000000"
 
 func decodeFixture(t *testing.T, encoded string, members, destinations int) SpendingLimit {
@@ -68,7 +68,7 @@ func TestDecodesARealMainnetLimit(t *testing.T) {
 }
 
 // The devnet fixture covers the other side of every branch: a token mint and a
-// one-time unlimited amount.
+// one-time maximum-u64 amount.
 func TestDecodesARealDevnetLimit(t *testing.T) {
 	limit := decodeFixture(t, devnetLimitHex, 1, 0)
 
@@ -76,7 +76,7 @@ func TestDecodesARealDevnetLimit(t *testing.T) {
 		t.Error("a token-mint limit was reported as native SOL")
 	}
 	if limit.Amount != ^uint64(0) {
-		t.Errorf("amount = %d, want the unlimited sentinel", limit.Amount)
+		t.Errorf("amount = %d, want maximum u64", limit.Amount)
 	}
 	if limit.Period != OneTime {
 		t.Errorf("period = %v, want one-time", limit.Period)
@@ -149,9 +149,9 @@ func TestTrailingBytesAreRefused(t *testing.T) {
 	}
 }
 
-// The boundary is only trustworthy because this software cannot use it. If this
-// package ever gains the ability to build or sign a transaction, the boundary
-// becomes only as good as our own code, which is the thing it exists to avoid.
+// This is a regression guard for the package's current read-only scope. It does
+// not prove process isolation or prevent another package from constructing a
+// Squads instruction.
 func TestSquadsPackageCannotMoveFunds(t *testing.T) {
 	forbidden := []string{
 		"mithril-agent/signer", "mithril-agent/submitter", "mithril-agent/sealedtx",
@@ -193,5 +193,38 @@ func TestSquadsPackageCannotMoveFunds(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("the guard checked no files, so it proves nothing")
+	}
+}
+
+func TestDerivesTheVaultAndSpendingLimitPDAs(t *testing.T) {
+	// Fixed vectors generated independently with official @sqds/multisig
+	// v2.1.4 getVaultPda/getSpendingLimitPda.
+	multisig := "11111111111111111111111111111111"
+	createKey := ProgramID
+	vaultZero, err := VaultAddress(multisig, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vaultOne, err := VaultAddress(multisig, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vaultZero != "HyvBpUqbXi4DEpVknM8Z6tUK3mKUTHaGmQ321rgvdDU6" {
+		t.Fatalf("vault index 0 = %q", vaultZero)
+	}
+	if vaultOne != "3hf7GkCzsdFzPxDdxTTSAbnyWvcBNCqyLoTAM4C4Mppb" {
+		t.Fatalf("vault index 1 = %q", vaultOne)
+	}
+	limitAddress, err := SpendingLimitAddress(multisig, createKey)
+	if err != nil || limitAddress != "3cMT1r5Y9oFe3a1sQ2YfTaUHQpX2en83vS1HzDSKBB5g" {
+		t.Fatalf("spending-limit PDA derivation failed: %q %v", limitAddress, err)
+	}
+	for _, invalid := range []string{"", "not-a-public-key"} {
+		if _, err := VaultAddress(invalid, 0); err == nil {
+			t.Errorf("accepted invalid Multisig address %q", invalid)
+		}
+		if _, err := SpendingLimitAddress(multisig, invalid); err == nil {
+			t.Errorf("accepted invalid create key %q", invalid)
+		}
 	}
 }

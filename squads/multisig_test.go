@@ -163,8 +163,19 @@ func TestVerifyControlProvesRevocability(t *testing.T) {
 			Members:         []Member{{Key: owner, Permissions: 7}},
 		}
 		got, findings := VerifyControl(multisig, limit, expect)
-		if got != RevocableByVote || len(findings) != 0 {
+		if got != RequiresMultisigProcess || len(findings) != 0 {
 			t.Fatalf("got %s findings %v", got, findings)
+		}
+	})
+
+	t.Run("autonomous owner member without vote permission", func(t *testing.T) {
+		multisig := Multisig{
+			ConfigAuthority: AutonomousConfigAuthority,
+			Members:         []Member{{Key: owner, Permissions: PermissionInitiate | PermissionExecute}},
+		}
+		got, findings := VerifyControl(multisig, limit, expect)
+		if got != NotRevocableByOperator || len(findings) == 0 {
+			t.Fatalf("a non-voting member must not read as able to revoke: %s %v", got, findings)
 		}
 	})
 
@@ -208,4 +219,19 @@ func TestVerifyControlProvesRevocability(t *testing.T) {
 			t.Fatal("an unstated expectation must not report revocable")
 		}
 	})
+}
+
+func TestVerifySpenderDoesNotRequireMultisigControl(t *testing.T) {
+	limit := SpendingLimit{Members: []string{"agent"}}
+	if findings := VerifySpender(limit, "agent"); len(findings) != 0 {
+		t.Fatalf("exact spender rejected: %+v", findings)
+	}
+	for name, candidate := range map[string]SpendingLimit{
+		"wrong": {Members: []string{"other"}},
+		"extra": {Members: []string{"agent", "other"}},
+	} {
+		if findings := VerifySpender(candidate, "agent"); len(findings) == 0 {
+			t.Errorf("%s spender set was accepted", name)
+		}
+	}
 }
