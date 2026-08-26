@@ -1,9 +1,15 @@
 # Mithril Agent full-strategy quick start
 
-This is the supported first-run path for the current Devnet pilot. It creates
-one bounded strategy with sell, buy, sweep, Telegram alerts, and read-only MCP
-status. Follow it in order. Do not mix these commands with the legacy
-single-trade units in `deploy/systemd`.
+This is the supported first-run path for the optional Devnet **trading** pilot.
+It is not the future default observe/index setup. Reading, custom indexing, and
+program simulation should require no wallet application or signing key; that
+walletless path is documented in [WALLETLESS_QUICKSTART.md](WALLETLESS_QUICKSTART.md),
+with its remaining live-cluster acceptance limits tracked in [ROADMAP.md](ROADMAP.md).
+
+This guide creates
+one bounded strategy with sell, buy, sweep, optional Telegram alerts, and
+read-only MCP status. Follow it in order. Do not mix these commands with the
+legacy single-trade units in `deploy/systemd`.
 
 The result is deliberately limited:
 
@@ -54,7 +60,7 @@ refuses a node that is still catching up.
 Clone this repository on the Linux host, then run:
 
 ```sh
-make prereqs
+make prereqs-trading
 make verify-source
 make test
 make build
@@ -64,7 +70,7 @@ make adapter
 Do not continue if any command fails. `make build` produces seven Go binaries;
 all seven must be installed together. The quote adapter also needs the pinned
 Node.js runtime and its installed `node_modules`. At this early step,
-`make prereqs` may also say that RPC variables are not set. That is expected;
+`make prereqs-trading` may also say that RPC variables are not set. That is expected;
 step 4 puts them in protected service files instead of your login shell.
 
 ## 3. Install the runtime and service identities
@@ -83,7 +89,7 @@ Install the verified runtime:
 sudo install -d -o root -g root -m 0755 /usr/local/libexec/mithril-agent
 sudo install -d -o root -g root -m 0755 /usr/local/share/doc/mithril-agent
 sudo install -o root -g root -m 0644 \
-  README.md OVERVIEW.md QUICKSTART.md DEMO.md OPERATIONS.md \
+  README.md OVERVIEW.md ROADMAP.md QUICKSTART.md DEMO.md OPERATIONS.md \
   /usr/local/share/doc/mithril-agent/
 sudo install -o root -g root -m 0755 \
   ./bin/mithril-agent \
@@ -131,6 +137,24 @@ This pilot needs four RPC URLs:
 The two evidence providers must be independent. Two keys or hostnames from one
 provider are not independent evidence.
 
+For a first Devnet rehearsal, no provider account is required. The following
+two public endpoints are operated by different organizations and currently
+work without API keys:
+
+```text
+MITHRIL_AGENT_QUOTE_RPC_URL=https://api.devnet.solana.com
+MITHRIL_AGENT_PRIMARY_RPC_URL=https://api.devnet.solana.com
+MITHRIL_AGENT_SECONDARY_RPC_URL=https://solana-devnet.api.onfinality.io/public
+```
+
+When setup asks who operates them, enter `solana-public` and
+`onfinality-public`. This option is only for a personal Devnet demonstration:
+both services are rate-limited public infrastructure with no application SLA,
+so a timeout or rate limit correctly stops the readiness gate. Do not use this
+shortcut for Mainnet or a production service. Before a funded production
+deployment, bind two dedicated evidence endpoints controlled by independent
+operators.
+
 Create the files, then edit them as root:
 
 ```sh
@@ -177,8 +201,8 @@ source. Do not copy paths or a source value from another host or an old run.
 
 The restricted agent must be able to traverse the storage parent and read the
 state and replay files without being able to list or rewrite AccountsDB. Follow
-the narrow `mithril-node-state` group and ACL block in README's "Service
-identities and filesystem layout" section, then verify as the service identity:
+the narrow [node-state filesystem access](OPERATIONS.md#node-state-filesystem-access)
+instructions, then verify as the service identity:
 
 ```sh
 sudo -u mithril-agent test -r /absolute/path/to/mithril_state.json
@@ -205,18 +229,36 @@ sudo install -d -o mithril-agent -g mithril-agent -m 0700 \
 sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
   /usr/local/bin/mithril-agent wallet new \
   --file /var/lib/mithril-agent/private/devnet-keypair.json
+sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
+  /usr/local/bin/mithril-agent wallet fund \
+  --file /var/lib/mithril-agent/private/devnet-keypair.json
 sudo -u mithril-agent /usr/local/bin/mithril-agent wallet check \
   --file /var/lib/mithril-agent/private/devnet-keypair.json
 ```
+
+`wallet fund` asks Solana's official public Devnet RPC to top the account up to
+1 test SOL; it sends only the public address. Public faucets are rate-limited,
+so if that request is refused, use `https://faucet.solana.com` with the address
+shown by `wallet check`. No provider account or API key is needed.
 
 `wallet new` refuses to replace an existing file. If you already have a
 dedicated Devnet keypair, install it at that path as
 `mithril-agent:mithril-agent` with mode `0600` instead. Fund only this account
 with enough Devnet SOL for the configured trade size, fees, rent, and reserve.
-Devnet SOL has no value. `mithril-agent start` reports the public address and
-any shortfall without printing the private key.
+Devnet SOL has no value. `wallet check` reports the public address and balance
+without printing the private key. After setup records the account and reserve,
+`mithril-agent start` reports any funding shortfall.
 
-## 6. Connect Telegram before trading
+## 6. Choose whether to connect Telegram
+
+Telegram is optional. For a path with no third-party messaging account, skip
+the rest of this step, leave `telegram-operator.env` empty, and choose **no**
+when setup asks about Telegram in step 8. `strategy show`, MCP, Prometheus, and
+the journal still provide local status. `service install` will not generate or
+start Telegram units for that strategy.
+
+If you want phone alerts, create or reuse an operator-owned Telegram bot and
+complete the delivery check below before trading.
 
 Put only the bot token in `/etc/mithril-agent/telegram-operator.env`, send the
 bot `hello` from Telegram, then discover the numeric chat ID through the same
@@ -295,9 +337,13 @@ sudo systemd-run --quiet --wait --pty --collect \
   --activation-delay 0s
 ```
 
-Choose **yes** when setup asks whether Telegram alerts are enabled. For a quick
-mechanics demonstration, choose no price conditions. For a market
+Choose **yes** for Telegram only if its delivery test passed in step 6;
+otherwise choose **no**. For a quick mechanics demonstration, choose no price
+conditions. For a market
 rule, set both a sell price and a lower buy price. Setting only one is refused.
+When asked who operates each evidence RPC, enter the two actual provider
+companies (for example `helius` and `quicknode`), not endpoints or credentials.
+They must be independent organizations.
 Choose a small trade size and a small `trades_per_day` bound for the first run.
 The zero sweep delay is only for this Devnet pilot, so its complete cycle can
 be reviewed immediately. Leave `--activation-delay` out of a production setup;
@@ -309,8 +355,10 @@ it.
 
 ## 9. Generate and install the strategy services
 
-Generate the runner, one read-only status socket per configured leg, and the
-single Telegram alert service from the recorded strategy:
+Generate the runner; isolated risk-authority, signer, and submitter sockets per
+configured leg; one root-only operator socket and keyless recovery timer per
+leg; one read-only status socket per leg; and, when enabled, the single
+Telegram alert service from the recorded strategy:
 
 ```sh
 sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
@@ -318,9 +366,25 @@ sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
   --output /var/lib/mithril-agent/.mithril-agent/mithril-agent-run.service
 ```
 
-Review every generated file, then run the exact install, enable, and restart
-commands printed by that command. Restart is intentional: every generated
-runner start revokes old authority before doing any work.
+Review every generated file, then run the exact account, permission, install,
+enable, stop, and restart commands printed by that command. The stop happens
+before authority sockets are reloaded, so an update cannot leave the runner on
+stale socket settings. Those commands give only
+the short-lived signer identity access to each leg's wallet key and private
+authorization ledger, and only the short-lived risk-authority identity access
+to its authority key. Only the isolated submitter identity can open its
+submitter key and durable control/recovery directory. The root-only operator
+socket can change bounded control state but receives no signing or submitter
+key; the recovery timer checks existing evidence without either key. The runner
+keeps access to its ordinary state but cannot open any of those keys or the
+signer ledger. If the command reports an old
+non-isolated ledger layout, rerun setup for that leg; do not move the ledger or
+loosen permissions by hand.
+
+Restart is intentional: every generated runner start revokes old authority
+before doing any work. The risk-authority, signer, submitter, and operator
+`.service` templates are socket-activated and exit after one request. Recovery
+services are timer-activated. Do not start those templates directly.
 
 Do **not** install or start these legacy single-leg units for a full strategy:
 
@@ -332,7 +396,8 @@ mithril-agent-status-bridge.service
 mithril-agent-telegram.service
 ```
 
-The full strategy uses `mithril-agent-run.service`, per-leg status units, and
+The full strategy uses `mithril-agent-run.service`, per-leg risk-authority,
+signer, submitter, operator, recovery, and status units, plus the optional
 `mithril-agent-alerts.service`. Running both layouts creates competing runners
 or Telegram consumers.
 
@@ -340,12 +405,25 @@ Verify the generated layout:
 
 ```sh
 systemctl is-active mithril-agent-run.service
-systemctl is-active mithril-agent-alerts.service
+systemctl is-active mithril-agent-signer-sell.socket
+systemctl is-active mithril-agent-signer-sweep.socket
+systemctl is-active mithril-agent-policy-sell.socket
+systemctl is-active mithril-agent-policy-sweep.socket
+systemctl is-active mithril-agent-submitter-sell.socket
+systemctl is-active mithril-agent-submitter-sweep.socket
+systemctl is-active mithril-agent-submitter-operator-sell.socket
+systemctl is-active mithril-agent-submitter-operator-sweep.socket
+systemctl is-active mithril-agent-recovery-sell.timer
+systemctl is-active mithril-agent-recovery-sweep.timer
 systemctl is-active mithril-agent-status-sell.socket
 systemctl is-active mithril-agent-status-sweep.socket
 sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
   /usr/local/bin/mithril-agent strategy show
 ```
+
+If Telegram was enabled, also require
+`systemctl is-active mithril-agent-alerts.service`; otherwise that unit should
+not exist and is not part of the readiness check.
 
 The first runner exposes sell metrics on `127.0.0.1:9310` and sweep metrics on
 `127.0.0.1:9312`; `9311` stays reserved for the pending buy leg.
@@ -394,8 +472,9 @@ sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
 If setup used no price conditions, add `--allow-any-price` immediately before
 `--reason`. Do not add it to a price-triggered strategy.
 
-Wait for the sell to complete and confirm its Telegram message. Then stop all
-new actions:
+Wait for the sell to complete. Confirm its Telegram message when Telegram is
+enabled; in either mode, confirm the terminal result with `strategy show` and
+the journal. Then stop all new actions:
 
 ```sh
 sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
@@ -417,7 +496,7 @@ sudo systemd-run --quiet --wait --pty --collect \
 ```
 
 Run step 9 again. The printed restart commands are required so the existing
-runner and Telegram service load the new buy leg. Then require:
+runner and, when enabled, Telegram service load the new buy leg. Then require:
 
 ```sh
 systemctl is-active mithril-agent-status-buy.socket
@@ -439,7 +518,10 @@ replacing `sell` with `buy` in the path. Continue only when both return
 `"status":"ready"`. Review the bounded enable arguments, then run `strategy
 enable` through the same `sudo -u mithril-agent env HOME=...` wrapper shown in
 step 10. The supervised runner continues after SSH closes and trades only while
-that grant remains valid.
+that grant remains valid. Each independently finalized action consumes exactly
+one action from its leg and leaves the remaining grant usable. An unresolved or
+failed send blocks that leg instead; a restart never turns it into fresh
+capacity.
 
 Read-only operator commands:
 
@@ -448,7 +530,7 @@ sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
   /usr/local/bin/mithril-agent strategy show
 ```
 
-Telegram:
+Telegram, when enabled:
 
 ```text
 /help
@@ -491,23 +573,33 @@ Use distinct client names such as `mithril-agent-sell`,
 multi-leg MCP socket in this version. Telegram `/status` and `strategy show`
 are the combined views.
 
-## 13. Verify the three journals
+## 13. Capture the three audit snapshots
 
-The live runner owns all journal locks. Stop it before verification; restarting
-it returns every leg to stopped mode:
+The live runner owns all journal locks. Stop it before capture; an
+ordinary restart returns every leg to stopped mode. If an action crossed its
+durable send boundary, the keyless recovery timer keeps checking the exact
+signed transaction against both bound evidence providers. Finalized matching
+effects clear only that marker; pending, failed, divergent, or malformed
+evidence keeps the strategy blocked for review. Never clear it just to make the
+unit start.
 
 ```sh
 sudo systemctl stop mithril-agent-run.service
 for leg in sell buy sweep; do
-  sudo -u mithril-agent \
-    /usr/local/bin/mithril-agent journal verify \
-    --path "/var/lib/mithril-agent/.mithril-agent/strategy-data/$leg/state/events.jsonl" \
+  sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
+    /usr/local/bin/mithril-agent audit snapshot \
+    --config "/var/lib/mithril-agent/.mithril-agent/strategy-data/$leg/config.json" \
     || exit 1
 done
 sudo systemctl start mithril-agent-run.service
 ```
 
 If setup used a custom `--dir`, use that directory instead of the default path.
+Each JSON result contains only bounded profile/status facts, the exact profile
+fingerprint, and hashes. Store it in the operator-selected append-only
+destination outside this host. The command fails unless the status and the
+complete journal agree while the runner is stopped.
+
 Do not hand-edit a journal, configuration, policy, control file, or generated
 unit.
 
@@ -518,7 +610,7 @@ Stop and do not enable the strategy when any of these is true:
 - Mithril is stale, diverged, rebuilding, or more than the configured slot gap
   behind;
 - the quote service, either evidence provider, clock check, status socket,
-  Telegram test, or monitoring target fails;
+  enabled Telegram test, or monitoring target fails;
 - `strategy show` reports an unreadable leg or `attention_required`;
 - a transaction outcome is unresolved; or
 - a service restarted unexpectedly.

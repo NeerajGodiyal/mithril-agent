@@ -14,11 +14,11 @@ This is a component that sits beside your Mithril node. If you have a node
 running, first verify the checkout without installing or authorising anything:
 
 ```sh
-make prereqs     # everything this needs, checked at once
+make prereqs-trading # walletless plus the optional trading runtime
 make build       # seven binaries into ./bin
 make adapter     # the Orca quote adapter (checks your Node version first)
-make test        # format, vet, tests, race detector and isolation checks
-make walkthrough # read-only prices plus a local audit/recovery walkthrough
+make test        # format, vet, tests, race, isolation and private-file checks
+make walkthrough # read-only prices plus a local audit-integrity walkthrough
 ```
 
 Keep all seven files produced by `make build` together. `mithril-agent` starts
@@ -36,8 +36,11 @@ service.
 
 These commands run after the supervised host installation above. The quote
 socket keeps Node.js out of the process that can sign and submit.
-`service install` also supplies that socket explicitly, so an older Devnet
-profile can use the safer layout without rewriting its policy, keys or journal.
+`service install` also supplies that socket explicitly. It additionally creates
+separate socket-activated risk-authority and signer boundaries per leg. A
+legacy setup whose signer ledger is not already below its stable `state/signer`
+directory must be recreated; the installer will not silently move a daily-cap
+ledger or weaken its permissions.
 The short commands show the workflow and assume the `mithril-agent` service
 identity with `HOME=/var/lib/mithril-agent`. On a live host, use the supervised
 command shapes in the installation section or the complete QUICKSTART. Do not
@@ -71,7 +74,8 @@ exact agent account to one exact payout address.
 After the first sell completes, finish the same saved setup and reinstall the
 generated service so it includes the buy leg. Run every install and restart
 command printed by `service install`; `daemon-reload` alone does not update an
-already-running runner or Telegram process:
+already-running runner, authority socket, recovery timer, status bridge, or
+Telegram process:
 
 ```bash
 mithril-agent setup strategy --resume
@@ -211,8 +215,9 @@ the working directory, where `mithril config init` writes it, then `~/.mithril`
 which is why `doctor`, `start`, and `strategy show` need no paths. `demo` is a
 single-leg command and needs an explicit `--config` after strategy-only setup.
 
-**What you need:** Go 1.25.12+, Node 24.18.x with npm 11.16.x (for live quotes
-only), and a Mithril node you can point at. `make prereqs` tells you which of
+**What you need:** Go 1.26.6+, Node 24.18+ and npm 11.16+ in their respective
+24.x and 11.x lines (for live quotes only), and a Mithril node you can point
+at. `make prereqs-trading` tells you which of
 those you are missing rather than letting you find out one failure at a time.
 
 To configure a trade you need **four RPC URLs** in the protected environment:
@@ -235,12 +240,20 @@ It reports what it has actually verified, so a node still catching up will
 refuse with "source account was not found by Mithril" — which is the gate
 working, not a fault. Compare `mithril_replay_slot` against the cluster head.
 
-And you need Devnet SOL in the agent account. `https://faucet.solana.com` is
-the usual source; note the public RPC airdrop is heavily rate-limited and often
-returns 429, so the web faucet is the reliable route. Devnet SOL has no value.
+And you need Devnet SOL in the agent account. Start with the account-free
+helper, which sends only the public address and tops the account up to 1 test
+SOL through Solana's official public Devnet RPC:
 
-**Before installing anything**, these two run on their own and need no wallet,
-no server and no account:
+```sh
+mithril-agent wallet fund --file /absolute/path/to/devnet-keypair.json
+```
+
+The public RPC airdrop is rate-limited and may return 429. If it does, use
+`https://faucet.solana.com` with the address shown by `wallet check`. Devnet SOL
+has no value.
+
+**Before installing anything**, these two run on their own and need no
+configured wallet, server, or provider account:
 
 ```sh
 make explain       # what it can and cannot do, in plain English
@@ -258,11 +271,40 @@ It is intentionally separate from the public Mithril node repository: node
 verification and RPC stay in Mithril, while wallet policy, signing, alerts, and
 application releases stay here.
 
-The implementation is not a general trading strategy and cannot execute on
-mainnet. Shadow mode does read mainnet — it watches a live market and records
-what the rule would have done — but it holds no key and has no code path to a
-signature, which is the only reason it is allowed to look. The supplied Telegram commands and MCP tools expose read-only status
-access and no authority to approve, construct, sign, or submit a transaction.
+The installed implementation is not a general trading strategy and cannot
+execute on Mainnet. Shadow mode does read Mainnet — it watches a live market and
+records what the rule would have done — but it holds no wallet signing key and
+has no code path to a signature. The supplied Telegram commands and MCP tools
+expose read-only status and no authority to approve, construct, sign, or submit
+a transaction.
+
+### Plan-only DCA and agent research
+
+`strategy dca-plan` accepts either an exact SOL cap or a USD notional plus an
+operator-confirmed SOL/USD reference. It calculates fixed SOL inputs, reports
+any lamport remainder, loads no wallet, and returns
+`planned_not_authorized`. Multi-day plans require a fresh bounded grant each
+day; fees and rent are outside the named swap-input cap.
+
+The planner uses the self-managed bounded runner. Jupiter's current Trigger DCA
+path instead requires an API key, wallet authentication, a signed upfront
+deposit, and a provider-managed vault, so it remains a separate unqualified
+Mainnet custody boundary. An agent may propose parameters and use `shadow
+backtest`, `shadow search`, `shadow run`, and `shadow review`, but it cannot turn
+a result into authority. `shadow search` chooses thresholds on one hash-chained
+day and reports the exact result on a later untouched day; pool fills remain
+explicitly modelled. Unlimited “trade the wallet” behavior remains unsupported: future
+execution still needs a dedicated limited-balance account, venue and asset
+allowlists, hard action, daily, total and loss caps, an expiring operator grant,
+independent evidence, and the separate signer and submitter.
+
+Internal packages cover a narrow future Mainnet boundary: exact Jupiter v0
+candidate validation, one bounded authorization, transaction-only custody,
+separate attestation, sealed submitter validation, and durable recovery with
+two-provider effect reconciliation. A disabled Turnkey adapter covers the
+transaction-signing API contract and can be selected explicitly by the bounded
+signer CLI/socket, but no generated service selects it and there is no Mainnet
+submit command that invokes those pieces.
 Do not grant an assistant shell or service-control access to the deployment.
 
 The current demonstration is designed to exercise the autonomous mechanics
@@ -344,10 +386,12 @@ The DEFAULT price source is the on-chain Pyth push feed, read through your own
 node. It needs no credential, so an ordinary price rule costs nothing extra.
 
 Only the optional Hermes adapter requires `MITHRIL_AGENT_PYTH_API_KEY`. Pyth's
-own documentation carries the banner "Pyth Core upgrade August 18, 2026. Every
-Core user will need an API Key", so from that date the Hermes source does not
-work without one. The on-chain push feed is unaffected: it is a Solana account
-read through your node, not an HTTP API.
+[migration guide](https://docs.pyth.network/price-feeds/core/upgrade/preparing)
+says every Hermes user needs an API key from August 18, 2026; an integration
+that only reads on-chain push feeds does not. The default adapter pins and reads
+both Pyth's current and early-upgrade SOL/USD accounts through your Mithril
+node, verifies each account's exact owner, and needs no operator-side address
+switch at cutover.
 
 `NewPyth` already refuses an empty key, so a Hermes-configured agent fails
 closed rather than trading on a feed it cannot read. If you select that source,
@@ -370,21 +414,37 @@ config, journal, metrics, MCP output, or command line.
   program, account role, signer, amount, threshold, and cleanup instruction.
 - A read-only live contract test checks the pinned SDK output against public
   Devnet and the independent validator.
-- The risk authority, signer, and submitter are separate processes with separate
-  policies. This gives the Devnet pilot fault isolation, not a custody boundary:
-  the provided setup runs them under one OS identity. The runner never receives
-  raw signed transaction bytes.
+- The risk authority, signer, and submitter are separate processes with
+  separate policies. In a newly generated supervised setup all three are
+  short-lived, socket-activated services under separate OS identities; systemd
+  passes each service its policy and key as private credentials. The runner
+  cannot open those keys, the signer's durable ledger, or the submitter's
+  writable control directory. Manual foreground Devnet runs retain the older
+  child-process compatibility path. The Devnet runner receives the exact
+  signature as response metadata and already has the unsigned message, so it
+  could reconstruct that one signer-approved transaction. The Devnet split is
+  operational isolation, not an adversarial boundary against a compromised
+  runner.
 - The signer re-decodes the exact message, applies its own daily cap, and
-  encrypts the signed transaction for the submitter. The runner relays that
-  envelope but never receives the raw signed transaction.
+  encrypts the signed transaction for the submitter. The disconnected Mainnet
+  response also withholds the signature inside that ciphertext, so the runner
+  cannot reconstruct the signed transaction; the current Devnet response does
+  not provide that stronger property. The response
+  attestation also binds the complete immutable signing-request hash, and both
+  fresh and recovered flows recompute that hash before accepting the response.
 - A hash-chained journal records every boundary. Capacity for terminal records
   is reserved before execution starts.
-- Stop state is checked under a send barrier. The submitter independently
-  confirms that the durable state still authorizes that exact action before it
-  contacts the node. The engine can conservatively retry only the same signed
-  bytes after a crash or ambiguous RPC response. The supplied service instead
-  stops on startup and does not resubmit after a restart; exact-byte recovery
-  requires an explicit deployment choice and separate crash-recovery testing.
+- Stop state is checked under a send barrier. Before contacting the node, the
+  submitter persists the exact signed transaction, signer attestation, action,
+  fee, and expiry beside the protected control state. A keyless systemd timer,
+  running as the submitter identity but unable to read its key or another
+  submitter process through `/proc`, asks the two
+  pinned evidence providers for finality and exact effects. Only that timer may
+  resolve a matching finalized recovery marker. Matching success clears it;
+  matching finalized failure becomes a stopped `failed` action that requires
+  explicit operator acknowledgement. Pending, divergent, or malformed evidence
+  keeps recovery pending and every new action blocked. The runner cannot call
+  the timer or name an action for it to resolve.
 - Finality, transaction bytes, native balances, token balances, fee, and output
   amount must agree across both evidence providers.
 - Missing, stale, divergent, or malformed evidence fails closed.
@@ -407,8 +467,9 @@ race with an immutable deployment or an on-chain guard.
 
 ## Build
 
-Go 1.25.12+, Node.js 24.18.x LTS, npm 11.16.x, and Linux are required for live
-execution. The minimum Go patch release includes security fixes used by the
+Go 1.26.6+, Node.js 24.18+ and npm 11.16+ in their respective 24.x LTS and
+11.x lines, and Linux are required for live execution. The minimum Go patch
+release includes security fixes used by the
 agent's network paths. macOS can build and run most tests, but the execution
 gate requires Linux kernel clock evidence.
 
@@ -485,12 +546,7 @@ candidate is not ready for cutover if any manifest check or comparison fails.
 ```sh
 sha256sum \
   deploy/sysusers/mithril-agent-status.conf \
-  deploy/systemd/mithril-agent-demo.service \
   deploy/systemd/mithril-agent-quote.service \
-  deploy/systemd/mithril-agent-swap.service \
-  deploy/systemd/mithril-agent-status.socket \
-  deploy/systemd/mithril-agent-status-bridge.service \
-  deploy/systemd/mithril-agent-telegram.service \
   deploy/timesyncd/90-mithril-agent.conf \
   deploy/prometheus/mithril-agent.rules.yml \
   > /absolute/private/validation/deployment-assets.sha256
@@ -507,9 +563,10 @@ Sealed transaction v2 binds the blockhash context slot into the encrypted
 envelope. Signer responses now also authenticate the intended submitter and all
 sealed metadata, and risk grant v2 authenticates the complete signing request.
 These changes are intentionally incompatible with earlier pilot state. The
-risk authority, signer, and submitter are short-lived children of the runner,
-not persistent services. Never roll binaries while an agent service or
-transient child is running, and never open old pilot state with new binaries.
+risk authority, signer, and supervised submitter are short-lived
+socket-activated service instances. Manual foreground mode retains a transient
+submitter child. Never roll binaries while an agent service, authority instance,
+or transient child is running, and never open old pilot state with new binaries.
 
 Use this upgrade sequence:
 
@@ -527,14 +584,17 @@ Use this upgrade sequence:
    independently confirm the failure, acknowledge that exact action with the
    old binary, restart the old runner in stopped mode, wait for a fresh status,
    and drain again. Do not use this path for `halted`.
-3. Stop the swap, quote, Telegram, status-socket, and bridge units. Verify each
-   unit has `MainPID=0` and that no process remains in any of their control
-   groups. The short-lived signer, submitter, and risk-authority children must
-   also be absent.
+3. Stop the runner, risk-authority sockets, signer sockets, quote, Telegram,
+   status-socket, and bridge units. Verify each unit has `MainPID=0` and that no
+   process remains in any of their control groups. The short-lived authority
+   instances and submitter child must also be absent.
 4. Preserve a private rollback bundle containing the old runtime, units,
    configs, environment files, policies, keys, journal, control state, signer
    ledger, Telegram cursor, and recorded ownership and mode metadata. Keep it
-   separate from the sanitized audit export.
+   separate from the sanitized audit export. Copy each complete `state/signer`
+   directory, not only its active `authorizations.jsonl` file: its lock and
+   numbered sealed segments are part of the ledger history, and omitting one
+   makes the restored signer refuse to start rather than resetting a cap.
 5. Archive the complete old setup directory. While every service remains
    stopped, perform a same-filesystem two-rename cutover: rename
    `/usr/local/libexec/mithril-agent` to a required-nonexistent rollback name,
@@ -614,8 +674,8 @@ private pilot setup:
   --input-lamports 1000000 \
   --slippage-bps 100 \
   --confirm-min-output-amount CURRENT_DISCOVERED_MINIMUM \
-  --primary-trust-domain provider-one \
-  --secondary-trust-domain provider-two \
+  --primary-trust-domain REPLACE_WITH_PRIMARY_PROVIDER_COMPANY \
+  --secondary-trust-domain REPLACE_WITH_SECONDARY_PROVIDER_COMPANY \
   --sell-at-usd 75.00
 ```
 
@@ -637,7 +697,12 @@ it is set, the runner keeps observing the rule while stopped and exposes it via
 stopped sends an informational alert; it does not grant execution authority.
 After the operator enables a bounded number of actions, a satisfied market rule and
 satisfied minimum swap rate allow the normal bounded swap flow to
-continue.
+continue. A finalized action consumes one slot; the independent recovery timer
+then clears only its provisional marker, so a multi-action grant can continue.
+A failed action is latched before its terminal journal record is written. If a
+crash leaves only the recovery marker, matching finalized failure evidence
+recreates that same operator-acknowledgeable stop. An ambiguous action keeps
+the recovery marker and blocks every remaining slot until review.
 
 If you only see a sell notification, this is usually expected for this
 one-action path. For a full AFK round trip setup (sell -> buy -> sweep), both
@@ -683,8 +748,8 @@ base units in the generated policy:
   --daily-native-fee-cap-lamports 100000 \
   --slippage-bps 100 \
   --confirm-min-output-amount CURRENT_DISCOVERED_MINIMUM \
-  --primary-trust-domain provider-one \
-  --secondary-trust-domain provider-two \
+  --primary-trust-domain REPLACE_WITH_PRIMARY_PROVIDER_COMPANY \
+  --secondary-trust-domain REPLACE_WITH_SECONDARY_PROVIDER_COMPANY \
   --buy-at-usd 75.00
 ```
 
@@ -726,8 +791,11 @@ sudo systemd-run --quiet --wait --pipe --collect \
 ```
 
 The existing trust-domain names are preserved unless replacement names are
-passed explicitly. Restart the swap service and rerun preflight afterward; the
-service still starts with new actions disabled.
+passed explicitly. The command updates both the agent configuration and the
+submitter's protected binding. If power is lost between those two atomic
+writes, preflight rejects the mismatch and rerunning the command completes the
+migration. Restart the swap service and rerun preflight afterward; the service
+still starts with new actions disabled.
 
 If Orca is deliberately upgraded, do not edit an existing setup in place.
 Verify the new program-data account, deployment slot, and authority through two
@@ -797,7 +865,7 @@ sudo systemd-sysusers /usr/lib/sysusers.d/mithril-agent-status.conf
 sudo install -d -o root -g root -m 0755 /usr/local/libexec/mithril-agent
 sudo install -d -o root -g root -m 0755 /usr/local/share/doc/mithril-agent
 sudo install -o root -g root -m 0644 \
-  README.md OVERVIEW.md QUICKSTART.md DEMO.md OPERATIONS.md \
+  README.md OVERVIEW.md ROADMAP.md QUICKSTART.md DEMO.md OPERATIONS.md \
   /usr/local/share/doc/mithril-agent/
 sudo install -o root -g root -m 0755 \
   ./bin/mithril-agent \
@@ -916,8 +984,9 @@ unit or omit an environment file: the generated service is the source of truth
 for leg paths, writable state, fixed metrics ports, status sockets and Telegram
 bridges.
 
-For the supervised immediate-sell pilot, these are the complete command shapes;
-replace only the confirmed minimum and any intentionally reviewed limits:
+For the supervised immediate-sell pilot, these are the complete command shapes.
+Replace the confirmed minimum, both provider-company placeholders with the
+actual independent operator names, and any intentionally reviewed limits:
 
 ```sh
 sudo systemd-run --quiet --wait --pipe --collect \
@@ -951,56 +1020,27 @@ sudo systemd-run --quiet --wait --pipe --collect \
   --input-lamports 1000000 \
   --slippage-bps 100 \
   --confirm-min-output-amount CURRENT_DISCOVERED_MINIMUM \
-  --primary-trust-domain provider-one \
-  --secondary-trust-domain provider-two
+  --primary-trust-domain REPLACE_WITH_PRIMARY_PROVIDER_COMPANY \
+  --secondary-trust-domain REPLACE_WITH_SECONDARY_PROVIDER_COMPANY
 ```
 
 One setup pins one direction. Create separate isolated setup and state paths
 for buy and sell; do not edit one setup back and forth or run two runners over
 the same state.
 
-These are the generic units, kept for a single-leg deployment and for review.
-For a strategy, do not hand-install the runner or the alert path: `mithril-agent
-service install` generates both from the legs setup recorded, so they name your
-actual paths and cannot drift from them. It prints the privileged commands to
-run, including the ones that create the alert account and group.
+Do not hand-install the older runner, demo, status, or Telegram examples from
+`deploy/systemd`. They predate the generated per-leg signer, risk-authority,
+submitter, operator, and recovery boundaries and are retained only for
+historical review. For both a strategy and a single-leg setup, `mithril-agent
+service install` generates the runner plus signer, risk-authority, submitter,
+operator, recovery, status, and optional alert units from the recorded paths
+and prints the privileged installation and verification commands.
 
-**Legacy single-leg deployments only:** install the supplied units below after
-single-leg setup is complete. If you followed `QUICKSTART.md`, skip this whole
-block. The full strategy uses the generated `mithril-agent-run.service`,
-per-leg status units, and `mithril-agent-alerts.service`; starting both layouts
-creates competing runners and Telegram consumers.
-
-```sh
-sudo install -m 0644 deploy/systemd/mithril-agent-quote.service /etc/systemd/system/
-sudo install -m 0644 deploy/systemd/mithril-agent-swap.service /etc/systemd/system/
-sudo install -m 0644 deploy/systemd/mithril-agent-demo.service /etc/systemd/system/
-sudo install -m 0644 deploy/systemd/mithril-agent-status.socket /etc/systemd/system/
-sudo install -m 0644 deploy/systemd/mithril-agent-status-bridge.service /etc/systemd/system/
-sudo install -m 0644 deploy/systemd/mithril-agent-telegram.service /etc/systemd/system/
-sudo install -d -m 0755 /etc/systemd/timesyncd.conf.d
-sudo install -m 0644 deploy/timesyncd/90-mithril-agent.conf \
-  /etc/systemd/timesyncd.conf.d/90-mithril-agent.conf
-sudo systemd-analyze verify \
-  /etc/systemd/system/mithril-agent-quote.service \
-  /etc/systemd/system/mithril-agent-swap.service \
-  /etc/systemd/system/mithril-agent-demo.service \
-  /etc/systemd/system/mithril-agent-status.socket \
-  /etc/systemd/system/mithril-agent-status-bridge.service \
-  /etc/systemd/system/mithril-agent-telegram.service
-sudo systemctl daemon-reload
-sudo systemctl restart systemd-timesyncd
-sudo systemctl enable --now mithril-agent-status.socket
-sudo systemctl enable --now mithril-agent-quote.service
-sudo systemctl enable --now mithril-agent-swap.service
-sudo systemctl enable --now mithril-agent-telegram.service
-```
-
-The swap service always starts with new actions disabled. Accept the
+The generated runner always starts with new actions disabled. Accept the
 installation only after `clock-check`, preflight, the read-only live check,
-the quote and runner services, the status socket, Prometheus target, notifier,
-and Telegram canary all pass. Do not grant an action merely because the
-services are active.
+the quote and runner services, status sockets, Prometheus target, notifier,
+and, when configured, the Telegram canary all pass. Do not grant an action
+merely because the services are active.
 
 ## One bounded Devnet action
 
@@ -1247,7 +1287,14 @@ sudo usermod -aG mithril-agent-status "$USER"
 Configure an MCP client to start the same binary as a managed stdio subprocess.
 For a full strategy, create a separate read-only MCP entry for each configured
 leg (`sell`, `buy`, and `sweep`); this version has no combined multi-leg MCP
-socket:
+socket. Print the complete paste-ready client configuration with:
+
+```sh
+/usr/local/libexec/mithril-agent/mithril-agent mcp config
+```
+
+It discovers the active generated sockets and emits a distinct MCP server entry
+for each leg. The equivalent entry for one leg is:
 
 ```text
 command: /usr/local/libexec/mithril-agent/mithril-agent
@@ -1399,7 +1446,7 @@ operational question without naming the wallet.
 
 `deploy/prometheus/mithril-agent.rules.yml` alerts on runner loss or quote
 unavailability observed by the runner, stale cycles, attention-required
-results, invalid control state, enabled
+results, pending transaction recovery, invalid control state, enabled
 execution, reached price targets while execution is stopped, submitted and
 completed swaps, stale reconciliation, and journal capacity. For the
 supervised demonstration, Alertmanager must deliver those alerts to Telegram
@@ -1487,19 +1534,21 @@ the node, runner, or trade is healthy; their own metrics and rules provide that
 evidence. A phone receiving alerts is not itself a deadman because it cannot
 detect that the sending host went silent.
 
-The deadman and alert receiver must run outside the agent process. Use
-`deploy/systemd/mithril-agent-swap.service` for the bounded swap runner. It
-forces stopped state before every start and after every stop, drains before a
-normal shutdown, runs preflight, and requires a fresh operator enable after
-restart. That conservative template also prevents exact-byte resubmission after
-a process crash; changing that restart policy requires an explicit deployment
-decision and a Linux crash-recovery test.
+The deadman and alert receiver must run outside the agent process. Use the
+`mithril-agent-run.service` generated by `mithril-agent service install`. It
+forces stopped state before every ordinary start and after every ordinary stop,
+uses the isolated per-leg signer and risk-authority sockets, and requires a
+fresh operator enable after restart. When an action has crossed the durable
+send boundary, the automatic hook instead fails visibly and preserves
+`recovery_pending`; review independent evidence, then use an explicit operator
+stop before starting the runner again.
 
 The top-level `devnet-*` commands are the retained but unsupported transfer
 pilot. They have no production service template. New Orca deployments must use
-the `swap` commands and `mithril-agent-swap.service`.
+the `swap` commands and the generated runner.
 
-For that unit, create the setup at `/var/lib/mithril-agent/agent` as the
+For a generated single-leg unit, create the setup at
+`/var/lib/mithril-agent/agent` as the
 dedicated, non-login `mithril-agent` user. The unit mounts those private
 service-owned files read-only and makes only the generated `state` directory
 writable. This is integrity protection inside the service sandbox, not a
@@ -1516,6 +1565,8 @@ to the local node paths. The required `MITHRIL_RPC_URL` override is derived from
 The supervised swap observer disables the optional file-log scan because the
 node service writes to journald. It still requires Mithril's structured RPC,
 metrics, state, verification, divergence, provenance, and host checks.
+
+### Node-state filesystem access
 
 The service identity therefore needs only narrow filesystem evidence access.
 Mithril replaces `mithril_state.json` atomically, so a one-time ACL on that file
@@ -1580,15 +1631,20 @@ Use this ownership layout for the service templates:
 /etc/mithril-agent/                 root:root
   rpc.env, quote.env, mcp.env, price.env, telegram-operator.env  mode 0600
 /var/lib/mithril-agent/             mithril-agent:mithril-agent, mode 0700
-  private/devnet-keypair.json       wallet keypair used only by the signer
+  private/devnet-keypair.json       wallet keypair loaded only by systemd for the signer
   agent/                            created by `swap setup`
 ```
 
 Create `/var/lib/mithril-agent/private` first, put the mode-0600 Devnet wallet
 keypair there, then run `swap setup` as the service user with `--dir
-/var/lib/mithril-agent/agent`. The quote unit cannot access any path below
-`/var/lib/mithril-agent`; only the runner and its protected child processes can
-read that state. Install both unit files as root, validate them with
+/var/lib/mithril-agent/agent`. Generate the runner and per-leg risk-authority,
+signer, submitter, operator, recovery, and status units with `service install`,
+then run the exact ownership, mode, installation, and verification commands it
+prints. The quote unit cannot access any path below
+`/var/lib/mithril-agent`; the runner can read its ordinary state but its unit
+makes the wallet key, risk-authority key, signer ledger, submitter policy and
+key, and submitter control directory inaccessible.
+Install the generated units as root, validate them with
 `systemd-analyze verify` and `systemd-analyze security`, then start the quote
 service before the runner. The runner starts stopped and still requires a
 separate, short-lived `swap enable` command.
@@ -1602,10 +1658,52 @@ starting the runner. The shorter poll ceiling keeps Linux's conservative
 `adjtimex` error bound compatible with that profile; missed synchronization
 still makes the runner fail closed.
 
-Before any mainnet-capable release, replace the same-user child-process pilot
-with separate service identities and narrow authenticated IPC. The signing key,
-signer authorization ledger, risk key, and submitter key must not be readable or
-deletable by the runner identity.
+The Devnet signer and risk authority now have separate service identities and
+narrow local IPC, but that does not select a production custody backend. Before
+any Mainnet-capable release, isolate the submitter and its durable send barrier
+without weakening the stop/grant checks, then qualify the chosen KMS, HSM, MPC,
+or bounded canary signer. Authority keys and durable limits must not be readable
+or deletable by the runner identity.
+
+The smallest acceptable authority topology is one submitter/control service
+with two local sockets. Its service identity alone owns the submitter key,
+policy, writable control state, and RPC credentials. The runner may reach only
+the runtime socket, whose operations can inspect authority, request one exact
+bounded submission, or narrow authority by stopping. A root-operated socket is
+the only interface that may enable a bounded action budget or acknowledge a
+terminal outcome. Socket ownership and mode, rather than a request field,
+separate those capabilities. The runtime protocol must not contain a hidden
+enable or acknowledgement operation.
+
+For submission, that service must validate the sealed transaction and exact
+action/request/transaction hashes, lock and recheck the control state, record
+the recovery marker, and keep the same lock through the actual network send.
+Returning the transaction to the runner or releasing the lock before the send
+would recreate the race this boundary is intended to remove. An absent,
+expired, malformed, mismatched, or pending-recovery state always refuses the
+request. Automatic reconciliation may clear a marker only after the service
+independently verifies the matching finalized transaction; otherwise clearing
+is an operator action. It must never restore expired or exhausted authority.
+
+Do not accept this boundary from unit tests alone. Its release gate includes:
+
+- filesystem and socket tests proving the runner cannot read or replace the
+  state, policy, credentials, or key and cannot connect to the operator socket;
+- protocol tests proving the runtime socket has no authority-widening method;
+- stop-versus-send race tests proving no send begins after a successful stop;
+- crash tests before the recovery marker, after the marker but before send,
+  during an ambiguous send, and after send but before the response;
+- restart tests proving pending recovery and exhausted budgets survive; and
+- migration and rollback tests proving deployment starts stopped and refuses
+  to replace a state with unresolved recovery.
+
+Newly generated supervised units implement this topology: the runner reaches a
+narrow runtime socket, a root-owned `0600` socket handles enable and terminal
+acknowledgement, and a keyless timer performs independent finality checks before
+recovery clearing. Tests cover the runtime protocol, socket ownership, exact
+pre-send evidence, ambiguous send, restart persistence, tampering, divergent
+effects, and fail-closed provider migration. This is implemented for the
+bounded Devnet profiles only; keep Mainnet signing and submission disabled.
 
 ## The audit journal and its segments
 
@@ -1628,9 +1726,19 @@ head, *before* either rename happens; a crash mid-rotation leaves exactly one
 recoverable state, which the next open completes. If the active file or a
 sealed segment is missing, the journal refuses to open rather than rebuilding
 what was lost: silently recreating either would roll history back and unlatch
-whatever it recorded, including a halt. The signer's authorization ledger
-never rotates — it requires its own header record first, and its daily spend
-totals are recomputed from the whole file.
+whatever it recorded, including a halt.
+
+The store checks for rotation after a completed action and before an idle
+record such as the once-per-minute clock anchor. It never rotates while an
+action capacity reservation is open, so a quiet strategy can run for years
+without cutting a segment across an in-flight transaction.
+
+The signer's authorization ledger uses the same segmented chain. Its header
+remains the first record in the global history, rotation markers are structural
+records rather than authorizations, and every reservation across every segment
+is reloaded before a new signature is allowed. Rotation therefore cannot reset
+an action ID or a daily cap. Never delete an active ledger or one of its sealed
+segments: missing history makes the signer refuse to start.
 
 ## Strategy: caps, triggers, alerts, and sweep
 
@@ -1670,17 +1778,1269 @@ destination at signing time.
 
 ## Production owner decisions
 
+### Read-only Mainnet proposal check
+
+`proposal check` exercises the current Mainnet transaction boundary without a
+private key, signature, or submission. It permits one operator-approved
+Exact-In route between native SOL and one classic SPL token, in either
+direction, using one current Jupiter `route_v2` or `shared_accounts_route_v2`
+and the canonical wrap/close instructions only. For SOL input, the checker
+requires the taker's canonical output token account to exist before the trade
+and rejects runtime creation. For token input, both evidence providers verify
+the canonical input account, its mint and owner, and enough balance for the
+bounded trade; Jupiter's temporary wrapped-SOL output account must close back
+to the protected wallet. Shared program token accounts must be the canonical
+accounts of one of Jupiter's 16 derived authorities.
+It accepts only Solana v0 messages. The announced larger v1 transaction format
+does not change existing v0 behavior, but this agent will keep refusing v1
+until its decoder, route validator, signer, submitter, and recovery bindings are
+implemented and independently tested. See Solana's
+[larger-transaction-size announcement](https://solana.com/upgrades/larger-transaction-sizes).
+The separately announced
+[200 ms slot upgrade](https://solana.com/upgrades/reduced-slot-times) does not
+weaken the existing safety gates: node lag is bounded in slots, while evidence
+age and sustained health are independently bounded in seconds. Faster slots
+therefore make the slot-gap check stricter in elapsed time; do not loosen it
+without new failure-injection evidence.
+
+This boundary deliberately uses Jupiter's advanced
+[`/swap/v2/build`](https://developers.jup.ag/docs/swap/build)
+route rather than `/order`: `/build` returns the raw instructions and lookup
+table contents that the agent must independently constrain, compile, and
+simulate. Jupiter currently documents `/build` as Metis-only and explicitly
+incompatible with `/execute`; the agent signs through its isolated custody
+boundary and sends through Mithril instead. Do not replace it with
+Jupiter-managed execution unless the complete policy and evidence model is
+redesigned and reviewed.
+
+Run it with a local Mainnet Mithril RPC and two independent Mainnet evidence
+RPCs. Jupiter's current
+[plan documentation](https://developers.jup.ag/docs/portal/plans) permits
+keyless `/swap/v2/build` access at 0.5 requests per second and explicitly lists
+AI-agent and test use. That needs no account and is enough for local rehearsal.
+For continuous production operation, Jupiter recommends using an API key; its
+free plan currently permits one request per second and adds usage monitoring.
+Keep `MITHRIL_AGENT_JUPITER_API_KEY` scoped to the read-only quote service. It
+is an operational requirement, not a signing gate: a missing, rate-limited, or
+unavailable quote still fails closed instead of triggering a trade. The agent
+never accepts a configurable Jupiter endpoint and never
+forwards a key through a redirect. A Devnet Mithril node will fail the cluster
+check by design:
+
+The evidence endpoints must support the standard Solana methods the checker
+and recovery path actually use: `getGenesisHash`, finalized `getSlot`,
+`getAccountInfo` with `minContextSlot`, `getMinimumBalanceForRentExemption`,
+`getFeeForMessage`, `getBlockHeight`, `getSignatureStatuses` with
+`searchTransactionHistory`, and finalized base64 `getTransaction` with
+`maxSupportedTransactionVersion: 0`. Before contacting Jupiter or creating a
+candidate, the checker loads one protected `archive_probe_signature` and
+requires both providers to agree on its finality, exact version-0 transaction
+bytes, fee, native balances, token balances, and failure result. It also proves
+that the signature embedded in those bytes is the configured probe. A
+recent-only endpoint therefore cannot pass by returning a convenient new
+transaction. This proves the configured endpoints can serve that known-old
+record; it does not make either provider authoritative.
+
+The proposal checker also binds Mithril's `getBlockHeight` read to the
+retained proposal context with `minContextSlot`. A node that has restarted or
+fallen behind that context fails before signing or consuming an action grant.
+
+Choose the probe during provider qualification, not during a trade. Use a
+successful or failed finalized Mainnet v0 transaction older than the longest
+retention window the recovery design relies on (and older than 48 hours when
+screening out short-retention dedicated nodes). Verify it through separate
+sources, then store its public signature with the protected provider bindings.
+Changing the probe is a protected policy change. The probe contains no wallet
+secret, but an untrusted candidate or quote must never be allowed to choose it.
+
+The initial provider pair to qualify is one Helius shared standard RPC and one
+QuickNode Mainnet archive RPC. They are separate operators,
+[Helius documents](https://www.helius.dev/docs/faqs/rpc) complete history on
+its shared standard plans, and
+[QuickNode documents](https://www.quicknode.com/docs/solana/api-overview)
+unpruned Mainnet archive access. Do not use two accounts or endpoints from one
+company as the pair. Do not substitute a Helius dedicated node for its shared
+endpoint: Helius documents only about 48 hours of history there. This is an
+operator recommendation, not a hard-coded vendor dependency; keep any pair
+that passes the live checker, retention drill, independent-ownership review,
+rate-limit test, and outage test.
+
+For an account-free preliminary drill, the following public pair and old v0
+transaction exercise the checker. This is a rehearsal fixture, not a production
+provider recommendation: the Solana Foundation endpoint is rate-limited, while
+Lava's public endpoint is shared and routed across providers that may not retain
+identical history. The check must fail closed when either origin cannot recover
+the fixture. Re-run it before every rehearsal and never copy these public
+endpoints into a production policy without the full qualification above.
+
+```sh
+export MITHRIL_AGENT_PRIMARY_RPC_URL='https://api.mainnet-beta.solana.com'
+export MITHRIL_AGENT_SECONDARY_RPC_URL='https://solana.lava.build'
+
+mithril-agent proposal evidence-check \
+  --primary-trust-domain solana-foundation-public \
+  --secondary-trust-domain lava-network-public \
+  --archive-probe-signature 2eLMRUZzCAhF2KjUeD6JJXpWVeMtPYbqNShFbLeKYSdKLNmAKXs2oUN3u5odBJFeZoTEve4huLHAMw8LUJCXzyD
+```
+
+Passing proves only that these two origins agreed on that retained record at
+the time of the check. It does not prove sustained independence, availability,
+retention, or production capacity.
+
+Qualify the evidence pair before choosing a wallet, asset, amount, or quote:
+
+```sh
+mithril-agent proposal evidence-check \
+  --primary-trust-domain PRIMARY_PROVIDER_OWNER \
+  --secondary-trust-domain SECONDARY_PROVIDER_OWNER \
+  --archive-probe-signature KNOWN_OLD_FINALIZED_V0_SIGNATURE
+```
+
+This uses only the two protected RPC environment variables. It verifies
+Mainnet genesis and exact finalized version-0 history, then prints the two
+credential-free origin fingerprints needed by later policy bindings. It prints
+no endpoint or probe signature, needs no wallet or provider account, and cannot
+sign or send. Public or self-hosted endpoints may be used for preliminary
+testing, but only independently operated endpoints that pass retention,
+rate-limit, and outage drills qualify for production.
+
+Run `make test-account-free` to exercise the self-hosted custody boundary,
+offline matching-policy generator (`make test-free-policy`), and current public
+market/Jupiter reads with temporary test identities. It creates no provider
+account and submits nothing.
+
+```sh
+mithril-agent proposal check \
+  --taker PUBLIC_WALLET_ADDRESS \
+  --input-mint INPUT_MINT_OR_WRAPPED_SOL \
+  --output-mint APPROVED_CLASSIC_SPL_MINT \
+  --amount INPUT_BASE_UNITS \
+  --minimum-output MINIMUM_OUTPUT_BASE_UNITS \
+  --slippage-bps 50 \
+  --max-compute-units MAX_COMPUTE_UNITS \
+  --max-cu-price MAX_MICRO_LAMPORTS_PER_COMPUTE_UNIT \
+  --max-fee-lamports MAX_TOTAL_FEE_LAMPORTS \
+  --max-account-rent MAX_TOKEN_ACCOUNT_RENT_LAMPORTS \
+  --route-guard-program IMMUTABLE_GUARD_PROGRAM \
+  --route-guard-program-data IMMUTABLE_GUARD_PROGRAM_DATA \
+  --route-guard-deployment-slot IMMUTABLE_GUARD_DEPLOYMENT_SLOT \
+  --route-guard-code-length REVIEWED_GUARD_CODE_LENGTH \
+  --route-guard-code-sha256 REVIEWED_GUARD_CODE_SHA256 \
+  --primary-trust-domain PRIMARY_PROVIDER_OWNER \
+  --secondary-trust-domain SECONDARY_PROVIDER_OWNER \
+  --archive-probe-signature KNOWN_OLD_FINALIZED_V0_SIGNATURE \
+  --candidate-output /ABSOLUTE/PRIVATE/PATH/jupiter-candidate.json \
+  --policy-output /ABSOLUTE/PRIVATE/PATH/jupiter-policy.json \
+  --result-output /ABSOLUTE/PRIVATE/PATH/jupiter-check-result.json
+```
+
+The checker rejects additional signers, instructions, routes, tips, token
+programs, or non-canonical token accounts. It independently checks the current
+Jupiter deployment, the protected historical v0 archive probe, and address tables;
+sizes the compute limit from a Mithril simulation; obtains the fee for the
+exact final message from both evidence providers; bounds the proposal lifetime
+to 150 slots; and simulates that exact message again through Mithril.
+The reviewed Jupiter deployment and the immutable guard's program,
+ProgramData, deployment slot, code length, and code SHA-256 are part of the
+policy fingerprint. Updating any deployment pin therefore invalidates existing
+grants, control state, action identities, and authorization ledgers and requires
+a fresh protected setup.
+`--input-mint` defaults to wrapped SOL. Set it to an approved classic SPL mint
+and set `--output-mint` to wrapped SOL for the token-to-SOL direction.
+
+Mainnet Jupiter profile v7 makes Jupiter's pinned ProgramData and all ten fixed
+`route_v2` accounts or all twelve fixed `shared_accounts_route_v2` accounts
+static so a hosted signer can inspect them. For SOL input it binds the
+pre-created canonical output account
+into the retained request and makes both evidence providers verify its exact
+classic-token mint, owner, initialized state, and absence of delegated or close
+authority. Current `/build` responses may include a redundant idempotent setup
+for that account. Only after the independent account proof passes, the checker
+removes that exact canonical setup before compiling the retained message; a
+missing account, duplicate setup, different account, or any other setup still
+fails closed. For token input it instead verifies the canonical funded input
+account and independently caps token spend and native fees. Profile-v1 through
+profile-v6 candidates, grants, control
+state, action identities, and authorization ledgers are intentionally
+incompatible and must not be migrated or replayed.
+The amount, output floor, slippage, compute-unit limit, priority-fee price,
+final total fee, and token-account rent are operator limits supplied before
+the proposal is accepted; Jupiter cannot raise them. The result reports both the
+maximum net debit and the larger upfront balance that temporary wrapped-SOL
+account creation may require.
+
+The CLI requires distinct operator-declared trust domains, derives the
+credential-free origin fingerprint for each provider, and includes both
+bindings plus the archive probe in the result. The in-process recheck rejects any provider-origin
+change while repeating the genesis, deployment, lookup-table, fee, simulation,
+history, rent, and lifetime checks over the exact retained message without
+asking Jupiter to rebuild it. Protected authority configuration must persist
+those bindings before preparing a signer request; the CLI still grants no
+authority.
+
+The optional candidate file contains the exact checked message, policy, quote,
+request, lifetime, and canonical lookup-table evidence. It is versioned,
+strictly decoded, and suitable for transport to a separate policy authority,
+which must recheck it using provider bindings from its own protected
+configuration. The candidate never selects its own providers and contains no
+signature or key. Its parent directory must already be private and trusted;
+the command writes it atomically with private permissions.
+
+The isolated policy-authority and signer protocols share a bounded 1 MiB
+request limit. This is large enough for the portable candidate's complete
+lookup-table evidence; their responses remain independently capped at 64 KiB.
+
+The policy is deliberately a separate artifact derived from the operator's
+explicit wallet, mint, amount, slippage, compute, fee, and rent limits. Transfer
+it to the authority through the protected configuration path and verify the
+`policy_sha256` from the check report. Never derive authority policy from the
+candidate being checked.
+
+The separate authority host or identity rechecks that artifact without calling
+Jupiter again. Copy the two origin hashes from the successful check report into
+protected operator configuration, then run:
+
+```sh
+mithril-agent proposal recheck \
+  --candidate /ABSOLUTE/PRIVATE/PATH/jupiter-candidate.json \
+  --policy /ABSOLUTE/PRIVATE/PATH/jupiter-policy.json \
+  --primary-trust-domain PRIMARY_PROVIDER_OWNER \
+  --primary-origin-sha256 PINNED_PRIMARY_ORIGIN_SHA256 \
+  --secondary-trust-domain SECONDARY_PROVIDER_OWNER \
+  --secondary-origin-sha256 PINNED_SECONDARY_ORIGIN_SHA256 \
+  --archive-probe-signature KNOWN_OLD_FINALIZED_V0_SIGNATURE
+```
+
+Recheck reads no Jupiter credential and never rebuilds the transaction. It
+rejects a changed provider origin and repeats every chain/evidence check over
+the exact candidate. Its result remains `checked_not_authorized`; the recheck
+command itself neither grants authority nor reaches signing or submission.
+
+Success returns `checked_not_authorized` with
+`mainnet_signing_policy_not_configured`. That is the expected terminal state,
+not an error and not permission to sign. Do not place a private key in the
+command environment; this command does not read one.
+
+Do not hand-write the three matching policy files. After reviewing the route,
+provider bindings, schedule, and the four distinct public identities, generate
+the protected files offline:
+
+The three non-wallet identities need no vendor account. Run each command on
+the separate host that will retain that private key, then carry only the JSON
+`public_key` value into policy creation:
+
+```sh
+mithril-agent proposal key-create --kind risk-authority \
+  --out /ABSOLUTE/PRIVATE/PATH/risk-authority-keypair.json
+mithril-agent proposal key-create --kind attestation \
+  --out /ABSOLUTE/PRIVATE/PATH/unfunded-attestor.json
+mithril-agent proposal key-create --kind submitter \
+  --out /ABSOLUTE/PRIVATE/PATH/unfunded-submitter-key.json
+```
+
+Each command is offline, refuses an existing path, writes mode `0600`, and
+prints no private key. It deliberately does not create the trading wallet:
+that source must be the separately reviewed custody identity already bound to
+the checked route.
+
+```sh
+mithril-agent proposal policy-create \
+  --route-policy /ABSOLUTE/PRIVATE/PATH/jupiter-policy.json \
+  --check-result /ABSOLUTE/PRIVATE/PATH/jupiter-check-result.json \
+  --out /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set \
+  --risk-key-id MAINNET_RISK_KEY_LABEL \
+  --risk-public-key RISK_AUTHORITY_PUBLIC_KEY_HEX \
+  --attestation-public-key ZERO_FUNDS_ATTESTATION_ADDRESS \
+  --submitter-public-key SUBMITTER_ENCRYPTION_PUBLIC_KEY_HEX \
+  --operator-approver SEPARATE_OPERATOR_WALLET_ADDRESS \
+  --recovery-mode stop_only
+```
+
+The command needs no provider account or network access. It copies only the
+checked provider pins, computes the smallest daily SOL debit cap that can fund
+one maximum action including fee and temporary token-account rent, defaults to
+one action window per UTC day, and validates the complete cross-policy set
+before installing it atomically. It creates no key, grant, control activation,
+signature, or transaction. Generate and retain private keys only on their
+separate authority, signer, and submitter hosts; pass only their public
+identities here.
+
+`stop_only` is the safe default: after an ambiguous crash or interrupted send
+boundary, recovery checks evidence but cannot broadcast again. Choose
+`exact_retry` only after the operator explicitly approves one resubmission of
+the same signed bytes before blockhash expiry. The protected recovery record
+durably counts each permitted attempt before its network call: one initial
+attempt in `stop_only`, or that attempt plus one retry in `exact_retry`. The
+mode is stored in the protected submitter policy, rejects unknown values, and
+cannot widen the signed action.
+
+Then independently check that the three generated files still describe one
+identical boundary before using any key or RPC:
+
+```sh
+mithril-agent proposal policy-check \
+  --authority-policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/authority-policy.json \
+  --signer-policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/signer-policy.json \
+  --submitter-policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/submitter-policy.json
+```
+
+This check is offline. It strictly reads private files, validates each policy,
+and requires exact agreement on the Jupiter route, source, profile fingerprint,
+limits, schedule, authority transaction envelope, provider bindings,
+attestation identity, and submitter identity. Success is
+`policies_consistent_not_authorized`; both `signing_enabled` and
+`submission_enabled` remain false. Repeat it after any policy edit.
+
+Before contacting providers again, verify that the retained candidate and the
+whole generated policy directory still form one bundle:
+
+```sh
+mithril-agent proposal bundle-check \
+  --candidate /ABSOLUTE/PRIVATE/PATH/jupiter-candidate.json \
+  --policy-dir /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set
+```
+
+This is also offline and reads no key. It detects a candidate copied from a
+different route or policy generation before the authority is involved. Success
+is `bundle_consistent_not_authorized`; it is not permission to sign or submit.
+
+On the separate authority host, prove that its installed key is the one bound
+to the protected policy before preparing any grant:
+
+```sh
+mithril-agent proposal authority-check \
+  --policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/authority-policy.json \
+  --key /ABSOLUTE/PRIVATE/PATH/risk-authority-keypair.json
+```
+
+This starts `mithril-agent-policy` in identity-only mode with an empty input
+and no RPC environment. It verifies the authority label and public key, prints
+neither, and cannot authorize, sign, or submit. Repeat it after key rotation.
+
+The same authority host can then exercise the final keyless proposal step:
+
+```sh
+umask 077
+mithril-agent proposal prepare \
+  --candidate /ABSOLUTE/PRIVATE/PATH/jupiter-candidate.json \
+  --authority-policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/authority-policy.json \
+  > /ABSOLUTE/PRIVATE/PATH/unsigned-signer-request.json
+```
+
+`proposal prepare` repeats the full recheck using provider bindings from that
+protected file and prints the exact unsigned request. The request carries those
+bindings in its immutable hash, and the submitter's protected policy must match
+them exactly. It derives the current schedule window from the protected policy;
+`--schedule-start` remains available for reproducible reviews. It reads no
+wallet key, produces no risk grant, and cannot sign or submit.
+
+Before granting it, independently decode the exact saved request against the
+protected signer policy:
+
+```sh
+mithril-agent proposal review \
+  --request /ABSOLUTE/PRIVATE/PATH/unsigned-signer-request.json \
+  --signer-policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/signer-policy.json
+```
+
+The receipt states the direction, wallet, exact mint addresses, base-unit
+amounts, maximum native debit, fee, rent allowance, schedule, action ID, and
+message hash. It deliberately does not translate arbitrary tokens into symbols
+or decimals. Confirm those separately from the reviewed route policy. This
+command validates transaction structure and signer limits only; authorization,
+signing, and submission remain false.
+
+Approve only that saved request with the separate operator wallet. Without
+`--signature`, the command prints one desktop helper command that opens the
+existing loopback-only Phantom/Solflare page through SSH. The wallet signs the
+displayed text, never a transaction, and the verified signature returns to the
+authority host automatically:
+
+```sh
+mithril-agent proposal approval-create \
+  --request /ABSOLUTE/PRIVATE/PATH/unsigned-signer-request.json \
+  --authority-policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/authority-policy.json \
+  --out /ABSOLUTE/PRIVATE/PATH/operator-approval.json
+```
+
+The output file is private, detached, and bound to the complete request hash,
+message hash, provider evidence, amounts, fee, blockhash lifetime, and schedule.
+The request is intentionally short-lived. Complete the remaining authority,
+signer, and offline submitter steps promptly. If a freshness check refuses it,
+prepare and approve a new request instead of weakening the check.
+Changing any one of them invalidates it. The approver must be different from
+the limited-balance trading wallet.
+
+A separate policy authority can then validate that request against the same
+protected bindings and emit the complete granted request without manual JSON
+editing:
+
+```sh
+umask 077
+mithril-agent-policy \
+  --policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/authority-policy.json \
+  --keypair /ABSOLUTE/PRIVATE/PATH/risk-authority-keypair.json \
+  --operator-approval /ABSOLUTE/PRIVATE/PATH/operator-approval.json \
+  --granted-request \
+  < /ABSOLUTE/PRIVATE/PATH/unsigned-signer-request.json \
+  > /ABSOLUTE/PRIVATE/PATH/granted-signer-request.json
+```
+
+Without `--granted-request`, the authority retains its existing machine
+protocol and prints only the short-lived grant. The signer package can
+then pass the canonical transaction through one transaction-only custody
+callback, reject any returned message or signer drift, reserve the durable
+daily cap, attest under a distinct zero-funds identity, and seal the result for
+the submitter. The full debit reservation is made durable while holding the
+ledger lock before custody is called. One caller context propagates cancellation
+and deadlines through both the custody and attestation callbacks. A request
+already canceled before reservation creates no ledger; once reservation begins,
+a timeout or malformed return consumes that action's allowance conservatively
+because a remote signature may exist. The first provider timestamp is stored in
+that durable reservation, so retrying the exact request reuses the same request
+hash, timestamp, and transaction while a changed request is refused. The
+agent-side risk-authority and signer client boundaries impose a 30-second
+operation deadline, while preserving any shorter caller deadline, so a stuck
+socket, child process, or remote signer cannot wedge the autonomous loop. The
+`turnkeycustody` package adapts that exact request to Turnkey and is available
+only as an explicit backend of the bounded signer command described below. It
+is mutually exclusive with the self-hosted file-key backend, requires a
+protected CLI key file, and exposes no raw-signing operation. Generated
+services do not select either Mainnet backend, and live submission remains
+Devnet-only.
+
+### Mainnet custody backend and cutover still required
+
+No provider account is required for routine development or for qualifying the
+repository's own custody boundary. From a clean checkout, run:
+
+```sh
+make test-account-free
+make test-free-rehearsal
+
+# Or run one boundary at a time while diagnosing a failure:
+make test-free-custody
+make test-free-market-data
+make test-free-jupiter
+
+# Separate strict public archive-availability drill:
+make test-free-evidence
+```
+
+The rehearsal target runs the policy and custody/submitter composition checks
+with temporary unfunded identities and no network. The aggregate target adds
+the current keyless market-data and Jupiter compatibility checks.
+The custody target runs
+the self-hosted signer, hardened pinned-SSH transport,
+exact Jupiter transaction checks, durable cap ledger, response sealing, and offline
+submitter/recovery tests under the race detector. It creates only temporary
+unfunded test identities and makes no RPC, hosted-custody, or broadcast call.
+Passing it proves the local implementation; it cannot prove that an external
+provider applies an equivalent policy. The second target reads the sponsored
+Pyth SOL/USD and USDC/USD accounts plus
+Coinbase and Kraken public market data. It needs no API key or wallet and
+cannot sign or submit; passing proves current reachability and agreement, not
+production capacity or an SLA.
+The third target forces keyless Jupiter access, uses only a fixed watch address,
+builds both directions, and verifies the pinned Mainnet program and IDL. The
+repository holds no private key for that address, so the check cannot sign or
+submit even if an RPC or quote service misbehaves.
+The separately invoked evidence target verifies that two no-signup public origins
+currently agree on one retained finalized v0 transaction. It remains strict and
+may stop when a shared public origin routes to a node without that history. That
+is a successful fail-closed safety result, not a reason to weaken the checker.
+It is a preliminary availability and retention drill only; it does not make
+those shared endpoints production-ready.
+An optional hosted-provider qualification may wait for a free allowance or
+for a different provider to survive the retained-transaction mutation suite.
+Do not weaken the local policy or enable Mainnet submission merely to avoid a
+provider fee.
+
+The smallest self-hosted canary design is a new, dedicated wallet funded only
+with the explicitly accepted canary amount. Its signer must run on a separately
+administered machine or hardware device, not merely as another process or user
+on the Mithril/agent host, and re-decode the exact checked v0 message under the
+same route, mint, amount, fee, lifetime, and daily-loss limits before signing.
+The runner, MCP, Telegram, and any conversational model remain unable to read
+the key or grant authority. Never import an operator's primary wallet into this
+setup. If no separate signing host or device is available, keep funded Mainnet
+execution disabled; Devnet execution and Mainnet shadow mode still work.
+
+That file-backed wallet is a bounded canary mechanism, not the production
+custody default. Solana's production guidance recommends a KMS/HSM or managed
+signer for backend automation. The official
+[Solana Keychain](https://solana.com/docs/tools/keychain/getting-started/rust)
+already supplies AWS KMS and GCP KMS Ed25519 backends behind one signer
+interface. Prefer that maintained adapter over new cryptographic integration
+code: AWS uses `ECC_NIST_EDWARDS25519` with `ED25519_SHA_512` and a raw message;
+GCP uses `EC_SIGN_ED25519`, also over the raw message.
+
+The vendor-account-free separate-host foundation does not require a new network
+service. `signerclient.SSHTransport` carries the existing bounded signer
+protocol over the installed OpenSSH client. It ignores user and system SSH
+configuration, uses a protected dedicated transport key rather than the wallet
+key, requires an exact protected known-hosts file, allows only non-interactive
+public-key authentication, disables certificates, agents, proxies, forwarding,
+and local commands, and pins the wallet, zero-funds attestor, and submitter
+public identities before accepting a signed response. The server-side
+authorized key must use `restrict` and one absolute forced signer command; a
+stable source address may additionally be constrained with `from=`. The client
+sends only the fixed command name `mithril-agent-signer-protocol-v1`, so a
+server missing its forced command fails closed instead of opening a shell.
+OpenSSH documents that `restrict` disables forwarding, PTY allocation, and user
+startup files, while `command=` ignores any client-supplied command. Give the
+dedicated signer user no password and no other authorized key. Its one
+`authorized_keys` entry has this shape (replace every uppercase placeholder):
+
+```text
+restrict,command="/usr/local/bin/mithril-agent-signer --policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/signer-policy.json --keypair /ABSOLUTE/PRIVATE/PATH/wallet.json --attestation-keypair /ABSOLUTE/PRIVATE/PATH/attestor.json --socket" ssh-ed25519 TRANSPORT_PUBLIC_KEY
+```
+
+See the current [OpenSSH authorized_keys specification](https://man.openbsd.org/OpenBSD-current/man8/sshd.8).
+Independently verify the server host-key fingerprint before writing the client
+`known-hosts` file; never accept a key learned only from the first connection.
+
+After the operator installs that forced command, verify the complete transport
+and identity binding without signing anything:
+
+```sh
+mithril-agent proposal self-hosted-check \
+  --host SIGNER_HOST --user SIGNER_USER \
+  --identity-file /ABSOLUTE/PRIVATE/PATH/transport-key \
+  --known-hosts /ABSOLUTE/PRIVATE/PATH/known-hosts \
+  --policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/signer-policy.json
+```
+
+Success reports `vendor_account_required:false`, `signing_activity:false`, and
+`can_submit:false`. The command prints none of the host, paths, identities, or
+policy fingerprint. It validates the local protected policy and derives all
+four expected pins from that one source, avoiding manual transcription. The
+four explicit pin flags remain available for policy-management automation but
+cannot be mixed with `--policy`. It proves the pinned OpenSSH identity and policy path; it does not qualify a funded wallet
+or enable Mainnet submission.
+
+This is transport infrastructure, not a Mainnet cutover. The generated signer
+service and runner configuration remain Devnet-only. The signer executable
+accepts a reviewed Jupiter policy only when a separate attestation key is
+supplied explicitly. For an unfunded local or isolated-host identity check:
+
+```sh
+umask 077
+mithril-agent-signer \
+  --policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/signer-policy.json \
+  --keypair /ABSOLUTE/PRIVATE/PATH/unfunded-wallet.json \
+  --attestation-keypair /ABSOLUTE/PRIVATE/PATH/unfunded-attestor.json \
+  --identity
+```
+
+After both the unfunded bootstrap qualification and the retained-Jupiter
+mutation qualification below pass for the exact operational Jupiter policy,
+select the transaction-only backend without placing any private value in the
+environment or command line:
+
+```sh
+mithril-agent-signer \
+  --policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/signer-policy.json \
+  --turnkey-api-key /ABSOLUTE/PRIVATE/PATH/turnkey.private \
+  --turnkey-api-public-key '<REGISTERED_API_PUBLIC_KEY>' \
+  --turnkey-organization '<ORGANIZATION_ID>' \
+  --turnkey-sign-with '<SOLANA_POLICY_SOURCE_ADDRESS_OR_PRIVATE_KEY_ID>' \
+  --attestation-keypair /ABSOLUTE/PRIVATE/PATH/unfunded-attestor.json \
+  --identity
+```
+
+When `--turnkey-sign-with` is a Solana address, it must exactly equal the
+protected policy source. It may instead be a Turnkey private-key ID. Before
+loading either form, the command authenticates the API identity and verifies
+that the signing resource resolves to the protected source address. It also
+derives the API public key from the protected private file and requires it to
+equal `--turnkey-api-public-key`. It rejects a partial Turnkey configuration or
+simultaneous `--keypair` and Turnkey inputs. The API private key stays in the
+protected file.
+
+The command validates the complete policy and prints only the wallet,
+attestation, and submitter public identities. Without `--identity`, it first
+size-bounds, strictly decodes, and independently validates the exact request
+before loading a file key or contacting hosted custody. It then returns one
+submitter-encrypted response; it still cannot submit:
+
+```sh
+umask 077
+mithril-agent-signer \
+  --policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/signer-policy.json \
+  --keypair /ABSOLUTE/PRIVATE/PATH/unfunded-wallet.json \
+  --attestation-keypair /ABSOLUTE/PRIVATE/PATH/unfunded-attestor.json \
+  < /ABSOLUTE/PRIVATE/PATH/granted-signer-request.json \
+  > /ABSOLUTE/PRIVATE/PATH/sealed-signer-response.json
+```
+
+On the separate submitter host, prove that its installed encryption key is the
+one bound into the same protected policy set:
+
+```sh
+mithril-agent proposal submitter-check \
+  --policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/submitter-policy.json \
+  --key /ABSOLUTE/PRIVATE/PATH/unfunded-submitter-key.json
+```
+
+This starts `mithril-agent-submitter` in identity-only mode with an empty input
+and no RPC environment. It requires the returned public key, profile, and
+source wallet to match the protected policy, prints none of them, and cannot
+sign or submit. Run it after installing or rotating the submitter key.
+
+Run prepare, grant, sign, and submitter preparation as one prompt review: the
+grant and blockhash are intentionally short-lived. If either expires before
+submitter preparation, discard the three request/response files and begin again
+at `proposal prepare`; do not edit or refresh any field by hand. If the
+submitter has already persisted the proposal, use the retirement command below
+before preparing its replacement. Do not fund a wallet,
+install a Mainnet signer service, or add the forced SSH command until the
+retained transaction mutation suite and the outage, timeout, retry, recovery,
+and audit gates below have passed.
+
+The independent submitter can complete the next offline boundary using the
+exact granted request and sealed response saved as private files:
+
+```sh
+umask 077
+mithril-agent-submitter \
+  --policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/submitter-policy.json \
+  --key /ABSOLUTE/PRIVATE/PATH/unfunded-submitter-key.json \
+  --prepare-mainnet \
+  --signer-request /ABSOLUTE/PRIVATE/PATH/granted-signer-request.json \
+  --signer-response /ABSOLUTE/PRIVATE/PATH/sealed-signer-response.json
+```
+
+Run this qualification only with temporary unfunded identities and a dedicated
+empty state directory. Success returns `ok` with the exact action ID and writes
+`submission-recovery.json` beside the policy's `control_state_path`. The
+operation re-decodes the complete v0 transaction, verifies its signature,
+lookup tables, policy, evidence bindings, response attestation, and encrypted
+recipient, and persists the exact recovery material under a private
+cross-process lock. It does not read an RPC URL, call `sendTransaction`, enable
+a service, or grant submission authority. The record explicitly says that
+submission has not started; recovery reconciliation refuses it before any
+finality-provider call while that marker remains false.
+The socket protocol exposes the same `prepare_mainnet` operation for a bounded
+client, but no generated Mainnet service or strategy runner uses it.
+
+An expired or operator-rejected proposal that never reached `send_started` can
+be retired only while the bound control state is fully stopped:
+
+```sh
+mithril-agent-submitter \
+  --policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/submitter-policy.json \
+  --retire-mainnet
+```
+
+This keyless command revalidates the complete recovery record under the control
+and recovery locks, refuses any action whose submission started, and moves the
+record to a private action-ID-named audit file in the same directory. It returns
+only the retired public action ID. The same action cannot be prepared again;
+start from a fresh `proposal prepare` result. Retirement never grants authority,
+signs, calls an RPC, or submits a transaction.
+
+The control package also contains the next disabled Mainnet admission boundary.
+Its `mainnet_canary` state is not interchangeable with `devnet_enabled`: each
+gate rejects the other mode. A canary grant is hard-limited to one action and
+one hour, and its only writer requires the exact action ID and protected-state
+revision that the operator reviewed. Admission consumes the action before entering the
+operation callback and leaves the exact action ID as the recovery marker. An
+exact recovery retry is possible only when the protected submitter policy says
+`exact_retry`; it does not create another action. Missing, expired,
+exhausted, changed-mode, or recovery-pending state fails closed.
+
+The existing keyless root-only operator socket can identify its protected
+policy, inspect the state revision,
+and activate this action-bound one-action canary. It validates the Mainnet policy and uses
+the same compare-and-swap protocol as Devnet, so stale operator state is
+refused. No generated unit, strategy runner, or operator command invokes this
+path, and activation cannot submit a transaction. Do not manually manufacture
+a `mainnet_canary` state file. The read-only command below binds the action ID, revision,
+complete policy set, independent evidence, and submitter recovery state into a
+review receipt; activation remains intentionally absent until the separate
+funded-canary decisions and qualifications are complete.
+
+Run the complete read-only receipt on the submitter host:
+
+```sh
+mithril-agent proposal canary-check \
+  --policy-dir /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set \
+  --operator-socket /run/mithril-agent-submitter-operator-mainnet.sock \
+  --request /ABSOLUTE/PRIVATE/PATH/unsigned-signer-request.json \
+  --operator-approval /ABSOLUTE/PRIVATE/PATH/operator-approval.json \
+  --shadow-policy /ABSOLUTE/PRIVATE/PATH/shadow-policy.json \
+  --shadow-dir /ABSOLUTE/PRIVATE/PATH/shadow-journals \
+  --shadow-days N
+```
+
+It requires the configured Mithril RPC and both policy-bound independent
+evidence RPCs. It first verifies all three policies, proves that the keyless
+operator socket loaded the matching submitter policy, replays the immediately
+preceding complete shadow days, and requires their wallet, route, action size,
+slippage, and fee assumptions to conservatively match the protected canary.
+It also requires a stopped state with no recovery or terminal latch, then runs
+the exact prepared-record readiness check below. That check re-verifies the
+policy-bound immutable guard program, ProgramData link, deployment slot, code
+length, and code SHA-256 through Mithril and both independent providers.
+Success reports the public
+action ID, approved request hash, control revision, shadow policy fingerprint, and complete-day count
+as `mainnet_canary_evidence_ready_not_enabled`. It explicitly reports
+`strategy_approved: true`, `production_ready: false`,
+`route_upgrade_atomic: true`, and
+`route_upgrade_protection: "immutable_guard_exact_code_pinned"`; reads no key;
+cannot enable, sign, or submit; and does not judge profitability. Those route
+fields are emitted only after the guarded v7 policy, exact candidate, and live
+three-source deployment/readiness checks all pass. They do not mean this
+repository contains an approved deployment or that Mainnet is production-ready.
+
+#### Guarded v7 deployment boundary
+
+`programs/mithril-route-guard` contains that narrowly scoped guard as an
+isolated Rust program. It holds no state, signs for no account, accepts only the
+two Jupiter route discriminators already supported by the Go policy, requires
+the pinned Jupiter ProgramData account read-only, verifies the exact reviewed
+Jupiter deployment, and forwards at most 64 route accounts unchanged. Holding
+ProgramData read-only while invoking Jupiter makes an upgrade and the guarded
+route mutually exclusive in the same transaction.
+
+The Go `jupiterswap` package wraps the reviewed route before compilation and
+unwraps it only after canonical message validation
+without mutating the source plan. The guard's own program and ProgramData
+identify its code deployment; the account prepended to a trade is Jupiter's
+pinned ProgramData, not the guard's ProgramData. `txflow` can require the local
+Mithril node and both independent evidence providers to agree that the guard's
+deployment is executable, linked to the expected ProgramData, at the pinned
+slot, contains the exact reviewed code bytes, and has no remaining upgrade
+authority.
+
+No deployment identity is built into the repository. `proposal check` requires
+the operator to provide `--route-guard-program`, `--route-guard-program-data`,
+`--route-guard-deployment-slot`, `--route-guard-code-length`, and
+`--route-guard-code-sha256`. Those values are embedded in the protected route
+policy and its fingerprint. Candidate, authority, signer, submitter, recovery,
+and canary validation reject a missing guard, a direct Jupiter route, or
+identity drift. This prepares the guarded profile but does not deploy,
+authorize, sign, enable, or submit anything. Test the source boundary with:
+
+```sh
+make test-route-guard
+```
+
+Build the SBF artifact only with Agave CLI 4.2 or newer; the target pins the
+verified platform-tools version and does not deploy anything:
+
+```sh
+make build-route-guard ROUTE_GUARD_OUT=/absolute/private/guard-build
+```
+
+The output directory must be outside the checkout with mode `0700` because the
+builder emits both the SBF program and its deployment keypair. Preserve that
+identity as protected release material; never place it in Git or a shared build
+directory. Record the reviewed SBF byte length and SHA-256 before deployment.
+After deployment, record the complete on-chain code region that begins after
+the upgradeable loader's fixed 45-byte ProgramData metadata area. The production
+`code_length` and `code_sha256` describe that deployed region, including any
+explicitly allocated trailing bytes; they match the SBF artifact for a current
+exact-size deployment that was not extended. The guard verifier reads this
+complete deployed region in bounded chunks and requires the same length and
+digest from Mithril and both independent providers.
+
+After the authority has been removed and the local Mithril node is ready, use
+Solana's read-only native dump command against that node to derive those two
+values. The command resolves the program to its ProgramData account and writes
+the complete code region after the loader metadata; it does not need a wallet
+or submit a transaction:
+
+```sh
+install -d -m 0700 /absolute/private/guard-verification
+solana program dump \
+  --url http://127.0.0.1:YOUR_MITHRIL_RPC_PORT \
+  ROUTE_GUARD_PROGRAM_ADDRESS \
+  /absolute/private/guard-verification/route-guard-onchain.so
+wc -c < /absolute/private/guard-verification/route-guard-onchain.so
+sha256sum /absolute/private/guard-verification/route-guard-onchain.so
+```
+
+Use the byte count as `--route-guard-code-length` and the digest as
+`--route-guard-code-sha256`. Keep the dump outside the checkout, compare it to
+the reviewed release artifact, and let `proposal check` independently require
+the same complete bytes from Mithril and both external evidence providers.
+
+Before any Mainnet canary, separately review the program, deploy it under a fixed
+address, permanently remove its upgrade authority, record its ProgramData,
+deployment slot, code length, and code SHA-256, verify that complete identity
+through Mithril plus two independent providers, and generate fresh v7 policies
+and candidates with those exact values. Mainnet signing and submission remain
+disabled until the separate custody, strategy, operator approval, shadow
+evidence, and one-action canary decisions are complete.
+
+The independent submitter exposes the lower-level readiness check as a keyless
+read-only command:
+
+```sh
+mithril-agent-submitter \
+  --policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/submitter-policy.json \
+  --check-mainnet
+```
+
+Run it with the configured Mithril RPC and the two policy-bound independent
+evidence RPCs. It re-opens the exact prepared record under its cross-process
+lock and repeats the same immutable-candidate check used before signing. With
+The operator-signed schedule end is an approval expiry: readiness refuses it
+before opening an RPC once that time has passed. With fresh finalized contexts
+it checks Mainnet identity, the pinned Jupiter
+deployment, the archive witness, current token-account state, lookup tables,
+fee and rent bounds, exact-message Mithril simulation, and block-height
+lifetime. It then requires both witnesses to return fresh
+`isBlockhashValid=true` at or after that new evidence context. It returns only
+`ok` and the public action ID. The command rejects a submitter key, and the
+readiness package interface exposes no transaction-submission method.
+
+Solana considers the blockhash expired only after that height is exceeded. The
+equality rejection above is a deliberate submission-headroom policy: the
+submitter will not begin a network round trip in the final valid block.
+
+The keyless `mithril-agent-submitter --recover` command also accepts this
+Mainnet policy. It refuses a record whose send has not durably started. After a
+future canary attempt, it queries only the two pinned evidence providers and
+resolves recovery only when both report finalized matching effects. Finalized
+success clears the matching marker. Finalized failure is made durable and
+becomes a stopped `failed` action that an operator must review and acknowledge.
+Pending, unresolved, or divergent evidence leaves recovery pending. The
+command has no submission method.
+
+Before choosing any recovery action, inspect the submitter-owned record without
+a key or RPC:
+
+```sh
+mithril-agent-submitter \
+  --policy /ABSOLUTE/PRIVATE/PATH/mainnet-policy-set/submitter-policy.json \
+  --recovery-status
+```
+
+This returns only a versioned format, the public action ID, recovery mode,
+whether sending started, the durable attempt count and limit, the remaining
+attempt budget, and the terminal verdict after reconciliation finalizes the
+record. It validates
+the protected record under its lock and never prints the transaction,
+signature, signer request, attestation, policy, endpoint, or key.
+
+Successful terminal reconciliation upgrades the protected record to the
+current format, stores the exact two-provider reconciliation and effects, and
+hard-links that complete record to an action-ID-named `finalized` audit file in
+the same protected directory. A later proposal cannot reuse that action ID and
+cannot replace a finalized active record until the archive is durable. Copy
+these archives to the off-host append-only audit destination; never delete one
+to make a repeated action eligible again.
+
+This follows Solana's RPC contract: [`sendTransaction`](https://solana.com/docs/rpc/http/sendtransaction)
+acknowledges RPC acceptance without guaranteeing processing or confirmation,
+and a transaction can still miss before its recent blockhash expires;
+[`isBlockhashValid`](https://solana.com/docs/rpc/http/isblockhashvalid) supports
+the `minContextSlot` freshness floor used here, as does
+[`getBlockHeight`](https://solana.com/docs/rpc/http/getblockheight). The unexported
+internal sender boundary repeats every readiness check while holding
+the canary and recovery barriers, opens the exact control path and profile
+fingerprint from the protected submitter policy, durably sets `send_started`
+and the attempt count, and then attempts one exact-byte v0 broadcast. It checks
+the approval expiry again inside those barriers, so crossing the boundary
+during the preceding network checks cannot reach broadcast. A
+transport error remains ambiguous. The default `stop_only` policy cannot create
+a second attempt; `exact_retry` permits exactly one resubmission of the same
+persisted bytes and never creates a new signature.
+No command, socket operation, generated service, or
+strategy runner calls this boundary yet.
+
+The installed Devnet sender follows the same binding rule: both senders derive
+the control path and profile fingerprint from their protected submitter policy.
+A caller cannot authorize either sender with another setup's control file.
+
+The Mainnet signer response is confidential to the submitter: its public
+metadata carries the transaction hash and attestation but not the Solana
+signature. The signature exists only inside the authenticated encrypted
+transaction. The pinned client can verify the request, wallet, hashes,
+attestation, and recipient identity; only the submitter can open the envelope,
+verify the Ed25519 signature and exact v0 transaction, persist recovery
+evidence, and eventually cross the final stop gate. This closes the bypass that
+would exist if a runner received both the unsigned message and its signature.
+
+Those raw-message APIs prevent key extraction; they do not independently
+understand a Jupiter route, mint, amount, fee, or address lookup. A compromised
+workload that holds KMS signing permission can still ask KMS to sign different
+bytes. Therefore a cloud KMS is a production boundary only when the exact
+transaction decoder and the KMS-authorized identity run together in a
+separately protected signer domain that the runner host cannot enter. Putting a
+Keychain adapter behind another service on the same compromised host is not
+that boundary. Until an enclave, dedicated signer host, or equivalent isolated
+workload identity is qualified, use a raw KMS only for a bounded canary or keep
+Mainnet execution disabled.
+
+The signer host is currently outside AWS and GCP, so a cloud KMS choice also
+requires a deliberately provisioned workload identity and provider audit log.
+Do not replace the file key with Vault on the same host and call that a separate
+failure domain: a host compromise would still reach both. Use an off-host KMS,
+HSM, MPC/managed signer, or keep Mainnet execution disabled. Grant only the
+specific signing and public-key/metadata permissions required for the chosen
+key; never give the runner provider credentials.
+
+A hosted policy signer is an alternative, not an automatic improvement. It is
+acceptable only if its enclave-enforced policy covers arbitrary Solana program
+transactions and the exact Jupiter v0 message constraints above. A transfer
+allowlist or transfer amount limit alone does not constrain a swap instruction.
+The funded wallet must expose a policy-evaluated Solana transaction-signing
+operation. Do not enable unrestricted message or raw-payload signing on that
+wallet: it could sign transaction message bytes without evaluating the
+transaction policy. Instead, configure `attestation_public_key` as a distinct,
+zero-funds Ed25519 service identity. That identity authenticates the request
+hash, submitter binding, and sealed response metadata; it never holds assets or
+signs Solana transactions. The signer and submitter policies reject a Mainnet
+configuration that reuses the funded wallet, risk authority, zero-funds
+attestor, or sealed-response submitter public identity for another role. The
+submitter key is also validated as a usable X25519 recipient during policy
+loading, so an invalid delivery key cannot survive until a signing attempt.
+
+This repository contains a provider-neutral transaction-only custody callback,
+exact returned-transaction validation, durable cap reservation, separate
+response attestation, sealing, independent submitter validation, and a pinned
+Turnkey v2 transaction-signing adapter. Both the Turnkey and self-hosted
+file-key implementations are callable only through explicit bounded signer
+CLI/socket configuration; no generated service chooses either one. The
+submitter command can prepare recovery evidence offline, but no Mainnet submit
+path is operational. Qualify a hosted adapter against a real
+test organization and wallet using
+version-0 transactions, address lookup tables, every Jupiter instruction the
+policy permits, deterministic idempotency keyed by `request_sha256`, outage and
+timeout behavior, audit export, credential rotation, and transaction-only
+policy enforcement before connecting that adapter to an operational signer.
+
+The default qualification path is vendor-account-free: run `make test-free-custody`,
+then qualify the pinned-SSH signer on a separately administered host with
+`proposal self-hosted-check`. This avoids a vendor account, but the operator is
+responsible for that host, its backups, and its physical and administrative
+separation. Keep Mainnet submission disabled if those conditions cannot be met.
+
+The provider ranking below applies only when the owner explicitly chooses
+managed custody instead:
+
+1. Evaluate Turnkey before other hosted candidates. Its current
+   [Solana policy examples](https://docs.turnkey.com/features/policies/examples/solana)
+   and [IDL policy documentation](https://docs.turnkey.com/features/policies/smart-contract-interfaces)
+   cover legacy and v0 transaction signing, instruction and account
+   constraints, address-table handling, uploaded IDL arguments (including a
+   Jupiter route example), delegated users, multi-party consensus, and deny
+   circuit-breakers.
+   This is the closest documented match to the existing validator. It is still
+   only a candidate: replay retained Jupiter V2 build responses through a test
+   wallet and prove that an in-policy message signs while the hosted policy
+   rejects an unapproved program, wallet, mint, instruction type, lookup table,
+   extra instruction, or value above the input, slippage, and compute-fee caps.
+   Do not require the hosted policy to pin one blockhash or one exact valid route:
+   that would prevent autonomous quoting. The isolated local signer remains
+   responsible for exact route/evidence binding, blockhash lifetime, quote
+   threshold, and the full transaction policy. Also qualify idempotency, audit
+   export, credential rotation, timeout, and outage behavior.
+   Turnkey documents
+   [identical activity POST bodies as idempotent](https://docs.turnkey.com/api-reference/activities/overview).
+   Once accepted, an activity does not expire, so an exact re-submission returns
+   that activity and a known activity ID can be polled. The same API documents
+   `timestampMs` as a liveness check: if the first request never reached Turnkey,
+   a much later submission of its old body may be refused. That case must remain
+   stopped for operator review; it is not permission to create a new timestamp
+   or a second signing activity.
+   Bind one deterministic activity body, including its timestamp, to the
+   agent's `request_sha256`; an exact retry must resubmit that body or poll its
+   activity ID, never create a new timestamp after the durable reservation
+   begins.
+   Use Turnkey's maintained
+   [Go v2 SDK](https://github.com/tkhq/go-sdk) rather than a new HTTP stamper or
+   Node sidecar. The local adapter pins v2.0.0, fixes the API origin, refuses
+   redirects, bounds response size and time, discards SDK logging, and never
+   propagates provider error bodies.
+
+### Bootstrap the Turnkey policy with an unfunded wallet
+
+This bootstrap qualifies the real API identity, transaction-signing endpoint,
+version-0 decoding, exact retry behavior, and basic policy rejection. It does
+not use an RPC, fund the wallet, or broadcast a transaction. It is the first
+provider gate, not the later retained-Jupiter/lookup-table qualification.
+
+1. Keep the original passkey user as an administrator only. Turnkey documents
+   that root quorum bypasses policies, so an API key attached to a root user
+   cannot prove policy enforcement. Create a dedicated **API-only, non-root**
+   user named `mithril-agent-qualification`, then generate its key pair with
+   Turnkey's maintained CLI:
+
+   ```sh
+   turnkey generate api-key --organization "$ORGANIZATION_ID" \
+     --key-name mithril-agent-qualification
+   ```
+
+   Register the exact `publicKey` printed by that command with the dedicated
+   user and record the user's ID. Keep the matching `privateKeyFile` at the path
+   printed by the command; do not pair it with a public key from a different
+   dashboard activity. Keep the private half only in that `.private` file;
+   never paste it into chat, JSON, a shell argument, or this repository. See
+   Turnkey's [CLI guide](https://docs.turnkey.com/sdks/cli) for installation
+   and higher-assurance installation choices.
+
+   A downloaded create-API-key activity JSON is only a registration receipt. It
+   contains the public identity and activity metadata, not the private key
+   needed to authenticate that identity.
+2. Create a separate Turnkey wallet with an Ed25519 Solana account and leave it
+   unfunded. Record the public Solana account address. A wallet UUID is not the
+   signing address.
+3. As the administrator, create this allow policy after replacing the two
+   placeholders. Do not add any broader signing policy for the API-only user:
+
+```json
+{
+  "policyName": "Mithril agent unfunded qualification",
+  "effect": "EFFECT_ALLOW",
+  "consensus": "approvers.any(user, user.id == '<API_ONLY_USER_ID>')",
+  "condition": "solana.tx.instructions.count() == 1 && solana.tx.address_table_lookups.count() == 0 && solana.tx.program_keys.all(p, p == '11111111111111111111111111111111') && solana.tx.transfers.count() == 1 && solana.tx.transfers[0].from == '<SOLANA_ACCOUNT_ADDRESS>' && solana.tx.transfers[0].to == '6HfHQs4q4hH3tXRPmbyVGYpHq1Zbw3xJY6R1dSfeoyNX' && solana.tx.instructions[0].instruction_data_hex == '020000000100000000000000'",
+  "notes": "Unfunded bootstrap only: one exact one-lamport v0 System transfer; never broadcast"
+}
+```
+
+4. Confirm that the CLI-generated private-key file is a regular file owned by
+   the current user and grants no group or other access. First run the
+   first-class read-only identity check from the repository root. It
+   authenticates the API key and verifies the Solana signing-resource mapping,
+   but creates no signing activity and prints none of the supplied identifiers:
+
+```sh
+chmod 600 "/ABSOLUTE/PATH/mithril-agent-qualification.private"
+./bin/mithril-agent proposal turnkey-check \
+  --api-key-file "/ABSOLUTE/PATH/mithril-agent-qualification.private" \
+  --api-public-key "<REGISTERED_API_PUBLIC_KEY>" \
+  --organization "<ORGANIZATION_ID>" \
+  --sign-with "<PRIVATE_KEY_ID_OR_SOLANA_ACCOUNT_ADDRESS>" \
+  --expected-address "<SOLANA_ACCOUNT_ADDRESS>"
+```
+
+   After that passes and the exact unfunded policy above is installed, run the
+   signing qualification. The private key itself never enters the environment:
+
+```sh
+MITHRIL_AGENT_TURNKEY_QUALIFY=1 \
+MITHRIL_AGENT_TURNKEY_API_PRIVATE_KEY_FILE="/ABSOLUTE/PATH/mithril-agent-qualification.private" \
+MITHRIL_AGENT_TURNKEY_API_PUBLIC_KEY="<REGISTERED_API_PUBLIC_KEY>" \
+MITHRIL_AGENT_TURNKEY_ORGANIZATION_ID="<ORGANIZATION_ID>" \
+MITHRIL_AGENT_TURNKEY_SIGN_WITH="<PRIVATE_KEY_ID_OR_SOLANA_ACCOUNT_ADDRESS>" \
+MITHRIL_AGENT_TURNKEY_SOLANA_ADDRESS="<SOLANA_ACCOUNT_ADDRESS>" \
+go test -count=1 -run '^TestLiveTurnkeyPolicyQualification$' ./turnkeycustody
+```
+
+If Turnkey reports that custody is rate or plan limited, no signed transaction
+was returned. HTTP 429 can be a short request window or the account's signature
+allowance; check the dashboard and current [Turnkey pricing](https://www.turnkey.com/pricing),
+then rerun the same command only after the applicable window or allowance
+resets. Do not rotate credentials, broaden the policy, or fund the
+qualification wallet to work around the limit.
+
+`MITHRIL_AGENT_TURNKEY_SIGN_WITH` is the Turnkey resource identifier passed to
+the signing API. `MITHRIL_AGENT_TURNKEY_SOLANA_ADDRESS` is the public Solana
+account used as the transaction fee payer. They may be the same address, but a
+Turnkey private-key UUID and a Solana address are not interchangeable.
+
+Before making a request, the test derives the API public key locally and
+requires it to equal `MITHRIL_AGENT_TURNKEY_API_PUBLIC_KEY`. This catches a
+private file downloaded or copied for a different API-key registration without
+printing either key. It then authenticates that API identity against the
+configured organization before looking up the Solana signing resource, so a
+missing API-key registration is reported separately from a wrong private-key
+ID. The test then accepts one exact transaction, verifies the returned Ed25519
+signature and unchanged message, repeats the identical Turnkey activity, and
+requires amount, recipient, and extra-instruction mutations to return a terminal
+provider-side `REJECTED` activity. A generic `FAILED` activity is not accepted as
+policy enforcement. A known-good identical activity must still succeed after
+every denial, so a provider outage cannot pass as policy enforcement. A root-user
+key or an overly broad policy fails the rejection tests. The test contains no
+submitter or RPC client, and the wallet must remain unfunded after it passes.
+
+### Qualify the retained Jupiter policy
+
+Do this only after the bootstrap passes. Use the same non-root API identity and
+dedicated test wallet, confirm that wallet is unfunded before signing, and
+replace the bootstrap policy with a retained-candidate qualification policy.
+This first Jupiter policy is deliberately not the funded operational policy: it
+proves Turnkey's parser and rejection behavior against one checked transaction
+shape while leaving only the recent blockhash refreshable.
+
+Create a protected Jupiter policy file and a protected candidate produced by
+`proposal check --candidate-output`. Then generate the exact Turnkey policy
+document from those two protected artifacts and the dedicated non-root API
+user's ID:
+
+```sh
+mithril-agent proposal turnkey-policy \
+  --candidate /ABSOLUTE/PRIVATE/PATH/jupiter-candidate.json \
+  --policy /ABSOLUTE/PRIVATE/PATH/jupiter-policy.json \
+  --api-user '<NON_ROOT_API_USER_ID>' \
+  --out /ABSOLUTE/PRIVATE/PATH/turnkey-jupiter-qualification.json
+```
+
+This command is offline: it does not contact Turnkey, read a credential,
+install a policy, sign, or send. It validates the candidate again and writes a
+mode-`0600` JSON policy that pins the fee payer, every instruction and account
+flag, raw instruction data, and every lookup-table key and index. It does not
+pin the recent blockhash. An administrator reviews and installs that exact JSON
+in Turnkey; the non-root API user must not have policy-administration rights.
+Do not fund the wallet or reuse this candidate-specific qualification policy as
+the eventual operational policy.
+
+The generator follows Turnkey's current
+[Solana policy schema](https://docs.turnkey.com/features/policies/language):
+transaction-level lookup entries contain `writable_indexes` and
+`readonly_indexes`, while each per-instruction lookup entry contains one
+`index` and `writable` flag. Lookup-loaded accounts are kept out of the
+instruction's static `accounts` list. This distinction is enforced by a local
+regression test because mixing the two shapes produces a policy that cannot
+qualify the retained transaction.
+
+Retain the candidate, remove all funds from the dedicated test wallet, and
+independently confirm its balance is zero before starting this test. The local
+Jupiter policy and candidate files must be absolute, regular,
+owned by the current user, and mode `0600`; their parent directories must not be
+writable by group or other users. Then run:
+
+```sh
+MITHRIL_AGENT_TURNKEY_JUPITER_QUALIFY=1 \
+MITHRIL_AGENT_TURNKEY_API_PRIVATE_KEY_FILE="/ABSOLUTE/PATH/turnkey.private" \
+MITHRIL_AGENT_TURNKEY_API_PUBLIC_KEY="<REGISTERED_API_PUBLIC_KEY>" \
+MITHRIL_AGENT_TURNKEY_ORGANIZATION_ID="<ORGANIZATION_ID>" \
+MITHRIL_AGENT_TURNKEY_SIGN_WITH="<PRIVATE_KEY_ID_OR_SOLANA_ACCOUNT_ADDRESS>" \
+MITHRIL_AGENT_TURNKEY_JUPITER_POLICY_FILE="/ABSOLUTE/PATH/jupiter-policy.json" \
+MITHRIL_AGENT_TURNKEY_JUPITER_CANDIDATE_FILE="/ABSOLUTE/PATH/jupiter-candidate.json" \
+go test -count=1 -run '^TestLiveTurnkeyJupiterPolicyQualification$' ./turnkeycustody
+```
+
+The signing resource must resolve to the protected policy owner. The harness
+authenticates that mapping, strictly decodes the candidate and policy, requires
+their exact match, verifies the returned signature and unchanged message,
+repeats the exact activity, and
+requires out-of-policy program, account, output-mint, instruction-type, input,
+output, slippage, platform-fee, compute-limit, compute-price, lookup-table,
+and extra-instruction variants to return a terminal provider-side refusal. Every variant is a
+structurally valid version-zero message, and the known-good identical activity
+must still succeed after each refusal. The harness contains no RPC or
+submitter and never broadcasts any signed bytes.
+
+For the later generalized operational policy, fetch the IDL from the standard
+Anchor IDL account derived from the pinned Jupiter program. Do not use an older
+parser-package copy: at the time of this qualification the program-owned
+on-chain IDL includes `route_v2` and `shared_accounts_route_v2`, while older
+checked-in parser IDLs may not. Before uploading it to Turnkey, verify that the IDL account is
+owned by the pinned Jupiter program, has the legacy Anchor
+`internal:IdlAccount` discriminator, and that both supported routes have the
+expected discriminators, named accounts, and arguments. Record the IDL JSON
+hash with the administrative policy change. Turnkey documents accepting Anchor IDLs and
+exposing the decoded instruction name, named accounts, and program arguments to
+policy conditions. The candidate-specific policy above pins raw instruction
+data and therefore does not require this interface.
+
+Constrain the decoded route instruction name, transfer authority,
+input/output mints, input and slippage caps, platform fee, allowed program set,
+allowed lookup-table shape, and total instruction shape. The compiler keeps all
+accounts in the static key list whenever the complete transaction fits Solana's
+packet limit. Larger routes fall back to keeping the ten fixed `route_v2`
+accounts or twelve fixed `shared_accounts_route_v2` accounts static and bind
+each remaining instruction account to its exact table key and writable/read-only index. The live Jupiter test covers whichever shape
+the current route requires. This matters because Turnkey documents
+lookup-loaded account addresses as the literal `ADDRESS_TABLE_LOOKUP`; a policy
+cannot allowlist an actual mint or token account hidden behind that placeholder.
+The local signer and two-provider evidence still verify the resolved addresses
+and exact route.
+
+Do not claim a hosted compute-unit or compute-price cap merely from raw
+`instruction_data_hex`: Turnkey documents equality and slicing for strings, not
+numeric decoding of the Compute Budget program's little-endian values. Such a
+cap counts as qualified only if a separately reviewed compatible interface is
+uploaded and the retained-candidate harness rejects both compute mutations. If
+either mutation signs, the hosted policy has failed and must not be connected
+to an operational wallet; the local signer still enforces both caps regardless.
+
+The exact allowlist depends on the retained route and the operator's approved
+venue set; do not copy a condition from an unrelated route. A Jupiter
+deployment-pin change requires fetching and reviewing the new on-chain IDL,
+replacing the hosted interface and policy, and repeating this entire
+qualification before any wallet is funded. Turnkey's policy must be defense in
+depth around the stricter local signer, not a replacement for it.
+
+After this candidate-specific suite passes, replace it with a generalized
+operational policy only when the uploaded program interfaces can enforce the
+same amount, mint, slippage, program, instruction-shape, and compute-fee limits
+without pinning one route or one compute estimate. Repeat the complete mutation
+suite against that generalized policy before funding a canary wallet.
+
+Changing the recent blockhash is deliberately not a hosted-policy rejection:
+an operational autonomous signer must accept fresh blockhashes. The local signer
+binds the selected blockhash and lifetime to the independently checked candidate
+and rejects drift before Turnkey is called.
+
+For credential rotation, have an administrator add a replacement API key to the
+same non-root policy user with a finite `expirationSeconds`, run both
+qualification suites with the replacement, stop the signer, atomically replace
+the protected credential file, and repeat the signer identity check before
+starting it again. Only then delete the old key and confirm it is absent using
+Turnkey's [Get API keys](https://docs.turnkey.com/api-reference/queries/get-api-keys)
+and [Delete API keys](https://docs.turnkey.com/api-reference/activities/delete-api-keys)
+operations. The signer credential must never be authorized to rotate or delete
+credentials itself.
+
+Export the provider-side signing audit independently with Turnkey's
+[List activities](https://docs.turnkey.com/api-reference/queries/list-activities)
+and reconcile completed `SIGN_TRANSACTION_V2` activities with the local durable
+authorization ledger. Keep this administrative reader outside the signer
+service; the transaction-only runtime neither lists history nor gains an
+administrative API permission.
+
+2. Evaluate Coinbase CDP second. Its current
+   [Solana policies](https://docs.cdp.coinbase.com/wallets/security-and-policies/policy-engine/solana-policies)
+   and [IDL policy](https://docs.cdp.coinbase.com/wallets/security-and-policies/policy-engine/solana-idl-policies)
+   cover program, mint, recipient, SOL/SPL value, network, and IDL-decoded
+   instruction constraints, with a fail-secure default. However, its
+   documented v0 address criteria inspect static account keys and its IDL
+   policy supports fewer data shapes than Turnkey. Do not assume those controls
+   cover a real Jupiter route; prove the same policy-bound mutation categories
+   first.
+3. Use AWS or GCP KMS only behind the separately protected transaction-aware
+   signer domain described above. KMS signature success by itself is not policy
+   qualification.
+
+Do not connect a hosted adapter to an operational signer or add a generic
+raw-signing sidecar before the qualification suite passes. The smallest safe
+integration is the one bounded transaction-signing operation that survives the
+suite; generic
+message signing would create a bypass.
+
+Choose between the dedicated self-hosted canary wallet and a specifically
+qualified hosted signer before deploying any Mainnet signer profile. Until
+then, the read-only checker is the correct terminal boundary for normal
+operator workflows.
+
 The Devnet pilot does not choose these on behalf of an operator:
 
 - two independently funded and rate-limited production evidence RPCs;
-- authenticated Pyth access and independent stablecoin/USD evidence for a
-  dollar-denominated trading rule;
+- production SLAs for the keyless Pyth-on-Mithril, Coinbase, and Kraken market
+  evidence paths, or explicitly approved authenticated replacements;
 - an external deadman receiver and an off-host append-only audit destination;
 - separate signer, submitter, risk-authority, and runner identities;
-- whether crash recovery may resubmit exact signed bytes or must stay stopped;
-- pre-created output accounts and the production mechanism that removes the
-  route-deployment upgrade race;
-- approval-device transaction decoding and production custody limits; and
+- whether production should override the generated `stop_only` recovery mode
+  and permit `exact_retry` for the same signed bytes;
+- the separately approved one-time mechanism that creates the required output
+  account (the read-only checker already verifies it);
+- the independently audited deployment of `programs/mithril-route-guard` that
+  production will use. The repository supplies and tests the narrow guard but
+  deliberately ships no default program identity. Build the reviewed SBF,
+  deploy it under a protected release process, remove its upgrade authority,
+  and record its program, ProgramData, deployment slot, code length, and code
+  SHA-256. Guarded v7 binds that exact immutable identity and locks Jupiter's
+  pinned ProgramData read-only in the same transaction as the route. An
+  off-chain recheck, multisig authority, or source verification alone is not
+  atomic execution protection;
+- production custody limits and approval-device recovery procedures; and
 - the optional conversational model/provider and its operator-paid budget.
 
 Mainnet routes, assets, limits, and authorities remain out of scope until those
@@ -1701,64 +3061,99 @@ MITHRIL_AGENT_ORCA_LIVE_OWNER=DEVNET_WALLET_PUBLIC_KEY \
 MITHRIL_AGENT_ORCA_LIVE_REQUIRED=1 \
   go test -v ./swapbuilder -run TestLiveOrcaAdapterMatchesIndependentValidator -count=1
 
-promtool check rules deploy/prometheus/mithril-agent.rules.yml
-promtool test rules deploy/prometheus/mithril-agent.rules.test.yml
+MITHRIL_AGENT_LIVE_JUPITER_TEST=1 \
+MITHRIL_AGENT_LIVE_JUPITER_TAKER=WATCH_ONLY_MAINNET_WALLET \
+MITHRIL_AGENT_LIVE_MAINNET_RPC_URL=https://MAINNET_RPC \
+  go test -v ./jupiterquote ./jupiterswap \
+    -run 'TestLive(JupiterBuild|PinnedJupiterDeployment|CurrentJupiterRouteShape|CurrentJupiterIDL)' -count=1
+
+make test-prometheus
 ```
 
-The live Orca test is read-only. The repository contains no mainnet submission
-path and no external-RPC submission fallback. The one component that reads
-mainnet is shadow mode, which cannot sign; see "Shadow mode" below.
+The live Orca and Jupiter tests are read-only. The Jupiter tests fetch one
+proposal in each direction, verify the pinned on-chain deployment and its
+program-owned Anchor IDL, and require one current proposal to retain the
+supported `route_v2` contract; the wallet address is watch-only and no key is
+read. No command, generated service, or strategy runner can invoke the
+unexported Mainnet sender, and there is no external-RPC submission fallback.
+Shadow mode and `proposal check` can read Mainnet, but neither can sign; see
+"Shadow mode" below.
 
 ## Preserve demonstration evidence
 
 After the terminal result and explicit stop, preserve only sanitized status,
-the public transaction signature and explorer confirmation, monitoring and
-Telegram counter snapshots, and SHA-256 hashes of the journal and status file.
+the public transaction signature and configured independent evidence result,
+monitoring and Telegram counter snapshots, and SHA-256 hashes of the journal
+and status file. An explorer link is optional and is not evidence required by
+the system.
 Copy those artifacts to the operator-selected off-host audit location. Do not
 copy environment, config, or key material.
 
-With the runner stopped, verify the complete journal before copying its hashes:
+With the runner stopped, capture one coherent status-and-journal proof:
 
 ```sh
 sudo -u mithril-agent \
-  /usr/local/libexec/mithril-agent/mithril-agent journal verify \
-  --path /var/lib/mithril-agent/agent/state/events.jsonl
-
-sudo -u mithril-agent sha256sum \
-  /var/lib/mithril-agent/agent/state/events.jsonl.status.json
+  /usr/local/libexec/mithril-agent/mithril-agent audit snapshot \
+  --config /var/lib/mithril-agent/agent/config.json
 ```
 
-The journal command is read-only and prints only the format, record and byte
-counts, send-boundary counts, final chain hash, and exact-file SHA-256. The
-second command hashes the exact bounded status projection. A valid journal
-result proves internal chain consistency, not who created the journal. Anchor
-the journal file hash, chain head, and status-file hash in the off-host audit
-destination so a later rewrite is detectable.
+The command is read-only. It refuses an active journal, validates every rotated
+segment, requires the bounded status projection to match the configured profile
+fingerprint, strategy, and journal counters, and hashes the exact status bytes
+before emitting JSON. It preserves whether recovery is pending or a finalized
+failure/halt needs acknowledgement, without exposing the action ID. It prints
+no paths, addresses, transaction payloads,
+configuration, endpoints, or credentials. A valid result proves internal
+consistency, not who created the files. Store the complete JSON result in the
+off-host append-only audit destination so a later rewrite is detectable.
+`journal verify --path PATH` remains available as the lower-level journal-only
+check.
 
 ## Funding boundary
 
-The two-tier model puts a cap between the operator's own wallet and the agent's
-account: the main wallet funds a dedicated, limited-risk account, and the agent
-operates only within that account. The cap itself is a Squads v4 spending limit,
-which is enforced on-chain by a program this software does not control.
+The two-tier model puts a cap between a Squads reserve Vault and the agent's
+dedicated, limited-risk account. The agent operates only within that account.
+The cap itself is a Squads v4 spending limit enforced on-chain by the Squads
+program, not by the agent.
 
 ```bash
 mithril-agent funding check --spending-limit ADDRESS --multisig ADDRESS \
-  --destination ADDRESS --max-lamports N --period one-time,daily
+  --vault-index N \
+  --destination ADDRESS --max-base-units N --period one-time,daily \
+  --spender AGENT_ADDRESS --owner OPERATOR_ADDRESS
 ```
 
-It reports the worst case — the most that can ever leave the vault — and every
-way the on-chain limit differs from what the operator believes they configured.
-The check most worth having is the aimed-ness one: a spending limit with an
-empty destination list decodes perfectly and caps the amount, but lets funds
-leave for any address at all, so it is not a boundary.
+`--multisig` is the Multisig **configuration** account; do not fund it.
+`--vault-index` selects the asset-holding Vault PDA, which the command derives
+and prints. Native SOL is deposited at that Vault PDA. SPL assets live in a
+token account controlled by that Vault PDA.
+`--max-base-units` is lamports for native SOL and the selected mint's smallest
+unit for an SPL token (for example, micro-USDC for six-decimal USDC).
+`--spender` verifies that it is the only key authorized by this spending-limit
+account. Adding `--owner` also reads the Multisig config and makes its control
+and revocation findings part of the same fail-closed text or JSON verdict.
 
-This command only reads, and `make check-funding-isolation` proves the package
-cannot do anything else. That is deliberate. A funding boundary is worth having
-precisely because it is enforced somewhere this software cannot reach; if this
-software could move funds through it, the boundary would only be as trustworthy
-as this software, which defeats the point. Moving funds through it is a human
-action taken in Squads.
+The command reports the allowance for this spending-limit account and every
+way it differs from the operator's expectation. A one-time limit never refills.
+Daily, weekly, and monthly limits are rolling 24-hour, 7-day, and 30-day
+intervals anchored at the account's last reset; they refill indefinitely. The
+displayed current allowance is explicitly a local-clock projection because the
+program performs resets lazily. A limit with an empty destination list decodes
+perfectly and caps the amount, but lets funds leave for any address, so it is
+not an aimed boundary.
+
+The result covers one spending-limit account, not the Vault's total exposure.
+Multiple limits may coexist and their allowances add. The amount is also shared
+by every spender listed on that spending-limit account; it is not a per-member
+allowance. Removing a Multisig member does not remove a separate spending-limit
+authorization.
+
+This command only reads. `make check-funding-isolation` is a regression guard
+that keeps the `squads` package free of signing and submission imports; it is not
+a proof of process isolation. The reserve boundary still holds when an
+authorized automation key replenishes the agent through the spending limit,
+because Squads enforces the cap on-chain. Whether replenishment is manual or
+automated is a separate custody decision.
 
 A spending limit is a funding boundary, not a policy engine. Squads v4's
 `spending_limit_use` can only perform `system_program::transfer` and
@@ -1776,27 +3171,56 @@ rule have made money on a real market? It watches live prices and read-only
 pool quotes, runs the same deterministic decision pipeline, and writes down the
 trade it would have made — without ever being able to make one.
 
-```bash
-mithril-agent shadow run --policy PATH --dir PATH \
-  --node-command PATH --quote-script PATH --pool ADDRESS --input-mint ADDRESS
-```
+Create the policy with `mithril-agent shadow policy`; its output prints the
+correct run command for that policy's cluster and direction. For Mainnet it
+uses Jupiter and fixes the pair to SOL/USDC. A sell spends wrapped SOL and
+receives the canonical classic-SPL USDC mint; a buy reverses those two mints.
+For Devnet, provide `--pool`, `--input-mint`, and `--output-mint` while creating
+the policy; it prints the Orca adapter form instead. The quote provider, pool,
+and pair are part of the policy fingerprint. Optional route flags on `shadow
+run` can only repeat those values and cannot replace them.
 
 The endpoint comes from `MITHRIL_AGENT_SHADOW_RPC_URL` and is never printed,
 logged, or journalled. The default price pair — the sponsored Pyth push
 accounts read through an RPC, cross-checked against Coinbase — needs no
 credential on either side.
 
-There are two quote adapters. `adapters/orca/quote.mjs` serves the real trading
-path and is pinned to Devnet; `adapters/orca-mainnet/quote.mjs` is a read-only
-fork used only by shadow mode. That is a deliberate duplication: the trading
-adapter's inability to quote mainnet means the trading engine cannot be aimed
-there even by misconfiguration, and widening it would quietly delete that
-property to save a file.
+Mainnet accounting has a second, separate evidence pair. USDC proceeds are
+labelled as USD only while Pyth's sponsored USDC/USD account read through that
+same RPC and Kraken's public timestamped USDC/USD order-book snapshot both remain fresh,
+agree within policy, and their complete confidence interval stays between
+$0.99 and $1.01. A stale source, disagreement, or depeg makes the tick
+`shadow.unobservable`; it cannot trigger a hypothetical trade and is counted in
+the report's coverage. Scheduled observations missed while the runner is down
+also reduce coverage; the report shows both attempted and expected observations
+so an outage cannot look like a fully observed period. The generated policy
+pins both source identities and the report repeats the allowed accounting
+range. No provider credential is needed.
+Devnet does not claim this: devUSDC is a test token, so its results remain a
+mechanics proxy rather than dollar P&L evidence.
 
-`MITHRIL_AGENT_SHADOW_RPC_URL` supplies price reads and accepts plain HTTP on
-loopback, so it can read the operator's own verifying node; anything off-box
-must be HTTPS. `MITHRIL_AGENT_QUOTE_RPC_URL` supplies the quote adapter and is
-HTTPS only.
+An unobservable tick includes only a bounded `reason` code such as
+`market_price_unavailable`, `market_price_invalid`,
+`quote_currency_price_unavailable`, `quote_currency_price_invalid`, or
+`quote_currency_outside_policy`. These identify the stage an operator should
+check without copying provider errors, endpoints, credentials, or response
+payloads into terminal output or the shareable journal. A later `shadow report`
+with no observable tick repeats the latest bounded reason.
+
+Shadow policy version 3 binds the quote provider, pool, and token pair in
+addition to the Mainnet accounting evidence introduced by version 2. Older
+policies are intentionally refused; generate a new policy and start a new
+evidence directory rather than relabelling old results.
+
+`adapters/orca/quote.mjs` serves the trading path and is pinned to Devnet.
+Mainnet shadow mode uses the separate keyless Jupiter reader in Go; it does not
+widen or reuse the trading adapter. The trading engine therefore cannot be
+aimed at Mainnet by changing an adapter option.
+
+`MITHRIL_AGENT_SHADOW_RPC_URL` supplies price reads and accepts plain HTTP only
+on a literal loopback IP, so it can read the operator's own verifying node;
+anything off-box must be HTTPS. `MITHRIL_AGENT_QUOTE_RPC_URL` supplies the quote
+adapter and is HTTPS only.
 
 ### Scoring a round trip
 
@@ -1805,6 +3229,21 @@ half the question. The other half — "and could I buy back low enough for the
 round trip to clear its own costs" — cannot be answered by running the legs
 separately, because the second leg spends exactly what the first produced and
 the spread plus two fees comes out of one book.
+
+For live evidence, generate a continuous round trip by giving both thresholds:
+
+```bash
+mithril-agent shadow policy --out POLICY --observe WATCH_ONLY_ADDRESS \
+  --sell-at-usd 240 --buy-at-usd 200 --amount 1000000
+```
+
+`shadow run` starts with the sell leg, switches to the buy-back leg only after
+a filled sell, and sizes that return leg from what the sell actually received.
+After a filled buy it switches back, never spending more than that leg returned
+or the shadow book holds. It still cannot sign or submit anything.
+
+The offline replay below is useful for testing different thresholds against an
+already-recorded price series without waiting for another live period:
 
 ```bash
 mithril-agent shadow backtest --policy PATH --dir PATH \
@@ -1845,9 +3284,15 @@ How it avoids flattering itself:
 - Each UTC day is an independent trial with its own opening mark and its own
   hold benchmark, so a run of daily reports is a walk-forward, not a backtest.
 - The report states how much of the period was actually observable and how many
-  signals could not be acted on, and leads with a caveat when coverage was poor.
+  signals could not be acted on, counts scheduled observations missed while the
+  runner was down, and leads with a caveat when coverage was poor.
+- Mainnet USD figures are emitted only while two independent USDC/USD sources
+  keep the quote token inside the policy's recorded peg band.
+- Every settled record carries its exact read-only decision quote. Replay rejects
+  a fill without a mature prior decision or whose quote, amounts, direction,
+  timing, trigger state, or equity cannot be reproduced.
 
-Every report ends by stating that nothing was traded, no key was loaded, and
+Every report ends by stating that nothing was traded, no wallet signing key was loaded, and
 nothing was signed.
 
 The report is not something you take on trust. It is derived by replaying the
@@ -1860,6 +3305,28 @@ mithril-agent shadow report --policy PATH --dir PATH [--day YYYY-MM-DD]
 That recomputes the day from the record alone and compares the result against
 the stored report field by field. A disagreement is shown rather than resolved,
 because a disagreement is the finding — and the journal, being hash-chained, is
-the side to trust. The day's report covers the whole journal rather than one
+the side to trust. A clean stop also records the exact report boundary in that
+chain, so recomputation never guesses that a partial current day ran until a
+future midnight. The day's report covers the whole journal rather than one
 process's counters, so a runner that restarts mid-day still reports the whole
-day instead of silently understating it.
+recorded period. The first journal record binds the exact policy to that day.
+On restart the runner restores its books, completed
+round-trip direction, and next amount from the verified record. An in-flight
+quote is never reconstructed: it is recorded as missed on the first fresh
+observation, then the rule continues. A different policy or the older
+non-resumable journal format is refused instead of being mixed into the day.
+
+Once the observer has run for the period the operator chose in advance, verify
+the whole walk-forward rather than selecting favourable days:
+
+```bash
+mithril-agent shadow review --policy PATH --dir PATH --days N
+```
+
+`shadow review` accepts only the immediately preceding `N` complete,
+consecutive Mainnet UTC days. It replays every hash-chained journal, requires
+at least 95% observable coverage on each day, and summarizes the result against
+holding. It deliberately does not decide whether the strategy is profitable
+or authorize anything: its result is
+`strategy_evidence_complete_not_approved`, requires an operator decision, and
+leaves execution disabled.

@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "recorded_date": "2026-08-25",
+  "scope": "classic_devnet_walletless_acceptance",
+  "production_acceptance": false,
+  "cluster": {
+    "name": "devnet",
+    "genesis_hash": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+    "provenance": "mithril_classic_finalized_feed"
+  },
+  "artifacts": {
+    "node_source_archive": "mithril-walletless-port-20260825-r9.tar.gz",
+    "node_source_sha256": "fdbeffc11fccb8f973fec8e349ba31c7ebad1549a7645058697b1237fb67ae4f",
+    "node_linux_sha256": "cb55018d4df805fb0b7736fe503ae4f55fd8c8457592f1e38af68ef264d74c26",
+    "agent_linux_sha256": "4301c22322ff3c47e6e3b1baebb24091a7a19b2a1ab5a575a72417495893769d",
+    "mcp_helper_sha256": "0d77a582b369cb5205a2b49bfa738671b63334e647054169ec129463c2c04d8b",
+    "acceptance_harness_sha256": "b2d887f583828c57532c324fe1ac96a4dee8210cf17c4f42d8ca34cc22946348",
+    "sanitized_summary_sha256": "a0d8dd7f993a6e0891d28bd1db54cd8d495f701f86e23a3e7b0c603c9d8c1662"
+  },
+  "runtime": {
+    "first_rooted_slot": 487740488,
+    "final_rooted_slot": 487740602,
+    "required_trailing_verification": true,
+    "rooted_durable": true,
+    "restart_from_accountsdb": true,
+    "exact_cursor_resume": true,
+    "retention_gap_rejected": true,
+    "graceful_shutdown": true
+  },
+  "walletless": {
+    "program": "Memo",
+    "rooted_indexes": 3,
+    "program_mcp_tools": 7,
+    "index_mcp_tools": 3,
+    "unsigned_simulation": true,
+    "wallet_loaded": false,
+    "signature_created": false,
+    "transaction_submitted": false,
+    "explorer_used": false
+  },
+  "limits": {
+    "mainnet_capacity_accepted": false,
+    "funded_mainnet_actions_enabled": false,
+    "steady_state_soak_complete": false
+  }
+}

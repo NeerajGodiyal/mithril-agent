@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "recorded_date": "2026-08-19",
+  "scope": "walletless_devnet_memo_transport_flaw_discovery",
+  "production_acceptance": false,
+  "finding": {
+    "node_identity_verified": false,
+    "description": "The loopback endpoint forwarded a generic Devnet RPC. The original client checked loopback and genesis but did not prove that the endpoint was Mithril before labeling the responses.",
+    "fix": "Program read, fetch, doctor, and simulation now require Mithril getVerificationStatus with an open evidence gate before accepting the configured genesis.",
+    "required_regression": "The same generic loopback proxy must be rejected before program evidence is accepted. A later successful acceptance must use a real Mithril node and a new evidence record.",
+    "regression_passed": true
+  },
+  "regression": {
+    "target": "linux/amd64",
+    "static_executable": true,
+    "sha256": "b9548e9152939d7c796235b527b2621f6c6d7e8ed7e30fcf760d1c55f3ac2e89",
+    "generic_loopback_workspace_doctor_exit": 1,
+    "generic_loopback_workspace_doctor_ready": false,
+    "generic_loopback_rejected_before_context_read": true,
+    "reason": "configured Mithril node is unavailable or does not match the workspace",
+    "real_mithril_live_acceptance_pending": true
+  },
+  "artifact": {
+    "source_revision": "434c6aa-dirty",
+    "go_version": "go1.26.6",
+    "target": "linux/amd64",
+    "static_executable": true,
+    "sha256": "e1f006c7c205d12a14ce5bee9676c3e7a0d5003290ad2ca7560799da076a8120"
+  },
+  "interface": {
+    "program": "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",
+    "spec": "codama/1.0.0",
+    "instruction": "addMemo",
+    "sha256": "d3f10aac6889e2082015b0b8842c158dc93fab88d37a26de6df4ef2853cefffe"
+  },
+  "workspace_doctor": {
+    "status": "ready",
+    "cluster": "devnet",
+    "genesis_hash": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+    "context_slot": 485414963,
+    "provenance": "mithril_processed_bank",
+    "finality": "processed",
+    "rooted_ready": false,
+    "wallet_loaded": false,
+    "explorer_required": false
+  },
+  "cli_simulation": {
+    "status": "simulated",
+    "context_slot": 485415161,
+    "units_consumed": 12778,
+    "message_sha256": "cd5cb38092d44b3f367a017fc1e2465cbf1d670dc2dfc95fdda832fa780c11d0",
+    "unsigned_transaction_sha256": "0728efffd071c7bb3b14046966060e7dd7a2606f52238176e84af786aa33d6e5",
+    "logs_sha256": "b6d58d96433fcb79bd73d11143922e8dce990da284996fd62df4c34a46b26e61",
+    "walletless": true
+  },
+  "remote_mcp": {
+    "transport": "authenticated_ssh_stdio",
+    "negotiated_legacy_protocol": "2025-11-25",
+    "current_sdk_discovery_protocol": "2026-07-28",
+    "current_sdk_focused_tests_passed": true,
+    "tool_count": 5,
+    "tools": [
+      "mithril_program_interface",
+      "mithril_program_build_unsigned",
+      "mithril_program_simulate",
+      "mithril_program_read_account",
+      "mithril_program_decode_instruction"
+    ],
+    "all_tools_read_only": true,
+    "interface_call": "passed",
+    "simulation_call": "passed",
+    "context_slot": 485416231,
+    "units_consumed": 11511,
+    "message_sha256": "081a991454e25f263a0f9f37a53a3f2b78d210f9bf8ef2bd22e24a24d0de5812",
+    "unsigned_transaction_sha256": "c4f547b25cbea5a728c22e083413ad887412f36bbc4f31e4e3170f9edc516dc8",
+    "logs_sha256": "7beb88d5798d6bf076e81db4cfad5253816a11ca1dd7552c1487d864f1fdc03d",
+    "walletless": true
+  },
+  "safety": {
+    "loopback_only_rpc_boundary": true,
+    "upstream_tls_verified": true,
+    "wallet_or_private_key_loaded": false,
+    "signature_created": false,
+    "transaction_submitted": false,
+    "explorer_used": false,
+    "public_listener_opened": false,
+    "rooted_claim_made": false,
+    "raw_logs_or_transaction_payload_retained": false,
+    "result_must_not_be_cited_as_mithril_node_acceptance": true
+  }
+}

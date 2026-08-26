@@ -10,8 +10,8 @@ The pilot can:
 
 - read health and slot evidence from a Mithril Devnet node;
 - validate one fixed Devnet swap route and its limits;
-- permit at most one trade, sign it in a separate process, and submit it only
-  through Mithril RPC;
+- permit at most one trade, sign it through a separately confined
+  socket-activated identity, and submit it only through Mithril RPC;
 - confirm the outcome using independent read providers;
 - return to stopped mode and preserve a hash-chained audit record;
 - expose bounded status through MCP, Telegram, and Prometheus.
@@ -19,7 +19,7 @@ The pilot can:
 It does not enable Mainnet trading, arbitrary tokens, or trade approval from
 Telegram or an LLM. The complete strategy can repeat only within an explicit
 time, action-count, schedule, and daily-spend grant. Shadow mode does *read*
-Mainnet, but it holds no key and cannot sign; see "Watching a real market"
+Mainnet, but it holds no wallet signing key and cannot sign; see "Watching a real market"
 below.
 
 ## Handing this to someone non-technical
@@ -61,6 +61,18 @@ Before handoff, the operator must prove all of these:
 sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
   /usr/local/bin/mithril-agent strategy show  # sell and sweep are listed
 systemctl is-active mithril-agent-run.service
+systemctl is-active mithril-agent-signer-sell.socket
+systemctl is-active mithril-agent-signer-sweep.socket
+systemctl is-active mithril-agent-policy-sell.socket
+systemctl is-active mithril-agent-policy-sweep.socket
+systemctl is-active mithril-agent-submitter-sell.socket
+systemctl is-active mithril-agent-submitter-sweep.socket
+systemctl is-active mithril-agent-submitter-operator-sell.socket
+systemctl is-active mithril-agent-submitter-operator-sweep.socket
+systemctl is-active mithril-agent-recovery-sell.timer
+systemctl is-active mithril-agent-recovery-sweep.timer
+systemctl is-active mithril-agent-status-sell.socket
+systemctl is-active mithril-agent-status-sweep.socket
 ```
 
 Then run the supervised no-trade check shown below and require it to say that
@@ -103,8 +115,8 @@ make walkthrough     # watch the real machinery run, on live prices
 ```
 
 `make explain` and `make walkthrough` build what they need, so there is no
-separate build step. All four need a Go toolchain and nothing else — no wallet,
-no server, no account.
+separate build step. All four need a Go toolchain and nothing else — no
+configured wallet, server, or provider account.
 
 Neither command needs a wallet, a host, or a configuration. Creating a strategy
 does need the prepared Linux host and must follow the supervised installation
@@ -134,6 +146,7 @@ operator shell:
 ```sh
 sudo systemd-run --quiet --wait --pipe --collect \
   --uid=mithril-agent --gid=mithril-agent \
+  --setenv=HOME=/var/lib/mithril-agent \
   -p 'EnvironmentFile=/etc/mithril-agent/rpc.env' \
   -p 'EnvironmentFile=/etc/mithril-agent/quote.env' \
   -p 'EnvironmentFile=-/etc/mithril-agent/mcp.env' \
@@ -195,7 +208,8 @@ result. A successful run ends with:
 
 - `Devnet trade complete`;
 - the input, output, and minimum output;
-- a transaction signature and Devnet Explorer link;
+- a transaction signature, locally reconciled result, and optional Devnet
+  Explorer link;
 - `Control: stopped`.
 
 Any timeout or terminal failure also attempts to stop new actions. Do not
@@ -263,7 +277,13 @@ or failure from SSH, a terminal, or a missing Telegram message.
 
 ## MCP and Telegram
 
-Configure any MCP client to launch:
+Print a paste-ready configuration containing every active strategy leg:
+
+```sh
+/usr/local/libexec/mithril-agent/mithril-agent mcp config
+```
+
+The equivalent single-leg MCP entry launches:
 
 ```text
 command: /usr/local/libexec/mithril-agent/mithril-agent
@@ -291,25 +311,30 @@ policy, signing, submission, or confirmation.
 
 ## Verify the evidence
 
-The full-strategy runner holds all three journal locks, so journal verification
+The full-strategy runner holds all three journal locks, so audit capture
 must not run while that service is active. During a planned review window, stop
-the generated runner, verify every journal, then start the runner again. Its
+the generated runner, capture every leg, then start the runner again. Its
 service starts with new actions disabled:
 
 ```sh
 sudo systemctl stop mithril-agent-run.service
 for leg in sell buy sweep; do
-  sudo -u mithril-agent \
-    /usr/local/libexec/mithril-agent/mithril-agent journal verify \
-    --path "/var/lib/mithril-agent/.mithril-agent/strategy-data/$leg/state/events.jsonl" \
+  sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
+    /usr/local/libexec/mithril-agent/mithril-agent audit snapshot \
+    --config "/var/lib/mithril-agent/.mithril-agent/strategy-data/$leg/config.json" \
     || exit 1
 done
 sudo systemctl start mithril-agent-run.service
 ```
 
-The verification must pass. If setup used a custom strategy directory, use its
-three `state/events.jsonl` paths instead. After restart, wait for all public
-statuses to become recent and confirm that every leg remains stopped.
+Every snapshot must pass and should be stored in the operator-selected
+append-only destination outside this host. If setup used a custom strategy
+directory, use its three `config.json` paths instead. After an ordinary
+restart, wait for all public statuses to become recent and confirm that every
+leg remains stopped. A restart that finds `recovery_pending` preserves it. The
+keyless recovery timer clears it only when both bound providers agree on the
+exact finalized effects; otherwise independently review the transaction and
+issue an explicit stop before retrying.
 
 ## Handoff checklist
 
@@ -318,7 +343,7 @@ statuses to become recent and confirm that every leg remains stopped.
   healthy with no unexpected restarts before the demo and after any planned
   journal-verification restart.
 - The live check reports ready at a fresh Devnet slot.
-- The wallet and action limits are disposable and understood.
+- The wallet balance and action limits are deliberately small and understood.
 - One demonstration completes or fails closed; it is never repeated blindly.
 - Final control mode is `no_new_actions`; any failed or halted result and its
   attention state remain visible. The journal verifies only in the planned
@@ -336,17 +361,37 @@ whether the rule would make money. Shadow mode answers that separately: it
 watches a live market — including Mainnet — and records the trade it would have
 made, without being able to make one.
 
+Create a policy first. Give either threshold for one direction, or both for a
+continuous sell-then-buy-back test:
+
 ```sh
-mithril-agent shadow run --policy PATH --dir PATH \
-  --node-command PATH --quote-script PATH --pool ADDRESS --input-mint ADDRESS
+mithril-agent shadow policy --out POLICY --observe WATCH_ONLY_ADDRESS \
+  --sell-at-usd 240 --buy-at-usd 200 --amount 1000000
 ```
 
-It writes a hash-chained journal per UTC day and a report beside it. The report
+The command stores the quoted venue and token pair in the policy and prints the
+exact `shadow run` invocation; replace only the labelled paths.
+
+The run writes a hash-chained journal per UTC day and a report beside it. The report
 scores every decision against a price observed *after* the decision was made,
 charges the transaction fee on every fill, refuses any fill that would have
 breached its own slippage floor, and compares the result against simply holding.
 It also states how much of the period it could actually see, and leads with a
 warning when that was poor.
+
+For Mainnet, the generated policy also pins two independent USDC/USD sources.
+Each observable tick requires Pyth's sponsored on-chain USDC feed and Kraken's
+timestamped public order-book snapshot to agree with their complete confidence interval
+inside $0.99-$1.01. A stale source, disagreement, or depeg records an
+unobservable tick and cannot produce a hypothetical trade. The report repeats
+this accounting bound. Devnet uses a test quote token and does not claim dollar
+profitability.
+
+A same-day restart resumes the verified books and round-trip direction instead
+of starting the strategy over. If the prior process stopped with a quote in
+flight, that decision is recorded as missed on the next fresh observation; no
+fill is invented. Changing the policy requires a new journal directory or a
+new UTC day.
 
 You can recompute any day's result yourself from the record:
 
@@ -357,6 +402,17 @@ mithril-agent shadow report --policy PATH --dir PATH
 It replays the hash-chained journal and tells you whether the stored report
 matches it, field for field.
 
-Shadow mode holds no key. The package it lives in declares no signer, no
-submitter, and no field that could name a key, and two tests fail the build if
+After an operator-chosen multi-day run, review every immediately preceding
+complete day together rather than selecting favourable days:
+
+```sh
+mithril-agent shadow review --policy PATH --dir PATH --days N
+```
+
+Each day must be a trustworthy Mainnet day with at least 95% observable
+coverage. The command summarizes evidence for a person to judge; it never
+approves a strategy, signs, submits, or enables execution.
+
+Shadow mode holds no wallet signing key. The package it lives in declares no
+signer, no submitter, and no field that could name one, and two tests fail the build if
 that ever stops being true.
