@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -10,6 +12,45 @@ import (
 	"testing"
 	"time"
 )
+
+func TestStrategySetupRejectsFloorToleranceBeforeNarrowing(t *testing.T) {
+	err := runStrategySetup(context.Background(), []string{
+		"--floor-tolerance-bps", "70000",
+	}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "at most 2000") {
+		t.Fatalf("oversized floor tolerance = %v, want a refusal before uint16 conversion", err)
+	}
+}
+
+func TestOlderStrategyIsDecodedForMigrationWithoutLosingItsProof(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "strategy.json")
+	legacy := map[string]any{
+		"size_sol": "0.05", "sell_at_usd": "250", "buy_at_usd": "200",
+		"sweep": map[string]any{
+			"enabled": true, "to": "wallet", "proof_nonce": "nonce",
+			"proof_issued": "issued", "proof_signature": "signature",
+		},
+	}
+	encoded, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readStrategyFileForEdit(path)
+	if err != nil {
+		t.Fatalf("older strategy could not seed guided migration: %v", err)
+	}
+	if got.SizeSOL != "0.05" || got.Sweep.To != "wallet" ||
+		got.Sweep.ProofNonce != "nonce" || got.Sweep.ProofIssued != "issued" ||
+		got.Sweep.ProofSignature != "signature" {
+		t.Fatalf("older strategy fields were lost: %+v", got)
+	}
+	if _, err := readStrategyFile(path); err == nil {
+		t.Fatal("older strategy was accepted without the new provider names")
+	}
+}
 
 // The plan is derived once, before any file is written, so a strategy that
 // cannot work is refused rather than half-configured.
@@ -106,8 +147,8 @@ func TestStrategySetupRecordsTheVerifiedDestinationProof(t *testing.T) {
 	}
 	strategyPath := filepath.Join(dir, "strategy.json")
 	if err := writeStrategyFile(strategyPath, strategyFile{
-		SizeSOL: "0.05",
-		Sweep:   strategyFileSweep{Enabled: true, To: "destination"},
+		SizeSOL: "0.05", PrimaryTrustDomain: "provider-one", SecondaryTrustDomain: "provider-two",
+		Sweep: strategyFileSweep{Enabled: true, To: "destination"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -304,9 +345,12 @@ func TestSetupStrategyAsksOnlyForWhatItCannotFindItself(t *testing.T) {
 			t.Errorf("setup strategy no longer discovers %s; the operator must type it", discovered)
 		}
 	}
-	// The trust domains have working defaults rather than being mandatory.
-	if !strings.Contains(text, `firstNonEmpty(*primaryTrust, "primary-provider")`) {
-		t.Error("the evidence trust domains are mandatory again")
+	// Provider ownership must never be invented: two keys from one company are
+	// not independent just because setup assigned them different labels.
+	for _, invented := range []string{`"primary-provider"`, `"secondary-provider"`} {
+		if strings.Contains(text, invented) {
+			t.Errorf("setup still invents an evidence provider identity: %s", invented)
+		}
 	}
 	// The floor is confirmed on screen, not fetched from a second command and
 	// pasted back — that round trip is where a stale number gets pasted.

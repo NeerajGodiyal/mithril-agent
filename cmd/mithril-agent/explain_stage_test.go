@@ -63,3 +63,10 @@ func TestExplanationsNeverSuggestBypassingTheGate(t *testing.T) {
 		}
 	}
 }
+
+func TestWalletExplanationUsesTheDedicatedWalletModel(t *testing.T) {
+	got := strings.ToLower(explainStage("wallet_balance"))
+	if !strings.Contains(got, "dedicated") || strings.Contains(got, "disposable") {
+		t.Errorf("wallet explanation contradicts the dedicated wallet model: %q", got)
+	}
+}

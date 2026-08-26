@@ -156,6 +156,97 @@ func TestStrategyStopRequiresAReason(t *testing.T) {
 	}
 }
 
+// A service restart is not an operator acknowledgement. If a process died
+// after the durable send marker, clearing that marker in ExecStartPre hid the
+// only evidence that the transaction might have reached the network.
+func TestAutomaticServiceStopPreservesPendingRecovery(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	configPath, statePath := armedSwapLeg(t, t.TempDir())
+	cfg, err := readSwapConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := cfg.Swap.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := control.NewStateFile(statePath, fingerprint, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actionID := strings.Repeat("a", 64)
+	blocked, err := state.WithSendBarrier(actionID, func() error { return nil })
+	if err != nil || blocked {
+		t.Fatalf("mark send boundary: blocked=%t error=%v", blocked, err)
+	}
+
+	if err := stopStrategyLeg("sell", configPath, "service_start"); err == nil ||
+		!strings.Contains(err.Error(), "review the transaction") {
+		t.Fatalf("automatic service stop = %v", err)
+	}
+	status, err := state.Status()
+	if err != nil || !status.RecoveryPending {
+		t.Fatalf("automatic stop lost recovery evidence: status=%+v error=%v", status, err)
+	}
+
+	if err := stopStrategyLeg("sell", configPath, "operator reviewed the pending action"); err != nil {
+		t.Fatal(err)
+	}
+	status, err = state.Status()
+	if err != nil || status.RecoveryPending || status.Mode != control.ModeNoNewActions {
+		t.Fatalf("explicit stop did not resolve recovery: status=%+v error=%v", status, err)
+	}
+}
+
+func TestAutomaticServiceStopPreservesPendingSweepRecovery(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "control.json")
+	profile := testSweepProfileForStrategy(
+		reserveOwner, otherOwner, time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC).Unix(),
+	)
+	cfg := config{Profile: profile}
+	cfg.Control.StatePath = statePath
+	configPath := filepath.Join(dir, "config.json")
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := profile.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := control.WriteDevnetActivation(
+		statePath, fingerprint, now, now.Add(time.Hour), 2, "armed sweep",
+	); err != nil {
+		t.Fatal(err)
+	}
+	state, err := control.NewStateFile(statePath, fingerprint, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actionID := strings.Repeat("b", 64)
+	if blocked, err := state.WithSendBarrier(actionID, func() error { return nil }); err != nil || blocked {
+		t.Fatalf("mark sweep send boundary: blocked=%t error=%v", blocked, err)
+	}
+
+	if err := stopStrategyLeg("sweep", configPath, "service_stop"); err == nil ||
+		!strings.Contains(err.Error(), "review the transaction") {
+		t.Fatalf("automatic sweep stop = %v", err)
+	}
+	status, err := state.Status()
+	if err != nil || !status.RecoveryPending {
+		t.Fatalf("automatic sweep stop lost recovery evidence: status=%+v error=%v", status, err)
+	}
+	if err := stopStrategyLeg("sweep", configPath, "operator reviewed the pending sweep"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Nothing configured must say so rather than reporting a successful stop of
 // nothing at all.
 func TestStrategyStopSaysWhenThereIsNothingToStop(t *testing.T) {

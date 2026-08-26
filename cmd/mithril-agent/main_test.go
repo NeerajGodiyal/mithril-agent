@@ -126,13 +126,15 @@ func TestRootHelpPrioritizesSupportedCommands(t *testing.T) {
 	if strings.ContainsRune(help, '\t') {
 		t.Fatalf("root help contains tab indentation:\n%s", help)
 	}
-	documentation := strings.Index(help, "/usr/local/share/doc/mithril-agent/QUICKSTART.md")
+	documentation := strings.Index(help, "Read README.md, then ROADMAP.md")
+	program := strings.Index(help, "mithril-agent program --help")
+	index := strings.Index(help, "mithril-agent index --help")
+	optional := strings.Index(help, "Optional bounded Devnet trading pilot")
 	status := strings.Index(help, "mithril-agent status --status-socket /run/mithril-agent-status-sell.sock")
-	start := strings.Index(help, "mithril-agent start")
 	legacy := strings.Index(help, "Legacy single-leg check, demo, preflight, and swap commands")
-	if documentation < 0 || status < 0 || start < 0 || legacy < 0 ||
-		documentation > status || status > start || start > legacy {
-		t.Fatalf("root help does not prioritize the generated strategy flow:\n%s", help)
+	if documentation < 0 || program < 0 || index < 0 || optional < 0 || status < 0 || legacy < 0 ||
+		documentation > program || program > index || index > optional || optional > status || status > legacy {
+		t.Fatalf("root help does not prioritize the walletless workflow:\n%s", help)
 	}
 	if strings.Contains(help, "mithril-agent devnet-check") ||
 		strings.Contains(help, "mithril-agent devnet-enable") ||
@@ -141,11 +143,20 @@ func TestRootHelpPrioritizesSupportedCommands(t *testing.T) {
 		t.Fatalf("root help advertises unsupported legacy commands:\n%s", help)
 	}
 	for _, statement := range []string{
-		"one generated strategy: sell, buy, sweep",
+		"walletless Solana program and index workflows",
+		"default workflows load no wallet or signing key",
+		"strategy dca-plan ...   plan only; never arms, signs, or submits",
+		"optional setup is one generated strategy: sell, buy, sweep",
 		"Run these strategy commands as the mithril-agent service identity",
+		"shadow review --policy PATH --dir PATH --days N",
+		"proposal check --taker ADDR --input-mint ADDR --output-mint ADDR --amount N",
+		"proposal review --request ABSOLUTE_PATH --signer-policy PATH",
+		"proposal approval-create --request ABSOLUTE_PATH --authority-policy PATH --out PATH",
+		"program inspect --idl PATH --program ADDRESS",
+		"program read-account --registry PATH",
 		"MCP and Telegram are read-only.",
 		"Neither can enable, sign, or submit a trade.",
-		"Trading remains\nDevnet-only",
+		"Trading remains Devnet-only",
 	} {
 		if !strings.Contains(help, statement) {
 			t.Fatalf("root help is missing %q:\n%s", statement, help)
@@ -231,6 +242,18 @@ func TestTopLevelCheckAndDemoAliasesKeepCanonicalHelp(t *testing.T) {
 	}
 }
 
+func TestProposalHelpListsEverySafeSubcommand(t *testing.T) {
+	var output bytes.Buffer
+	if err := runContext(t.Context(), []string{"proposal", "--help"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"check", "recheck", "prepare", "review", "key-create", "policy-create", "policy-check", "turnkey-policy"} {
+		if !strings.Contains(output.String(), "proposal "+command) {
+			t.Errorf("proposal help omitted %q: %q", command, output.String())
+		}
+	}
+}
+
 func TestConfigRequiresExactlyOneProfile(t *testing.T) {
 	swap := testSwapProfile("3qbR1eZRqXUWroWKKYhbDmR3FfqTHfqSU8zZSxtANzYh")
 	buy := testBuySwapProfile(t)
@@ -308,6 +331,14 @@ func TestSocketOperatorProviderUsesOnlyBoundedStatus(t *testing.T) {
 		Cluster: "devnet", Result: execution.Result{Decision: "stopped"},
 		Journal: journal.Stats{MaxRecords: 100, MaxBytes: 1024},
 		Control: control.Status{Mode: control.ModeNoNewActions},
+		Strategy: operatorstatus.StrategyProjection{
+			Configured: true, Direction: "buy", InputAmount: 1_000_000,
+			DailyCap: 3_000_000, MaxFeeLamports: 100_000, FundedTradesPerDay: 3,
+			PriceDirection: "buy_at_or_below", PriceThresholdMicros: 150_000_000,
+			SweepConfigured: true, SweepProofValid: true,
+			SweepKeepLamports: 100_000_000, SweepMaxLamports: 50_000_000,
+			SweepDailyLamports: 100_000_000, SweepActiveAfter: now.Add(time.Hour),
+		},
 	}}
 	provider, err := newSocketOperatorProvider(reader, func() time.Time { return now })
 	if err != nil {
@@ -329,12 +360,74 @@ func TestSocketOperatorProviderUsesOnlyBoundedStatus(t *testing.T) {
 		view.Profile != orcaswap.BuyProfileName {
 		t.Fatalf("socket MCP status = %+v", view)
 	}
+	strategy, err := provider.Strategy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strategy.Configured || strategy.Direction != "buy SOL with devUSDC" ||
+		strategy.InputPerAction != "1.000000 devUSDC" ||
+		strategy.DailyCap != "3.000000 devUSDC" ||
+		strategy.FundedTradesPerDay != 3 ||
+		strategy.PriceRule != "buy_at_or_below $150.000000" ||
+		!strategy.SweepConfigured || !strategy.SweepProofValid ||
+		strategy.ControlMode != control.ModeNoNewActions {
+		t.Fatalf("socket MCP strategy = %+v", strategy)
+	}
+	encoded, err := json.Marshal(strategy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"address", "keypair", "/var/", "http://", "https://"} {
+		if strings.Contains(strings.ToLower(string(encoded)), forbidden) {
+			t.Errorf("bounded strategy contains private locator %q: %s", forbidden, encoded)
+		}
+	}
 	guide := provider.OperatorGuide()
 	if guide.SafeLocalCommand != supervisedDemoCommand ||
 		!strings.Contains(guide.SafeLocalCommand, "systemctl start --wait") ||
 		!strings.Contains(guide.SafeLocalCommand, "mithril-agent-demo.service") ||
 		strings.Contains(guide.SafeLocalCommand, "systemd-run") {
 		t.Fatalf("socket MCP guide = %+v", guide)
+	}
+}
+
+func TestStrategyProjectionAttachesOnlyAValidBoundSweep(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	profile := testSwapProfile(reserveOwner)
+	sell := filepath.Join(dir, "sell.json")
+	writeJSON(t, sell, config{Swap: &profile})
+	sweep := filepath.Join(dir, "sweep.json")
+	anchor := time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC).Unix()
+	if err := recordStrategy(strategyPaths{sell: sell, sweep: sweep}); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, sweepProfile := range map[string]agent.Profile{
+		"valid": testSweepProfileForStrategy(reserveOwner, otherOwner, anchor),
+		"zero reserve": func() agent.Profile {
+			p := testSweepProfileForStrategy(reserveOwner, otherOwner, anchor)
+			p.ReserveLamports = 0
+			return p
+		}(),
+		"wrong wallet": testSweepProfileForStrategy(otherOwner, reserveOwner, anchor),
+		"malformed": func() agent.Profile {
+			p := testSweepProfileForStrategy(reserveOwner, otherOwner, anchor)
+			p.ScheduleWindowSeconds = 0
+			return p
+		}(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeJSON(t, sweep, config{Profile: sweepProfile})
+			projection, err := strategyProjection(profile, sell)
+			if err != nil {
+				t.Fatalf("display-only sweep metadata stopped status: %v", err)
+			}
+			want := name == "valid" || name == "zero reserve"
+			if projection.SweepConfigured != want {
+				t.Fatalf("sweep configured = %v, want %v", projection.SweepConfigured, want)
+			}
+		})
 	}
 }
 
@@ -686,8 +779,8 @@ func TestTerminalActionDurablyStopsRemainingActivation(t *testing.T) {
 				t.Fatalf("consume first action: blocked=%v err=%v", blocked, err)
 			}
 			status, err := state.Status()
-			if err != nil || !status.RecoveryPending {
-				t.Fatalf("recovery state before terminal result = %+v, %v", status, err)
+			if err != nil || !status.RecoveryPending || status.Mode != control.ModeNoNewActions {
+				t.Fatalf("remaining activation before terminal result = %+v, %v", status, err)
 			}
 
 			ctx, cancel := context.WithCancel(t.Context())
@@ -865,7 +958,7 @@ type shutdownControlStub struct {
 	err    error
 }
 
-func (s *shutdownControlStub) Stop(reason string) error {
+func (s *shutdownControlStub) StopPreservingRecovery(reason string) error {
 	s.called = reason == "runner shutdown"
 	return s.err
 }
@@ -920,6 +1013,37 @@ func TestRunnerShutdownAlwaysRevokesAndCloses(t *testing.T) {
 				t.Fatalf("successful shutdown error = %v", runErr)
 			}
 		})
+	}
+}
+
+func TestRunnerShutdownPreservesPendingRecovery(t *testing.T) {
+	directory := t.TempDir()
+	fingerprint := strings.Repeat("a", 64)
+	path := filepath.Join(directory, "control.json")
+	now := time.Now().UTC()
+	if err := control.WriteDevnetActivation(
+		path, fingerprint, now.Add(-time.Second), now.Add(time.Hour), 2, "test",
+	); err != nil {
+		t.Fatal(err)
+	}
+	state, err := control.NewStateFile(path, fingerprint, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocked, err := state.WithSendBarrier(
+		strings.Repeat("b", 64), func() error { return nil },
+	); err != nil || blocked {
+		t.Fatalf("send barrier = blocked %t, error %v", blocked, err)
+	}
+	runtime := &shutdownRuntimeStub{}
+	var runErr error
+	shutdownRunner(&runErr, state, runtime)
+	if !runtime.called || runErr != nil {
+		t.Fatalf("shutdown runtime called=%t error=%v", runtime.called, runErr)
+	}
+	status, err := state.Status()
+	if err != nil || !status.RecoveryPending || status.Mode != control.ModeNoNewActions {
+		t.Fatalf("shutdown erased recovery: status=%+v error=%v", status, err)
 	}
 }
 
@@ -1142,6 +1266,7 @@ func TestDevnetControlCommandsDefaultStopAndBoundEnablement(t *testing.T) {
 	}}
 	cfg.Control.StatePath = statePath
 	writeJSON(t, configPath, cfg)
+	withDirectOperatorControl(t, cfg)
 
 	var stopped bytes.Buffer
 	if err := run([]string{
@@ -1261,6 +1386,7 @@ func TestSwapOperatorCommandsExposeReadOnlyBoundary(t *testing.T) {
 	cfg.Journal.Path = filepath.Join(dir, "journal.jsonl")
 	configPath := filepath.Join(dir, "config.json")
 	writeJSON(t, configPath, cfg)
+	withDirectOperatorControl(t, cfg)
 
 	provider, err := newOperatorProvider(configPath)
 	if err != nil {
@@ -1443,6 +1569,7 @@ func TestSwapAcknowledgeOfflineWorkflowAndStatus(t *testing.T) {
 	cfg.Journal.Path = filepath.Join(dir, "journal.jsonl")
 	configPath := filepath.Join(dir, "config.json")
 	writeJSON(t, configPath, cfg)
+	withDirectOperatorControl(t, cfg)
 
 	fingerprint, err := profile.Fingerprint()
 	if err != nil {
@@ -1668,6 +1795,7 @@ func TestSwapEnableRequiresRunningHealthyLoop(t *testing.T) {
 	cfg.Journal.Path = filepath.Join(dir, "journal.jsonl")
 	configPath := filepath.Join(dir, "config.json")
 	writeJSON(t, configPath, cfg)
+	withDirectOperatorControl(t, cfg)
 
 	err := run([]string{
 		"swap", "enable", "--config", configPath,

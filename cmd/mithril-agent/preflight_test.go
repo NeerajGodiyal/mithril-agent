@@ -23,6 +23,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/policyauthority"
 	"github.com/Overclock-Validator/mithril-agent/pricesource"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
+	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
 	"github.com/Overclock-Validator/mithril-agent/riskgrant"
 	"github.com/Overclock-Validator/mithril-agent/sealedtx"
 	"github.com/Overclock-Validator/mithril-agent/signer"
@@ -731,6 +732,12 @@ func configureSwapPreflightFixture(
 	fixture.submitterPolicy.MaxLamports = profile.InputLamports
 	fixture.submitterPolicy.MaxInputTokenAmount = profile.InputTokenAmount
 	fixture.submitterPolicy.MaxFeeLamports = profile.MaxFeeLamports
+	fixture.submitterPolicy.Evidence = proposalcheck.ProviderBindings{
+		PrimaryTrustDomain:    fixture.cfg.Evidence.PrimaryTrustDomain,
+		PrimaryOriginSHA256:   fixture.cfg.Evidence.PrimaryOriginSHA256,
+		SecondaryTrustDomain:  fixture.cfg.Evidence.SecondaryTrustDomain,
+		SecondaryOriginSHA256: fixture.cfg.Evidence.SecondaryOriginSHA256,
+	}
 	fixture.submitterPolicy.OrcaSwap = nil
 	fixture.submitterPolicy.OrcaBuy = nil
 	if profile.IsBuy() {
@@ -776,6 +783,39 @@ func TestSwapSocketModeStartsWithoutQuoteCredentialOrService(t *testing.T) {
 	summary := decodePreflightSummary(t, output.Bytes())
 	if summary.Status != preflightOK || !allPreflightChecksOK(summary.Checks) {
 		t.Fatalf("socket-mode preflight summary = %+v", summary)
+	}
+}
+
+func TestPreflightUsesRiskAuthoritySocketWithoutReadingItsKey(t *testing.T) {
+	fixture := newPreflightFixture(t)
+	profile := testSwapProfile(fixture.policy.Source)
+	configureSwapPreflightFixture(t, &fixture, profile)
+	installPreflightEnvironment(t, profile.ClockUncertaintyLimit())
+	t.Setenv("MITHRIL_AGENT_QUOTE_RPC_URL", "https://quote.invalid/devnet")
+	if err := os.Remove(fixture.riskKeypairPath); err != nil {
+		t.Fatal(err)
+	}
+
+	oldIdentity := preflightRiskSocketIdentity
+	t.Cleanup(func() { preflightRiskSocketIdentity = oldIdentity })
+	called := false
+	preflightRiskSocketIdentity = func(_ context.Context, socketPath, keyID, publicKey string) error {
+		called = true
+		if socketPath != "/run/mithril-agent-policy-sell.sock" ||
+			keyID != fixture.cfg.Policy.KeyID || publicKey != fixture.cfg.Policy.PublicKey {
+			return errors.New("risk socket identity mismatch")
+		}
+		return nil
+	}
+
+	summary := checkPreflightWithSockets(
+		fixture.configPath, "", "/run/mithril-agent-policy-sell.sock", "",
+	)
+	if !called {
+		t.Fatal("preflight did not verify the risk authority socket identity")
+	}
+	if summary.Status != preflightOK || !allPreflightChecksOK(summary.Checks) {
+		t.Fatalf("risk socket preflight summary = %+v", summary)
 	}
 }
 
@@ -894,6 +934,10 @@ func newPreflightFixture(t *testing.T) preflightFixture {
 	}
 	fixture.cfg.Control.StatePath = filepath.Join(stateDir, "control.json")
 	fixture.cfg.Journal.Path = fixture.journalPath
+	fixture.cfg.Evidence.PrimaryTrustDomain = "provider-one"
+	fixture.cfg.Evidence.PrimaryOriginSHA256 = testRPCIdentity(t, testPrimaryRPC)
+	fixture.cfg.Evidence.SecondaryTrustDomain = "provider-two"
+	fixture.cfg.Evidence.SecondaryOriginSHA256 = testRPCIdentity(t, testSecondaryRPC)
 	fingerprint, err := fixture.cfg.Profile.Fingerprint()
 	if err != nil {
 		t.Fatal(err)
@@ -932,6 +976,12 @@ func newPreflightFixture(t *testing.T) preflightFixture {
 		MaxLamports:        fixture.policy.MaxLamports,
 		MaxFeeLamports:     fixture.policy.MaxFeeLamports,
 		SubmitterPublicKey: fixture.policy.SubmitterPublicKey,
+		Evidence: proposalcheck.ProviderBindings{
+			PrimaryTrustDomain:    fixture.cfg.Evidence.PrimaryTrustDomain,
+			PrimaryOriginSHA256:   fixture.cfg.Evidence.PrimaryOriginSHA256,
+			SecondaryTrustDomain:  fixture.cfg.Evidence.SecondaryTrustDomain,
+			SecondaryOriginSHA256: fixture.cfg.Evidence.SecondaryOriginSHA256,
+		},
 	}
 
 	script := fmt.Sprintf(

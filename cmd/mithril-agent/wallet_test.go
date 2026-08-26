@@ -5,6 +5,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -184,6 +186,141 @@ func TestWalletNewNeverPrintsTheSecret(t *testing.T) {
 	}
 }
 
+// Funding must use only the derived public address, request no more than the
+// fixed one-SOL target, and leave the key file untouched.
+func TestWalletFundTopsUpWithoutSendingThePrivateKey(t *testing.T) {
+	path, address, _ := writeTestWallet(t, t.TempDir())
+	keyBefore, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	original := walletHTTP
+	t.Cleanup(func() { walletHTTP = original })
+	var calls int
+	var requestBodies [][]byte
+	walletHTTP = &http.Client{Transport: walletRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requestBodies = append(requestBodies, body)
+		var rpc struct {
+			Method string            `json:"method"`
+			Params []json.RawMessage `json:"params"`
+		}
+		if err := json.Unmarshal(body, &rpc); err != nil {
+			t.Fatal(err)
+		}
+		calls++
+		response := `{"jsonrpc":"2.0","id":1,"result":{"value":250000000}}`
+		switch calls {
+		case 1:
+			if rpc.Method != "getBalance" {
+				t.Fatalf("first method = %q, want getBalance", rpc.Method)
+			}
+		case 2:
+			if rpc.Method != "requestAirdrop" || len(rpc.Params) != 3 {
+				t.Fatalf("funding request = %q with %d params", rpc.Method, len(rpc.Params))
+			}
+			var gotAddress string
+			var gotLamports uint64
+			var config map[string]string
+			if json.Unmarshal(rpc.Params[0], &gotAddress) != nil ||
+				json.Unmarshal(rpc.Params[1], &gotLamports) != nil ||
+				json.Unmarshal(rpc.Params[2], &config) != nil {
+				t.Fatal("funding parameters did not decode")
+			}
+			if gotAddress != address || gotLamports != 750_000_000 || config["commitment"] != "confirmed" {
+				t.Fatalf("funding parameters = %q, %d, %v", gotAddress, gotLamports, config)
+			}
+			response = fmt.Sprintf(
+				`{"jsonrpc":"2.0","id":1,"result":%q}`,
+				solana.Encode(make([]byte, ed25519.SignatureSize)),
+			)
+		default:
+			t.Fatal("wallet fund made an unexpected extra request")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(response)),
+		}, nil
+	})}
+
+	var out bytes.Buffer
+	if err := runWalletFund(t.Context(), []string{"--file", path}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 || !strings.Contains(out.String(), "requested successfully") {
+		t.Fatalf("funding calls = %d, output = %q", calls, out.String())
+	}
+	for _, body := range requestBodies {
+		if bytes.Contains(body, keyBefore) {
+			t.Fatal("the private key was sent to the Devnet endpoint")
+		}
+	}
+	keyAfter, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(keyBefore, keyAfter) {
+		t.Fatal("wallet fund changed the key file")
+	}
+}
+
+func TestWalletFundIsIdempotentAtTheTarget(t *testing.T) {
+	path, _, _ := writeTestWallet(t, t.TempDir())
+	original := walletHTTP
+	t.Cleanup(func() { walletHTTP = original })
+	var calls int
+	walletHTTP = &http.Client{Transport: walletRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(
+				`{"jsonrpc":"2.0","id":1,"result":{"value":1000000000}}`,
+			)),
+		}, nil
+	})}
+
+	var out bytes.Buffer
+	if err := runWalletFund(t.Context(), []string{"--file", path}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || !strings.Contains(out.String(), "no funding was requested") {
+		t.Fatalf("funding calls = %d, output = %q", calls, out.String())
+	}
+}
+
+func TestWalletFundExplainsTheNoAccountFallback(t *testing.T) {
+	path, _, _ := writeTestWallet(t, t.TempDir())
+	original := walletHTTP
+	t.Cleanup(func() { walletHTTP = original })
+	var calls int
+	walletHTTP = &http.Client{Transport: walletRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		body := `{"jsonrpc":"2.0","id":1,"result":{"value":0}}`
+		if calls == 2 {
+			body = `{"jsonrpc":"2.0","id":1,"error":{"code":429,"message":"private provider detail"}}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})}
+
+	err := runWalletFund(t.Context(), []string{"--file", path}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "https://faucet.solana.com") {
+		t.Fatalf("funding failure did not name the fallback: %v", err)
+	}
+	if strings.Contains(err.Error(), "private provider detail") {
+		t.Fatalf("funding failure leaked provider text: %v", err)
+	}
+}
+
 func TestWalletCheckRejectsUnsafeInput(t *testing.T) {
 	for _, args := range [][]string{
 		{"check", "--file", "relative.json"},
@@ -225,5 +362,60 @@ func TestWalletTokenBalanceDistinguishesEmptyFromMissing(t *testing.T) {
 				t.Fatalf("balance = %d, exists = %v; want 0, %v", amount, exists, test.exists)
 			}
 		})
+	}
+}
+
+func TestWalletRPCRejectsHTTPFailuresAndOversizedResponses(t *testing.T) {
+	original := walletHTTP
+	t.Cleanup(func() { walletHTTP = original })
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"HTTP failure", http.StatusBadGateway, `{"jsonrpc":"2.0","id":1,"result":0}`},
+		{"oversized", http.StatusOK, strings.Repeat(" ", walletMaxResponse+1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			walletHTTP = &http.Client{Transport: walletRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: test.status,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(test.body)),
+				}, nil
+			})}
+			var result any
+			if err := walletRPC(t.Context(), "getBalance", nil, &result); err == nil {
+				t.Fatal("unsafe Devnet response was accepted")
+			}
+		})
+	}
+}
+
+func TestWalletBalanceRejectsAMissingResult(t *testing.T) {
+	original := walletHTTP
+	t.Cleanup(func() { walletHTTP = original })
+	walletHTTP = &http.Client{Transport: walletRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(
+				`{"jsonrpc":"2.0","id":1}`,
+			)),
+		}, nil
+	})}
+	if _, err := walletLamports(t.Context(), "public-address"); err == nil {
+		t.Fatal("a balance response with no result was accepted as zero")
+	}
+}
+
+func TestWalletHTTPClientDoesNotUseAmbientProxyOrRedirects(t *testing.T) {
+	client := newWalletHTTPClient()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok || transport.Proxy != nil {
+		t.Fatal("wallet balance client can use an ambient proxy")
+	}
+	if err := client.CheckRedirect(nil, nil); !errors.Is(err, http.ErrUseLastResponse) {
+		t.Fatalf("wallet balance client accepted a redirect: %v", err)
 	}
 }

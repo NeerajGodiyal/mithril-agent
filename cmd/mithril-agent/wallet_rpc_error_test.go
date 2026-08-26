@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"strings"
 	"testing"
 )
@@ -54,25 +53,47 @@ func TestWalletResponseSeparatesProviderErrorFromAbsence(t *testing.T) {
 // cannot run when in fact nothing was read — the same confusion that made the
 // sweep setup announce every destination as absent.
 func TestAbsentTokenAccountIsNotAProviderFailure(t *testing.T) {
-	for _, absent := range []string{
-		"the Devnet endpoint refused the read (-32602): Invalid param: could not find account",
-		"could not find account",
+	var result any
+	absent := decodeWalletResponse([]byte(
+		`{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Invalid param: could not find account"}}`,
+	), &result)
+	if !isAccountNotFound(absent) {
+		t.Errorf("a genuinely absent account was treated as a failure: %v", absent)
+	}
+	for _, body := range []string{
+		`{"jsonrpc":"2.0","id":1,"error":{"code":429,"message":"Too many requests"}}`,
+		`{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}`,
+		`{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Invalid params"}}`,
 	} {
-		if !isAccountNotFound(errors.New(absent)) {
-			t.Errorf("a genuinely absent account was treated as a failure: %q", absent)
+		err := decodeWalletResponse([]byte(body), &result)
+		if err == nil || isAccountNotFound(err) {
+			t.Errorf("a provider failure was reported as an empty account: %v", err)
 		}
 	}
-	for _, failure := range []string{
-		"the Devnet endpoint refused the read (429): Too many requests",
-		"the Devnet endpoint could not be reached",
-		"the Devnet endpoint returned an unreadable response",
-		// These two were swallowed by matching bare "not found" / "invalid
-		// param": a broken or rate-limited endpoint read as an empty wallet.
-		"the Devnet endpoint refused the read (-32601): Method not found",
-		"the Devnet endpoint refused the read (-32602): Invalid params",
+}
+
+func TestWalletResponseNeverEchoesProviderErrorText(t *testing.T) {
+	const providerText = "private provider detail\n\x1b[31m"
+	var result any
+	err := decodeWalletResponse([]byte(
+		`{"jsonrpc":"2.0","id":1,"error":{"code":429,"message":"private provider detail\n\\u001b[31m"}}`,
+	), &result)
+	if err == nil || strings.Contains(err.Error(), "private provider") ||
+		strings.Contains(err.Error(), providerText) || strings.Contains(err.Error(), "\x1b") {
+		t.Fatalf("provider response text reached the operator error: %q", err)
+	}
+}
+
+func TestWalletResponseRejectsAmbiguousJSONRPCEnvelope(t *testing.T) {
+	for _, body := range []string{
+		`{"jsonrpc":"2.0","id":2,"result":{"value":1}}`,
+		`{"jsonrpc":"1.0","id":1,"result":{"value":1}}`,
+		`{"jsonrpc":"2.0","id":1,"id":1,"result":{"value":1}}`,
+		`{"jsonrpc":"2.0","id":1,"result":{"value":1}} {}`,
 	} {
-		if isAccountNotFound(errors.New(failure)) {
-			t.Errorf("a provider failure was reported as an empty account: %q", failure)
+		var result any
+		if err := decodeWalletResponse([]byte(body), &result); err == nil {
+			t.Fatalf("ambiguous JSON-RPC response was accepted: %s", body)
 		}
 	}
 }

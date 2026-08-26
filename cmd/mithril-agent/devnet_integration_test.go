@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +28,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/internal/control"
 	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/policyauthority"
+	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
 	"github.com/Overclock-Validator/mithril-agent/riskgrant"
 	"github.com/Overclock-Validator/mithril-agent/sealedtx"
 	"github.com/Overclock-Validator/mithril-agent/signer"
@@ -134,13 +136,14 @@ func TestDevnetOnceComposesRealProcessesAndRPCClients(t *testing.T) {
 		TransactionPolicy: policy, GrantLifetimeSecs: 30,
 	})
 	writeJSON(t, riskKeypairPath, integrationKeypairValues(authorityKey))
-	writeJSON(t, submitterPolicyPath, submitter.Policy{
+	submitterPolicy := submitter.Policy{
 		Cluster: policy.Cluster, Profile: policy.Profile,
 		ProfileFingerprint: policy.ProfileFingerprint, ControlStatePath: controlStatePath,
 		Source: policy.Source, Destination: policy.Destination,
 		MaxLamports: policy.MaxLamports, MaxFeeLamports: policy.MaxFeeLamports,
 		SubmitterPublicKey: policy.SubmitterPublicKey,
-	})
+	}
+	writeJSON(t, submitterPolicyPath, submitterPolicy)
 	writeJSON(t, submitterKeyPath, submitter.KeyDocument{
 		Version: 1, PrivateKey: submitterPrivateKey,
 	})
@@ -158,6 +161,12 @@ func TestDevnetOnceComposesRealProcessesAndRPCClients(t *testing.T) {
 	secondary := httptest.NewTLSServer(http.HandlerFunc(rpc.serve))
 	defer secondary.Close()
 	trustTestServers(t, primary, secondary)
+	bindings := proposalcheck.ProviderBindings{
+		PrimaryTrustDomain: "provider-one", PrimaryOriginSHA256: testRPCIdentity(t, primary.URL),
+		SecondaryTrustDomain: "provider-two", SecondaryOriginSHA256: testRPCIdentity(t, secondary.URL),
+	}
+	submitterPolicy.Evidence = bindings
+	writeJSON(t, submitterPolicyPath, submitterPolicy)
 	t.Setenv("MITHRIL_AGENT_MITHRIL_RPC_URL", mithrilNode.URL)
 	t.Setenv("MITHRIL_AGENT_PRIMARY_RPC_URL", primary.URL)
 	t.Setenv("MITHRIL_AGENT_SECONDARY_RPC_URL", secondary.URL)
@@ -170,6 +179,10 @@ func TestDevnetOnceComposesRealProcessesAndRPCClients(t *testing.T) {
 	t.Setenv("MITHRIL_STATE_PATH", statePath)
 
 	cfg := config{Profile: profile}
+	cfg.Evidence.PrimaryTrustDomain = bindings.PrimaryTrustDomain
+	cfg.Evidence.PrimaryOriginSHA256 = bindings.PrimaryOriginSHA256
+	cfg.Evidence.SecondaryTrustDomain = bindings.SecondaryTrustDomain
+	cfg.Evidence.SecondaryOriginSHA256 = bindings.SecondaryOriginSHA256
 	cfg.MCP.Command = mcpCommand
 	cfg.MCP.Args = []string{"-test.run=^TestMCPHelperProcess$"}
 	cfg.Signer.Command = signerCommand
@@ -603,13 +616,22 @@ func (rpc *integrationRPC) submitCount() int {
 func trustTestServers(t *testing.T, servers ...*httptest.Server) {
 	t.Helper()
 	roots := x509.NewCertPool()
+	var certificates []byte
 	for _, server := range servers {
 		certificate, err := x509.ParseCertificate(server.TLS.Certificates[0].Certificate[0])
 		if err != nil {
 			t.Fatal(err)
 		}
 		roots.AddCert(certificate)
+		certificates = append(certificates, pem.EncodeToMemory(&pem.Block{
+			Type: "CERTIFICATE", Bytes: certificate.Raw,
+		})...)
 	}
+	certificateFile := filepath.Join(t.TempDir(), "test-roots.pem")
+	if err := os.WriteFile(certificateFile, certificates, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SSL_CERT_FILE", certificateFile)
 	previous := http.DefaultTransport
 	previousExternalRPC := newExternalRPC
 	previousPacedExternalRPC := newPacedExternalRPC

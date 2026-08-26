@@ -8,6 +8,21 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/readiness"
 )
 
+func TestFreshStartRoutesToTheAllInOneSetup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var out bytes.Buffer
+	if err := runStart(t.Context(), nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	screen := out.String()
+	if !strings.Contains(screen, "mithril-agent setup strategy") {
+		t.Fatalf("fresh start did not name the all-in-one setup:\n%s", screen)
+	}
+	if strings.Contains(screen, "Next:  Run: mithril-agent setup,") {
+		t.Fatalf("fresh start still names the legacy setup:\n%s", screen)
+	}
+}
+
 // The root help lists about twenty commands across six sections. This one
 // answers "what do I do next" and must answer it with exactly one thing —
 // a list of five problems is a list somebody picks the easiest item from.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,9 +18,9 @@ func TestTheWrittenTemplateCanBeReadBack(t *testing.T) {
 	if err := runStrategyInit([]string{path}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	file, err := readStrategyFile(path)
-	if err != nil {
-		t.Fatalf("the template this tool wrote could not be read back: %v", err)
+	var file strategyFile
+	if err := readStrictJSON(path, &file); err != nil {
+		t.Fatalf("the template this tool wrote is not valid strict JSON: %v", err)
 	}
 	if file.SizeSOL == "" || !file.Sweep.Enabled {
 		t.Fatalf("template lost its settings: %+v", file)
@@ -47,16 +48,21 @@ func TestInitRefusesToOverwriteAnExistingStrategyFile(t *testing.T) {
 // Every refusal names the field, so an operator fixes one line rather than
 // discovering the problem inside a generated profile.
 func TestStrategyFileRefusalsNameTheField(t *testing.T) {
+	withTrust := func(file strategyFile) strategyFile {
+		file.PrimaryTrustDomain = "provider-one"
+		file.SecondaryTrustDomain = "provider-two"
+		return file
+	}
 	for name, test := range map[string]struct {
 		file strategyFile
 		want string
 	}{
-		"no size":     {strategyFile{Sweep: strategyFileSweep{Enabled: true, To: "x"}}, "size_sol"},
-		"half a pair": {strategyFile{SizeSOL: "0.05", SellAtUSD: "250", Sweep: strategyFileSweep{Enabled: true, To: "x"}}, "buy_at_usd"},
-		"sweep off":   {strategyFile{SizeSOL: "0.05"}, "sweep.enabled"},
-		"sweep no to": {strategyFile{SizeSOL: "0.05", Sweep: strategyFileSweep{Enabled: true}}, "sweep.to"},
-		"part proof":  {strategyFile{SizeSOL: "0.05", Sweep: strategyFileSweep{Enabled: true, To: "x", ProofNonce: "n"}}, "proof_signature"},
-		"bad window":  {strategyFile{SizeSOL: "0.05", ScheduleWindow: "soon", Sweep: strategyFileSweep{Enabled: true, To: "x"}}, "schedule_window"},
+		"no size":     {withTrust(strategyFile{Sweep: strategyFileSweep{Enabled: true, To: "x"}}), "size_sol"},
+		"half a pair": {withTrust(strategyFile{SizeSOL: "0.05", SellAtUSD: "250", Sweep: strategyFileSweep{Enabled: true, To: "x"}}), "buy_at_usd"},
+		"sweep off":   {withTrust(strategyFile{SizeSOL: "0.05"}), "sweep.enabled"},
+		"sweep no to": {withTrust(strategyFile{SizeSOL: "0.05", Sweep: strategyFileSweep{Enabled: true}}), "sweep.to"},
+		"part proof":  {withTrust(strategyFile{SizeSOL: "0.05", Sweep: strategyFileSweep{Enabled: true, To: "x", ProofNonce: "n"}}), "proof_signature"},
+		"bad window":  {withTrust(strategyFile{SizeSOL: "0.05", ScheduleWindow: "soon", Sweep: strategyFileSweep{Enabled: true, To: "x"}}), "schedule_window"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := test.file.validate()
@@ -69,9 +75,30 @@ func TestStrategyFileRefusalsNameTheField(t *testing.T) {
 		})
 	}
 	// Neither price is a deliberate choice, not an error.
-	ok := strategyFile{SizeSOL: "0.05", Sweep: strategyFileSweep{Enabled: true, To: "x"}}
+	ok := withTrust(strategyFile{SizeSOL: "0.05", Sweep: strategyFileSweep{Enabled: true, To: "x"}})
 	if err := ok.validate(); err != nil {
 		t.Fatalf("a market-order strategy file was refused: %v", err)
+	}
+}
+
+func TestStrategyFileRequiresTwoRealProviderOrganizations(t *testing.T) {
+	base := strategyFile{
+		SizeSOL: "0.05", PrimaryTrustDomain: "provider-one", SecondaryTrustDomain: "provider-two",
+		Sweep: strategyFileSweep{Enabled: true, To: "x"},
+	}
+	for name, mutate := range map[string]func(*strategyFile){
+		"missing first":        func(f *strategyFile) { f.PrimaryTrustDomain = "" },
+		"missing second":       func(f *strategyFile) { f.SecondaryTrustDomain = "" },
+		"same company":         func(f *strategyFile) { f.SecondaryTrustDomain = f.PrimaryTrustDomain },
+		"endpoint not company": func(f *strategyFile) { f.PrimaryTrustDomain = "https://provider.example" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			file := base
+			mutate(&file)
+			if err := file.validate(); err == nil || !strings.Contains(err.Error(), "trust_domain") {
+				t.Fatalf("invalid provider ownership was accepted or poorly explained: %v", err)
+			}
+		})
 	}
 }
 
@@ -134,7 +161,8 @@ func TestEditSummarisesWhatTheStrategyNowDoes(t *testing.T) {
 	}
 	withEditor(t, func(p string) error {
 		return os.WriteFile(p, []byte(
-			`{"size_sol":"0.25","sweep":{"enabled":true,"to":"SOMEWALLET"}}`), 0o600)
+			`{"size_sol":"0.25","primary_trust_domain":"provider-one",`+
+				`"secondary_trust_domain":"provider-two","sweep":{"enabled":true,"to":"SOMEWALLET"}}`), 0o600)
 	})
 	var output bytes.Buffer
 	if err := runStrategyEdit([]string{path, "--raw"}, &output); err != nil {
@@ -178,10 +206,10 @@ func TestTheEditorMustBeResolvableAndNamed(t *testing.T) {
 // showing them a brace.
 func TestTheGuidedEditorBuildsAValidFileFromPlainAnswers(t *testing.T) {
 	var output strings.Builder
-	// size, price-rules? (n = market), window, trades/day, wallet,
+	// size, two provider companies, price-rules? (n = market), window, trades/day, wallet,
 	// keep (blank = just what the trades need), Telegram, balance alerts.
 	answers := strings.Join([]string{
-		"0.25", "n", "15m", "8", "MYWALLET", "", "y", "1.5", "0.2",
+		"0.25", "provider-one", "provider-two", "n", "15m", "8", "MYWALLET", "", "y", "1.5", "0.2",
 	}, "\n") + "\n"
 	got, err := guideStrategyFile(
 		newPrompter(strings.NewReader(answers), &output, true), strategyFile{})
@@ -211,14 +239,14 @@ func TestTheGuidedEditorBuildsAValidFileFromPlainAnswers(t *testing.T) {
 // or the file would carry a signature for an address nobody approved.
 func TestChangingTheDestinationDiscardsTheOldProof(t *testing.T) {
 	current := strategyFile{
-		SizeSOL: "0.05",
+		SizeSOL: "0.05", PrimaryTrustDomain: "provider-one", SecondaryTrustDomain: "provider-two",
 		Sweep: strategyFileSweep{
 			Enabled: true, To: "OLDWALLET",
 			ProofNonce: "n", ProofIssued: "i", ProofSignature: "s",
 		},
 	}
 	var output strings.Builder
-	answers := "0.05\nn\n1h\n8\ny\nNEWWALLET\n\nn\n\n\n"
+	answers := "0.05\n\n\nn\n1h\n8\nNEWWALLET\n\nn\n\n\n"
 	got, err := guideStrategyFile(
 		newPrompter(strings.NewReader(answers), &output, true), current)
 	if err != nil {
@@ -236,12 +264,12 @@ func TestChangingTheDestinationDiscardsTheOldProof(t *testing.T) {
 // thing that wastes a hardware-wallet session.
 func TestKeepingTheDestinationKeepsTheProof(t *testing.T) {
 	current := strategyFile{
-		SizeSOL: "0.05",
-		Sweep:   strategyFileSweep{Enabled: true, To: "SAME", ProofNonce: "n", ProofIssued: "i", ProofSignature: "s"},
+		SizeSOL: "0.05", PrimaryTrustDomain: "provider-one", SecondaryTrustDomain: "provider-two",
+		Sweep: strategyFileSweep{Enabled: true, To: "SAME", ProofNonce: "n", ProofIssued: "i", ProofSignature: "s"},
 	}
 	var output strings.Builder
 	got, err := guideStrategyFile(
-		newPrompter(strings.NewReader("\n\n\n\n\n\nn\n\n\n"), &output, true), current)
+		newPrompter(strings.NewReader("\n\n\n\n\n\n\n\nn\n\n\n"), &output, true), current)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +286,8 @@ func TestKeepingTheDestinationKeepsTheProof(t *testing.T) {
 func TestOptionalFeaturesCanBeTurnedOffAndBackOn(t *testing.T) {
 	// Start from a strategy with prices, the required sweep, and Telegram ON.
 	on := strategyFile{
-		SizeSOL: "0.05", SellAtUSD: "250", BuyAtUSD: "200",
+		SizeSOL: "0.05", PrimaryTrustDomain: "provider-one", SecondaryTrustDomain: "provider-two",
+		SellAtUSD: "250", BuyAtUSD: "200",
 		ScheduleWindow: "1h", TradesPerDay: 6,
 		Sweep:    strategyFileSweep{Enabled: true, To: "WALLET", KeepSOL: "0.5"},
 		Telegram: strategyFileTelegram{Enabled: true},
@@ -269,7 +298,7 @@ func TestOptionalFeaturesCanBeTurnedOffAndBackOn(t *testing.T) {
 	// remains because it is part of the all-in-one strategy contract.
 	var out strings.Builder
 	off, err := guideStrategyFile(
-		newPrompter(strings.NewReader("\n"+"n\n"+"\n"+"\n"+"\n"+"\n"+"n\n"+"\n"+"\n"), &out, true), on)
+		newPrompter(strings.NewReader("\n\n\n"+"n\n"+"\n"+"\n"+"\n"+"\n"+"n\n"+"\n"+"\n"), &out, true), on)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +318,7 @@ func TestOptionalFeaturesCanBeTurnedOffAndBackOn(t *testing.T) {
 	// And back ON from that state, supplying the details each one needs.
 	var back strings.Builder
 	again, err := guideStrategyFile(newPrompter(strings.NewReader(
-		"\n"+"y\n"+"300\n"+"250\n"+"\n"+"\n"+"MYWALLET\n"+"2\n"+"y\n"+
+		"\n\n\n"+"y\n"+"300\n"+"250\n"+"\n"+"\n"+"MYWALLET\n"+"2\n"+"y\n"+
 			"350\n"+"225\n"+"\n"+"\n"),
 		&back, true), off)
 	if err != nil {
@@ -360,5 +389,27 @@ func TestStrategyInitWritesIntoAPrivateDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("no strategy file was written: %v", err)
+	}
+}
+
+func TestStrategyFileCommandsHonorHelp(t *testing.T) {
+	for name, run := range map[string]func([]string, io.Writer) error{
+		"init":   runStrategyInit,
+		"edit":   runStrategyEdit,
+		"alerts": strategyAlerts,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var output bytes.Buffer
+			if err := run([]string{"--help"}, &output); err != nil {
+				t.Fatalf("strategy %s --help: %v", name, err)
+			}
+			if !strings.Contains(output.String(), "mithril-agent strategy "+name) {
+				t.Fatalf("strategy %s help = %q", name, output.String())
+			}
+		})
+	}
+	var output bytes.Buffer
+	if err := strategyAlerts([]string{"set", "--help"}, &output); err != nil {
+		t.Fatalf("strategy alerts set --help: %v", err)
 	}
 }

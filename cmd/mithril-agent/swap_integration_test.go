@@ -27,6 +27,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
 	"github.com/Overclock-Validator/mithril-agent/signer"
 	"github.com/Overclock-Validator/mithril-agent/solana"
+	"github.com/Overclock-Validator/mithril-agent/submitter"
 	"github.com/Overclock-Validator/mithril-agent/swaprun"
 	"github.com/Overclock-Validator/mithril-agent/txflow"
 )
@@ -34,6 +35,9 @@ import (
 func TestSwapRunComposesSetupProcessesAndRPCs(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds command processes")
+	}
+	if secondsToMidnight := 86_400 - time.Now().UTC().Unix()%86_400; secondsToMidnight < 120 {
+		t.Skip("too close to the UTC schedule boundary")
 	}
 	realOperatingSystem := preflightOperatingSystem
 	preflightOperatingSystem = "linux"
@@ -127,6 +131,7 @@ func TestSwapRunComposesSetupProcessesAndRPCs(t *testing.T) {
 		"--input-lamports", "10",
 		"--reserve-lamports", "100",
 		"--max-fee-lamports", "5",
+		"--schedule-window", "24h",
 		"--confirm-min-output-amount", "99",
 		"--primary-trust-domain", "provider-one",
 		"--secondary-trust-domain", "provider-two",
@@ -144,6 +149,7 @@ func TestSwapRunComposesSetupProcessesAndRPCs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	withDirectOperatorControl(t, cfg)
 	realClockSample := preflightClockSample
 	realRuntimeClockSample := clockCheckSample
 	testClockSample := func() (clockcheck.Sample, error) {
@@ -247,6 +253,14 @@ func TestSwapRunComposesSetupProcessesAndRPCs(t *testing.T) {
 		view.LastAction.Result.Recovered {
 		t.Fatalf("completed status = %+v", view)
 	}
+	if err := finalizeRecoveryForTest(t, cfg, primary.URL, secondary.URL); err != nil {
+		cancelLoop()
+		<-loopDone
+		t.Fatalf("independent recovery finalizer: %v", err)
+	}
+	waitForSwapStatus(t, cfg, 10*time.Second, func(view operatorstatus.View) bool {
+		return !view.Control.RecoveryPending && view.Control.Mode == control.ModeNoNewActions
+	})
 	cancelLoop()
 	if err := <-loopDone; err != nil {
 		t.Fatal(err)
@@ -256,7 +270,7 @@ func TestSwapRunComposesSetupProcessesAndRPCs(t *testing.T) {
 	}
 	assertSwapRPCRouting(t, rpc.methodCounts())
 	assertSwapJournal(t, cfg.Journal.Path)
-	authorizations, err := journal.Open(signerPolicy.AuthorizationLedgerPath)
+	authorizations, err := journal.OpenRotating(signerPolicy.AuthorizationLedgerPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,6 +298,43 @@ func TestSwapRunComposesSetupProcessesAndRPCs(t *testing.T) {
 		strings.Contains(loopOutput.String(), "https://") {
 		t.Fatal("runner output exposed an endpoint")
 	}
+}
+
+func finalizeRecoveryForTest(
+	t *testing.T,
+	cfg config,
+	primaryURL,
+	secondaryURL string,
+) error {
+	t.Helper()
+	var policy submitter.Policy
+	if err := readStrictJSON(cfg.Submitter.PolicyPath, &policy); err != nil {
+		return err
+	}
+	primary, secondary, err := openEvidenceProviders(primaryURL, secondaryURL)
+	if err != nil {
+		return err
+	}
+	lifecycle, err := txflow.NewEvidenceLifecycle(primary, secondary)
+	if err != nil {
+		return err
+	}
+	actionID, result, err := submitter.ReconcileRecovery(t.Context(), policy, lifecycle)
+	if err != nil {
+		return err
+	}
+	if result.Verdict != txflow.VerdictFinalized {
+		return errors.New("recovery evidence is not finalized")
+	}
+	fingerprint, err := cfg.Swap.Fingerprint()
+	if err != nil {
+		return err
+	}
+	gate, err := control.NewStateFile(cfg.Control.StatePath, fingerprint, true)
+	if err != nil {
+		return err
+	}
+	return gate.ClearTerminalForFinalized(actionID)
 }
 
 func TestSwapCheckReportsArgumentAndConfigurationStages(t *testing.T) {
@@ -600,8 +651,12 @@ func (rpc *swapIntegrationRPC) serve(
 		result = rpc.deploymentAccount(origin, input.Params)
 	case "simulateTransaction":
 		rpc.validateSimulation(input.Params)
+		context := map[string]any{"slot": uint64(460)}
+		if origin == "mithril" {
+			context["bankhash"] = rpc.blockhash
+		}
 		result = map[string]any{
-			"context": swapIntegrationContext(origin),
+			"context": context,
 			"value": map[string]any{
 				"err": nil, "unitsConsumed": uint64(500), "logs": []string{"success"},
 			},
@@ -647,22 +702,18 @@ func (rpc *swapIntegrationRPC) deploymentAccount(origin string, params json.RawM
 		rpc.t.Errorf("unexpected deployment account %q", address)
 		return nil
 	}
+	context := map[string]any{"slot": uint64(460)}
+	if origin == "mithril" {
+		context["bankhash"] = rpc.blockhash
+	}
 	return map[string]any{
-		"context": swapIntegrationContext(origin),
+		"context": context,
 		"value": map[string]any{
 			"data":       []any{base64.StdEncoding.EncodeToString(data), "base64"},
 			"executable": executable, "lamports": uint64(1),
-			"owner": orcaswap.UpgradeableLoader, "space": uint64(len(data)),
+			"owner": orcaswap.UpgradeableLoader, "space": len(data),
 		},
 	}
-}
-
-func swapIntegrationContext(origin string) map[string]any {
-	context := map[string]any{"slot": uint64(460)}
-	if origin == "mithril" {
-		context["bankhash"] = solana.Encode(bytes.Repeat([]byte{9}, 32))
-	}
-	return context
 }
 
 func (rpc *swapIntegrationRPC) validateSimulation(params json.RawMessage) {

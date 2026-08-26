@@ -35,7 +35,7 @@ func TestUnreadableLimitIsNeverReportedAsSound(t *testing.T) {
 func TestEveryFindingBecomesAnActionableCheck(t *testing.T) {
 	vaultIndex := uint8(0)
 	limit := squads.SpendingLimit{
-		Multisig: "vault-a", Mint: squads.NativeMint, Amount: 9_000_000_000,
+		Multisig: "vault-a", VaultIndex: 0, Mint: squads.NativeMint, Amount: 9_000_000_000,
 		Period: squads.Monthly, Members: []string{"member"},
 	}
 	expect := squads.Expectation{
@@ -65,7 +65,7 @@ func TestEveryFindingBecomesAnActionableCheck(t *testing.T) {
 func TestASoundBoundaryReportsItsCap(t *testing.T) {
 	vaultIndex := uint8(0)
 	limit := squads.SpendingLimit{
-		Multisig: "vault", Mint: squads.NativeMint, Amount: 500_000_000,
+		Multisig: "vault", VaultIndex: 0, Mint: squads.NativeMint, Amount: 500_000_000,
 		Period: squads.Daily, Members: []string{"member"},
 		Destinations: []string{"agent"},
 	}
@@ -116,7 +116,7 @@ func TestFundingJSONSurfaceIsStable(t *testing.T) {
 	// JSON with a blocked verdict, rather than the command erroring out.
 	var out bytes.Buffer
 	if err := runFundingCheck(t.Context(), []string{
-		"--json", "--spending-limit", "11111111111111111111111111111112",
+		"--json", "--spending-limit", "11111111111111111111111111111112", "--vault-index", "0",
 	}, &out); err != nil {
 		t.Fatal(err)
 	}
@@ -132,6 +132,54 @@ func TestFundingJSONSurfaceIsStable(t *testing.T) {
 	}
 	if decoded.Overall != string(readiness.Blocked) || len(decoded.Checks) == 0 {
 		t.Fatalf("a check with no arguments should be blocked: %s", out.String())
+	}
+}
+
+func TestFundingCheckRequiresAnExplicitVaultIndex(t *testing.T) {
+	err := runFundingCheck(t.Context(), []string{
+		"--spending-limit", "11111111111111111111111111111112",
+	}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--vault-index") {
+		t.Fatalf("missing vault index was not rejected clearly: %v", err)
+	}
+	for _, bad := range []string{"256", "999"} {
+		err = runFundingCheck(t.Context(), []string{
+			"--spending-limit", "11111111111111111111111111111112", "--vault-index", bad,
+		}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), "--vault-index") {
+			t.Fatalf("invalid vault index %q was not rejected clearly: %v", bad, err)
+		}
+	}
+}
+
+func TestFundingOwnerCannotBeSilentlyIgnored(t *testing.T) {
+	err := runFundingCheck(t.Context(), []string{
+		"--spending-limit", "11111111111111111111111111111112", "--vault-index", "0",
+		"--owner", "owner",
+	}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--spender") {
+		t.Fatalf("owner without spender was not rejected clearly: %v", err)
+	}
+}
+
+func TestRequestedSpenderFindingsBlockReadiness(t *testing.T) {
+	vaultIndex := uint8(0)
+	limit := squads.SpendingLimit{
+		Multisig: "vault", VaultIndex: 0, Mint: squads.NativeMint, Amount: 500,
+		Period: squads.Daily, Members: []string{"other"}, Destinations: []string{"agent"},
+	}
+	expect := squads.Expectation{
+		Multisig: "vault", VaultIndex: &vaultIndex, Destination: "agent",
+		Mint: squads.NativeMint, MaxAmount: 1_000, AllowedPeriods: []squads.Period{squads.Daily},
+	}
+	report := fundingReport(limit, expect, nil)
+	report = readiness.NewReport(append(report.Checks,
+		verifyFundingControl(t.Context(), limit, "", "agent")...))
+	if report.CanAct() {
+		t.Fatal("a wrong requested spender did not block funding readiness")
+	}
+	if got := report.Blocking(); len(got) != 1 || got[0].Name != "members" {
+		t.Fatalf("unexpected spender blockers: %+v", got)
 	}
 }
 
@@ -153,7 +201,7 @@ func TestUnknownPeriodNameIsRejected(t *testing.T) {
 // flag they never typed.
 func TestMissingSpendingLimitIsAUsageErrorNotANetworkOne(t *testing.T) {
 	err := runFundingCheck(t.Context(), []string{
-		"--multisig", "A", "--destination", "B", "--max-lamports", "1",
+		"--multisig", "A", "--destination", "B", "--max-base-units", "1",
 	}, &bytes.Buffer{})
 	if err == nil {
 		t.Fatal("funding check ran with no --spending-limit")

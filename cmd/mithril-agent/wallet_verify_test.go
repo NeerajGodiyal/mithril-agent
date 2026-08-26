@@ -2,8 +2,12 @@ package main
 
 import (
 	"encoding/base64"
+	"io"
+	"net/http"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestWalletVerificationSessionRejectsMalformedInput(t *testing.T) {
@@ -60,5 +64,37 @@ func TestSSHTargetCannotBecomeAnOption(t *testing.T) {
 		if safeSSHTarget(target) {
 			t.Errorf("unsafe target %q was accepted", target)
 		}
+	}
+}
+
+func TestWalletVerificationStatusRejectsOversizedResponse(t *testing.T) {
+	client := &http.Client{Transport: walletRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		body := `{"status":"verified"}` + strings.Repeat(" ", walletVerifyResponseLimit)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})}
+	if _, err := readWalletVerificationStatus(client, "http://127.0.0.1/status"); err == nil {
+		t.Fatal("an oversized wallet verification response was accepted")
+	}
+}
+
+func TestWalletVerificationStopsWhenTheRemoteSessionExpires(t *testing.T) {
+	client := &http.Client{Transport: walletRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"status":"waiting"}`)),
+		}, nil
+	})}
+	tunnelDone := make(chan error)
+	started := time.Now()
+	err := waitForWalletVerification(
+		t.Context(), client, "http://127.0.0.1/status", tunnelDone, 20*time.Millisecond,
+	)
+	if err == nil || !strings.Contains(err.Error(), "expired") || time.Since(started) > time.Second {
+		t.Fatalf("session timeout err=%v elapsed=%s", err, time.Since(started))
 	}
 }

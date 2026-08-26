@@ -374,8 +374,8 @@ func TestKeepSOLOnlyEverRaisesTheSweepFloor(t *testing.T) {
 // not true.
 func TestStrategyFileCarriesKeepSOL(t *testing.T) {
 	file := strategyFile{
-		SizeSOL: "0.05",
-		Sweep:   strategyFileSweep{Enabled: true, To: "SOMEWALLET", KeepSOL: "0.25"},
+		SizeSOL: "0.05", PrimaryTrustDomain: "provider-one", SecondaryTrustDomain: "provider-two",
+		Sweep: strategyFileSweep{Enabled: true, To: "SOMEWALLET", KeepSOL: "0.25"},
 	}
 	if err := file.validate(); err != nil {
 		t.Fatalf("a valid keep_sol was refused: %v", err)

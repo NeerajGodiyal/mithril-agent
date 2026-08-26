@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/internal/control"
+	"github.com/Overclock-Validator/mithril-agent/internal/operatorstatus"
+	"github.com/Overclock-Validator/mithril-agent/journal"
+	"github.com/Overclock-Validator/mithril-agent/orcaswap"
 	"github.com/Overclock-Validator/mithril-agent/readiness"
 )
 
@@ -32,9 +35,9 @@ func armedLegWithStatus(t *testing.T, dir string, buy bool, statusAge time.Durat
 	); err != nil {
 		t.Fatal(err)
 	}
-	// The journal path is not set by triggeredLeg, so point it at this dir and
-	// write the status file the check reads.
-	cfg.Journal.Path = filepath.Join(dir, "events.jsonl")
+	// The control file is isolated one directory below the stable state. Keep the
+	// runner-owned journal in the stable parent, matching setup.
+	cfg.Journal.Path = filepath.Join(filepath.Dir(filepath.Dir(cfg.Control.StatePath)), "events.jsonl")
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -42,14 +45,11 @@ func armedLegWithStatus(t *testing.T, dir string, buy bool, statusAge time.Durat
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	status := cfg.Journal.Path + ".status.json"
-	if err := os.WriteFile(status, []byte(`{"ok":true}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	stamp := now.Add(-statusAge)
-	if err := os.Chtimes(status, stamp, stamp); err != nil {
-		t.Fatal(err)
-	}
+	writeStrategyStatus(t, cfg, stamp, control.Status{
+		Mode: control.ModeDevnetEnabled, ExpiresAt: now.Add(time.Hour),
+		MaxActions: 4, RemainingActions: 4,
+	})
 	return path
 }
 
@@ -69,7 +69,20 @@ func writeFreshStatus(t *testing.T, configPath string) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(cfg.Journal.Path+".status.json", []byte(`{"ok":true}`), 0o600); err != nil {
+	writeStrategyStatus(t, cfg, time.Now().UTC(), control.Status{Mode: control.ModeNoNewActions})
+}
+
+func writeStrategyStatus(t *testing.T, cfg config, observedAt time.Time, status control.Status) {
+	t.Helper()
+	profile, version, cluster := configStatusIdentity(cfg)
+	snapshot := operatorstatus.Snapshot{
+		Version: operatorstatus.Version, ObservedAt: observedAt.UTC(),
+		Profile: profile, ProfileVersion: version, Cluster: cluster,
+		Result:  operatorstatus.Result{Decision: "stopped"},
+		Journal: journal.Stats{MaxRecords: 65_536, MaxBytes: 64 << 20},
+		Control: status,
+	}
+	if err := operatorstatus.Write(operatorstatus.Path(cfg.Journal.Path), snapshot); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -95,6 +108,11 @@ func TestDoctorFlagsArmedLegsWithNoRunner(t *testing.T) {
 	// the operator to re-run it by hand rebuilds the same fragility.
 	if !strings.Contains(check.Action, "service install") {
 		t.Errorf("action does not point at supervising the runner: %q", check.Action)
+	}
+	for _, want := range []string{"--output", "mithril-agent-run.service"} {
+		if !strings.Contains(check.Action, want) {
+			t.Errorf("action omits %q, so it would only print a unit: %q", want, check.Action)
+		}
 	}
 	if strings.Contains(check.Action, "strategy run") {
 		t.Errorf("action tells the operator to recreate the unsupervised runner: %q", check.Action)
@@ -152,6 +170,11 @@ func TestDoctorInstallsTheRunnerBeforeArming(t *testing.T) {
 	check := doctorStrategyCheck(time.Now)
 	if !strings.Contains(check.Action, "service install") {
 		t.Fatalf("action = %q, want service installation", check.Action)
+	}
+	for _, want := range []string{"--output", "mithril-agent-run.service"} {
+		if !strings.Contains(check.Action, want) {
+			t.Fatalf("action omits %q, so it would only print a unit: %q", want, check.Action)
+		}
 	}
 	if strings.Contains(check.Action, "strategy enable") {
 		t.Fatalf("fresh setup grants authority before the runner is installed: %q", check.Action)
@@ -249,6 +272,41 @@ func TestMissingStatusFileIsNotStale(t *testing.T) {
 	}
 	if statusIsStale("", time.Now()) {
 		t.Error("an empty journal path was reported as stale")
+	}
+}
+
+func TestDoctorRejectsFreshButInvalidOrWrongProfileStatus(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sell := armedLegWithStatus(t, t.TempDir(), false, time.Second)
+	cfg, err := readConfig(sell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recordStrategy(strategyPaths{sell: sell}); err != nil {
+		t.Fatal(err)
+	}
+
+	statusPath := operatorstatus.Path(cfg.Journal.Path)
+	if err := os.WriteFile(statusPath, []byte(`{"ok":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if check := doctorStrategyCheck(time.Now); check.State != readiness.Blocked {
+		t.Fatalf("invalid fresh status reported a running strategy: %+v", check)
+	}
+
+	writeStrategyStatus(t, cfg, time.Now().UTC(), control.Status{Mode: control.ModeDevnetEnabled,
+		ExpiresAt: time.Now().UTC().Add(time.Hour), MaxActions: 4, RemainingActions: 4})
+	snapshot, err := operatorstatus.Read(statusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Profile = orcaswap.BuyProfileName
+	snapshot.ProfileVersion = orcaswap.BuyProfileVersion
+	if err := operatorstatus.Write(statusPath, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if check := doctorStrategyCheck(time.Now); check.State != readiness.Blocked {
+		t.Fatalf("wrong-profile status reported a running strategy: %+v", check)
 	}
 }
 

@@ -489,7 +489,8 @@ func withSwapDemoStubs(
 	t.Helper()
 	oldCheck, oldEnable, oldStatus := demoCheck, demoEnable, demoStatus
 	oldStop, oldWait := demoStop, demoWait
-	demoCheck, demoEnable, demoStatus = check, enable, status
+	demoCheck, demoEnable, demoStatus = check,
+		func(path, _ string, duration time.Duration) error { return enable(path, duration) }, status
 	demoStop, demoWait = stop, wait
 	t.Cleanup(func() {
 		demoCheck, demoEnable, demoStatus = oldCheck, oldEnable, oldStatus

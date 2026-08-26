@@ -13,11 +13,13 @@ import (
 // reason, so this fixture is deliberately exhaustive.
 func fullStrategyFile() strategyFile {
 	return strategyFile{
-		SizeSOL:        "0.02",
-		SellAtUSD:      "25.50",
-		BuyAtUSD:       "19.75",
-		ScheduleWindow: "3m",
-		TradesPerDay:   9,
+		SizeSOL:              "0.02",
+		PrimaryTrustDomain:   "provider-one",
+		SecondaryTrustDomain: "provider-two",
+		SellAtUSD:            "25.50",
+		BuyAtUSD:             "19.75",
+		ScheduleWindow:       "3m",
+		TradesPerDay:         9,
 		Sweep: strategyFileSweep{
 			Enabled:         true,
 			To:              "3qbR1eZRqXUWroWKKYhbDmR3FfqTHfqSU8zZSxtANzYh",
@@ -41,6 +43,7 @@ func fullStrategyFile() strategyFile {
 func newTargets() (strategyFileTargets, func() map[string]string) {
 	var (
 		sizeSOL, sellAtUSD, buyAtUSD, destination string
+		primaryTrust, secondaryTrust              string
 		proofNonce, proofIssued, proofSignature   string
 		keepSOL                                   string
 		alerts                                    alertsConfig
@@ -54,10 +57,12 @@ func newTargets() (strategyFileTargets, func() map[string]string) {
 		alerts:  &alerts,
 		keepSOL: &keepSOL, scheduleWindow: &scheduleWindow,
 		activationDelay: &activationDelay, tradesPerDay: &tradesPerDay,
+		primaryTrust: &primaryTrust, secondaryTrust: &secondaryTrust,
 	}
 	read := func() map[string]string {
 		return map[string]string{
 			"SizeSOL": sizeSOL, "SellAtUSD": sellAtUSD, "BuyAtUSD": buyAtUSD,
+			"PrimaryTrustDomain": primaryTrust, "SecondaryTrustDomain": secondaryTrust,
 			"Sweep.To": destination, "Sweep.ProofNonce": proofNonce,
 			"Sweep.ProofIssued": proofIssued, "Sweep.ProofSignature": proofSignature,
 			"Sweep.KeepSOL": keepSOL, "ScheduleWindow": scheduleWindow.String(),
@@ -93,6 +98,8 @@ func TestOneFileConfiguresEverySetting(t *testing.T) {
 	}
 	for field, want := range map[string]string{
 		"SizeSOL":               "0.02",
+		"PrimaryTrustDomain":    "provider-one",
+		"SecondaryTrustDomain":  "provider-two",
 		"SellAtUSD":             "25.50",
 		"BuyAtUSD":              "19.75",
 		"ScheduleWindow":        "3m0s",

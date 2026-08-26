@@ -145,6 +145,40 @@ func TestAskRecordsWhetherTheDefaultWasUsed(t *testing.T) {
 	}
 }
 
+func TestProviderNameIsExplainedAndRepromptedImmediately(t *testing.T) {
+	var out bytes.Buffer
+	p := newPrompter(strings.NewReader("QuickNode, Inc.\nquicknode\nhelius\n"), &out, true)
+	primary, err := p.askTrustDomain("Primary provider", "", "")
+	if err != nil || primary != "quicknode" {
+		t.Fatalf("primary provider = %q, %v", primary, err)
+	}
+	secondary, err := p.askTrustDomain("Secondary provider", "", primary)
+	if err != nil || secondary != "helius" {
+		t.Fatalf("secondary provider = %q, %v", secondary, err)
+	}
+	if !strings.Contains(out.String(), "lowercase letters") {
+		t.Fatalf("provider format was not explained:\n%s", out.String())
+	}
+}
+
+func TestInteractivePromptsRefuseClosedInput(t *testing.T) {
+	var out bytes.Buffer
+	p := newPrompter(strings.NewReader(""), &out, true)
+	if _, err := p.askTrustDomain("Primary provider", "", ""); err == nil ||
+		err.Error() != "input closed before an answer was entered" {
+		t.Fatalf("closed provider prompt = %v", err)
+	}
+	if strings.Count(out.String(), "Primary provider") != 1 {
+		t.Fatalf("closed provider prompt retried:\n%s", out.String())
+	}
+
+	p = newPrompter(strings.NewReader(""), &bytes.Buffer{}, true)
+	if agreed, err := p.confirm("Proceed?", true); err == nil || agreed ||
+		err.Error() != "input closed before an answer was entered" {
+		t.Fatalf("closed confirmation = %t, %v", agreed, err)
+	}
+}
+
 // A bot token must never be requested at a prompt: it would land in shell
 // history and scrollback. The wizard explains instead of asking.
 func TestSetupNeverPromptsForTheTelegramToken(t *testing.T) {
@@ -241,7 +275,7 @@ func guidedProfileFixture(t *testing.T, answers string, minOutput uint64) (
 // move between reading a number and using it.
 func TestGuidedSetupConfirmsTheLiveQuoteWithoutReQuoting(t *testing.T) {
 	const floor = uint64(21_525)
-	choices, p, out, calls := guidedProfileFixture(t, "\n\ny\n", floor)
+	choices, p, out, calls := guidedProfileFixture(t, "helius\nquicknode\ny\n", floor)
 	choices.quoteSocket = "/run/mithril-agent-quote/quote.sock"
 
 	configPath, err := configureSwapProfile(t.Context(), p, choices, out)
@@ -279,7 +313,7 @@ func TestGuidedSetupConfirmsTheLiveQuoteWithoutReQuoting(t *testing.T) {
 }
 
 func TestGuidedSetupRediscoversAnExistingProfile(t *testing.T) {
-	choices, p, out, _ := guidedProfileFixture(t, "\n\ny\n", 21_525)
+	choices, p, out, _ := guidedProfileFixture(t, "helius\nquicknode\ny\n", 21_525)
 	configPath, err := configureSwapProfile(t.Context(), p, choices, out)
 	if err != nil {
 		t.Fatal(err)
@@ -299,7 +333,7 @@ func TestGuidedSetupRediscoversAnExistingProfile(t *testing.T) {
 
 // Declining is a normal answer, not an error, and it must leave nothing behind.
 func TestGuidedSetupWritesNothingWhenTheQuoteIsDeclined(t *testing.T) {
-	choices, p, out, _ := guidedProfileFixture(t, "\n\nn\n", 21_525)
+	choices, p, out, _ := guidedProfileFixture(t, "helius\nquicknode\nn\n", 21_525)
 
 	configPath, err := configureSwapProfile(t.Context(), p, choices, out)
 	if err != nil {
@@ -316,7 +350,7 @@ func TestGuidedSetupWritesNothingWhenTheQuoteIsDeclined(t *testing.T) {
 // Holding Enter through the wizard must never write a policy. The confirmation
 // defaults to no.
 func TestGuidedSetupTreatsEnterAsDeclineOnTheQuote(t *testing.T) {
-	choices, p, out, _ := guidedProfileFixture(t, "\n\n\n", 21_525)
+	choices, p, out, _ := guidedProfileFixture(t, "helius\nquicknode\n\n", 21_525)
 
 	configPath, err := configureSwapProfile(t.Context(), p, choices, out)
 	if err != nil {
@@ -556,6 +590,28 @@ func TestSetupRejectsAnUnsupportedNodeVersion(t *testing.T) {
 	}
 	if reason := unsupportedNodeReason(filepath.Join(root, "absent")); reason != "" {
 		t.Errorf("an absent path produced a version complaint: %q", reason)
+	}
+}
+
+func TestNodeVersionProbeUsesAProtectedExecutableAndMinimalEnvironment(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("MITHRIL_AGENT_PRIMARY_RPC_URL", "must-not-reach-node")
+	node := filepath.Join(root, "node")
+	if err := os.WriteFile(node, []byte(
+		"#!/bin/sh\n"+
+			"test -z \"$MITHRIL_AGENT_PRIMARY_RPC_URL\" || exit 42\n"+
+			"echo v24.18.0\n",
+	), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if reason := unsupportedNodeReason(node); reason != "" {
+		t.Fatalf("Node version probe inherited the operator environment: %q", reason)
+	}
+	if err := os.Chmod(node, 0o722); err != nil {
+		t.Fatal(err)
+	}
+	if reason := unsupportedNodeReason(node); reason == "" {
+		t.Fatal("Node version probe executed a group- or world-writable binary")
 	}
 }
 

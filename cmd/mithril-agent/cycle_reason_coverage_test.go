@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/agent"
+	"github.com/Overclock-Validator/mithril-agent/execution"
 	"github.com/Overclock-Validator/mithril-agent/internal/runmetrics"
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
 	"github.com/Overclock-Validator/mithril-agent/signerclient"
@@ -43,7 +44,11 @@ func TestFailureCategoriesCoverEveryCycleReason(t *testing.T) {
 		"blockhash":      {swaprun.ErrBlockhashExpired, "blockhash_expired"},
 		"signer refusal": {signerclient.ErrSignerRefused, "signer_refused"},
 		"node down":      {txflow.ErrNodeUnavailable, "node_unavailable"},
-		"anything else":  {errors.New("anything else"), "operation_failed"},
+		"Mithril observer": {
+			execution.ErrObservationUnavailable,
+			"observation_not_ready",
+		},
+		"anything else": {errors.New("anything else"), "operation_failed"},
 	}
 	for name, want := range expected {
 		t.Run(name, func(t *testing.T) {

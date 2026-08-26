@@ -15,6 +15,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/internal/control"
 	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/solana"
+	"github.com/Overclock-Validator/mithril-agent/submitter"
 	"github.com/Overclock-Validator/mithril-agent/swaprun"
 )
 
@@ -151,6 +152,7 @@ func TestBindProvidersRequiresStoppedStateAndRecordsMigration(t *testing.T) {
 	cfg.Journal.Path = filepath.Join(stateDir, "events.jsonl")
 	cfg.Evidence.PrimaryTrustDomain = "provider-one"
 	cfg.Evidence.SecondaryTrustDomain = "provider-two"
+	writeProviderBindingSubmitterPolicy(t, root, &cfg, profile)
 	configPath := filepath.Join(root, "config.json")
 	writeJSON(t, configPath, cfg)
 
@@ -182,6 +184,13 @@ func TestBindProvidersRequiresStoppedStateAndRecordsMigration(t *testing.T) {
 		rebound.Evidence.PrimaryOriginSHA256 != result.PrimaryOriginSHA256 ||
 		rebound.Evidence.SecondaryOriginSHA256 != result.SecondaryOriginSHA256 {
 		t.Fatalf("rebound evidence configuration = %+v", rebound.Evidence)
+	}
+	var reboundPolicy submitter.Policy
+	if err := readStrictJSON(rebound.Submitter.PolicyPath, &reboundPolicy); err != nil {
+		t.Fatal(err)
+	}
+	if reboundPolicy.Evidence != providerBindings(rebound) {
+		t.Fatalf("rebound submitter evidence = %+v", reboundPolicy.Evidence)
 	}
 	store, err := journal.Open(cfg.Journal.Path)
 	if err != nil {
@@ -293,6 +302,7 @@ func TestBindProvidersPreservesNewerMetadataAfterStaleRead(t *testing.T) {
 	cfg.Journal.Path = filepath.Join(stateDir, "events.jsonl")
 	cfg.Evidence.PrimaryTrustDomain = "provider-one"
 	cfg.Evidence.SecondaryTrustDomain = "provider-two"
+	writeProviderBindingSubmitterPolicy(t, root, &cfg, profile)
 	configPath := filepath.Join(root, "config.json")
 	writeJSON(t, configPath, cfg)
 
@@ -341,4 +351,29 @@ func TestBindProvidersPreservesNewerMetadataAfterStaleRead(t *testing.T) {
 		rebound.Evidence.SecondaryTrustDomain != "provider-four" {
 		t.Fatalf("stale binding restored old provider metadata: %+v", rebound.Evidence)
 	}
+}
+
+func writeProviderBindingSubmitterPolicy(
+	t *testing.T,
+	root string,
+	cfg *config,
+	profile swaprun.Profile,
+) {
+	t.Helper()
+	fingerprint, err := profile.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Submitter.PolicyPath = filepath.Join(root, "submitter-policy.json")
+	policy := submitter.Policy{
+		Cluster: profile.Cluster, Profile: profile.Name,
+		ProfileFingerprint: fingerprint, ControlStatePath: cfg.Control.StatePath,
+		Source: profile.Owner(), MaxLamports: profile.InputLamports,
+		MaxFeeLamports:     profile.MaxFeeLamports,
+		SubmitterPublicKey: strings.Repeat("1", 64), OrcaSwap: &profile.Route,
+	}
+	if err := policy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, cfg.Submitter.PolicyPath, policy)
 }

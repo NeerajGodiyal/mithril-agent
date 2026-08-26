@@ -160,7 +160,7 @@ func TestSwapSetupCreatesBoundPrivateConfiguration(t *testing.T) {
 		signerPolicy.Source != fixture.owner || signerPolicy.OrcaSwap == nil ||
 		*signerPolicy.OrcaSwap != wantRoute ||
 		!signerPoliciesEqual(riskPolicy.TransactionPolicy, signerPolicy) ||
-		!submitterPolicyMatchesSigner(submitterPolicy, signerPolicy) {
+		!submitterPolicyMatchesSigner(submitterPolicy, signerPolicy, cfg) {
 		t.Fatalf("setup policies are not mutually bound")
 	}
 	riskPrivate, err := signer.LoadKeypair(paths.riskKeypair)
@@ -204,6 +204,27 @@ func TestSwapSetupCreatesBoundPrivateConfiguration(t *testing.T) {
 	}, &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("repeat setup error = %v", err)
+	}
+}
+
+func TestInstallSwapSetupRefusesExistingEmptyDirectory(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "setup")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	err := installSwapSetup(root, map[string]any{
+		"config.json": map[string]any{"probe": true},
+	})
+	if err == nil {
+		t.Fatal("existing empty setup directory was replaced")
+	}
+	entries, readErr := os.ReadDir(root)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("existing setup directory contains %d entries, want 0", len(entries))
 	}
 }
 
@@ -742,6 +763,33 @@ func installBuySwapSetupTestHooks(
 		swapSetupExecutable = previousExecutable
 		swapSetupDiscoverBuy = previousDiscover
 	})
+}
+
+func TestResolvedAgentExecutableRejectsReplaceableBinary(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "mithril-agent")
+	if err := os.WriteFile(path, []byte("test executable\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previousExecutable := swapSetupExecutable
+	swapSetupExecutable = func() (string, error) { return path, nil }
+	t.Cleanup(func() { swapSetupExecutable = previousExecutable })
+
+	if _, err := resolvedAgentExecutable(); err != nil {
+		t.Fatalf("protected executable was rejected: %v", err)
+	}
+	if err := os.Chmod(path, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolvedAgentExecutable(); err == nil {
+		t.Fatal("replaceable executable was accepted")
+	}
 }
 
 func assertMode(t *testing.T, path string, want os.FileMode) {

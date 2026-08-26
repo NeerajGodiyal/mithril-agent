@@ -62,7 +62,11 @@ func TestStrategyRunGivesEveryLegItsOwnMetricsPort(t *testing.T) {
 	var output bytes.Buffer
 	done := make(chan error, 1)
 	go func() {
-		done <- strategyRun(ctx, []string{"--quote-socket", supervisedQuoteSocket}, &output)
+		done <- strategyRun(ctx, []string{
+			"--quote-socket", supervisedQuoteSocket,
+			"--signer-socket-prefix", signerSocketPrefix,
+			"--risk-socket-prefix", riskSocketPrefix,
+		}, &output)
 	}()
 
 	deadline := time.After(3 * time.Second)
@@ -104,6 +108,19 @@ func TestStrategyRunGivesEveryLegItsOwnMetricsPort(t *testing.T) {
 	}
 	if !sweepRouted {
 		t.Errorf("the sweep leg was not routed to the sweep loop: %v", started)
+	}
+	for _, leg := range []string{"sell", "buy", "sweep"} {
+		signerSocket := "--signer-socket " + signerSocketPrefix + leg + ".sock"
+		riskSocket := "--risk-socket " + riskSocketPrefix + leg + ".sock"
+		var matches int
+		for _, entry := range started {
+			if strings.Contains(entry, signerSocket) && strings.Contains(entry, riskSocket) {
+				matches++
+			}
+		}
+		if matches != 1 {
+			t.Errorf("%s authority sockets reached %d legs, want 1: %v", leg, matches, started)
+		}
 	}
 }
 
@@ -184,6 +201,28 @@ func TestStrategyRunSaysWhenThereIsNoStrategy(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if err := strategyRun(t.Context(), nil, &bytes.Buffer{}); err == nil {
 		t.Fatal("strategy run started with nothing configured")
+	}
+}
+
+func TestSystemdRunnersRequireAllAuthoritySockets(t *testing.T) {
+	t.Setenv("INVOCATION_ID", "")
+	if err := requireSystemdAuthoritySockets("", "", ""); err != nil {
+		t.Fatalf("manual foreground run was rejected: %v", err)
+	}
+
+	t.Setenv("INVOCATION_ID", "test-invocation")
+	for _, sockets := range [][3]string{
+		{}, {"/run/signer.sock", "", ""}, {"", "/run/risk.sock", ""},
+		{"/run/signer.sock", "/run/risk.sock", ""},
+	} {
+		if err := requireSystemdAuthoritySockets(sockets[0], sockets[1], sockets[2]); err == nil {
+			t.Fatalf("supervised run accepted sockets %q", sockets)
+		}
+	}
+	if err := requireSystemdAuthoritySockets(
+		"/run/signer.sock", "/run/risk.sock", "/run/submitter.sock",
+	); err != nil {
+		t.Fatalf("supervised run with all authority sockets was rejected: %v", err)
 	}
 }
 

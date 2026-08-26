@@ -12,6 +12,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril-agent/pricesource"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
+	"github.com/Overclock-Validator/mithril-agent/signer"
 )
 
 // triggeredLeg writes a swap config carrying a price trigger.
@@ -60,11 +61,42 @@ func triggeredLeg(t *testing.T, dir string, buy bool, thresholdMicros uint64) st
 			SecondarySourceSHA256: pricesource.CoinbaseIdentitySHA256(),
 		}
 	}
+	stateDir := filepath.Join(dir, stableStateDirName)
+	if err := os.MkdirAll(filepath.Join(stateDir, signerStateDirName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, controlStateDirName), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	cfg := config{Swap: &profile}
 	cfg.Quote.SocketPath = "/run/mithril-agent-quote/quote.sock"
 	cfg.Evidence.PrimaryTrustDomain = "primary.test"
 	cfg.Evidence.SecondaryTrustDomain = "secondary.test"
-	cfg.Control.StatePath = filepath.Join(dir, "control.json")
+	cfg.Control.StatePath = filepath.Join(stateDir, controlStateDirName, "control.json")
+	cfg.Signer.PolicyPath = filepath.Join(dir, "signer-policy.json")
+	cfg.Signer.KeypairPath = filepath.Join(dir, "wallet-keypair.json")
+	cfg.Policy.PolicyPath = filepath.Join(dir, "risk-policy.json")
+	cfg.Policy.KeypairPath = filepath.Join(dir, "risk-keypair.json")
+	cfg.Submitter.PolicyPath = filepath.Join(dir, "submitter-policy.json")
+	cfg.Submitter.PrivateKeyPath = filepath.Join(dir, "submitter-key.json")
+	writeJSON(t, cfg.Signer.PolicyPath, signer.Policy{
+		AuthorizationLedgerPath: filepath.Join(stateDir, signerStateDirName, "authorizations.jsonl"),
+	})
+	if err := os.WriteFile(cfg.Signer.KeypairPath, []byte("[0]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.Policy.PolicyPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.Policy.KeypairPath, []byte("[0]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.Submitter.PolicyPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.Submitter.PrivateKeyPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	raw, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)

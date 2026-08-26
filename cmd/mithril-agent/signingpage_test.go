@@ -7,7 +7,7 @@ import (
 )
 
 func TestTheSigningPageIsEmbeddedInTheBinary(t *testing.T) {
-	if !strings.Contains(embeddedSigningPage, "Verify your payout wallet") {
+	if !strings.Contains(embeddedSigningPage, "Approve this exact trade") {
 		t.Fatal("the embedded wallet page is missing or incomplete")
 	}
 	runbook, err := os.ReadFile("../../OPERATIONS.md")

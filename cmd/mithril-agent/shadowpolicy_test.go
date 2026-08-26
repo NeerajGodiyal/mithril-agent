@@ -9,7 +9,6 @@ import (
 
 	"github.com/Overclock-Validator/mithril-agent/pricesource"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
-	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
 
 func generatedPolicyPath(t *testing.T, args ...string) string {
@@ -44,34 +43,21 @@ func TestAGeneratedPolicyLoadsWithoutEditing(t *testing.T) {
 		policy.Trigger.SecondarySourceSHA256 != pricesource.CoinbaseIdentitySHA256() {
 		t.Fatal("the generated policy does not name the sources the runner uses")
 	}
+	if policy.QuotePeg == nil ||
+		policy.QuotePeg.PrimarySourceSHA256 != pricesource.PythPushUSDCIdentitySHA256() ||
+		policy.QuotePeg.SecondarySourceSHA256 != pricesource.KrakenIdentitySHA256() {
+		t.Fatal("the generated Mainnet policy does not bind its independent USDC/USD sources")
+	}
 	if policy.Trigger.ThresholdMicros != 80_000_000 {
 		t.Errorf("threshold = %d micros, want 80000000", policy.Trigger.ThresholdMicros)
 	}
 	if policy.Trigger.Direction != pricetrigger.SellAtOrAbove {
 		t.Errorf("direction = %q, want a sell", policy.Trigger.Direction)
 	}
-	if policy.QuoteRoute != shadow.MainnetQuoteRoute(true) || policy.QuotePeg == nil {
-		t.Fatalf("generated Mainnet evidence route = %+v, peg=%+v", policy.QuoteRoute, policy.QuotePeg)
-	}
-}
-
-func TestDevnetPolicyBindsItsOrcaRoute(t *testing.T) {
-	pool := "11111111111111111111111111111111"
-	input := "So11111111111111111111111111111111111111112"
-	output := "SysvarRent111111111111111111111111111111111"
-	path := generatedPolicyPath(t,
-		"--cluster", "devnet", "--sell-at-usd", "80.00",
-		"--pool", pool, "--input-mint", input, "--output-mint", output,
-	)
-	policy, err := loadShadowPolicy(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := shadow.QuoteRoute{
-		Provider: shadow.QuoteOrca, Pool: pool, InputMint: input, OutputMint: output,
-	}
-	if policy.QuoteRoute != want || policy.QuotePeg != nil {
-		t.Fatalf("generated Devnet route = %+v, peg=%+v", policy.QuoteRoute, policy.QuotePeg)
+	if policy.QuoteRoute.Provider != "jupiter" ||
+		policy.QuoteRoute.InputMint != "So11111111111111111111111111111111111111112" ||
+		policy.QuoteRoute.OutputMint != mainnetUSDCMint {
+		t.Fatalf("generated policy does not bind its Jupiter SOL/USDC route: %+v", policy.QuoteRoute)
 	}
 }
 
@@ -88,6 +74,33 @@ func TestABuyPolicySwapsTheDecimals(t *testing.T) {
 	if policy.InputDecimals != 6 || policy.OutputDecimals != 9 {
 		t.Errorf("decimals = %d/%d, want 6/9 for a buy",
 			policy.InputDecimals, policy.OutputDecimals)
+	}
+	if policy.StartingInputUnits < policy.InputAmount ||
+		policy.StartingOutputUnits < policy.FeeLamports {
+		t.Fatalf("buy policy cannot fund its notional trade and fee: %+v", policy)
+	}
+}
+
+func TestGeneratedSellPolicyFundsTheConfiguredNotional(t *testing.T) {
+	const amount = "2000000000"
+	policy, err := loadShadowPolicy(generatedPolicyPath(t,
+		"--sell-at-usd", "80.00", "--amount", amount))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.StartingInputUnits-policy.InputAmount < policy.FeeLamports {
+		t.Fatalf("generated sell policy cannot fund its trade and fee: %+v", policy)
+	}
+}
+
+func TestGeneratedPolicyAcceptsConservativeExecutionCosts(t *testing.T) {
+	policy, err := loadShadowPolicy(generatedPolicyPath(t,
+		"--sell-at-usd", "80.00", "--slippage-bps", "125", "--fee-lamports", "20000"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.SlippageBPS != 125 || policy.FeeLamports != 20_000 {
+		t.Fatalf("generated execution costs = %d/%d", policy.SlippageBPS, policy.FeeLamports)
 	}
 }
 
@@ -110,18 +123,45 @@ func TestPolicyGeneratorRefusesAmbiguousInstructions(t *testing.T) {
 	out := filepath.Join(root, "p.json")
 	observe := "So11111111111111111111111111111111111111112"
 	for name, args := range map[string][]string{
-		"neither direction": {"--out", out, "--observe", observe},
-		"both directions": {"--out", out, "--observe", observe,
-			"--sell-at-usd", "80", "--buy-at-usd", "50"},
+		"neither direction":  {"--out", out, "--observe", observe},
 		"no observe address": {"--out", out, "--sell-at-usd", "80"},
 		"relative out":       {"--out", "policy.json", "--observe", observe, "--sell-at-usd", "80"},
 		"no output path":     {"--observe", observe, "--sell-at-usd", "80"},
 		"unparseable price": {"--out", out, "--observe", observe,
 			"--sell-at-usd", "not-a-price"},
+		"unfundable amount": {"--out", out, "--observe", observe,
+			"--sell-at-usd", "80", "--amount", "18446744073709551615"},
+		"wrapped slippage": {"--out", out, "--observe", observe,
+			"--sell-at-usd", "80", "--slippage-bps", "65537"},
+		"zero fee": {"--out", out, "--observe", observe,
+			"--sell-at-usd", "80", "--fee-lamports", "0"},
+		"Devnet route omitted": {"--out", out, "--observe", observe,
+			"--cluster", "devnet", "--sell-at-usd", "80"},
+		"Mainnet route override": {"--out", out, "--observe", observe,
+			"--sell-at-usd", "80", "--pool", observe,
+			"--input-mint", observe, "--output-mint", mainnetUSDCMint},
 	} {
 		if err := runShadowPolicy(args, &bytes.Buffer{}); err == nil {
 			t.Errorf("%s was accepted", name)
 		}
+	}
+}
+
+func TestPolicyGeneratorBuildsAContinuousRoundTrip(t *testing.T) {
+	policy, err := loadShadowPolicy(generatedPolicyPath(t,
+		"--sell-at-usd", "80.00", "--buy-at-usd", "60.00"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.RoundTrip() || policy.ReturnTrigger == nil {
+		t.Fatal("giving both thresholds did not create a round-trip policy")
+	}
+	if policy.Trigger.Direction != pricetrigger.SellAtOrAbove ||
+		policy.Trigger.ThresholdMicros != 80_000_000 ||
+		policy.ReturnTrigger.Direction != pricetrigger.BuyAtOrBelow ||
+		policy.ReturnTrigger.ThresholdMicros != 60_000_000 {
+		t.Fatalf("generated round trip has the wrong legs: %+v / %+v",
+			policy.Trigger, *policy.ReturnTrigger)
 	}
 }
 
@@ -144,10 +184,67 @@ func TestPolicyGeneratorPrintsTheNextCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := out.String()
-	if !strings.Contains(text, "shadow run --policy") {
-		t.Errorf("the output does not name the command that runs it:\n%s", text)
+	for _, command := range []string{"shadow run --policy", "shadow review --policy"} {
+		if !strings.Contains(text, command) {
+			t.Errorf("the output does not name %q:\n%s", command, text)
+		}
 	}
 	if !strings.Contains(text, "cannot sign") {
 		t.Errorf("the output does not repeat that it cannot sign:\n%s", text)
+	}
+	if strings.Contains(text, "--input-mint") || !strings.Contains(text, "shadow run --policy") {
+		t.Errorf("the next command repeats route settings instead of reading the policy:\n%s", text)
+	}
+}
+
+func TestPolicyGeneratorPrintsDirectionAndClusterSpecificCommands(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	observe := "So11111111111111111111111111111111111111112"
+
+	var buy bytes.Buffer
+	if err := runShadowPolicy([]string{
+		"--out", filepath.Join(root, "buy.json"), "--observe", observe,
+		"--buy-at-usd", "50.00",
+	}, &buy); err != nil {
+		t.Fatal(err)
+	}
+	buyPolicy, err := loadShadowPolicy(filepath.Join(root, "buy.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if buyPolicy.QuoteRoute.InputMint != mainnetUSDCMint ||
+		buyPolicy.QuoteRoute.OutputMint != observe {
+		t.Errorf("the buy policy does not reverse the supported pair: %+v", buyPolicy.QuoteRoute)
+	}
+
+	var devnet bytes.Buffer
+	if err := runShadowPolicy([]string{
+		"--out", filepath.Join(root, "devnet.json"), "--observe", observe,
+		"--cluster", "devnet", "--sell-at-usd", "80.00",
+		"--pool", "11111111111111111111111111111111",
+		"--input-mint", observe, "--output-mint", mainnetUSDCMint,
+	}, &devnet); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(devnet.String(), "jupiter") ||
+		!strings.Contains(devnet.String(), "--node-command") {
+		t.Errorf("the Devnet policy printed a Mainnet-only command:\n%s", devnet.String())
+	}
+	devnetPolicy, err := loadShadowPolicy(filepath.Join(root, "devnet.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if devnetPolicy.QuotePeg != nil {
+		t.Fatal("Devnet policy claimed the test quote token had USDC/USD evidence")
+	}
+	if devnetPolicy.QuoteRoute.Provider != "orca" ||
+		devnetPolicy.QuoteRoute.Pool != "11111111111111111111111111111111" {
+		t.Fatalf("Devnet policy did not bind its Orca route: %+v", devnetPolicy.QuoteRoute)
 	}
 }

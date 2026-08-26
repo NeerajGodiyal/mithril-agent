@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Overclock-Validator/mithril-agent/signer"
 )
 
 // A unit that names one deployment's paths silently supervises the wrong thing
@@ -114,8 +116,9 @@ func TestServiceInstallArmsNothing(t *testing.T) {
 			t.Errorf("the generated unit contains an arming command (%q):\n%s", forbidden, unit)
 		}
 	}
-	if !strings.Contains(unit, "ExecStartPre="+planBinaryForTest(t)+" strategy stop --reason service_start") ||
-		!strings.Contains(unit, "ExecStopPost="+planBinaryForTest(t)+" strategy stop --reason service_stop") {
+	stop := " strategy stop --submitter-socket-prefix " + submitterSocketPrefix + " --reason "
+	if !strings.Contains(unit, "ExecStartPre="+planBinaryForTest(t)+stop+"service_start") ||
+		!strings.Contains(unit, "ExecStopPost="+planBinaryForTest(t)+stop+"service_stop") {
 		t.Errorf("the service can restart without revoking old authority:\n%s", unit)
 	}
 }
@@ -234,8 +237,13 @@ func TestServiceInstallPrintsBeforeItWrites(t *testing.T) {
 		t.Errorf("did not say how to make the unit take effect:\n%s", wrote.String())
 	}
 	if !strings.Contains(wrote.String(), "sudo install") ||
-		!strings.Contains(wrote.String(), "/etc/systemd/system/"+serviceUnitName) {
+		!strings.Contains(wrote.String(), serviceUnitName+" ") ||
+		!strings.Contains(wrote.String(), "/etc/systemd/system/") {
 		t.Errorf("a staged unit was not given an install command:\n%s", wrote.String())
+	}
+	if !strings.Contains(wrote.String(), "sudo systemd-analyze verify "+
+		"/etc/systemd/system/"+serviceUnitName) {
+		t.Errorf("the generated units were not given a syntax check:\n%s", wrote.String())
 	}
 }
 
@@ -476,7 +484,7 @@ func TestServiceUnitUsesStableStatePaths(t *testing.T) {
 	t.Setenv("HOME", home)
 	strategyRoot := t.TempDir()
 	sellRoot := filepath.Join(strategyRoot, "sell")
-	if err := os.MkdirAll(filepath.Join(sellRoot, stableStateDirName), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(sellRoot, stableStateDirName, controlStateDirName), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	sell := triggeredLeg(t, sellRoot, false, 0)
@@ -484,7 +492,7 @@ func TestServiceUnitUsesStableStatePaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.Control.StatePath = filepath.Join(sellRoot, stableStateDirName, "control.json")
+	cfg.Control.StatePath = filepath.Join(sellRoot, stableStateDirName, controlStateDirName, "control.json")
 	cfg.Journal.Path = filepath.Join(sellRoot, stableStateDirName, "events.jsonl")
 	encoded, err := json.Marshal(cfg)
 	if err != nil {
@@ -591,11 +599,34 @@ func TestServiceUnitKeepsWriteExecuteProtectionWithQuoteSocket(t *testing.T) {
 
 func TestSweepLegDoesNotDisableWriteExecuteProtection(t *testing.T) {
 	dir := t.TempDir()
+	stateDir := filepath.Join(dir, stableStateDirName)
+	if err := os.MkdirAll(filepath.Join(stateDir, signerStateDirName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, controlStateDirName), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(dir, "config.json")
 	var cfg config
 	cfg.Profile = testSweepProfileForStrategy("source", "destination", time.Now().Unix())
-	cfg.Control.StatePath = filepath.Join(dir, "control.json")
-	cfg.Journal.Path = filepath.Join(dir, "events.jsonl")
+	cfg.Control.StatePath = filepath.Join(stateDir, controlStateDirName, "control.json")
+	cfg.Journal.Path = filepath.Join(stateDir, "events.jsonl")
+	cfg.Signer.PolicyPath = filepath.Join(dir, "signer-policy.json")
+	cfg.Signer.KeypairPath = filepath.Join(dir, "wallet-keypair.json")
+	cfg.Submitter.PolicyPath = filepath.Join(dir, "submitter-policy.json")
+	cfg.Submitter.PrivateKeyPath = filepath.Join(dir, "submitter-key.json")
+	writeJSON(t, cfg.Signer.PolicyPath, signer.Policy{
+		AuthorizationLedgerPath: filepath.Join(stateDir, signerStateDirName, "authorizations.jsonl"),
+	})
+	if err := os.WriteFile(cfg.Signer.KeypairPath, []byte("[0]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.Submitter.PolicyPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg.Submitter.PrivateKeyPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	encoded, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -612,9 +643,261 @@ func TestSweepLegDoesNotDisableWriteExecuteProtection(t *testing.T) {
 	}
 }
 
+func TestServiceInstallIsolatesAuthoritiesBehindSocketActivation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	privateRoot := filepath.Join(t.TempDir(), "strategy-data", "sell")
+	sell := triggeredLeg(t, privateRoot, false, 0)
+	if err := recordStrategy(strategyPaths{sell: sell}); err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	var output bytes.Buffer
+	if err := runService([]string{"install", "--output", filepath.Join(directory, serviceUnitName)},
+		&output); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := buildServicePlan(defaultMetricsBasePort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leg := plan.Legs[0]
+	runner, err := os.ReadFile(filepath.Join(directory, serviceUnitName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"--signer-socket-prefix " + signerSocketPrefix,
+		"--risk-socket-prefix " + riskSocketPrefix,
+		"--submitter-socket-prefix " + submitterSocketPrefix,
+		"Requires=" + leg.signerUnit() + ".socket",
+		leg.riskUnit() + ".socket", leg.submitterUnit() + ".socket",
+		"InaccessiblePaths=", leg.SignerKeypair, leg.RiskKeypair, leg.SignerStateDir,
+		leg.SubmitterPolicy, leg.SubmitterKey, leg.ControlStateDir,
+	} {
+		if !strings.Contains(string(runner), want) {
+			t.Errorf("runner is missing %q:\n%s", want, runner)
+		}
+	}
+	socket, err := os.ReadFile(filepath.Join(directory, leg.signerUnit()+".socket"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"ListenStream=" + leg.signerSocket(), "SocketUser=" + plan.User,
+		"SocketGroup=" + plan.Group, "SocketMode=0660", "Accept=yes",
+		"MaxConnections=8", "MaxConnectionsPerSource=2",
+	} {
+		if !strings.Contains(string(socket), want) {
+			t.Errorf("signer socket is missing %q:\n%s", want, socket)
+		}
+	}
+	if strings.Contains(string(socket), "Service=") || strings.Contains(string(socket), "FlushPending=") {
+		t.Errorf("Accept=yes socket contains an Accept=no-only directive:\n%s", socket)
+	}
+	service, err := os.ReadFile(filepath.Join(directory, leg.signerUnit()+"@.service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"User=" + signerAccountName, "LoadCredential=signer-policy:" + leg.SignerPolicy,
+		"LoadCredential=signer-key:" + leg.SignerKeypair,
+		"--policy %d/signer-policy --keypair %d/signer-key --socket",
+		"StandardInput=socket", "StandardOutput=socket", "PrivateNetwork=yes",
+		"ReadWritePaths=" + leg.SignerStateDir, "MemoryDenyWriteExecute=yes",
+		"CollectMode=inactive-or-failed",
+	} {
+		if !strings.Contains(string(service), want) {
+			t.Errorf("signer service is missing %q:\n%s", want, service)
+		}
+	}
+	for _, want := range []string{
+		"useradd --system --no-create-home --user-group " + signerAccountName,
+		"chmod g+x ", filepath.Dir(leg.SignerStateDir), filepath.Dir(privateRoot),
+		"chown -R " + signerAccountName + ":" + signerAccountName + " " + leg.SignerStateDir,
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("install instructions are missing %q:\n%s", want, output.String())
+		}
+	}
+	riskSocket, err := os.ReadFile(filepath.Join(directory, leg.riskUnit()+".socket"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"ListenStream=" + leg.riskSocket(), "SocketUser=" + plan.User,
+		"SocketGroup=" + plan.Group, "SocketMode=0660", "Accept=yes",
+		"MaxConnections=8", "MaxConnectionsPerSource=2",
+	} {
+		if !strings.Contains(string(riskSocket), want) {
+			t.Errorf("risk authority socket is missing %q:\n%s", want, riskSocket)
+		}
+	}
+	riskService, err := os.ReadFile(filepath.Join(directory, leg.riskUnit()+"@.service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"User=" + riskAccountName, "LoadCredential=risk-policy:" + leg.RiskPolicy,
+		"LoadCredential=risk-key:" + leg.RiskKeypair,
+		"--policy %d/risk-policy --keypair %d/risk-key --socket",
+		"StandardInput=socket", "StandardOutput=socket", "PrivateNetwork=yes",
+		"MemoryDenyWriteExecute=yes", "CollectMode=inactive-or-failed",
+	} {
+		if !strings.Contains(string(riskService), want) {
+			t.Errorf("risk authority service is missing %q:\n%s", want, riskService)
+		}
+	}
+	for _, want := range []string{
+		"useradd --system --no-create-home --user-group " + riskAccountName,
+		"chown " + riskAccountName + ":" + riskAccountName + " " + leg.RiskKeypair,
+		"chmod 0600 " + leg.RiskKeypair,
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("install instructions are missing %q:\n%s", want, output.String())
+		}
+	}
+	submitterSocket, err := os.ReadFile(filepath.Join(directory, leg.submitterUnit()+".socket"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"ListenStream=" + leg.submitterSocket(), "SocketUser=" + plan.User,
+		"SocketGroup=" + plan.Group, "SocketMode=0660", "Accept=yes",
+		"MaxConnections=8", "MaxConnectionsPerSource=2",
+	} {
+		if !strings.Contains(string(submitterSocket), want) {
+			t.Errorf("submitter socket is missing %q:\n%s", want, submitterSocket)
+		}
+	}
+	submitterService, err := os.ReadFile(filepath.Join(directory, leg.submitterUnit()+"@.service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"User=" + submitterAccountName,
+		"LoadCredential=submitter-policy:" + leg.SubmitterPolicy,
+		"LoadCredential=submitter-key:" + leg.SubmitterKey,
+		"--policy %d/submitter-policy --key %d/submitter-key --socket",
+		"StandardInput=socket", "StandardOutput=socket",
+		"ReadWritePaths=" + leg.ControlStateDir,
+		"IPAddressDeny=any", "IPAddressAllow=127.0.0.0/8",
+		"MemoryDenyWriteExecute=yes", "CollectMode=inactive-or-failed",
+	} {
+		if !strings.Contains(string(submitterService), want) {
+			t.Errorf("submitter service is missing %q:\n%s", want, submitterService)
+		}
+	}
+	for _, want := range []string{
+		"useradd --system --no-create-home --user-group " + submitterAccountName,
+		"chown " + submitterAccountName + ":" + submitterAccountName,
+		leg.SubmitterPolicy, leg.SubmitterKey,
+		"chown -R " + submitterAccountName + ":" + submitterAccountName + " " + leg.ControlStateDir,
+		"chmod 0700 " + leg.ControlStateDir,
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("install instructions are missing %q:\n%s", want, output.String())
+		}
+	}
+	operatorSocket, err := os.ReadFile(filepath.Join(directory, leg.operatorUnit()+".socket"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"ListenStream=" + leg.operatorSocket(), "SocketUser=root", "SocketGroup=root",
+		"SocketMode=0600", "Accept=yes", "MaxConnections=4", "MaxConnectionsPerSource=1",
+	} {
+		if !strings.Contains(string(operatorSocket), want) {
+			t.Errorf("operator socket is missing %q:\n%s", want, operatorSocket)
+		}
+	}
+	operatorService, err := os.ReadFile(filepath.Join(directory, leg.operatorUnit()+"@.service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"User=" + submitterAccountName,
+		"LoadCredential=submitter-policy:" + leg.SubmitterPolicy,
+		"--policy %d/submitter-policy --operator-socket",
+		"PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
+		"ReadWritePaths=" + leg.ControlStateDir,
+		"InaccessiblePaths=/proc " + leg.SubmitterKey,
+	} {
+		if !strings.Contains(string(operatorService), want) {
+			t.Errorf("operator service is missing %q:\n%s", want, operatorService)
+		}
+	}
+	for _, forbidden := range []string{"LoadCredential=submitter-key:", "EnvironmentFile=", "--key "} {
+		if strings.Contains(string(operatorService), forbidden) {
+			t.Errorf("operator service contains %q:\n%s", forbidden, operatorService)
+		}
+	}
+	if strings.Contains(string(runner), leg.operatorUnit()+".socket") ||
+		strings.Contains(string(runner), leg.operatorSocket()) {
+		t.Errorf("runner was granted the root-only operator socket:\n%s", runner)
+	}
+	recoveryService, err := os.ReadFile(filepath.Join(directory, leg.recoveryUnit()+".service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"User=" + submitterAccountName,
+		"LoadCredential=submitter-policy:" + leg.SubmitterPolicy,
+		"--policy %d/submitter-policy --recover",
+		"ReadWritePaths=" + leg.ControlStateDir,
+		"InaccessiblePaths=/proc " + leg.SubmitterKey,
+		"EnvironmentFile=/etc/mithril-agent/rpc.env",
+		"IPAddressDeny=127.0.0.0/8", "IPAddressDeny=169.254.0.0/16",
+		"MemoryDenyWriteExecute=yes", "ProtectClock=yes",
+	} {
+		if !strings.Contains(string(recoveryService), want) {
+			t.Errorf("recovery service is missing %q:\n%s", want, recoveryService)
+		}
+	}
+	for _, forbidden := range []string{
+		"submitter-key:", "--key ", "MITHRIL_AGENT_MITHRIL_RPC_URL=",
+		"ListenStream=", "StandardInput=socket",
+	} {
+		if strings.Contains(string(recoveryService), forbidden) {
+			t.Errorf("recovery service contains %q:\n%s", forbidden, recoveryService)
+		}
+	}
+	recoveryTimer, err := os.ReadFile(filepath.Join(directory, leg.recoveryUnit()+".timer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"OnBootSec=10s", "OnUnitInactiveSec=10s",
+		"Unit=" + leg.recoveryUnit() + ".service", "WantedBy=timers.target",
+	} {
+		if !strings.Contains(string(recoveryTimer), want) {
+			t.Errorf("recovery timer is missing %q:\n%s", want, recoveryTimer)
+		}
+	}
+	if strings.Contains(string(runner), leg.recoveryUnit()) ||
+		strings.Contains(string(runner), "--recover") {
+		t.Errorf("runner controls the independent recovery service:\n%s", runner)
+	}
+	if !strings.Contains(output.String(), "systemctl enable "+leg.recoveryUnit()+".timer") ||
+		!strings.Contains(output.String(), "systemctl restart "+leg.recoveryUnit()+".timer") {
+		t.Errorf("install instructions omit the recovery timer:\n%s", output.String())
+	}
+	runtimeSockets := append(signerSocketUnits(plan), riskSocketUnits(plan)...)
+	runtimeSockets = append(runtimeSockets, submitterSocketUnits(plan)...)
+	for _, instruction := range []string{
+		"systemctl stop " + serviceUnitName,
+		"systemctl restart " + strings.Join(runtimeSockets, " "),
+		"systemctl restart " + serviceUnitName,
+	} {
+		if !strings.Contains(output.String(), instruction) {
+			t.Errorf("install instructions omit the safe service reload step %q:\n%s",
+				instruction, output.String())
+		}
+	}
+}
+
 func TestTelegramCanBeDisabledFromTheStrategyFile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	sell := triggeredLeg(t, t.TempDir(), false, 0)
+	sell := armedLegWithStatus(t, t.TempDir(), false, time.Second)
 	if err := recordStrategy(strategyPaths{sell: sell, telegram: "disabled"}); err != nil {
 		t.Fatal(err)
 	}
@@ -626,6 +909,23 @@ func TestTelegramCanBeDisabledFromTheStrategyFile(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(directory, alertsUnitName)); !os.IsNotExist(err) {
 		t.Fatalf("Telegram was disabled but its unit was generated: %v", err)
+	}
+	for _, name := range []string{
+		"mithril-agent-status-sell.socket",
+		"mithril-agent-status-sell.service",
+	} {
+		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
+			t.Fatalf("Telegram was disabled and removed read-only status unit %s: %v", name, err)
+		}
+	}
+	text := output.String()
+	if !strings.Contains(text, "systemctl enable mithril-agent-status-sell.socket") {
+		t.Fatalf("Telegram was disabled and status socket activation was omitted:\n%s", text)
+	}
+	for _, forbidden := range []string{alertsAccountName, alertsUnitName, "mithril-agent-telegram test"} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("Telegram was disabled but install instructions contain %q:\n%s", forbidden, text)
+		}
 	}
 }
 
@@ -678,8 +978,10 @@ func TestServiceInstallAlsoWiresTheAlertPath(t *testing.T) {
 	}
 	for _, instruction := range []string{
 		"less " + filepath.Join(directory, serviceUnitName),
-		"sudo systemctl enable mithril-agent-status-sell.socket " + alertsUnitName,
-		"sudo systemctl restart mithril-agent-status-sell.socket " + alertsUnitName,
+		"sudo systemctl enable mithril-agent-status-sell.socket",
+		"sudo systemctl restart mithril-agent-status-sell.socket",
+		"sudo systemctl enable " + alertsUnitName,
+		"sudo systemctl restart " + alertsUnitName,
 		"--uid=" + alertsAccountName + " --gid=" + alertsAccountName,
 		"EnvironmentFile=" + alertsEnvFile,
 		filepath.Join(filepath.Dir(planBinaryForTest(t)), "mithril-agent-telegram") + " test",
@@ -757,16 +1059,25 @@ func TestStatusBridgeRetriesUntilTheFirstSnapshotExists(t *testing.T) {
 	}
 }
 
+func listenSupportedMetricsPort(t *testing.T) net.Listener {
+	t.Helper()
+	for port := 60_000; port <= 65_000; port++ {
+		listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+		if err == nil {
+			return listener
+		}
+	}
+	t.Fatal("could not allocate a test port in the supported metrics range")
+	return nil
+}
+
 // The runner binds one metrics port per leg and exits if any is taken. Because
 // the unit restarts forever by design, that is a permanent crash loop nobody
 // sees without reading the journal — which is exactly how it went twice: once
 // against a single-leg `swap run`, once against a runner an earlier rehearsal
 // had left behind.
 func TestServiceInstallRefusesAMetricsPortAlreadyInUse(t *testing.T) {
-	held, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	held := listenSupportedMetricsPort(t)
 	defer held.Close()
 	port := held.Addr().(*net.TCPAddr).Port
 
@@ -776,7 +1087,7 @@ func TestServiceInstallRefusesAMetricsPortAlreadyInUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	err = runService([]string{"install", "--metrics-base-port", strconv.Itoa(port)}, &out)
+	err := runService([]string{"install", "--metrics-base-port", strconv.Itoa(port)}, &out)
 	if err == nil {
 		t.Fatal("a unit was written naming a port that is already bound")
 	}
@@ -791,10 +1102,7 @@ func TestServiceInstallRefusesAMetricsPortAlreadyInUse(t *testing.T) {
 
 // A free port must not be reported as busy, or the check blocks every install.
 func TestServiceInstallAcceptsAFreeMetricsRange(t *testing.T) {
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	probe := listenSupportedMetricsPort(t)
 	port := probe.Addr().(*net.TCPAddr).Port
 	if err := probe.Close(); err != nil {
 		t.Fatal(err)
@@ -822,10 +1130,7 @@ func TestMetricsPortSpanKeepsTheSweepPortBeforeBuyExists(t *testing.T) {
 // new collision made the documented resume flow impossible without stopping a
 // healthy agent first.
 func TestServiceInstallCanUpdateItsOwnStagedUnitWhilePortsAreBusy(t *testing.T) {
-	held, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	held := listenSupportedMetricsPort(t)
 	defer held.Close()
 	port := held.Addr().(*net.TCPAddr).Port
 
@@ -880,6 +1185,57 @@ func TestServiceInstallDoesNotOverwriteAnUnrelatedFile(t *testing.T) {
 	}
 	if string(got) != "keep me\n" {
 		t.Fatalf("unrelated file changed to %q", got)
+	}
+}
+
+func TestGeneratedUnitWriterDoesNotFollowAReplacedSymlink(t *testing.T) {
+	directory := t.TempDir()
+	referent := filepath.Join(directory, "referent")
+	if err := os.WriteFile(referent, []byte("keep me\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(directory, serviceUnitName)
+	if err := os.Symlink(referent, target); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	if err := writeGeneratedUnit(target, []byte("[Unit]\nDescription=Mithril agent runner\n")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(referent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "keep me\n" {
+		t.Fatalf("generated unit writer followed the replaced symlink: %q", got)
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o644 {
+		t.Fatalf("generated unit mode = %v, want regular 0644", info.Mode())
+	}
+}
+
+func TestServiceInstallRefusesReplaceableOutputDirectory(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sell := armedLegWithStatus(t, t.TempDir(), false, time.Second)
+	if err := recordStrategy(strategyPaths{sell: sell}); err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(directory, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(directory, serviceUnitName)
+	if err := runService([]string{"install", "--output", target}, &bytes.Buffer{}); err == nil {
+		t.Fatal("a replaceable service output directory was accepted")
+	}
+	if _, err := os.Lstat(target); !os.IsNotExist(err) {
+		t.Fatalf("service unit was written into a replaceable directory: %v", err)
 	}
 }
 

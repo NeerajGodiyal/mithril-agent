@@ -176,7 +176,7 @@ func TestDoctorSendsPeopleToTheGuidedCommand(t *testing.T) {
 			t.Errorf("blocker %q sends the reviewer to the expert command: %q",
 				check.Title, check.Action)
 		}
-		if !strings.Contains(check.Action, "mithril-agent setup") {
+		if !strings.Contains(check.Action, "mithril-agent setup strategy") {
 			t.Errorf("blocker %q does not name the guided command: %q",
 				check.Title, check.Action)
 		}

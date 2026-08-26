@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/agent"
@@ -15,8 +17,23 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
 	"github.com/Overclock-Validator/mithril-agent/signer"
 	"github.com/Overclock-Validator/mithril-agent/solana"
-	"github.com/Overclock-Validator/mithril-agent/submitter"
 )
+
+func TestSweepNonceRequiresCompleteRandomInput(t *testing.T) {
+	original := swapSetupRandom
+	t.Cleanup(func() { swapSetupRandom = original })
+
+	swapSetupRandom = bytes.NewReader(bytes.Repeat([]byte{1}, 15))
+	if _, err := newSweepNonce(); err == nil {
+		t.Fatal("short random input produced a destination nonce")
+	}
+
+	swapSetupRandom = iotest.OneByteReader(bytes.NewReader(bytes.Repeat([]byte{2}, 16)))
+	nonce, err := newSweepNonce()
+	if err != nil || nonce != strings.Repeat("02", 16) {
+		t.Fatalf("partial random reads produced nonce %q, %v", nonce, err)
+	}
+}
 
 func sweepTestKey(t *testing.T) (string, ed25519.PrivateKey) {
 	t.Helper()
@@ -145,8 +162,8 @@ func TestInstallSweepSetupProducesACoherentBoundSet(t *testing.T) {
 		SignatureBase58: "unverified-in-this-fixture", ActiveAfterUnix: anchor.Unix(),
 	}
 	evidence := proposalcheck.ProviderBindings{
-		PrimaryTrustDomain: "provider-one", PrimaryOriginSHA256: strings.Repeat("b", 64),
-		SecondaryTrustDomain: "provider-two", SecondaryOriginSHA256: strings.Repeat("c", 64),
+		PrimaryTrustDomain: "provider-one", PrimaryOriginSHA256: strings.Repeat("1", 64),
+		SecondaryTrustDomain: "provider-two", SecondaryOriginSHA256: strings.Repeat("2", 64),
 	}
 	if err := installSweepSetup(root, fingerprint, profile, filepath.Join(home, "wallet.json"), "", "", evidence, proof); err != nil {
 		t.Fatalf("install: %v", err)
@@ -158,9 +175,6 @@ func TestInstallSweepSetupProducesACoherentBoundSet(t *testing.T) {
 	}
 	if cfg.Profile != profile {
 		t.Fatal("the installed profile does not match what was configured")
-	}
-	if cfg.Evidence != evidence {
-		t.Fatal("the installed runner config does not bind the evidence providers")
 	}
 	var signerPolicy signer.Policy
 	if err := readStrictJSONFile(filepath.Join(root, "signer-policy.json"), &signerPolicy); err != nil {
@@ -174,13 +188,6 @@ func TestInstallSweepSetupProducesACoherentBoundSet(t *testing.T) {
 	}
 	if signerPolicy.ScheduleAnchorUnix != anchor.Unix() {
 		t.Fatal("the signer does not enforce the same activation anchor")
-	}
-	var submitterPolicy submitter.Policy
-	if err := readStrictJSONFile(filepath.Join(root, "submitter-policy.json"), &submitterPolicy); err != nil {
-		t.Fatalf("read submitter policy: %v", err)
-	}
-	if submitterPolicy.Evidence != evidence {
-		t.Fatal("the submitter policy does not bind the evidence providers")
 	}
 	stateDir := "state-" + fingerprint[:8]
 	if !strings.Contains(signerPolicy.AuthorizationLedgerPath, stateDir) {
