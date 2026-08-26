@@ -717,7 +717,15 @@ func serveSSHRequest(
 			return err
 		}
 		_, _ = channel.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{0}))
-		return channel.CloseWrite()
+		if err := channel.CloseWrite(); err != nil {
+			return err
+		}
+		if err := channel.Close(); err != nil {
+			return err
+		}
+		_ = connection.SetDeadline(time.Now().Add(time.Second))
+		_ = server.Wait()
+		return nil
 	}
 	return errors.New("OpenSSH signer command was not requested")
 }

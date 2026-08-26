@@ -80,7 +80,7 @@ func TestDevnetOnceComposesRealProcessesAndRPCClients(t *testing.T) {
 		MaxTransferLamports:          20,
 		DailyCapLamports:             30,
 		MaxFeeLamports:               5,
-		ScheduleWindowSeconds:        3_600,
+		ScheduleWindowSeconds:        86_400,
 		ScheduleAnchorUnix:           time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC).Unix(),
 		MaxClockUncertaintyMillis:    2_000,
 		MaxObservationAgeSeconds:     30,
