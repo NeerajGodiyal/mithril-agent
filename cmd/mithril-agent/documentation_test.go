@@ -40,6 +40,7 @@ func TestFullStrategyDocumentationMatchesGeneratedLayout(t *testing.T) {
 		"127.0.0.1:9312",
 		"sudo -u mithril-agent env HOME=/var/lib/mithril-agent",
 		"[node-state filesystem access](OPERATIONS.md#node-state-filesystem-access)",
+		"WALLETLESS_QUICKSTART.md INDEXING.md",
 		"EnvironmentFile=/etc/mithril-agent/telegram-operator.env",
 		"--activation-delay 0s",
 		"/usr/local/bin/mithril-agent check",
@@ -91,26 +92,29 @@ func TestFullStrategyDocumentationMatchesGeneratedLayout(t *testing.T) {
 	for _, want := range []string{
 		"[ROADMAP.md](ROADMAP.md)",
 		"[WALLETLESS_QUICKSTART.md](WALLETLESS_QUICKSTART.md)",
+		"[INDEXING.md](INDEXING.md)",
 		"[QUICKSTART.md](QUICKSTART.md)",
 		"[DEMO.md](DEMO.md)",
 		"[OPERATIONS.md](OPERATIONS.md)",
-		"Give this project to another AI assistant",
-		"--output /var/lib/mithril-agent/.mithril-agent/mithril-agent-run.service",
-		"make test-account-free",
+		"## Default walletless flow",
+		"## MCP and AI clients",
+		"## Optional Devnet execution",
+		"## Milestones",
+		"## Current limits",
+		"## Releases and change history",
+		"make test-walletless",
+		"make test-rooted-contract MITHRIL_SOURCE=/absolute/path/to/Mithril",
+		"make prereqs-trading",
 		"make test-free-rehearsal",
-		"make test-free-custody",
-		"mithril-agent proposal canary-check",
-		"proposal approval-create",
-		"mithril-agent proposal turnkey-check",
-		"temporary, unfunded test identities",
-		"No operator wallet or custody-provider or messaging account is required",
+		"Published in Mithril Agent v0.1.0",
+		"Funded Mainnet execution is disabled",
 	} {
 		if !strings.Contains(readme, want) {
 			t.Errorf("README.md is missing entry-point fact %q", want)
 		}
 	}
-	if lines := strings.Count(readme, "\n") + 1; lines < 250 || lines > 500 {
-		t.Errorf("README.md has %d lines; want a complete 250..500-line orientation", lines)
+	if lines := strings.Count(readme, "\n") + 1; lines > 300 {
+		t.Errorf("README.md has %d lines; keep detailed procedures in the linked guides", lines)
 	}
 	walletless := readDocumentation(t, "../../WALLETLESS_QUICKSTART.md")
 	for _, want := range []string{
@@ -135,8 +139,9 @@ func TestFullStrategyDocumentationMatchesGeneratedLayout(t *testing.T) {
 		"install -d -m 0755 bin",
 		"(umask 022 && go build",
 		"executable is not trusted",
-		"operator-supplied source bundle",
-		"Do not clone the older",
+		"Mithril Agent v0.1.0 contains the agent-side walletless commands",
+		"operator-supplied node source bundle",
+		"old `koro/agent-node-integration-wip` branch is not a substitute",
 	} {
 		if !strings.Contains(walletless, want) {
 			t.Errorf("WALLETLESS_QUICKSTART.md is missing first-run fact %q", want)

@@ -85,7 +85,8 @@ Install the verified runtime:
 sudo install -d -o root -g root -m 0755 /usr/local/libexec/mithril-agent
 sudo install -d -o root -g root -m 0755 /usr/local/share/doc/mithril-agent
 sudo install -o root -g root -m 0644 \
-  README.md OVERVIEW.md ROADMAP.md QUICKSTART.md DEMO.md OPERATIONS.md \
+  README.md OVERVIEW.md ROADMAP.md WALLETLESS_QUICKSTART.md INDEXING.md \
+  QUICKSTART.md DEMO.md OPERATIONS.md \
   /usr/local/share/doc/mithril-agent/
 sudo install -o root -g root -m 0755 \
   ./bin/mithril-agent \

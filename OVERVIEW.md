@@ -170,11 +170,11 @@ Land them in order, then add the focused replay/rooting and rooted-feed work.
 The old `koro/agent-node-integration-wip` branch is useful for comparison and
 test extraction, but should not be merged or used for a new deployment.
 
-The Alpenglow rooted-event feed and the corresponding walletless program and
-index commands are newer than that published trading-pilot revision. Until a
-matched revision is authorized and published, they must be reviewed from the
-operator-supplied source bundle; cloning the older integration branch does not
-provide them.
+Mithril Agent v0.1.0 publishes the agent-side walletless program and index
+commands. The matching Alpenglow rooted-event feed remains part of the focused
+node review. Until that node revision is authorized and published, review it
+from the operator-supplied source bundle; the older integration branch does not
+provide the current contract.
 
 ### 2. Mithril Agent
 

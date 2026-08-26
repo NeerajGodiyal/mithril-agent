@@ -43,8 +43,8 @@ The rooted feed has two deliberately separate evidence paths. Alpenglow uses
 Mithril's native rooted replay and certificate path. Classic `devnet`,
 `testnet`, and `mainnet-beta` use finalized blocks fetched and verified by the
 local Mithril node before durable rooted-event batches are published. Classic
-output must never be relabelled as native Alpenglow evidence. Alpenglow is not
-active on Solana Mainnet today; Mainnet uses the classic finalized path.
+output must never be relabelled as native Alpenglow evidence. This release
+treats Solana Mainnet as the classic finalized path.
 
 The node configuration must contain:
 
@@ -103,17 +103,17 @@ validator, voter, or withdrawer private key into this setup.
 This path needs Go 1.26.6 or newer. It does not need Node.js, a quote adapter,
 Telegram, a custody account, or any of the optional trading services:
 
-This walletless work is newer than the published trading pilot. The current
-operator-supplied source bundle is `mithril-walletless-port-20260826-r12.tar.gz` (SHA-256
-`f98c3e5b60b493a22a5a0c38ccf0ef82f5e97c741a649b62e7ff6c9ce9a88e34`).
-It is an unpublished review artifact, not a release. Use it only for local
-cross-repository testing after its source and contract checks pass.
-The Mithril source must contain the `events` command and
-`storage.rooted_events`; the agent source must contain this guide plus the
-`program` and `index` commands. Do not clone the older trading-pilot revision
-and assume it contains these features. The archive is a non-Git review
-artifact, not a published revision. The old `koro/agent-node-integration-wip`
-branch is not a substitute for the focused node prerequisites.
+Mithril Agent v0.1.0 contains the agent-side walletless commands in this guide.
+The matching Mithril node work is still under focused review. The current
+operator-supplied node source bundle is
+`mithril-walletless-port-20260826-r12.tar.gz` (SHA-256
+`f98c3e5b60b493a22a5a0c38ccf0ef82f5e97c741a649b62e7ff6c9ce9a88e34`). It is
+an unpublished review artifact, not a node release. Use it only for local
+cross-repository testing after its source and contract checks pass. The
+Mithril source must contain the `events` command and `storage.rooted_events`;
+the agent source must contain this guide plus the `program` and `index`
+commands. The old `koro/agent-node-integration-wip` branch is not a substitute
+for the focused node prerequisites.
 
 ```sh
 cd /path/to/verified/mithril-agent-source
