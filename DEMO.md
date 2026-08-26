@@ -316,6 +316,9 @@ must not run while that service is active. During a planned review window, stop
 the generated runner, capture every leg, then start the runner again. Its
 service starts with new actions disabled:
 
+Each leg's append-only journal is
+`/var/lib/mithril-agent/.mithril-agent/strategy-data/$leg/state/events.jsonl`.
+
 ```sh
 sudo systemctl stop mithril-agent-run.service
 for leg in sell buy sweep; do
