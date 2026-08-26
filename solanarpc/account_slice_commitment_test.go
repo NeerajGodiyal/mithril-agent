@@ -25,6 +25,10 @@ func TestAccountSliceUsesProcessedForMithrilNode(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			seen := false
+			responseContext := map[string]any{"slot": uint64(90)}
+			if test.mithril {
+				responseContext["bankhash"] = solana.Encode(bytes.Repeat([]byte{4}, 32))
+			}
 			httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 				var input struct {
 					ID     uint64          `json:"id"`
@@ -42,7 +46,7 @@ func TestAccountSliceUsesProcessedForMithrilNode(t *testing.T) {
 				return jsonResponse(t, map[string]any{
 					"jsonrpc": "2.0", "id": input.ID,
 					"result": map[string]any{
-						"context": map[string]any{"slot": uint64(90)},
+						"context": responseContext,
 						"value": map[string]any{
 							"owner": solana.Encode(bytes.Repeat([]byte{3}, 32)),
 							"data": []any{

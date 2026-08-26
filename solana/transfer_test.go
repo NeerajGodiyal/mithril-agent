@@ -144,6 +144,9 @@ func TestValidateVariableLengthBase58(t *testing.T) {
 	if _, err := Decode32(DevnetGenesisHash); err != nil {
 		t.Fatalf("devnet genesis hash: %v", err)
 	}
+	if _, err := Decode32(TestnetGenesisHash); err != nil {
+		t.Fatalf("testnet genesis hash: %v", err)
+	}
 	for _, value := range []string{
 		"EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
 		"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",

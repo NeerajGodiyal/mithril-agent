@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"slices"
 	"strings"
@@ -104,8 +107,17 @@ func TestClientRPCMethods(t *testing.T) {
 					"lastValidBlockHeight": uint64(120),
 				},
 			}
+		case "isBlockhashValid":
+			assertContains(t, input.Params, `"`+blockhash+`"`)
+			assertContains(t, input.Params, `"commitment":"processed"`)
+			assertContains(t, input.Params, `"minContextSlot":80`)
+			result = map[string]any{
+				"context": map[string]any{"slot": uint64(91)},
+				"value":   true,
+			}
 		case "getBlockHeight":
 			assertContains(t, input.Params, `"commitment":"finalized"`)
+			assertContains(t, input.Params, `"minContextSlot":80`)
 			result = uint64(100)
 		case "getSlot":
 			assertContains(t, input.Params, `"commitment":"finalized"`)
@@ -212,9 +224,16 @@ func TestClientRPCMethods(t *testing.T) {
 	if latest.ContextSlot != 90 || latest.Blockhash != blockhash || latest.LastValidBlockHeight != 120 {
 		t.Fatalf("unexpected latest blockhash: %+v", latest)
 	}
-	height, err := client.BlockHeight(t.Context())
+	validity, err := client.BlockhashValid(t.Context(), blockhash, 80)
+	if err != nil || validity != (BlockhashValidity{ContextSlot: 91, Valid: true}) {
+		t.Fatalf("blockhash validity = %+v, %v", validity, err)
+	}
+	height, err := client.BlockHeightAt(t.Context(), 80)
 	if err != nil || height != 100 {
 		t.Fatalf("block height = %d, %v", height, err)
+	}
+	if _, err := client.BlockHeightAt(t.Context(), 0); err == nil {
+		t.Fatal("zero minimum block-height context slot was accepted")
 	}
 	finalizedSlot, err := client.FinalizedSlot(t.Context())
 	if err != nil || finalizedSlot != 89 {
@@ -343,6 +362,157 @@ func TestMithrilNodeUsesProcessedCommitment(t *testing.T) {
 	}
 }
 
+func TestMithrilVerificationStatusIdentifiesEvidenceNode(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var input struct {
+			ID     uint64 `json:"id"`
+			Method string `json:"method"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.Method != "getVerificationStatus" {
+			t.Fatalf("method = %q, want getVerificationStatus", input.Method)
+		}
+		return jsonResponse(t, map[string]any{
+			"jsonrpc": "2.0", "id": input.ID,
+			"result": map[string]any{
+				"state": "complete", "required": true,
+				"verifiedSlot": uint64(91), "eligibleSlot": uint64(91),
+				"healthy": true, "evidenceServed": true,
+			},
+		}), nil
+	})}
+	client, err := NewMithrilNode("http://127.0.0.1:8899", httpClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := client.VerificationStatus(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "complete" || !status.Required || status.VerifiedSlot != 91 ||
+		status.EligibleSlot != 91 || !status.Healthy || !status.EvidenceServed || status.Reason != "" {
+		t.Fatalf("status = %+v", status)
+	}
+
+	generic, err := New("https://rpc.test", httpClient, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := generic.VerificationStatus(t.Context()); err == nil {
+		t.Fatal("generic RPC client returned Mithril verification status")
+	}
+}
+
+func TestMithrilRootedFeedStatusBindsAccountsDBLineage(t *testing.T) {
+	client, err := NewMithrilNode("http://127.0.0.1:8899", &http.Client{
+		Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			return jsonResponse(t, map[string]any{
+				"jsonrpc": "2.0", "id": uint64(1), "result": map[string]any{
+					"enabled": true, "accountsDbRootRunId": "0123abcd",
+				},
+			}), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := client.RootedFeedStatus(t.Context())
+	if err != nil || !status.Enabled || status.AccountsDBRootRunID != "0123abcd" {
+		t.Fatalf("status = %+v, %v", status, err)
+	}
+}
+
+func TestMithrilRootedFeedStatusAcceptsNewAccountsDBLineageID(t *testing.T) {
+	const rootRunID = "0123456789abcdef0123456789abcdef"
+	client, err := NewMithrilNode("http://127.0.0.1:8899", &http.Client{
+		Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			return jsonResponse(t, map[string]any{
+				"jsonrpc": "2.0", "id": uint64(1), "result": map[string]any{
+					"enabled": true, "accountsDbRootRunId": rootRunID,
+				},
+			}), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := client.RootedFeedStatus(t.Context())
+	if err != nil || status.AccountsDBRootRunID != rootRunID {
+		t.Fatalf("status = %+v, %v", status, err)
+	}
+}
+
+func TestMithrilRootedFeedStatusRejectsInvalidResponses(t *testing.T) {
+	for name, result := range map[string]map[string]any{
+		"missing enabled":   {"accountsDbRootRunId": "0123abcd"},
+		"enabled no root":   {"enabled": true},
+		"invalid root":      {"enabled": true, "accountsDbRootRunId": "not-hex!"},
+		"disabled has root": {"enabled": false, "accountsDbRootRunId": "0123abcd"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client, err := NewMithrilNode("http://127.0.0.1:8899", &http.Client{
+				Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+					return jsonResponse(t, map[string]any{
+						"jsonrpc": "2.0", "id": uint64(1), "result": result,
+					}), nil
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.RootedFeedStatus(t.Context()); err == nil {
+				t.Fatalf("invalid status accepted: %v", result)
+			}
+		})
+	}
+}
+
+func TestMithrilVerificationStatusRejectsInvalidResponses(t *testing.T) {
+	valid := map[string]any{
+		"state": "complete", "required": true,
+		"verifiedSlot": uint64(91), "eligibleSlot": uint64(91),
+		"healthy": true, "evidenceServed": true,
+	}
+	for name, mutate := range map[string]func(map[string]any){
+		"missing evidence gate":  func(result map[string]any) { delete(result, "evidenceServed") },
+		"unknown state":          func(result map[string]any) { result["state"] = "unknown" },
+		"closed complete state":  func(result map[string]any) { result["evidenceServed"] = false },
+		"backward coverage":      func(result map[string]any) { result["eligibleSlot"] = uint64(89) },
+		"incomplete at equality": func(result map[string]any) { result["state"] = "incomplete" },
+		"stalled at equality": func(result map[string]any) {
+			result["state"] = "stalled"
+			result["healthy"] = false
+			result["evidenceServed"] = false
+			result["reason"] = "stalled"
+		},
+		"complete below eligible": func(result map[string]any) { result["verifiedSlot"] = uint64(90) },
+		"unsafe reason":           func(result map[string]any) { result["reason"] = "diverged" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := make(map[string]any, len(valid))
+			for key, value := range valid {
+				result[key] = value
+			}
+			mutate(result)
+			client, err := NewMithrilNode("http://127.0.0.1:8899", &http.Client{
+				Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+					return jsonResponse(t, map[string]any{
+						"jsonrpc": "2.0", "id": uint64(1), "result": result,
+					}), nil
+				}),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.VerificationStatus(t.Context()); err == nil {
+				t.Fatalf("VerificationStatus accepted %v", result)
+			}
+		})
+	}
+}
+
 func TestClientRejectsDuplicateResponseKeys(t *testing.T) {
 	client, err := New("https://rpc.test", &http.Client{
 		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -360,6 +530,334 @@ func TestClientRejectsDuplicateResponseKeys(t *testing.T) {
 	if _, err := client.GenesisHash(t.Context()); err == nil ||
 		!strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("duplicate RPC response error = %v", err)
+	}
+}
+
+func TestSimulateV0UsesUnsignedVersionedTransaction(t *testing.T) {
+	key := func(value byte) [32]byte {
+		var result [32]byte
+		for index := range result {
+			result[index] = value
+		}
+		return result
+	}
+	feePayer, program := key(1), key(2)
+	loaded, tableID, blockhash := key(3), key(4), key(5)
+	tables := map[[32]byte][][32]byte{tableID: {loaded}}
+	message, err := solana.BuildV0Message(
+		solana.Encode(feePayer[:]), solana.Encode(blockhash[:]),
+		[]solana.Instruction{{
+			Program:  solana.Encode(program[:]),
+			Accounts: []solana.AccountMeta{{Address: solana.Encode(loaded[:]), Writable: true}},
+			Data:     []byte{7},
+		}},
+		tables,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var input struct {
+			JSONRPC string            `json:"jsonrpc"`
+			ID      uint64            `json:"id"`
+			Method  string            `json:"method"`
+			Params  []json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.Method != "simulateTransaction" || len(input.Params) != 2 {
+			t.Fatalf("unexpected RPC request: %+v", input)
+		}
+		var encoded string
+		if err := json.Unmarshal(input.Params[0], &encoded); err != nil {
+			t.Fatal(err)
+		}
+		transaction, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(transaction) != 1+ed25519.SignatureSize+len(message) || transaction[0] != 1 ||
+			transaction[1+ed25519.SignatureSize] != 0x80 {
+			t.Fatal("RPC did not receive a one-signature-slot v0 simulation transaction")
+		}
+		assertContains(t, input.Params[1], `"sigVerify":false`)
+		assertContains(t, input.Params[1], `"minContextSlot":90`)
+		return jsonResponse(t, map[string]any{
+			"jsonrpc": "2.0", "id": input.ID,
+			"result": map[string]any{
+				"context": map[string]any{"slot": uint64(91), "bankhash": solana.Encode(blockhash[:])},
+				"value": map[string]any{
+					"err": nil, "unitsConsumed": uint64(123), "logs": []string{"success"},
+				},
+			},
+		}), nil
+	})}
+	client, err := NewMithrilNode("http://127.0.0.1:8899", httpClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.SimulateV0(t.Context(), message, tables, 90)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ContextSlot != 91 || result.Bankhash != solana.Encode(blockhash[:]) ||
+		result.UnitsConsumed != 123 || len(result.LogsSHA256) != 64 {
+		t.Fatalf("simulation = %+v", result)
+	}
+	missingBankhash, err := NewMithrilNode("http://127.0.0.1:8899", &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return jsonResponse(t, map[string]any{
+				"jsonrpc": "2.0", "id": uint64(1),
+				"result": map[string]any{
+					"context": map[string]any{"slot": uint64(91)},
+					"value": map[string]any{
+						"err": nil, "unitsConsumed": uint64(123), "logs": []string{"success"},
+					},
+				},
+			}), nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := missingBankhash.SimulateV0(t.Context(), message, tables, 90); err == nil {
+		t.Fatal("Mithril simulation without an exact bank identity was accepted")
+	}
+}
+
+func TestSendTransactionAcceptsVerifiedV0(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blockhash [32]byte
+	for index := range blockhash {
+		blockhash[index] = byte(index + 1)
+	}
+	message, err := solana.BuildV0Message(
+		solana.Encode(publicKey), solana.Encode(blockhash[:]),
+		[]solana.Instruction{{Program: "11111111111111111111111111111111"}}, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transaction, signature, err := solana.SignV0Message(privateKey, message, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSignature := solana.Encode(signature[:])
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var input struct {
+			ID     uint64            `json:"id"`
+			Method string            `json:"method"`
+			Params []json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.Method != "sendTransaction" || len(input.Params) != 2 {
+			t.Fatalf("unexpected RPC request: %+v", input)
+		}
+		var encoded string
+		if err := json.Unmarshal(input.Params[0], &encoded); err != nil {
+			t.Fatal(err)
+		}
+		got, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil || !bytes.Equal(got, transaction) {
+			t.Fatal("RPC did not receive the exact signed v0 transaction")
+		}
+		assertContains(t, input.Params[1], `"minContextSlot":90`)
+		return jsonResponse(t, map[string]any{
+			"jsonrpc": "2.0", "id": input.ID, "result": wantSignature,
+		}), nil
+	})}
+	client, err := New("https://rpc.test", httpClient, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.SendTransaction(t.Context(), transaction, 90)
+	if err != nil || got != wantSignature {
+		t.Fatalf("send v0 = %q, %v", got, err)
+	}
+}
+
+func TestFeeForV0MessageRequiresTheExpectedSigner(t *testing.T) {
+	filled := func(value byte) [32]byte {
+		var result [32]byte
+		for index := range result {
+			result[index] = value
+		}
+		return result
+	}
+	feePayer, blockhash, program := filled(1), filled(2), filled(3)
+	message, err := solana.BuildV0Message(
+		solana.Encode(feePayer[:]), solana.Encode(blockhash[:]),
+		[]solana.Instruction{{Program: solana.Encode(program[:]), Data: []byte{7}}}, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		calls++
+		var input struct {
+			ID     uint64            `json:"id"`
+			Method string            `json:"method"`
+			Params []json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.Method != "getFeeForMessage" || len(input.Params) != 2 {
+			t.Fatalf("unexpected RPC request: %+v", input)
+		}
+		var encoded string
+		if err := json.Unmarshal(input.Params[0], &encoded); err != nil {
+			t.Fatal(err)
+		}
+		got, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil || !bytes.Equal(got, message) {
+			t.Fatal("fee RPC did not receive the exact v0 message")
+		}
+		assertContains(t, input.Params[1], `"minContextSlot":90`)
+		return jsonResponse(t, map[string]any{
+			"jsonrpc": "2.0", "id": input.ID,
+			"result": map[string]any{
+				"context": map[string]any{"slot": uint64(91)}, "value": uint64(5_000),
+			},
+		}), nil
+	})}
+	client, err := New("https://rpc.test", httpClient, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.FeeForV0Message(
+		t.Context(), message, nil, solana.Encode(blockhash[:]), 90,
+	); err == nil || calls != 0 {
+		t.Fatal("wrong signer reached the RPC")
+	}
+	fee, err := client.FeeForV0Message(
+		t.Context(), message, nil, solana.Encode(feePayer[:]), 90,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fee.ContextSlot != 91 || fee.Lamports != 5_000 || calls != 1 {
+		t.Fatalf("fee = %+v, calls = %d", fee, calls)
+	}
+}
+
+func TestTransactionEffectAcceptsAndBindsVersionZeroSignature(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockhash := bytes.Repeat([]byte{8}, 32)
+	message, err := solana.BuildV0Message(
+		solana.Encode(publicKey), solana.Encode(blockhash),
+		[]solana.Instruction{{Program: solana.ComputeBudgetProgram, Data: []byte{1}}}, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transaction, signatureBytes, err := solana.SignV0Message(privateKey, message, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := solana.Encode(signatureBytes[:])
+	client, err := New("https://rpc.test", &http.Client{Transport: roundTripFunc(
+		func(request *http.Request) (*http.Response, error) {
+			var input struct {
+				ID     uint64            `json:"id"`
+				Method string            `json:"method"`
+				Params []json.RawMessage `json:"params"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+				t.Fatal(err)
+			}
+			if input.Method != "getTransaction" {
+				t.Fatalf("method = %s", input.Method)
+			}
+			return jsonResponse(t, map[string]any{
+				"jsonrpc": "2.0", "id": input.ID,
+				"result": map[string]any{
+					"slot": uint64(100), "version": uint64(0),
+					"meta": map[string]any{
+						"err": nil, "fee": uint64(5_000),
+						"preBalances": []uint64{100_000}, "postBalances": []uint64{95_000},
+					},
+					"transaction": []any{base64.StdEncoding.EncodeToString(transaction), "base64"},
+				},
+			}), nil
+		},
+	)}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	effect, err := client.TransactionEffect(t.Context(), signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if effect.Slot != 100 || effect.FeeLamports != 5_000 ||
+		!bytes.Equal(effect.Transaction, transaction) {
+		t.Fatalf("effect = %+v", effect)
+	}
+	wrongSignature := solana.Encode(bytes.Repeat([]byte{1}, 64))
+	if _, err := client.TransactionEffect(t.Context(), wrongSignature); err == nil {
+		t.Fatal("accepted a finalized transaction with a different embedded signature")
+	}
+}
+
+func TestAddressLookupTableReadsOneCoherentAccount(t *testing.T) {
+	address := bytes.Repeat([]byte{7}, 32)
+	first, second := bytes.Repeat([]byte{8}, 32), bytes.Repeat([]byte{9}, 32)
+	data := make([]byte, 56, 56+64)
+	binary.LittleEndian.PutUint32(data[:4], 1)
+	binary.LittleEndian.PutUint64(data[4:12], math.MaxUint64)
+	binary.LittleEndian.PutUint64(data[12:20], 90)
+	data[20] = 1
+	data = append(data, first...)
+	data = append(data, second...)
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var input struct {
+			ID     uint64          `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.Method != "getAccountInfo" {
+			t.Fatalf("method = %q", input.Method)
+		}
+		assertContains(t, input.Params, `"commitment":"confirmed"`)
+		assertContains(t, input.Params, `"minContextSlot":90`)
+		return jsonResponse(t, map[string]any{
+			"jsonrpc": "2.0", "id": input.ID,
+			"result": map[string]any{
+				"context": map[string]any{"slot": uint64(90)},
+				"value": map[string]any{
+					"data":       []any{base64.StdEncoding.EncodeToString(data), "base64"},
+					"executable": false, "lamports": uint64(1),
+					"owner": solana.AddressLookupTableProgram, "space": len(data),
+				},
+			},
+		}), nil
+	})}
+	client, err := New("https://rpc.test", httpClient, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	table, err := client.AddressLookupTable(t.Context(), solana.Encode(address), 90)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// At the extension slot only the prefix before LastExtendedSlotStartIndex
+	// is active.
+	if table.ContextSlot != 90 || len(table.Addresses) != 1 ||
+		!bytes.Equal(table.Addresses[0][:], first) {
+		t.Fatalf("table = %+v", table)
 	}
 }
 
@@ -384,6 +882,34 @@ func TestLatestBlockhashRejectsContextBeforeMinimum(t *testing.T) {
 	}
 	if _, err := client.LatestBlockhash(t.Context(), 80); err == nil {
 		t.Fatal("latest blockhash before minContextSlot was accepted")
+	}
+}
+
+func TestBlockhashValidityRejectsInvalidInputAndStaleContext(t *testing.T) {
+	blockhash := solana.Encode(bytes.Repeat([]byte{7}, 32))
+	client, err := New("https://rpc.test", &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return jsonResponse(t, map[string]any{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"result": map[string]any{
+					"context": map[string]any{"slot": uint64(79)},
+					"value":   true,
+				},
+			}), nil
+		}),
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.BlockhashValid(t.Context(), "not-a-blockhash", 80); err == nil {
+		t.Fatal("invalid blockhash was accepted")
+	}
+	if _, err := client.BlockhashValid(t.Context(), blockhash, 0); err == nil {
+		t.Fatal("zero minimum context slot was accepted")
+	}
+	if _, err := client.BlockhashValid(t.Context(), blockhash, 80); err == nil {
+		t.Fatal("blockhash validity before minContextSlot was accepted")
 	}
 }
 
@@ -685,6 +1211,185 @@ func TestAccountSliceRejectsMalformedEvidence(t *testing.T) {
 				t.Fatal("malformed account slice was accepted")
 			}
 		})
+	}
+}
+
+func TestAccountDataRangeUsesBoundedSliceAndAllowsEOF(t *testing.T) {
+	address := solana.Encode(bytes.Repeat([]byte{8}, 32))
+	owner := solana.Encode(bytes.Repeat([]byte{9}, 32))
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var input struct {
+			ID     uint64          `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.Method != "getAccountInfo" {
+			t.Fatalf("method = %q", input.Method)
+		}
+		assertContains(t, input.Params, `"commitment":"confirmed"`)
+		assertContains(t, input.Params, `"minContextSlot":90`)
+		assertContains(t, input.Params, `"dataSlice":{"length":8,"offset":12}`)
+		return jsonResponse(t, map[string]any{
+			"jsonrpc": "2.0", "id": input.ID,
+			"result": map[string]any{
+				"context": map[string]any{"slot": uint64(91)},
+				"value": map[string]any{
+					"data":       []any{base64.StdEncoding.EncodeToString([]byte{1, 2, 3}), "base64"},
+					"executable": false, "lamports": uint64(1), "owner": owner, "space": uint64(15),
+				},
+			},
+		}), nil
+	})}
+	client, err := New("https://rpc.test", httpClient, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.AccountDataRange(t.Context(), address, 90, 12, 8)
+	if err != nil || got.ContextSlot != 91 || got.Owner != owner || got.DataLength != 15 ||
+		!bytes.Equal(got.Data, []byte{1, 2, 3}) {
+		t.Fatalf("account data range = %+v, %v", got, err)
+	}
+	for _, length := range []uint64{0, maxAccountDataBytes + 1} {
+		if _, err := client.AccountDataRange(t.Context(), address, 90, 0, length); err == nil {
+			t.Fatalf("invalid range length %d was accepted", length)
+		}
+	}
+}
+
+func TestAccountDataUsesBoundedConfirmedRead(t *testing.T) {
+	address := solana.Encode(bytes.Repeat([]byte{8}, 32))
+	owner := solana.Encode(bytes.Repeat([]byte{9}, 32))
+	content := bytes.Repeat([]byte{7}, 700)
+	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var input struct {
+			ID     uint64          `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.Method != "getAccountInfo" {
+			t.Fatalf("method = %q", input.Method)
+		}
+		assertContains(t, input.Params, `"commitment":"confirmed"`)
+		assertContains(t, input.Params, `"minContextSlot":90`)
+		if bytes.Contains(input.Params, []byte("dataSlice")) {
+			t.Fatal("complete account request contained a data slice")
+		}
+		return jsonResponse(t, map[string]any{
+			"jsonrpc": "2.0", "id": input.ID,
+			"result": map[string]any{
+				"context": map[string]any{"slot": uint64(91)},
+				"value": map[string]any{
+					"data":       []any{base64.StdEncoding.EncodeToString(content), "base64"},
+					"executable": false, "lamports": uint64(1), "owner": owner,
+					"space": uint64(len(content)),
+				},
+			},
+		}), nil
+	})}
+	client, err := New("https://rpc.test", httpClient, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.AccountData(t.Context(), address, 90, 700)
+	if err != nil || got.ContextSlot != 91 || got.Owner != owner || got.Executable ||
+		got.DataLength != 700 || !bytes.Equal(got.Data, content) {
+		t.Fatalf("account data = %+v, %v", got, err)
+	}
+	if _, err := client.AccountData(t.Context(), address, 0, 700); err == nil {
+		t.Fatal("zero context was accepted")
+	}
+	if _, err := client.AccountData(t.Context(), address, 1, (10<<20)+1); err == nil {
+		t.Fatal("oversized data bound was accepted")
+	}
+}
+
+func TestAccountDataRejectsMalformedEvidence(t *testing.T) {
+	address := solana.Encode(bytes.Repeat([]byte{8}, 32))
+	owner := solana.Encode(bytes.Repeat([]byte{9}, 32))
+	for name, value := range map[string]any{
+		"missing": nil,
+		"over bound": map[string]any{
+			"data": []any{"AQIDBA==", "base64"}, "owner": owner, "space": uint64(4),
+		},
+		"wrong space": map[string]any{
+			"data": []any{"AQIDBA==", "base64"}, "owner": owner, "space": uint64(3),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := newTestClient(t, func(id uint64) any {
+				return map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{
+					"context": map[string]any{"slot": uint64(9)}, "value": value,
+				}}
+			})
+			bound := uint64(4)
+			if name == "over bound" {
+				bound = 3
+			}
+			if _, err := client.AccountData(t.Context(), address, 9, bound); err == nil {
+				t.Fatal("malformed complete account data was accepted")
+			}
+		})
+	}
+}
+
+func TestMithrilAccountReadsRequireProcessedBankIdentity(t *testing.T) {
+	address := solana.Encode(bytes.Repeat([]byte{8}, 32))
+	owner := solana.Encode(bytes.Repeat([]byte{9}, 32))
+	content := []byte{1, 2, 3, 4}
+	newClient := func(bankhash string) *Client {
+		t.Helper()
+		httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			var input struct {
+				ID uint64 `json:"id"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+				t.Fatal(err)
+			}
+			return jsonResponse(t, map[string]any{
+				"jsonrpc": "2.0", "id": input.ID,
+				"result": map[string]any{
+					"context": map[string]any{"slot": uint64(91), "bankhash": bankhash},
+					"value": map[string]any{
+						"data":       []any{base64.StdEncoding.EncodeToString(content), "base64"},
+						"executable": false, "lamports": uint64(1), "owner": owner, "space": uint64(len(content)),
+					},
+				},
+			}), nil
+		})}
+		client, err := NewMithrilNode("http://127.0.0.1:8899", httpClient)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return client
+	}
+
+	for name, bankhash := range map[string]string{
+		"missing": "",
+		"invalid": "invalid",
+		"zero":    solana.Encode(make([]byte, 32)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := newClient(bankhash).AccountData(t.Context(), address, 90, uint64(len(content))); err == nil {
+				t.Fatal("Mithril account response without a valid bank identity was accepted")
+			}
+		})
+	}
+
+	bankhash := solana.Encode(bytes.Repeat([]byte{7}, 32))
+	client := newClient(bankhash)
+	full, err := client.AccountData(t.Context(), address, 90, uint64(len(content)))
+	if err != nil || full.Bankhash != bankhash {
+		t.Fatalf("Mithril full account bank identity = %q, %v", full.Bankhash, err)
+	}
+	ranged, err := client.AccountDataRange(t.Context(), address, 90, 0, uint64(len(content)))
+	if err != nil || ranged.Bankhash != bankhash {
+		t.Fatalf("Mithril ranged account bank identity = %q, %v", ranged.Bankhash, err)
 	}
 }
 
