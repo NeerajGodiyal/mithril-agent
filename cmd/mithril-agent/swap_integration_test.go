@@ -597,11 +597,11 @@ func (rpc *swapIntegrationRPC) serve(
 	case "getMinimumBalanceForRentExemption":
 		result = uint64(2_039_280)
 	case "getAccountInfo":
-		result = rpc.deploymentAccount(input.Params)
+		result = rpc.deploymentAccount(origin, input.Params)
 	case "simulateTransaction":
 		rpc.validateSimulation(input.Params)
 		result = map[string]any{
-			"context": map[string]any{"slot": uint64(460)},
+			"context": swapIntegrationContext(origin),
 			"value": map[string]any{
 				"err": nil, "unitsConsumed": uint64(500), "logs": []string{"success"},
 			},
@@ -625,7 +625,7 @@ func (rpc *swapIntegrationRPC) serve(
 	}
 }
 
-func (rpc *swapIntegrationRPC) deploymentAccount(params json.RawMessage) any {
+func (rpc *swapIntegrationRPC) deploymentAccount(origin string, params json.RawMessage) any {
 	address := firstRPCString(rpc.t, params)
 	var data []byte
 	executable := false
@@ -648,13 +648,21 @@ func (rpc *swapIntegrationRPC) deploymentAccount(params json.RawMessage) any {
 		return nil
 	}
 	return map[string]any{
-		"context": map[string]any{"slot": uint64(460)},
+		"context": swapIntegrationContext(origin),
 		"value": map[string]any{
 			"data":       []any{base64.StdEncoding.EncodeToString(data), "base64"},
 			"executable": executable, "lamports": uint64(1),
-			"owner": orcaswap.UpgradeableLoader,
+			"owner": orcaswap.UpgradeableLoader, "space": uint64(len(data)),
 		},
 	}
+}
+
+func swapIntegrationContext(origin string) map[string]any {
+	context := map[string]any{"slot": uint64(460)}
+	if origin == "mithril" {
+		context["bankhash"] = solana.Encode(bytes.Repeat([]byte{9}, 32))
+	}
+	return context
 }
 
 func (rpc *swapIntegrationRPC) validateSimulation(params json.RawMessage) {

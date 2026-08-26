@@ -12,8 +12,10 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/agent"
 	"github.com/Overclock-Validator/mithril-agent/internal/offchainmsg"
 	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
+	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
 	"github.com/Overclock-Validator/mithril-agent/signer"
 	"github.com/Overclock-Validator/mithril-agent/solana"
+	"github.com/Overclock-Validator/mithril-agent/submitter"
 )
 
 func sweepTestKey(t *testing.T) (string, ed25519.PrivateKey) {
@@ -142,7 +144,11 @@ func TestInstallSweepSetupProducesACoherentBoundSet(t *testing.T) {
 		Nonce: strings.Repeat("ab", 16), IssuedAt: "2026-08-05T12:00:00Z",
 		SignatureBase58: "unverified-in-this-fixture", ActiveAfterUnix: anchor.Unix(),
 	}
-	if err := installSweepSetup(root, fingerprint, profile, filepath.Join(home, "wallet.json"), "", "", proof); err != nil {
+	evidence := proposalcheck.ProviderBindings{
+		PrimaryTrustDomain: "provider-one", PrimaryOriginSHA256: strings.Repeat("b", 64),
+		SecondaryTrustDomain: "provider-two", SecondaryOriginSHA256: strings.Repeat("c", 64),
+	}
+	if err := installSweepSetup(root, fingerprint, profile, filepath.Join(home, "wallet.json"), "", "", evidence, proof); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 
@@ -152,6 +158,9 @@ func TestInstallSweepSetupProducesACoherentBoundSet(t *testing.T) {
 	}
 	if cfg.Profile != profile {
 		t.Fatal("the installed profile does not match what was configured")
+	}
+	if cfg.Evidence != evidence {
+		t.Fatal("the installed runner config does not bind the evidence providers")
 	}
 	var signerPolicy signer.Policy
 	if err := readStrictJSONFile(filepath.Join(root, "signer-policy.json"), &signerPolicy); err != nil {
@@ -166,6 +175,13 @@ func TestInstallSweepSetupProducesACoherentBoundSet(t *testing.T) {
 	if signerPolicy.ScheduleAnchorUnix != anchor.Unix() {
 		t.Fatal("the signer does not enforce the same activation anchor")
 	}
+	var submitterPolicy submitter.Policy
+	if err := readStrictJSONFile(filepath.Join(root, "submitter-policy.json"), &submitterPolicy); err != nil {
+		t.Fatalf("read submitter policy: %v", err)
+	}
+	if submitterPolicy.Evidence != evidence {
+		t.Fatal("the submitter policy does not bind the evidence providers")
+	}
 	stateDir := "state-" + fingerprint[:8]
 	if !strings.Contains(signerPolicy.AuthorizationLedgerPath, stateDir) {
 		t.Fatalf("the ledger path %q is not keyed by the fingerprint", signerPolicy.AuthorizationLedgerPath)
@@ -175,7 +191,7 @@ func TestInstallSweepSetupProducesACoherentBoundSet(t *testing.T) {
 	}
 	// A second install to the same root must refuse rather than overwrite:
 	// an existing setup may hold a live ledger.
-	if err := installSweepSetup(root, fingerprint, profile, filepath.Join(home, "wallet.json"), "", "", proof); err == nil {
+	if err := installSweepSetup(root, fingerprint, profile, filepath.Join(home, "wallet.json"), "", "", evidence, proof); err == nil {
 		t.Fatal("reinstalling over an existing setup must fail")
 	}
 }

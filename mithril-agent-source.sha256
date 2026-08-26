@@ -3,7 +3,7 @@
 340600323218bfa197209e4228bd0a0b23bfee734626573cd2e5e8aa1b162aba  ./DEMO.md
 2f3f96a672d74f373672e79a0ba37449712a5992dd19437b72b184e41dddf379  ./INDEXING.md
 eecb537d068a8122532492e253cbf9c539b88ee25244c02f2f38a398fad63d9e  ./Makefile
-ffeeafbcb946590c98d77b070d82e565f43eb92ecf91dd5fedf415fb6f8eb141  ./OPERATIONS.md
+f2906b61da9e168f546f2a65a6c29c68f1968c2c6c97d6b602f53aa41e4652d2  ./OPERATIONS.md
 8c999b097492ec94355b2fc814681fd2c716283b00dda16af0ffdb3266b00391  ./OVERVIEW.md
 45a2e75d1ad11e8bd79f6898c9c0f55d4fe5bdf33f936e7757008423454320c5  ./QUICKSTART.md
 70219f6acd88b4ba840a2b545b022ff4bfa0cc08883abacfaf966997ced58729  ./README.md
@@ -64,7 +64,7 @@ b52b9a5ff4044613b6b83026cbea3fc3778856c752b5cc674e9a7e0b2a5406a9  ./cmd/mithril-
 39baf12ab1ab429368967d34c517ec459aff5516f0477084fa6820e1df649783  ./cmd/mithril-agent/hostpaths_test.go
 e6b0361c514efeb0ab612c6be6036cb27ad6f5b55773ce1a62fe42e144909b94  ./cmd/mithril-agent/journal.go
 a231f8e63c8d16e027362818c17852387e70aea6ecfca4db0f2eeddb47a1f139  ./cmd/mithril-agent/journal_test.go
-21a16644e28caec34e371df65aafc8ceba3d2a10171b52e6b0d373529f23d352  ./cmd/mithril-agent/main.go
+e8e792821334ac5c012291e96ce3c4973b3452b2a6546e2f36eee72570fa78f8  ./cmd/mithril-agent/main.go
 3163888ca61788cb6300ee9503001202671e7e000fe83ba64aa477a1f9eb2c27  ./cmd/mithril-agent/main_test.go
 0d06b22931ea508f8903992dcb6ed2a4da68bd3c692447775ae9bc513f9047dd  ./cmd/mithril-agent/mcpconfig.go
 7d382534e1dea48e54366363ea6cb9218f5f2f374853dc7e73c2679fe0288593  ./cmd/mithril-agent/mcpconfig_test.go
@@ -110,7 +110,7 @@ b423f6eeb603102e00d9359d4b9ab8606c5224564b2bd7debf4b4c87e8a87777  ./cmd/mithril-
 f7e4c1accaa908d2d16469e86875260c1a94b9974841c2bd33061d5f6f0defe6  ./cmd/mithril-agent/strategy_pointer_test.go
 877656e2360a431178c89dcccb0a632936386c8ec058ff50eb6ad0176a25075c  ./cmd/mithril-agent/strategy_run.go
 67aeeb68687e34b68fa72df826269cfeeade94f337822b2b4aceda820e4a249a  ./cmd/mithril-agent/strategy_run_test.go
-390e58bad25012dafb7c292ea4ff2d722d76e6686e16d9df1a8aa38aa2093bc2  ./cmd/mithril-agent/strategy_setup.go
+ad30e0cec0f88170439f02a0a33c3259d81156e91b014aabca494a4fe1481276  ./cmd/mithril-agent/strategy_setup.go
 b68696ff05e7609061b01e94f91ee2bd4924858c12d7cb910bf32043355c212c  ./cmd/mithril-agent/strategy_setup_test.go
 b41c9a1b3628d8806e1299de6b3de6eedca97ec87affcf7e920db26ee8edc9d8  ./cmd/mithril-agent/strategy_show_test.go
 96be38fa14ad47b2a936b4f24173ec82dec5b7df56500c3d05772413809bb084  ./cmd/mithril-agent/strategy_sizing.go
@@ -122,16 +122,16 @@ bc4e87b1f4144f94622bbabfaa9b39729561cca9737cda9d85d418b4fd2a7748  ./cmd/mithril-
 ac82fcb9bfed6898f5f507edae6df1ac902881771e092aa66677c9aaa7da09db  ./cmd/mithril-agent/swap.go
 a21ccf4fac936ff799895879bd9311919c9c09f74ccd074601dba5e830b5f98b  ./cmd/mithril-agent/swap_demo.go
 214dafefd67b37b8b8fccb0bbfaab59750bf23289b5261cadae28fe7fbfd4281  ./cmd/mithril-agent/swap_demo_test.go
-0d0ce62a96302e46d6fcc7b58fe3b1a759bf4e84b8d10e952e6458e2072690cb  ./cmd/mithril-agent/swap_integration_test.go
+73518cd55b7771388c705fa9a262935043aaa8387928cddd29b00f297565ec37  ./cmd/mithril-agent/swap_integration_test.go
 a0936e56b6c09abe0b3b1862f8f80e6c3a3f61f7a578314fb579dedafbe21651  ./cmd/mithril-agent/swap_plan.go
 299df33a8fbfd1070d9b6ddc6ba914370ee3f8cd856cebebc9ffc0047f816791  ./cmd/mithril-agent/swap_plan_test.go
 0c0a138939d3ed4b9386308c584e4e4f9601dc627f050145ed9ea22bc578f9e7  ./cmd/mithril-agent/swap_runner_start_test.go
-0db0004ba1dfe352280985e977b5fab15e65e7863f34176f18bc8fa78c4b4270  ./cmd/mithril-agent/swap_setup.go
+357170e2345a8038c2f4a239e98ebecff7304e6a2800cc4eb666917b30244525  ./cmd/mithril-agent/swap_setup.go
 38fb0892886bd37c4774151cd5d4c78d4c7b21207e6af7c86653b019f47e4708  ./cmd/mithril-agent/swap_setup_test.go
 ca60c520d94722da8ea8132126d773d40c264e20998fd1cffc090839972d7582  ./cmd/mithril-agent/swap_test.go
 7f40fa612eeee1923c942121a129464305ddab368964d1fc59de59927cb69f82  ./cmd/mithril-agent/sweep_reserve_test.go
-15c4c0f78b03c1ad32b55ff9748b38016d250b3961b7cbd0e1fcf2d82dbc4ddc  ./cmd/mithril-agent/sweep_setup.go
-7f7f86e0735dff83270350e7dd7b98a9ea22644ede3963a4a931c2fce3b29f7c  ./cmd/mithril-agent/sweep_setup_test.go
+0ac4f0ac48354c712acc313d5197f0d1e4e96b7a740f5c3394a1f02a9d06ccdd  ./cmd/mithril-agent/sweep_setup.go
+927da659a8b8213aa2829f88348d7670c171b67f33bc3ec8742d46af6f9558ba  ./cmd/mithril-agent/sweep_setup_test.go
 77547cd0a41fb5f9d03b90d2208b65df6e8d5522e908675e29623f36fb5b30ed  ./cmd/mithril-agent/terminal_latch_test.go
 16aa6da964d45ca1637bea7de28a6924ade434247ff402862261e45f346a4480  ./cmd/mithril-agent/walkthrough.go
 df80e7178002608bfd2825f5b335ed556c63fa13fb46074c89bedd9f9c81b5ff  ./cmd/mithril-agent/walkthrough_test.go
