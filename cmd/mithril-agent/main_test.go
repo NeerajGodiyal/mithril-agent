@@ -686,8 +686,8 @@ func TestTerminalActionDurablyStopsRemainingActivation(t *testing.T) {
 				t.Fatalf("consume first action: blocked=%v err=%v", blocked, err)
 			}
 			status, err := state.Status()
-			if err != nil || status.RemainingActions != 1 {
-				t.Fatalf("remaining activation before terminal result = %+v, %v", status, err)
+			if err != nil || !status.RecoveryPending {
+				t.Fatalf("recovery state before terminal result = %+v, %v", status, err)
 			}
 
 			ctx, cancel := context.WithCancel(t.Context())

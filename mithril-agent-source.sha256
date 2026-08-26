@@ -59,13 +59,13 @@ f15b882356164dffeb951ec746cc9d3d046af5d2cff8afdc4a4f636d54228874  ./cmd/mithril-
 b358bc60d82f0ff2d1d6bad93bdfa79780204e4b5f4963a98993058d045f153e  ./cmd/mithril-agent/floor_consent_test.go
 b52b9a5ff4044613b6b83026cbea3fc3778856c752b5cc674e9a7e0b2a5406a9  ./cmd/mithril-agent/floor_tolerance_test.go
 05a46211e4503b90a6cd9720d2d8c1d0b00d78d92ce778720869fb9c75fe3641  ./cmd/mithril-agent/funding.go
-7efa68ea6c21df651d14828ca3d73a49e1a124b53d807596ad566190985fd85f  ./cmd/mithril-agent/funding_test.go
+4387b178697e7e6a3d1ca2137c48618362c4afbe88bea769d3be1ba531880db3  ./cmd/mithril-agent/funding_test.go
 3e2d591f94a117b1598b5393723d7d54c3f935536be6d69ff41afac9f6602366  ./cmd/mithril-agent/hostpaths.go
 39baf12ab1ab429368967d34c517ec459aff5516f0477084fa6820e1df649783  ./cmd/mithril-agent/hostpaths_test.go
 e6b0361c514efeb0ab612c6be6036cb27ad6f5b55773ce1a62fe42e144909b94  ./cmd/mithril-agent/journal.go
 a231f8e63c8d16e027362818c17852387e70aea6ecfca4db0f2eeddb47a1f139  ./cmd/mithril-agent/journal_test.go
 21a16644e28caec34e371df65aafc8ceba3d2a10171b52e6b0d373529f23d352  ./cmd/mithril-agent/main.go
-309057c77e3f0a32ff6ed5dbf682a726f7cff678b29aaa2894de9bf17d24ef64  ./cmd/mithril-agent/main_test.go
+3163888ca61788cb6300ee9503001202671e7e000fe83ba64aa477a1f9eb2c27  ./cmd/mithril-agent/main_test.go
 0d06b22931ea508f8903992dcb6ed2a4da68bd3c692447775ae9bc513f9047dd  ./cmd/mithril-agent/mcpconfig.go
 7d382534e1dea48e54366363ea6cb9218f5f2f374853dc7e73c2679fe0288593  ./cmd/mithril-agent/mcpconfig_test.go
 fe0d5f2b0ffe27087c9ab2b3cc7a4c23d61ae20eb912e8d5219c13a726361324  ./cmd/mithril-agent/preflight.go

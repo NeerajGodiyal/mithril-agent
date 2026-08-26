@@ -33,12 +33,14 @@ func TestUnreadableLimitIsNeverReportedAsSound(t *testing.T) {
 // Every finding must reach the operator with a title they can act on, not a
 // bare field name.
 func TestEveryFindingBecomesAnActionableCheck(t *testing.T) {
+	vaultIndex := uint8(0)
 	limit := squads.SpendingLimit{
 		Multisig: "vault-a", Mint: squads.NativeMint, Amount: 9_000_000_000,
 		Period: squads.Monthly, Members: []string{"member"},
 	}
 	expect := squads.Expectation{
-		Multisig: "vault-b", Destination: "agent", Mint: squads.NativeMint,
+		Multisig: "vault-b", VaultIndex: &vaultIndex,
+		Destination: "agent", Mint: squads.NativeMint,
 		MaxAmount: 1_000_000, AllowedPeriods: []squads.Period{squads.Daily},
 	}
 	report := fundingReport(limit, expect, nil)
@@ -61,13 +63,15 @@ func TestEveryFindingBecomesAnActionableCheck(t *testing.T) {
 // A sound boundary must report the cap, so the operator sees the worst case
 // rather than just a green line.
 func TestASoundBoundaryReportsItsCap(t *testing.T) {
+	vaultIndex := uint8(0)
 	limit := squads.SpendingLimit{
 		Multisig: "vault", Mint: squads.NativeMint, Amount: 500_000_000,
 		Period: squads.Daily, Members: []string{"member"},
 		Destinations: []string{"agent"},
 	}
 	expect := squads.Expectation{
-		Multisig: "vault", Destination: "agent", Mint: squads.NativeMint,
+		Multisig: "vault", VaultIndex: &vaultIndex,
+		Destination: "agent", Mint: squads.NativeMint,
 		MaxAmount: 1_000_000_000, AllowedPeriods: []squads.Period{squads.Daily},
 	}
 	report := fundingReport(limit, expect, nil)
