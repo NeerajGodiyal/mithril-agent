@@ -3,14 +3,26 @@ package shadow
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 	"time"
 )
 
+func TestReportRefusesAmountsThatCannotBeRendered(t *testing.T) {
+	report := testReport(t)
+	report.TurnoverMicros = math.MaxUint64
+	if err := report.Render(&bytes.Buffer{}); err == nil {
+		t.Fatal("unrepresentable unsigned report amount was accepted")
+	}
+	if got := usd(math.MinInt64); got != "-$9223372036854.775808" {
+		t.Fatalf("minimum signed amount rendered as %q", got)
+	}
+}
+
 func testReport(t *testing.T) Report {
 	t.Helper()
-	policy := sellPolicy()
+	policy := mainnetPolicy()
 	policy.StartingInputUnits = 1_000_000_000
 	ledger, err := NewLedger(policy, 20_000_000)
 	if err != nil {
@@ -54,6 +66,38 @@ func TestReportComparesAgainstHolding(t *testing.T) {
 	}
 }
 
+func TestCompareChecksTheMainnetAccountingBand(t *testing.T) {
+	stored := testReport(t)
+	replayed := stored
+	replayed.QuotePegMaximumMicros++
+	found := Compare(stored, replayed)
+	if len(found) != 1 || found[0].Field != "quote_peg_maximum_micros" {
+		t.Fatalf("accounting-band disagreement = %+v", found)
+	}
+}
+
+func TestCompareReallyChecksMetadataAndCoverage(t *testing.T) {
+	stored := testReport(t)
+	replayed := stored
+	replayed.Cluster = Devnet
+	replayed.ObservableBPS--
+	replayed.Stats.SumImpactBPS++
+	found := Compare(stored, replayed)
+	want := map[string]bool{
+		"cluster": false, "observable_bps": false, "stats.sum_impact_bps": false,
+	}
+	for _, disagreement := range found {
+		if _, ok := want[disagreement.Field]; ok {
+			want[disagreement.Field] = true
+		}
+	}
+	for field, seen := range want {
+		if !seen {
+			t.Errorf("field-for-field comparison skipped %s: %+v", field, found)
+		}
+	}
+}
+
 // A period the agent could barely see must not read as a result.
 func TestReportRefusesToLookTrustworthyWhenMostlyBlind(t *testing.T) {
 	policy := sellPolicy()
@@ -80,6 +124,56 @@ func TestReportRefusesToLookTrustworthyWhenMostlyBlind(t *testing.T) {
 	}
 	if !strings.HasPrefix(strings.Split(out.String(), "Read this with care")[0], "Shadow report") {
 		t.Error("the caveat is buried below the numbers instead of above them")
+	}
+}
+
+func TestReportCountsRunnerDowntimeAsMissingCoverage(t *testing.T) {
+	policy := sellPolicy()
+	policy.StartingInputUnits = 1_000_000_000
+	ledger, err := NewLedger(policy, 20_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := time.Unix(1_700_000_000, 0).UTC()
+	report, err := BuildReport(
+		policy, ledger, Counts{Ticks: 10}, Stats{}, 20_000_000,
+		from, from.Add(100*policy.Tick()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ExpectedTicks != 100 || report.ObservableBPS != 1_000 || report.Trustworthy() {
+		t.Fatalf("downtime coverage = expected %d, observed %d bps, trustworthy=%v",
+			report.ExpectedTicks, report.ObservableBPS, report.Trustworthy())
+	}
+}
+
+func TestReportRejectsAnInvalidCoverageDenominator(t *testing.T) {
+	report := testReport(t)
+	report.ExpectedTicks = report.Counts.Ticks - 1
+	if report.Trustworthy() {
+		t.Fatal("a report with fewer expected observations than attempts was trustworthy")
+	}
+	if err := report.Render(&bytes.Buffer{}); err == nil {
+		t.Fatal("a report rendered an impossible expected observation count")
+	}
+}
+
+func TestMainnetReportRejectsAnUnapprovedAccountingBand(t *testing.T) {
+	report := testReport(t)
+	var output bytes.Buffer
+	if err := report.Render(&output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "only after each observable tick passes") {
+		t.Fatalf("mainnet accounting guard is unclear:\n%s", output.String())
+	}
+	report.QuotePegMinimumMicros--
+	if report.Trustworthy() {
+		t.Fatal("a Mainnet report with an unapproved USDC/USD band was trustworthy")
+	}
+	if err := report.Render(&bytes.Buffer{}); err == nil {
+		t.Fatal("a Mainnet report rendered an unapproved USDC/USD band")
 	}
 }
 
@@ -127,7 +221,7 @@ func TestRenderedReportStatesNothingWasTraded(t *testing.T) {
 		t.Fatalf("the report does not state that nothing happened:\n%s", text)
 	}
 	for _, required := range []string{"Unrealized", "Worst fall",
-		"Turnover", "Holding would be worth", "could not be acted on"} {
+		"Turnover", "Holding would be worth", "could not be acted on", "USDC", "$0.990000-$1.010000"} {
 		if !strings.Contains(text, required) {
 			t.Errorf("the report omits %q", required)
 		}
@@ -153,8 +247,9 @@ func TestReportJSONCarriesEveryMetric(t *testing.T) {
 	for _, field := range []string{
 		"realized_micros", "unrealized_micros", "fees_micros", "turnover_micros",
 		"max_drawdown_micros", "hold_benchmark_micros", "versus_hold_micros",
-		"observable_bps", "acted_bps", "base_units", "quote_units",
-		"closing_price_micros", "counts", "stats",
+		"expected_ticks", "observable_bps", "acted_bps", "base_units", "quote_units",
+		"closing_price_micros", "quote_peg_minimum_micros",
+		"quote_peg_maximum_micros", "counts", "stats",
 	} {
 		if _, ok := decoded[field]; !ok {
 			t.Errorf("the report JSON is missing %q", field)
@@ -177,6 +272,22 @@ func TestBuildReportRefusesWithoutAClosingPrice(t *testing.T) {
 	}
 	if _, err := BuildReport(policy, ledger, Counts{}, Stats{}, 20_000_000, from, from); err == nil {
 		t.Error("a report was built for a period with no duration")
+	}
+}
+
+func TestBuildReportRefusesADifferentPolicyThanTheLedger(t *testing.T) {
+	policy := sellPolicy()
+	ledger, err := NewLedger(policy, 20_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := policy
+	changed.Trigger.ThresholdMicros++
+	from := time.Now().UTC()
+	if _, err := BuildReport(
+		changed, ledger, Counts{Ticks: 1}, Stats{}, 20_000_000, from, from.Add(time.Hour),
+	); err == nil {
+		t.Fatal("a report was relabelled with a policy different from its ledger")
 	}
 }
 

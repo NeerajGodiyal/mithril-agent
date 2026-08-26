@@ -148,6 +148,64 @@ func TestEvaluateRejectsUntrustedOrWeakEvidence(t *testing.T) {
 	}
 }
 
+func TestEvaluateBandRequiresBothConfidenceIntervalsInsidePeg(t *testing.T) {
+	now := time.Now().UTC()
+	policy := testBandPolicy()
+	primary := bandSample(policy.PrimarySourceSHA256, 1_000_000, 100, now)
+	secondary := bandSample(policy.SecondarySourceSHA256, 999_900, 100, now)
+	evidence, err := EvaluateBand(policy, primary, secondary, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !evidence.InBand || evidence.LowerMicros != 999_800 || evidence.UpperMicros != 1_000_100 {
+		t.Fatalf("band evidence = %+v", evidence)
+	}
+
+	// The midpoint remains near one dollar, but the lower confidence bound has
+	// crossed policy. Treating only the midpoint as the peg would miss this.
+	secondary.PriceMicros = 990_050
+	secondary.ConfidenceMicros = 100
+	evidence, err = EvaluateBand(policy, primary, secondary, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidence.InBand {
+		t.Fatalf("out-of-band confidence interval passed: %+v", evidence)
+	}
+}
+
+func TestEvaluateBandReusesFreshIndependentEvidenceRules(t *testing.T) {
+	now := time.Now().UTC()
+	policy := testBandPolicy()
+	primary := bandSample(policy.PrimarySourceSHA256, 1_000_000, 10, now)
+	secondary := bandSample(policy.SecondarySourceSHA256, 1_000_000, 10, now)
+	for name, mutate := range map[string]func(*BandPolicy, *Sample, *Sample){
+		"wrong feed": func(_ *BandPolicy, primary *Sample, _ *Sample) {
+			primary.Feed = FeedSOLUSD
+		},
+		"wrong source": func(_ *BandPolicy, _ *Sample, secondary *Sample) {
+			secondary.SourceSHA256 = strings.Repeat("c", 64)
+		},
+		"stale": func(policy *BandPolicy, primary *Sample, _ *Sample) {
+			primary.PublishedAt = now.Add(-time.Duration(policy.MaxAgeSeconds+1) * time.Second)
+		},
+		"skew": func(policy *BandPolicy, _ *Sample, secondary *Sample) {
+			secondary.PublishedAt = now.Add(-time.Duration(policy.MaxSourceSkewSeconds+1) * time.Second)
+		},
+		"sources disagree": func(_ *BandPolicy, _ *Sample, secondary *Sample) {
+			secondary.PriceMicros = 900_000
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, a, b := policy, primary, secondary
+			mutate(&p, &a, &b)
+			if _, err := EvaluateBand(p, a, b, now); err == nil {
+				t.Fatal("invalid band evidence was accepted")
+			}
+		})
+	}
+}
+
 func TestRatioWithinBPSDoesNotOverflow(t *testing.T) {
 	if !ratioWithinBPS(^uint64(0)/10_000, ^uint64(0), 1) {
 		t.Fatal("valid large ratio was rejected")
@@ -171,5 +229,23 @@ func testSample(source string, price uint64, at time.Time) Sample {
 	return Sample{
 		SourceSHA256: source, Feed: FeedSOLUSD, PriceMicros: price,
 		ConfidenceMicros: 100_000, PublishedAt: at,
+	}
+}
+
+func testBandPolicy() BandPolicy {
+	return BandPolicy{
+		Version: Version, Feed: FeedUSDCUSD,
+		MinimumMicros: USDCBandMinimumMicros, MaximumMicros: USDCBandMaximumMicros,
+		MaxAgeSeconds: 60, MaxSourceSkewSeconds: 30,
+		MaxDeviationBPS: 100, MaxConfidenceBPS: 100,
+		PrimarySourceSHA256:   strings.Repeat("d", 64),
+		SecondarySourceSHA256: strings.Repeat("e", 64),
+	}
+}
+
+func bandSample(source string, price, confidence uint64, at time.Time) Sample {
+	return Sample{
+		SourceSHA256: source, Feed: FeedUSDCUSD, PriceMicros: price,
+		ConfidenceMicros: confidence, PublishedAt: at,
 	}
 }

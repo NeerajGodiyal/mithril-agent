@@ -144,6 +144,31 @@ func TestParseAllowedChatIDsRequiresUniqueNumericValues(t *testing.T) {
 	}
 }
 
+func TestStatusExplainsRecoveryAndTerminalStops(t *testing.T) {
+	now := time.Date(2026, time.August, 2, 12, 0, 0, 0, time.UTC)
+	snapshot := testSnapshot(now.Add(-10 * time.Second))
+	snapshot.Control.RecoveryPending = true
+	reader := &statusStub{snapshot: snapshot}
+
+	recovery, _, _, _ := statusReportFor(reader, now)
+	if !strings.Contains(
+		recovery,
+		"Recovery: Waiting for independent confirmation — do not retry",
+	) {
+		t.Fatalf("recovery status is not actionable: %q", recovery)
+	}
+
+	reader.snapshot.Control = control.Status{
+		Mode:             control.ModeNoNewActions,
+		TerminalActionID: strings.Repeat("a", 64),
+		TerminalOutcome:  "failed",
+	}
+	terminal, _, _, _ := statusReportFor(reader, now)
+	if !strings.Contains(terminal, "Terminal stop: Failed — needs review") {
+		t.Fatalf("terminal status is not actionable: %q", terminal)
+	}
+}
+
 func TestDeterministicCommandsUseOnlyBoundedOperatorStatus(t *testing.T) {
 	now := time.Date(2026, time.August, 2, 12, 0, 0, 0, time.UTC)
 	reader := &statusStub{snapshot: testSnapshot(now.Add(-10 * time.Second))}
@@ -619,6 +644,24 @@ func testSnapshot(observedAt time.Time) operatorstatus.Snapshot {
 		},
 		Journal: journal.Stats{MaxRecords: 100, MaxBytes: 1024},
 		Control: control.Status{Mode: control.ModeNoNewActions},
+	}
+}
+
+func TestStatusAcceptsMainnetCanaryControl(t *testing.T) {
+	now := time.Date(2026, time.August, 14, 12, 0, 0, 0, time.UTC)
+	snapshot := testSnapshot(now.Add(-time.Second))
+	snapshot.Cluster = "mainnet-beta"
+	snapshot.Result = execution.Result{Decision: "waiting"}
+	snapshot.Control = control.Status{
+		Mode: control.ModeMainnetCanary, ExpectedActionID: strings.Repeat("a", 64),
+		ExpiresAt:  now.Add(time.Minute),
+		MaxActions: 1, RemainingActions: 1,
+	}
+	report, _, ok, _ := statusReportFor(&statusStub{snapshot: snapshot}, now)
+	if !ok || strings.Contains(report, "Status: unknown") ||
+		!strings.Contains(report, "Control: mainnet_canary") ||
+		!strings.Contains(report, "Attention required: no") {
+		t.Fatalf("Mainnet canary status report = %q", report)
 	}
 }
 

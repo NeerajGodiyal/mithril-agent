@@ -145,8 +145,9 @@ func TestReportAgreesWithTheBooksItCameFrom(t *testing.T) {
 	from := time.Unix(1_700_000_000, 0).UTC()
 	closing := uint64(21_000_000)
 
-	report, err := BuildReport(sellPolicyWithInventory(), ledger,
-		runner.Counts(), runner.Stats(), closing, from, from.Add(24*time.Hour))
+	report, err := BuildReport(ledger.Policy, ledger,
+		runner.Counts(), runner.Stats(), closing,
+		from, from.Add(time.Duration(runner.Counts().Ticks)*ledger.Policy.Tick()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,12 +167,6 @@ func TestReportAgreesWithTheBooksItCameFrom(t *testing.T) {
 	if report.ObservableBPS != bpsScale {
 		t.Errorf("a fully observable run reported %d bps of coverage", report.ObservableBPS)
 	}
-}
-
-func sellPolicyWithInventory() Policy {
-	policy := sellPolicy()
-	policy.StartingInputUnits = 1_000_000_000
-	return policy
 }
 
 // recordingTicks captures the tick stream a run produced, which is exactly what

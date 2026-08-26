@@ -94,12 +94,30 @@ func TestPythRejectsMissingOrUnsafeAccessToken(t *testing.T) {
 	}
 }
 
-func fixtureClient(t *testing.T, body func(*http.Request) string) *http.Client {
+func TestPriceSourcesDoNotUseAnAmbientProxyByDefault(t *testing.T) {
+	for _, client := range []*http.Client{nil, {Timeout: time.Second}} {
+		transport, ok := boundedClient(client).Transport.(*http.Transport)
+		if !ok || transport.Proxy != nil {
+			t.Fatal("default price-source client can use an ambient proxy")
+		}
+	}
+}
+
+func fixtureClient(
+	t *testing.T,
+	body func(*http.Request) string,
+	headers ...http.Header,
+) *http.Client {
 	t.Helper()
 	return &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		header := http.Header{"Content-Type": []string{"application/json"}}
+		if len(headers) != 0 {
+			header = headers[0].Clone()
+			header.Set("Content-Type", "application/json")
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Header:     header,
 			Body:       io.NopCloser(strings.NewReader(body(request))),
 			Request:    request,
 		}, nil

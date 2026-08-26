@@ -196,6 +196,10 @@ func TestHTTPBotAlwaysHasABoundedClientTimeout(t *testing.T) {
 	if bot.client.Timeout != maxTelegramHTTPTime {
 		t.Fatalf("default timeout = %s", bot.client.Timeout)
 	}
+	transport, ok := bot.client.Transport.(*http.Transport)
+	if !ok || transport.Proxy != nil {
+		t.Fatal("default Telegram client can use an ambient proxy")
+	}
 	bot, err = NewHTTPBot(testBotToken, &http.Client{Timeout: 2 * maxTelegramHTTPTime})
 	if err != nil {
 		t.Fatal(err)

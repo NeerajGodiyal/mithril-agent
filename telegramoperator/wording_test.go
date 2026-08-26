@@ -30,6 +30,16 @@ func TestEveryEngineDecisionHasOperatorWording(t *testing.T) {
 			t.Errorf("verdict %q has no operator wording", verdict)
 		}
 	}
+	for _, reason := range []string{
+		"operation_timeout", "quote_unavailable", "price_below_floor",
+		"before_schedule_anchor", "blockhash_expired", "signer_refused",
+		"node_unavailable", "observation_not_ready", "clock_unusable",
+		"control_state_unavailable", "operation_failed",
+	} {
+		if text := describeReason(reason); text == reason || strings.Contains(text, "_") {
+			t.Errorf("reason %q has no operator wording: %q", reason, text)
+		}
+	}
 }
 
 // An unknown state must still be visible rather than silently blank, because
@@ -43,6 +53,9 @@ func TestUnknownStatesRemainVisible(t *testing.T) {
 	}
 	if got := describeVerdict("some_future_verdict"); got != "some_future_verdict" {
 		t.Errorf("unknown verdict rendered as %q, want the raw token", got)
+	}
+	if got := describeReason("some_future_reason"); got != "some_future_reason" {
+		t.Errorf("unknown reason rendered as %q, want the raw token", got)
 	}
 }
 

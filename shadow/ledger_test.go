@@ -1,6 +1,50 @@
 package shadow
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
+
+func TestLedgerArithmeticRefusesEveryIntegerBoundaryWrap(t *testing.T) {
+	if _, err := addUnits(math.MaxUint64, 1); err == nil {
+		t.Fatal("unsigned addition wrapped")
+	}
+	if _, err := addMagnitude(math.MaxInt64, 1); err == nil {
+		t.Fatal("USD magnitude crossed the signed reporting range")
+	}
+	if _, err := addSigned(math.MaxInt64, 1); err == nil {
+		t.Fatal("positive signed addition wrapped")
+	}
+	if _, err := addSigned(math.MinInt64, -1); err == nil {
+		t.Fatal("negative signed addition wrapped")
+	}
+}
+
+func TestLedgerRefusesOpeningEquityOverflow(t *testing.T) {
+	policy := sellPolicy()
+	policy.StartingInputUnits = 1_000_000_000
+	policy.StartingOutputUnits = ^uint64(0)
+	if _, err := NewLedger(policy, 20_000_000); err == nil {
+		t.Fatal("opening equity wrapped instead of being refused")
+	}
+}
+
+func TestLedgerRefusesInventoryOverflow(t *testing.T) {
+	policy := sellPolicy()
+	policy.OutputDecimals = 18
+	policy.StartingInputUnits = 1_000_000_000
+	policy.StartingOutputUnits = ^uint64(0) - 10
+	ledger, err := NewLedger(policy, 20_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ledger.Apply(Fill{
+		Filled: true, Sell: true, SpentUnits: 1, ReceivedUnits: 11, FeeLamports: 1,
+	}, 20_000_000)
+	if err == nil {
+		t.Fatal("quote inventory wrapped instead of being refused")
+	}
+}
 
 // A sell books the proceeds, drops the inventory, and charges the fee. The
 // numbers are checked against hand arithmetic, not against the code.
@@ -93,13 +137,13 @@ func TestRefusedFillMovesNoInventory(t *testing.T) {
 // inventory that silently goes negative or wraps.
 func TestLedgerRefusesToSpendWhatItDoesNotHold(t *testing.T) {
 	policy := sellPolicy()
-	policy.StartingInputUnits = 1_000_000
+	policy.StartingInputUnits = 3_000_000
 	ledger, err := NewLedger(policy, 20_000_000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ledger.Apply(Fill{
-		Filled: true, Sell: true, SpentUnits: 2_000_000, ReceivedUnits: 40_000, FeeLamports: 5_000,
+		Filled: true, Sell: true, SpentUnits: 4_000_000, ReceivedUnits: 80_000, FeeLamports: 5_000,
 	}, 20_000_000); err == nil {
 		t.Fatal("the ledger sold inventory it did not have")
 	}

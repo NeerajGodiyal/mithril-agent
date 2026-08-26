@@ -446,7 +446,11 @@ func TestAnnounceReportsAFailureThatNeverGotAnActionID(t *testing.T) {
 	service.announce(t.Context())
 
 	refused := testSnapshot(now)
-	refused.LastAction.Result = operatorstatus.Result{Decision: "failed", Reason: "signer_refused"}
+	refused.Result = operatorstatus.Result{Decision: "failed", Reason: "signer_refused"}
+	refused.LastAction = operatorstatus.Action{}
+	if err := operatorstatus.ValidateSnapshot(refused); err != nil {
+		t.Fatalf("production status rejected the refusal fixture: %v", err)
+	}
 	status.snapshot = refused
 	service.announce(t.Context())
 	if len(bot.sent) != 1 {
@@ -464,7 +468,11 @@ func TestAnnounceReportsAFailureThatNeverGotAnActionID(t *testing.T) {
 
 	// A DIFFERENT reason is different news and must get through.
 	changed := testSnapshot(now)
-	changed.LastAction.Result = operatorstatus.Result{Decision: "failed", Reason: "quote_unavailable"}
+	changed.Result = operatorstatus.Result{Decision: "failed", Reason: "quote_unavailable"}
+	changed.LastAction = operatorstatus.Action{}
+	if err := operatorstatus.ValidateSnapshot(changed); err != nil {
+		t.Fatalf("production status rejected the changed refusal fixture: %v", err)
+	}
 	status.snapshot = changed
 	service.announce(t.Context())
 	if len(bot.sent) != 2 {
@@ -477,7 +485,11 @@ func TestAnnounceReportsAFailureThatNeverGotAnActionID(t *testing.T) {
 func TestAnnounceSeedsAnIDLessFailureAsHistory(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	standing := testSnapshot(now)
-	standing.LastAction.Result = operatorstatus.Result{Decision: "failed", Reason: "signer_refused"}
+	standing.Result = operatorstatus.Result{Decision: "failed", Reason: "signer_refused"}
+	standing.LastAction = operatorstatus.Action{}
+	if err := operatorstatus.ValidateSnapshot(standing); err != nil {
+		t.Fatalf("production status rejected the standing refusal fixture: %v", err)
+	}
 	status := &statusStub{snapshot: standing}
 	bot := &botStub{}
 	service := announceService(t, status, bot)

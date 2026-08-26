@@ -9,7 +9,11 @@ import (
 
 func sellPolicy() Policy {
 	return Policy{
-		Version: Version, Cluster: Mainnet,
+		Version: Version, Cluster: Devnet,
+		QuoteRoute: QuoteRoute{
+			Provider: QuoteOrca, Pool: "11111111111111111111111111111111",
+			InputMint: wrappedSOLMint, OutputMint: mainnetUSDCMint,
+		},
 		Trigger: pricetrigger.Policy{
 			Version: pricetrigger.Version, Feed: pricetrigger.FeedSOLUSD,
 			Direction: pricetrigger.SellAtOrAbove, ThresholdMicros: 20_000_000,
@@ -23,6 +27,26 @@ func sellPolicy() Policy {
 		SlippageBPS: 100, FeeLamports: 5_000,
 		TickSeconds: 60, SettleSeconds: 30,
 		StartingInputUnits: 1_000_000_000,
+	}
+}
+
+// The quoted route is evidence, not launch configuration. If it is outside
+// the policy fingerprint, a process can restart against a different pool or
+// token pair and append incomparable observations to the same journal.
+func TestPolicyFingerprintBindsTheQuotedRoute(t *testing.T) {
+	policy := sellPolicy()
+	want, err := policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.QuoteRoute.InputMint, policy.QuoteRoute.OutputMint =
+		policy.QuoteRoute.OutputMint, policy.QuoteRoute.InputMint
+	changed, err := policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed == want {
+		t.Fatal("changing the quoted token pair did not change the policy fingerprint")
 	}
 }
 
@@ -239,5 +263,24 @@ func TestBuyImpactIsMeasuredAgainstTheOracleNotItsReciprocal(t *testing.T) {
 	}
 	if fill.QuotedPriceMicros < 20_000_000 || fill.QuotedPriceMicros > 23_000_000 {
 		t.Errorf("quoted price = %d micros; not in the oracle's units", fill.QuotedPriceMicros)
+	}
+}
+
+// A round trip keeps one policy and changes direction per leg. Its return leg
+// must use the base/quote decimals, not reinterpret the first leg's input and
+// output decimals as though the direction had never changed.
+func TestDirectedReturnLegUsesTheReturnDirection(t *testing.T) {
+	policy := sellPolicy()
+	fill, err := SettleFillDirected(policy, Quote{
+		InputAmount: 1_000_000, EstimatedOutput: 46_000_000, MinimumOutput: 45_540_000,
+	}, 21_525_000, 21_525_000, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fill.QuotedPriceMicros != 21_739_130 {
+		t.Fatalf("return-leg quoted price = %d, want 21739130", fill.QuotedPriceMicros)
+	}
+	if fill.ImpactBPS < -200 || fill.ImpactBPS > 0 {
+		t.Fatalf("return-leg impact = %d bps, want a small negative cost", fill.ImpactBPS)
 	}
 }

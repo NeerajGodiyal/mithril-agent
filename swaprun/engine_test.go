@@ -365,6 +365,12 @@ func TestValidateClockSampleRejectsFutureAndMalformedEvidence(t *testing.T) {
 	if err := ValidateClockSample(invalidUncertainty, now, 100*time.Millisecond); err == nil {
 		t.Fatal("maximum clock uncertainty was accepted")
 	}
+	if err := ValidateClockSample(valid, now, -time.Nanosecond); err == nil {
+		t.Fatal("negative clock uncertainty policy was accepted")
+	}
+	if err := ValidateClockSample(valid, now, clockcheck.MaxUncertaintyCap+1); err == nil {
+		t.Fatal("excessive clock uncertainty policy was accepted")
+	}
 }
 
 func TestEngineCompletesAndRecoversOneSwapWithoutResubmission(t *testing.T) {
@@ -1170,14 +1176,14 @@ func TestFinalizedJournalClearsMatchingProvisionalControl(t *testing.T) {
 	}
 	engine := &Engine{store: store, stop: stateFile, now: time.Now}
 	result, err := engine.RunOnce(context.Background(), profile)
-	if err != nil || result.Decision != "complete" ||
-		result.Verdict != txflow.VerdictFinalized || !result.Recovered ||
+	if err != nil || result.Decision != "waiting" ||
+		result.Reason != "independent recovery finalizer is pending" ||
 		result.ActionID != actionID {
 		t.Fatalf("finalized repair result = %+v, %v", result, err)
 	}
 	status, err := stateFile.Status()
 	if err != nil || status.Mode != control.ModeNoNewActions ||
-		status.TerminalActionID != "" || status.TerminalOutcome != "" {
+		status.TerminalActionID != actionID || status.TerminalOutcome != "halted" {
 		t.Fatalf("finalized repair status = %+v, %v", status, err)
 	}
 }
@@ -1890,8 +1896,13 @@ func (stub signerStub) Sign(_ context.Context, request signer.Request) (signer.R
 		}
 		messageHash := sha256.Sum256(message)
 		transactionHash := sha256.Sum256(transaction)
+		binding, err := signer.RiskBinding(request, hex.EncodeToString(messageHash[:]))
+		if err != nil {
+			return signer.Response{}, err
+		}
 		response := signer.Response{
 			ActionID: request.ActionID, Signature: solana.Encode(signature[:]),
+			RequestSHA256:        binding.RequestSHA256,
 			MessageSHA256:        hex.EncodeToString(messageHash[:]),
 			TransactionSHA256:    hex.EncodeToString(transactionHash[:]),
 			BlockhashContextSlot: request.BlockhashContextSlot,

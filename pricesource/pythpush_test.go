@@ -15,11 +15,17 @@ import (
 // validPushAccount builds a byte-exact PriceUpdateV2 account matching the
 // layout observed live on 2026-08-04 (134 bytes, 133 consumed plus one pad).
 func validPushAccount(price int64, confidence uint64, exponent int32, publish int64) []byte {
+	return validPushAccountFor(SOLUSDFeedID, price, confidence, exponent, publish)
+}
+
+func validPushAccountFor(
+	feedID string, price int64, confidence uint64, exponent int32, publish int64,
+) []byte {
 	data := make([]byte, pythPushAccountBytes)
 	copy(data[0:8], pythPushDiscriminator[:])
 	// write_authority occupies 8..40 and is not validated.
 	data[8+32] = pythPushVerificationFull
-	feed, _ := hex.DecodeString(SOLUSDFeedID)
+	feed, _ := hex.DecodeString(feedID)
 	copy(data[8+32+1:], feed)
 
 	body := data[pythPushPriceOffset:]
@@ -28,6 +34,59 @@ func validPushAccount(price int64, confidence uint64, exponent int32, publish in
 	binary.LittleEndian.PutUint32(body[16:20], uint32(exponent))
 	binary.LittleEndian.PutUint64(body[20:28], uint64(publish))
 	return data
+}
+
+func TestPythPushReadsSponsoredUSDCFeed(t *testing.T) {
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	data := validPushAccountFor(USDCUSDFeedID, 99_999_800, 1_000, -8,
+		now.Add(-20*time.Second).Unix())
+	reader := &fakeReader{byAccount: map[string]AccountData{
+		pythPushUSDCAccount: {
+			ContextSlot: 100, Owner: pythPushLegacyOwner,
+			DataLength: pythPushAccountBytes, Data: data,
+		},
+	}}
+	source, err := NewPythPushUSDC(reader, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	sample, err := source.LatestAtSlot(t.Context(), pricetrigger.FeedUSDCUSD, 99)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sample.SourceSHA256 != PythPushUSDCIdentitySHA256() ||
+		sample.Feed != pricetrigger.FeedUSDCUSD || sample.PriceMicros != 999_998 ||
+		sample.ConfidenceMicros != 10 {
+		t.Fatalf("sample = %+v", sample)
+	}
+	if PythPushUSDCIdentitySHA256() == PythPushIdentitySHA256() {
+		t.Fatal("SOL and USDC feed identities collided")
+	}
+}
+
+func TestPythPushUSDCRejectsWrongFeedAndOwner(t *testing.T) {
+	now := time.Date(2026, 8, 12, 12, 0, 0, 0, time.UTC)
+	for name, account := range map[string]AccountData{
+		"wrong feed": {
+			Owner: pythPushLegacyOwner, DataLength: pythPushAccountBytes,
+			Data: validPushAccount(99_999_800, 1_000, -8, now.Unix()),
+		},
+		"wrong owner": {
+			Owner: pythPushUpgradedOwner, DataLength: pythPushAccountBytes,
+			Data: validPushAccountFor(USDCUSDFeedID, 99_999_800, 1_000, -8, now.Unix()),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reader := &fakeReader{byAccount: map[string]AccountData{pythPushUSDCAccount: account}}
+			source, err := NewPythPushUSDC(reader, func() time.Time { return now })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := source.Latest(t.Context(), pricetrigger.FeedUSDCUSD); err == nil {
+				t.Fatal("tampered USDC account was accepted")
+			}
+		})
+	}
 }
 
 type fakeReader struct {
@@ -136,7 +195,7 @@ func TestPythPushRejectsEveryTamperedField(t *testing.T) {
 		},
 		"wrong feed id": {
 			mutate: func(a *AccountData) { a.Data[8+32+1] ^= 0xff },
-			want:   "SOL/USD",
+			want:   "wrong feed",
 		},
 		"negative price": {
 			mutate: func(a *AccountData) {

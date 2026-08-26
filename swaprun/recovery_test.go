@@ -130,6 +130,9 @@ func TestRecoveredSwapRejectsBrokenBindingsBeforeRPC(t *testing.T) {
 		"response action": func(current *state) {
 			current.signed.Response.ActionID = strings.Repeat("a", 64)
 		},
+		"request hash": func(current *state) {
+			current.signed.Response.RequestSHA256 = strings.Repeat("a", 64)
+		},
 		"response blockhash context": func(current *state) {
 			current.signed.Response.BlockhashContextSlot++
 		},
@@ -463,8 +466,23 @@ func recoveredBuyFixture(t *testing.T, now time.Time) (Profile, string, *state) 
 	}
 	messageHash := sha256.Sum256(message)
 	transactionHash := sha256.Sum256(transaction)
+	binding, err := signer.RiskBinding(signer.Request{
+		Domain: orcaswap.BuyRequestDomain, Cluster: profile.Cluster,
+		Profile: profile.Name, ProfileVersion: profile.Version,
+		ProfileFingerprint: fingerprint, ActionID: actionID,
+		ScheduleWindowStartUnix: windowStart,
+		ScheduleWindowEndUnix:   windowStart + int64(profile.ScheduleWindowSeconds),
+		MessageBase64:           base64.StdEncoding.EncodeToString(message), BlockhashContextSlot: 101,
+		FeeLamports: 5_000, FeeMinContextSlot: 101,
+		PrimaryFeeContextSlot: 101, SecondaryFeeContextSlot: 101,
+		RecentBlockhash: recentBlockhash, ObservedBlockHeight: 100, LastValidBlockHeight: 250,
+	}, hex.EncodeToString(messageHash[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
 	response := signer.Response{
 		ActionID: actionID, Signature: solana.Encode(signature[:]),
+		RequestSHA256:        binding.RequestSHA256,
 		MessageSHA256:        hex.EncodeToString(messageHash[:]),
 		TransactionSHA256:    hex.EncodeToString(transactionHash[:]),
 		BlockhashContextSlot: 101, FeeLamports: 5_000, LastValidBlockHeight: 250,
@@ -608,8 +626,23 @@ func recoveredSwapFixture(t *testing.T, now time.Time) (Profile, string, *state)
 	}
 	messageHash := sha256.Sum256(message)
 	transactionHash := sha256.Sum256(transaction)
+	binding, err := signer.RiskBinding(signer.Request{
+		Domain: orcaswap.RequestDomain, Cluster: profile.Cluster,
+		Profile: profile.Name, ProfileVersion: profile.Version,
+		ProfileFingerprint: fingerprint, ActionID: actionID,
+		ScheduleWindowStartUnix: windowStart,
+		ScheduleWindowEndUnix:   windowStart + int64(profile.ScheduleWindowSeconds),
+		MessageBase64:           base64.StdEncoding.EncodeToString(message), BlockhashContextSlot: 101,
+		FeeLamports: 5_000, FeeMinContextSlot: 101,
+		PrimaryFeeContextSlot: 101, SecondaryFeeContextSlot: 101,
+		RecentBlockhash: recentBlockhash, ObservedBlockHeight: 100, LastValidBlockHeight: 250,
+	}, hex.EncodeToString(messageHash[:]))
+	if err != nil {
+		t.Fatal(err)
+	}
 	response := signer.Response{
 		ActionID:             actionID,
+		RequestSHA256:        binding.RequestSHA256,
 		Signature:            solana.Encode(signature[:]),
 		MessageSHA256:        hex.EncodeToString(messageHash[:]),
 		TransactionSHA256:    hex.EncodeToString(transactionHash[:]),
