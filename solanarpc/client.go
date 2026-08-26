@@ -27,6 +27,7 @@ import (
 
 const (
 	maxResponseBytes      = 1 << 20
+	maxAccountDataBytes   = 10 << 20
 	maxSimulationLogLines = 256
 	maxSimulationLogBytes = 64 << 10
 	maxRPCAttempts        = 3
@@ -55,6 +56,29 @@ type LatestBlockhash struct {
 	LastValidBlockHeight uint64
 }
 
+// VerificationStatus is Mithril's replay-evidence state. A generic Solana RPC
+// does not implement the method that returns it.
+type VerificationStatus struct {
+	State          string
+	Required       bool
+	VerifiedSlot   uint64
+	EligibleSlot   uint64
+	Healthy        bool
+	EvidenceServed bool
+	Reason         string
+}
+
+// RootedFeedStatus binds rooted-event publication to one AccountsDB lineage.
+type RootedFeedStatus struct {
+	Enabled             bool
+	AccountsDBRootRunID string
+}
+
+type BlockhashValidity struct {
+	ContextSlot uint64
+	Valid       bool
+}
+
 type FeeQuote struct {
 	ContextSlot uint64
 	Lamports    uint64
@@ -70,10 +94,90 @@ type AccountQuote struct {
 
 type AccountDataSlice struct {
 	ContextSlot uint64
+	Bankhash    string
 	Owner       string
 	Executable  bool
 	DataLength  uint64
 	Data        []byte
+}
+
+// AccountData reads one complete bounded account value. It is separate from
+// AccountSlice because interface metadata can exceed the small evidence slices
+// used by transaction checks. The caller chooses the smallest useful bound,
+// up to Solana's 10 MiB account limit; the HTTP response cap follows that
+// bound instead of always allowing the largest response.
+func (c *Client) AccountData(
+	ctx context.Context,
+	address string,
+	minContextSlot,
+	maxDataBytes uint64,
+) (AccountDataSlice, error) {
+	if _, err := solana.Decode32(address); err != nil {
+		return AccountDataSlice{}, errors.New("account address is invalid")
+	}
+	if minContextSlot == 0 || maxDataBytes == 0 || maxDataBytes > maxAccountDataBytes {
+		return AccountDataSlice{}, errors.New("account data bound is invalid")
+	}
+	commitment := "confirmed"
+	if c.mithril {
+		commitment = "processed"
+	}
+	raw, err := c.callBounded(ctx, "getAccountInfo", []any{
+		address,
+		map[string]any{
+			"commitment": commitment, "encoding": "base64", "minContextSlot": minContextSlot,
+		},
+	}, accountDataResponseLimit(maxDataBytes))
+	if err != nil {
+		return AccountDataSlice{}, err
+	}
+	var result struct {
+		Context struct {
+			Slot     uint64 `json:"slot"`
+			Bankhash string `json:"bankhash"`
+		} `json:"context"`
+		Value *rpcAccountValue `json:"value"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return AccountDataSlice{}, errors.New("decode account data")
+	}
+	if result.Context.Slot < minContextSlot || result.Value == nil ||
+		result.Value.Space > maxDataBytes {
+		return AccountDataSlice{}, errors.New("account data is missing, stale, or exceeds its bound")
+	}
+	if c.mithril && !validProcessedBankhash(result.Context.Bankhash) {
+		return AccountDataSlice{}, errors.New("Mithril account bank identity is missing or invalid")
+	}
+	if _, err := solana.Decode32(result.Value.Owner); err != nil {
+		return AccountDataSlice{}, errors.New("account owner is invalid")
+	}
+	var parts []json.RawMessage
+	if err := json.Unmarshal(result.Value.Data, &parts); err != nil || len(parts) != 2 {
+		return AccountDataSlice{}, errors.New("account data encoding is invalid")
+	}
+	var encoded, encoding string
+	if err := json.Unmarshal(parts[0], &encoded); err != nil ||
+		json.Unmarshal(parts[1], &encoding) != nil || encoding != "base64" {
+		return AccountDataSlice{}, errors.New("account data encoding is invalid")
+	}
+	data, err := base64.StdEncoding.Strict().DecodeString(encoded)
+	if err != nil || uint64(len(data)) != result.Value.Space {
+		return AccountDataSlice{}, errors.New("account data has an invalid length")
+	}
+	return AccountDataSlice{
+		ContextSlot: result.Context.Slot, Bankhash: result.Context.Bankhash, Owner: result.Value.Owner,
+		Executable: result.Value.Executable, DataLength: result.Value.Space, Data: data,
+	}, nil
+}
+
+func accountDataResponseLimit(maxDataBytes uint64) int64 {
+	base64Bytes := 4 * ((maxDataBytes + 2) / 3)
+	return int64(base64Bytes + (64 << 10))
+}
+
+type AddressLookupTable struct {
+	ContextSlot uint64
+	Addresses   [][32]byte
 }
 
 type Simulation struct {
@@ -87,6 +191,7 @@ type Simulation struct {
 
 type LegacySimulation struct {
 	ContextSlot   uint64
+	Bankhash      string
 	UnitsConsumed uint64
 	LogsSHA256    string
 }
@@ -246,6 +351,91 @@ func (c *Client) GenesisHash(ctx context.Context) (string, error) {
 	return hash, nil
 }
 
+// VerificationStatus returns Mithril's node-specific evidence status.
+func (c *Client) VerificationStatus(ctx context.Context) (VerificationStatus, error) {
+	if !c.mithril {
+		return VerificationStatus{}, errors.New("verification status requires a Mithril node client")
+	}
+	raw, err := c.call(ctx, "getVerificationStatus", []any{})
+	if err != nil {
+		return VerificationStatus{}, err
+	}
+	var wire struct {
+		State          *string `json:"state"`
+		Required       *bool   `json:"required"`
+		VerifiedSlot   *uint64 `json:"verifiedSlot"`
+		EligibleSlot   *uint64 `json:"eligibleSlot"`
+		Healthy        *bool   `json:"healthy"`
+		EvidenceServed *bool   `json:"evidenceServed"`
+		Reason         string  `json:"reason,omitempty"`
+	}
+	if err := strictjson.Decode(raw, &wire); err != nil || wire.State == nil ||
+		wire.Required == nil || wire.VerifiedSlot == nil || wire.EligibleSlot == nil ||
+		wire.Healthy == nil || wire.EvidenceServed == nil {
+		return VerificationStatus{}, errors.New("Mithril verification status is invalid")
+	}
+	var open, healthy, required bool
+	switch *wire.State {
+	case "complete":
+		open, healthy, required = true, true, true
+	case "incomplete":
+		open, required = true, true
+	case "stalled", "diverged", "unavailable":
+		required = true
+	case "not_applicable":
+		open, healthy = true, true
+	default:
+		return VerificationStatus{}, errors.New("Mithril verification status is invalid")
+	}
+	if *wire.EvidenceServed != open ||
+		*wire.Healthy != healthy || *wire.Required != required ||
+		*wire.EligibleSlot < *wire.VerifiedSlot ||
+		(*wire.State == "complete" && *wire.VerifiedSlot != *wire.EligibleSlot) ||
+		((*wire.State == "incomplete" || *wire.State == "stalled") && *wire.VerifiedSlot >= *wire.EligibleSlot) ||
+		(open && wire.Reason != "") || (!open && wire.Reason != *wire.State) {
+		return VerificationStatus{}, errors.New("Mithril verification status is inconsistent")
+	}
+	return VerificationStatus{
+		State: *wire.State, Required: *wire.Required,
+		VerifiedSlot: *wire.VerifiedSlot, EligibleSlot: *wire.EligibleSlot,
+		Healthy: *wire.Healthy, EvidenceServed: *wire.EvidenceServed, Reason: wire.Reason,
+	}, nil
+}
+
+// RootedFeedStatus returns the current node's immutable rooted-event source
+// identity. Older nodes without the method fail closed for rooted workspaces.
+func (c *Client) RootedFeedStatus(ctx context.Context) (RootedFeedStatus, error) {
+	if !c.mithril {
+		return RootedFeedStatus{}, errors.New("rooted feed status requires a Mithril node client")
+	}
+	raw, err := c.call(ctx, "getRootedFeedStatus", []any{})
+	if err != nil {
+		return RootedFeedStatus{}, err
+	}
+	var wire struct {
+		Enabled             *bool  `json:"enabled"`
+		AccountsDBRootRunID string `json:"accountsDbRootRunId,omitempty"`
+	}
+	if err := strictjson.Decode(raw, &wire); err != nil || wire.Enabled == nil {
+		return RootedFeedStatus{}, errors.New("Mithril rooted feed status is invalid")
+	}
+	if *wire.Enabled {
+		if len(wire.AccountsDBRootRunID) != 8 && len(wire.AccountsDBRootRunID) != 32 ||
+			strings.ToLower(wire.AccountsDBRootRunID) != wire.AccountsDBRootRunID {
+			return RootedFeedStatus{}, errors.New("Mithril rooted feed status is invalid")
+		}
+		if _, err := hex.DecodeString(wire.AccountsDBRootRunID); err != nil {
+			return RootedFeedStatus{}, errors.New("Mithril rooted feed status is invalid")
+		}
+	} else if wire.AccountsDBRootRunID != "" {
+		return RootedFeedStatus{}, errors.New("Mithril rooted feed status is inconsistent")
+	}
+	return RootedFeedStatus{
+		Enabled:             *wire.Enabled,
+		AccountsDBRootRunID: wire.AccountsDBRootRunID,
+	}, nil
+}
+
 func (c *Client) LatestBlockhash(
 	ctx context.Context,
 	minContextSlot uint64,
@@ -293,13 +483,28 @@ func (c *Client) LatestBlockhash(
 }
 
 func (c *Client) BlockHeight(ctx context.Context) (uint64, error) {
+	return c.blockHeight(ctx, 0)
+}
+
+// BlockHeightAt returns the node's block height only after it can evaluate the
+// request at the retained transaction context.
+func (c *Client) BlockHeightAt(ctx context.Context, minContextSlot uint64) (uint64, error) {
+	if minContextSlot == 0 {
+		return 0, errors.New("minimum block-height context slot is required")
+	}
+	return c.blockHeight(ctx, minContextSlot)
+}
+
+func (c *Client) blockHeight(ctx context.Context, minContextSlot uint64) (uint64, error) {
 	commitment := "finalized"
 	if c.mithril {
 		commitment = "processed"
 	}
-	raw, err := c.call(ctx, "getBlockHeight", []any{map[string]any{
-		"commitment": commitment,
-	}})
+	config := map[string]any{"commitment": commitment}
+	if minContextSlot != 0 {
+		config["minContextSlot"] = minContextSlot
+	}
+	raw, err := c.call(ctx, "getBlockHeight", []any{config})
 	if err != nil {
 		return 0, err
 	}
@@ -311,6 +516,40 @@ func (c *Client) BlockHeight(ctx context.Context) (uint64, error) {
 		return 0, errors.New("block height is zero")
 	}
 	return height, nil
+}
+
+// BlockhashValid asks a standard Solana evidence RPC whether one exact recent
+// blockhash remains valid at a context no older than the retained proposal.
+func (c *Client) BlockhashValid(
+	ctx context.Context,
+	blockhash string,
+	minContextSlot uint64,
+) (BlockhashValidity, error) {
+	if _, err := solana.Decode32(blockhash); err != nil {
+		return BlockhashValidity{}, errors.New("blockhash is invalid")
+	}
+	if minContextSlot == 0 {
+		return BlockhashValidity{}, errors.New("minimum blockhash-validity context slot is required")
+	}
+	raw, err := c.call(ctx, "isBlockhashValid", []any{blockhash, map[string]any{
+		"commitment": "processed", "minContextSlot": minContextSlot,
+	}})
+	if err != nil {
+		return BlockhashValidity{}, err
+	}
+	var result struct {
+		Context struct {
+			Slot uint64 `json:"slot"`
+		} `json:"context"`
+		Value bool `json:"value"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return BlockhashValidity{}, errors.New("decode blockhash validity")
+	}
+	if result.Context.Slot < minContextSlot {
+		return BlockhashValidity{}, errors.New("blockhash validity context is older than the requested minimum")
+	}
+	return BlockhashValidity{ContextSlot: result.Context.Slot, Valid: result.Value}, nil
 }
 
 func (c *Client) FinalizedSlot(ctx context.Context) (uint64, error) {
@@ -392,17 +631,48 @@ func (c *Client) AccountSlice(
 	offset,
 	length uint64,
 ) (AccountDataSlice, error) {
+	if length > 512 {
+		return AccountDataSlice{}, errors.New("account data slice is invalid")
+	}
+	return c.accountDataRange(ctx, address, minContextSlot, offset, length, true)
+}
+
+// AccountDataRange reads up to length bytes from an account while retaining
+// the account's complete data length. Unlike AccountSlice, a range ending past
+// EOF is returned as the shorter available suffix so callers can safely resolve
+// bounded on-chain references without first downloading the whole account.
+func (c *Client) AccountDataRange(
+	ctx context.Context,
+	address string,
+	minContextSlot,
+	offset,
+	length uint64,
+) (AccountDataSlice, error) {
+	if length > maxAccountDataBytes {
+		return AccountDataSlice{}, errors.New("account data range is invalid")
+	}
+	return c.accountDataRange(ctx, address, minContextSlot, offset, length, false)
+}
+
+func (c *Client) accountDataRange(
+	ctx context.Context,
+	address string,
+	minContextSlot,
+	offset,
+	length uint64,
+	requireExact bool,
+) (AccountDataSlice, error) {
 	if _, err := solana.Decode32(address); err != nil {
 		return AccountDataSlice{}, errors.New("account address is invalid")
 	}
-	if minContextSlot == 0 || length == 0 || length > 512 || offset > ^uint64(0)-length {
+	if minContextSlot == 0 || length == 0 || offset > ^uint64(0)-length {
 		return AccountDataSlice{}, errors.New("account data slice is invalid")
 	}
 	commitment := "confirmed"
 	if c.mithril {
 		commitment = "processed"
 	}
-	raw, err := c.call(ctx, "getAccountInfo", []any{
+	raw, err := c.callBounded(ctx, "getAccountInfo", []any{
 		address,
 		map[string]any{
 			"commitment":     commitment,
@@ -413,13 +683,14 @@ func (c *Client) AccountSlice(
 				"length": length,
 			},
 		},
-	})
+	}, accountDataResponseLimit(length))
 	if err != nil {
 		return AccountDataSlice{}, err
 	}
 	var result struct {
 		Context struct {
-			Slot uint64 `json:"slot"`
+			Slot     uint64 `json:"slot"`
+			Bankhash string `json:"bankhash"`
 		} `json:"context"`
 		Value *rpcAccountValue `json:"value"`
 	}
@@ -428,6 +699,9 @@ func (c *Client) AccountSlice(
 	}
 	if result.Context.Slot < minContextSlot || result.Value == nil {
 		return AccountDataSlice{}, errors.New("account data slice is missing or stale")
+	}
+	if c.mithril && !validProcessedBankhash(result.Context.Bankhash) {
+		return AccountDataSlice{}, errors.New("Mithril account bank identity is missing or invalid")
 	}
 	if _, err := solana.Decode32(result.Value.Owner); err != nil {
 		return AccountDataSlice{}, errors.New("account owner is invalid")
@@ -442,16 +716,89 @@ func (c *Client) AccountSlice(
 		return AccountDataSlice{}, errors.New("account data encoding is invalid")
 	}
 	data, err := base64.StdEncoding.Strict().DecodeString(encoded)
-	if err != nil || uint64(len(data)) != length {
+	if err != nil || offset > result.Value.Space {
+		return AccountDataSlice{}, errors.New("account data slice has an invalid length")
+	}
+	expected := result.Value.Space - offset
+	if expected > length {
+		expected = length
+	}
+	if uint64(len(data)) != expected || requireExact && expected != length {
 		return AccountDataSlice{}, errors.New("account data slice has an invalid length")
 	}
 	return AccountDataSlice{
 		ContextSlot: result.Context.Slot,
+		Bankhash:    result.Context.Bankhash,
 		Owner:       result.Value.Owner,
 		Executable:  result.Value.Executable,
 		DataLength:  result.Value.Space,
 		Data:        data,
 	}, nil
+}
+
+func validProcessedBankhash(value string) bool {
+	decoded, err := solana.Decode32(value)
+	return err == nil && decoded != ([32]byte{})
+}
+
+// AddressLookupTable reads and decodes one complete ALT account at a coherent
+// node context. Its result can be compared with a transaction builder's claim
+// before compiling a v0 message.
+func (c *Client) AddressLookupTable(
+	ctx context.Context,
+	address string,
+	minContextSlot uint64,
+) (AddressLookupTable, error) {
+	if _, err := solana.Decode32(address); err != nil {
+		return AddressLookupTable{}, errors.New("address lookup table address is invalid")
+	}
+	if minContextSlot == 0 {
+		return AddressLookupTable{}, errors.New("minimum context slot is required")
+	}
+	commitment := "confirmed"
+	if c.mithril {
+		commitment = "processed"
+	}
+	raw, err := c.call(ctx, "getAccountInfo", []any{
+		address,
+		map[string]any{
+			"commitment": commitment, "encoding": "base64", "minContextSlot": minContextSlot,
+		},
+	})
+	if err != nil {
+		return AddressLookupTable{}, err
+	}
+	var result struct {
+		Context struct {
+			Slot uint64 `json:"slot"`
+		} `json:"context"`
+		Value *rpcAccountValue `json:"value"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return AddressLookupTable{}, errors.New("decode address lookup table account")
+	}
+	if result.Context.Slot < minContextSlot || result.Value == nil ||
+		result.Value.Owner != solana.AddressLookupTableProgram || result.Value.Executable {
+		return AddressLookupTable{}, errors.New("address lookup table account is missing, stale, or invalid")
+	}
+	var parts []json.RawMessage
+	if err := json.Unmarshal(result.Value.Data, &parts); err != nil || len(parts) != 2 {
+		return AddressLookupTable{}, errors.New("address lookup table data encoding is invalid")
+	}
+	var encoded, encoding string
+	if err := json.Unmarshal(parts[0], &encoded); err != nil ||
+		json.Unmarshal(parts[1], &encoding) != nil || encoding != "base64" {
+		return AddressLookupTable{}, errors.New("address lookup table data encoding is invalid")
+	}
+	data, err := base64.StdEncoding.Strict().DecodeString(encoded)
+	if err != nil || len(data) > 56+256*32 || result.Value.Space != uint64(len(data)) {
+		return AddressLookupTable{}, errors.New("address lookup table data is invalid")
+	}
+	addresses, err := solana.DecodeAddressLookupTable(data, result.Context.Slot)
+	if err != nil {
+		return AddressLookupTable{}, err
+	}
+	return AddressLookupTable{ContextSlot: result.Context.Slot, Addresses: addresses}, nil
 }
 
 func parseAccountQuote(value *rpcAccountValue, contextSlot uint64) (AccountQuote, error) {
@@ -493,6 +840,29 @@ func (c *Client) FeeForMessage(ctx context.Context, message []byte, minContextSl
 	if decoded.RequiredSignatures != 1 || decoded.ReadonlySigned != 0 {
 		return FeeQuote{}, errors.New("message must have exactly one writable signer")
 	}
+	return c.feeForMessage(ctx, message, minContextSlot)
+}
+
+// FeeForV0Message obtains a fee quote only after resolving the message and
+// enforcing its expected sole-signer shape.
+func (c *Client) FeeForV0Message(
+	ctx context.Context,
+	message []byte,
+	addressTables map[[32]byte][][32]byte,
+	expectedSigner string,
+	minContextSlot uint64,
+) (FeeQuote, error) {
+	decoded, err := solana.DecodeV0Message(message, addressTables)
+	if err != nil {
+		return FeeQuote{}, fmt.Errorf("validate v0 message: %w", err)
+	}
+	if err := solana.ValidateV0MessageForSigner(decoded, expectedSigner); err != nil {
+		return FeeQuote{}, fmt.Errorf("validate v0 signer shape: %w", err)
+	}
+	return c.feeForMessage(ctx, message, minContextSlot)
+}
+
+func (c *Client) feeForMessage(ctx context.Context, message []byte, minContextSlot uint64) (FeeQuote, error) {
 	if minContextSlot == 0 {
 		return FeeQuote{}, errors.New("minimum context slot is required")
 	}
@@ -641,6 +1011,30 @@ func (c *Client) SimulateLegacy(
 	if err != nil {
 		return LegacySimulation{}, fmt.Errorf("validate simulation message: %w", err)
 	}
+	return c.simulateUnsigned(ctx, transaction, minContextSlot, "mithril-agent/legacy-simulation-logs-v1")
+}
+
+// SimulateV0 simulates a decoded and independently resolved version-0 message
+// without supplying signing authority.
+func (c *Client) SimulateV0(
+	ctx context.Context,
+	message []byte,
+	addressTables map[[32]byte][][32]byte,
+	minContextSlot uint64,
+) (LegacySimulation, error) {
+	transaction, err := solana.BuildV0SimulationTransaction(message, addressTables)
+	if err != nil {
+		return LegacySimulation{}, fmt.Errorf("validate simulation message: %w", err)
+	}
+	return c.simulateUnsigned(ctx, transaction, minContextSlot, "mithril-agent/v0-simulation-logs-v1")
+}
+
+func (c *Client) simulateUnsigned(
+	ctx context.Context,
+	transaction []byte,
+	minContextSlot uint64,
+	logDomain string,
+) (LegacySimulation, error) {
 	if minContextSlot == 0 {
 		return LegacySimulation{}, errors.New("minimum simulation context slot is required")
 	}
@@ -663,7 +1057,8 @@ func (c *Client) SimulateLegacy(
 	}
 	var result struct {
 		Context struct {
-			Slot uint64 `json:"slot"`
+			Slot     uint64 `json:"slot"`
+			Bankhash string `json:"bankhash"`
 		} `json:"context"`
 		Value struct {
 			Err           json.RawMessage `json:"err"`
@@ -678,6 +1073,9 @@ func (c *Client) SimulateLegacy(
 		result.Value.Logs == nil {
 		return LegacySimulation{}, errors.New("transaction simulation response is incomplete")
 	}
+	if c.mithril && !validProcessedBankhash(result.Context.Bankhash) {
+		return LegacySimulation{}, errors.New("Mithril simulation bank identity is missing or invalid")
+	}
 	if !bytes.Equal(bytes.TrimSpace(result.Value.Err), []byte("null")) {
 		return LegacySimulation{}, errors.New("transaction simulation failed")
 	}
@@ -691,12 +1089,13 @@ func (c *Client) SimulateLegacy(
 	if len(*result.Value.Logs) > maxSimulationLogLines {
 		return LegacySimulation{}, errors.New("transaction simulation has too many log lines")
 	}
-	logsHash, err := evidenceHash("mithril-agent/legacy-simulation-logs-v1", *result.Value.Logs)
+	logsHash, err := evidenceHash(logDomain, *result.Value.Logs)
 	if err != nil {
 		return LegacySimulation{}, err
 	}
 	return LegacySimulation{
 		ContextSlot:   result.Context.Slot,
+		Bankhash:      result.Context.Bankhash,
 		UnitsConsumed: result.Value.UnitsConsumed,
 		LogsSHA256:    logsHash,
 	}, nil
@@ -719,7 +1118,7 @@ func (c *Client) SendTransaction(
 	transaction []byte,
 	minContextSlot uint64,
 ) (string, error) {
-	if _, err := solana.DecodeSignedLegacyTransaction(transaction); err != nil {
+	if _, err := solana.VerifySignedTransactionEnvelope(transaction); err != nil {
 		return "", fmt.Errorf("validate transaction: %w", err)
 	}
 	if minContextSlot == 0 {
@@ -850,8 +1249,9 @@ func (c *Client) TransactionEffect(ctx context.Context, signature string) (Trans
 	if err != nil {
 		return TransactionEffect{}, errors.New("finalized transaction is not canonical base64")
 	}
-	if _, err := solana.DecodeSignedLegacyTransaction(transaction); err != nil {
-		return TransactionEffect{}, errors.New("finalized transaction is not a supported legacy transaction")
+	envelope, err := solana.VerifySignedTransactionEnvelope(transaction)
+	if err != nil || solana.Encode(envelope.Signature[:]) != signature {
+		return TransactionEffect{}, errors.New("finalized transaction signature or version is invalid")
 	}
 	fingerprint, failed, err := errorFingerprint(result.Meta.Err)
 	if err != nil {
@@ -985,6 +1385,12 @@ func (e *RPCError) Error() string {
 }
 
 func (c *Client) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
+	return c.callBounded(ctx, method, params, maxResponseBytes)
+}
+
+func (c *Client) callBounded(
+	ctx context.Context, method string, params any, responseLimit int64,
+) (json.RawMessage, error) {
 	id := c.nextID.Add(1)
 	body, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params})
 	if err != nil {
@@ -995,7 +1401,7 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 		if err := c.waitForRequestTurn(ctx); err != nil {
 			return nil, err
 		}
-		result, delay, retry, err := c.callOnce(ctx, id, body)
+		result, delay, retry, err := c.callOnce(ctx, id, body, responseLimit)
 		if err == nil {
 			return result, nil
 		}
@@ -1033,6 +1439,7 @@ func (c *Client) callOnce(
 	ctx context.Context,
 	id uint64,
 	body []byte,
+	responseLimit int64,
 ) (json.RawMessage, time.Duration, bool, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint.String(), bytes.NewReader(body))
 	if err != nil {
@@ -1048,7 +1455,7 @@ func (c *Client) callOnce(
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxResponseBytes+1))
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, responseLimit+1))
 		retry := retryableHTTPStatus(response.StatusCode)
 		delay := time.Duration(-1)
 		if retry {
@@ -1058,14 +1465,14 @@ func (c *Client) callOnce(
 		}
 		return nil, delay, retry, errors.New("RPC returned a non-200 status")
 	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+	data, err := io.ReadAll(io.LimitReader(response.Body, responseLimit+1))
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, 0, false, ctxErr
 		}
 		return nil, -1, safeTransportFailure(err), errors.New("read RPC response")
 	}
-	if len(data) > maxResponseBytes {
+	if int64(len(data)) > responseLimit {
 		return nil, 0, false, errors.New("RPC response exceeds size limit")
 	}
 	if err := strictjson.Validate(data); err != nil {
@@ -1100,7 +1507,9 @@ func (c *Client) callOnce(
 func retryableReadMethod(method string) bool {
 	switch method {
 	case "getGenesisHash",
+		"getVerificationStatus",
 		"getLatestBlockhash",
+		"isBlockhashValid",
 		"getBlockHeight",
 		"getSlot",
 		"getAccountInfo",
