@@ -7,16 +7,18 @@ import (
 	"os"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/agent"
 	"github.com/Overclock-Validator/mithril-agent/internal/control"
 	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
 	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
 	"github.com/Overclock-Validator/mithril-agent/journal"
+	"github.com/Overclock-Validator/mithril-agent/jupiterswap"
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 )
 
 const (
-	Version       = 1
+	Version       = 2
 	maxStatusSize = 32 << 10
 	StaleAfter    = 90 * time.Second
 )
@@ -24,15 +26,36 @@ const (
 // Snapshot is the bounded, non-secret state exposed to operators and MCP
 // clients. It intentionally excludes configuration, endpoints, and key data.
 type Snapshot struct {
-	Version        uint32         `json:"version"`
-	ObservedAt     time.Time      `json:"observed_at"`
-	Profile        string         `json:"profile"`
-	ProfileVersion uint32         `json:"profile_version"`
-	Cluster        string         `json:"cluster"`
-	Result         Result         `json:"result"`
-	LastAction     Action         `json:"last_action,omitzero"`
-	Journal        journal.Stats  `json:"journal"`
-	Control        control.Status `json:"control"`
+	Version        uint32             `json:"version"`
+	ObservedAt     time.Time          `json:"observed_at"`
+	Profile        string             `json:"profile"`
+	ProfileVersion uint32             `json:"profile_version"`
+	Cluster        string             `json:"cluster"`
+	Result         Result             `json:"result"`
+	LastAction     Action             `json:"last_action,omitzero"`
+	Journal        journal.Stats      `json:"journal"`
+	Control        control.Status     `json:"control"`
+	Strategy       StrategyProjection `json:"strategy,omitzero"`
+}
+
+// StrategyProjection is the bounded, address-free subset of static policy an
+// operator asks about. Numeric base units cross the socket; human formatting
+// happens at the MCP edge, so untrusted status cannot inject labels or paths.
+type StrategyProjection struct {
+	Configured           bool      `json:"configured"`
+	Direction            string    `json:"direction,omitempty"`
+	InputAmount          uint64    `json:"input_amount,omitempty"`
+	DailyCap             uint64    `json:"daily_cap,omitempty"`
+	MaxFeeLamports       uint64    `json:"max_fee_lamports,omitempty"`
+	FundedTradesPerDay   uint64    `json:"funded_trades_per_day,omitempty"`
+	PriceDirection       string    `json:"price_direction,omitempty"`
+	PriceThresholdMicros uint64    `json:"price_threshold_micros,omitempty"`
+	SweepConfigured      bool      `json:"sweep_configured"`
+	SweepProofValid      bool      `json:"sweep_proof_valid"`
+	SweepKeepLamports    uint64    `json:"sweep_keep_lamports,omitempty"`
+	SweepMaxLamports     uint64    `json:"sweep_max_lamports,omitempty"`
+	SweepDailyLamports   uint64    `json:"sweep_daily_lamports,omitempty"`
+	SweepActiveAfter     time.Time `json:"sweep_active_after,omitzero"`
 }
 
 type Action struct {
@@ -138,16 +161,21 @@ func CurrentView(
 	currentControl control.Status,
 	now time.Time,
 ) (View, error) {
-	if err := control.ValidateStatus(currentControl); err != nil {
+	if err := validateControlStatus(cluster, currentControl); err != nil {
 		return View{}, errors.New("current control status is invalid")
 	}
+	if err := validateProfileControl(profile, profileVersion, cluster, currentControl); err != nil {
+		return View{}, err
+	}
 	view := View{
-		Profile:           profile,
-		ProfileVersion:    profileVersion,
-		Cluster:           cluster,
-		RunnerState:       "not_started",
-		Control:           currentControl,
-		AttentionRequired: RequiresAttention(Result{}, currentControl, now.UTC()),
+		Profile:        profile,
+		ProfileVersion: profileVersion,
+		Cluster:        cluster,
+		RunnerState:    "not_started",
+		Control:        currentControl,
+		AttentionRequired: RequiresAttentionForCluster(
+			Result{}, currentControl, cluster, now.UTC(),
+		),
 	}
 	snapshot, err := Read(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -177,8 +205,13 @@ func viewFromSnapshot(
 	currentControl control.Status,
 	now time.Time,
 ) (View, error) {
-	if err := control.ValidateStatus(currentControl); err != nil {
+	if err := validateControlStatus(snapshot.Cluster, currentControl); err != nil {
 		return View{}, errors.New("current control status is invalid")
+	}
+	if err := validateProfileControl(
+		snapshot.Profile, snapshot.ProfileVersion, snapshot.Cluster, currentControl,
+	); err != nil {
+		return View{}, err
 	}
 	now = now.UTC()
 	if now.IsZero() {
@@ -204,7 +237,9 @@ func viewFromSnapshot(
 	view.Result = snapshot.Result
 	view.LastAction = snapshot.LastAction
 	view.Journal = snapshot.Journal
-	view.AttentionRequired = RequiresAttention(view.Result, currentControl, now)
+	view.AttentionRequired = RequiresAttentionForCluster(
+		view.Result, currentControl, snapshot.Cluster, now,
+	)
 	view.LastActionAcknowledged = terminalAction(view.LastAction.Result) &&
 		currentControl.Mode == control.ModeNoNewActions &&
 		currentControl.TerminalActionID == "" &&
@@ -215,7 +250,18 @@ func viewFromSnapshot(
 // RequiresAttention derives the bounded operator alarm state shared by status
 // and metrics. Historical terminal actions do not alarm after acknowledgement.
 func RequiresAttention(result Result, status control.Status, now time.Time) bool {
-	if control.ValidateStatus(status) != nil || status.RecoveryPending ||
+	return RequiresAttentionForCluster(result, status, "devnet", now)
+}
+
+// RequiresAttentionForCluster derives the operator alarm state while binding
+// an active control mode to its cluster.
+func RequiresAttentionForCluster(
+	result Result,
+	status control.Status,
+	cluster string,
+	now time.Time,
+) bool {
+	if validateControlStatus(cluster, status) != nil || status.RecoveryPending ||
 		status.TerminalActionID != "" {
 		return true
 	}
@@ -272,9 +318,19 @@ func validate(snapshot Snapshot) error {
 	if snapshot.Version != Version || snapshot.ObservedAt.IsZero() ||
 		snapshot.Profile == "" || snapshot.ProfileVersion == 0 ||
 		snapshot.Cluster == "" || snapshot.Result.Decision == "" ||
-		snapshot.Journal.Records < 0 || snapshot.Journal.Bytes < 0 ||
+		snapshot.Journal.ActiveRecords < 0 || snapshot.Journal.Records < 0 ||
+		snapshot.Journal.Bytes < 0 ||
 		snapshot.Journal.ReservedBytes < 0 || snapshot.Journal.MaxRecords <= 0 ||
-		snapshot.Journal.MaxBytes <= 0 {
+		snapshot.Journal.MaxBytes <= 0 ||
+		snapshot.Journal.ActiveRecords > snapshot.Journal.Records ||
+		snapshot.Journal.ActiveRecords > snapshot.Journal.MaxRecords ||
+		snapshot.Journal.Bytes > snapshot.Journal.MaxBytes ||
+		snapshot.Journal.ReservedBytes > snapshot.Journal.MaxBytes ||
+		snapshot.Journal.Bytes > snapshot.Journal.MaxBytes-snapshot.Journal.ReservedBytes ||
+		snapshot.Journal.SendStartedRecords < 0 ||
+		snapshot.Journal.SubmittedRecords < 0 ||
+		snapshot.Journal.SendStartedRecords > snapshot.Journal.Records ||
+		snapshot.Journal.SubmittedRecords > snapshot.Journal.SendStartedRecords {
 		return errors.New("operator status is invalid")
 	}
 	if snapshot.LastAction != (Action{}) &&
@@ -290,8 +346,144 @@ func validate(snapshot Snapshot) error {
 			return errors.New("operator status last action result is invalid")
 		}
 	}
-	if err := control.ValidateStatus(snapshot.Control); err != nil {
+	if err := validateProfileControl(
+		snapshot.Profile, snapshot.ProfileVersion, snapshot.Cluster, snapshot.Control,
+	); err != nil {
+		return err
+	}
+	if err := validateControlStatus(snapshot.Cluster, snapshot.Control); err != nil {
 		return errors.New("operator status control state is invalid")
+	}
+	if err := validateStrategyProjection(
+		snapshot.Profile, snapshot.ProfileVersion, snapshot.Cluster, snapshot.Strategy,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateProfileControl(
+	profile string,
+	profileVersion uint32,
+	cluster string,
+	status control.Status,
+) error {
+	validIdentity := false
+	switch profile {
+	case agent.ProfileTreasurySweepV1:
+		validIdentity = profileVersion == 1 &&
+			(cluster == "devnet" || cluster == "testnet" || cluster == "mainnet-beta")
+	case orcaswap.ProfileName:
+		validIdentity = profileVersion == orcaswap.ProfileVersion && cluster == "devnet"
+	case orcaswap.BuyProfileName:
+		validIdentity = profileVersion == orcaswap.BuyProfileVersion && cluster == "devnet"
+	case jupiterswap.ProfileName:
+		validIdentity = profileVersion == jupiterswap.ProfileVersion && cluster == "mainnet-beta"
+	}
+	if !validIdentity {
+		return errors.New("operator status profile does not match its version or cluster")
+	}
+	if status.Mode == control.ModeMainnetCanary && profile != jupiterswap.ProfileName {
+		return errors.New("Mainnet canary control status does not match the Jupiter profile")
+	}
+	return nil
+}
+
+func validateControlStatus(cluster string, status control.Status) error {
+	switch status.Mode {
+	case control.ModeDevnetEnabled:
+		if cluster != "devnet" {
+			return errors.New("Devnet control status does not match cluster")
+		}
+		return control.ValidateStatus(status)
+	case control.ModeMainnetCanary:
+		if cluster != "mainnet-beta" {
+			return errors.New("Mainnet control status does not match cluster")
+		}
+		return control.ValidateMainnetCanaryStatus(status)
+	default:
+		return control.ValidateStatus(status)
+	}
+}
+
+// ValidateStrategyProjection validates the same bounded strategy contract for
+// config-backed MCP providers that do not pass through a Snapshot.
+func ValidateStrategyProjection(
+	profile string,
+	profileVersion uint32,
+	cluster string,
+	strategy StrategyProjection,
+) error {
+	return validateStrategyProjection(profile, profileVersion, cluster, strategy)
+}
+
+func validateStrategyProjection(
+	profile string,
+	profileVersion uint32,
+	cluster string,
+	strategy StrategyProjection,
+) error {
+	if !strategy.Configured {
+		if strategy != (StrategyProjection{}) {
+			return errors.New("unconfigured operator strategy contains settings")
+		}
+		return nil
+	}
+	wantDirection := ""
+	var wantVersion uint32
+	switch profile {
+	case orcaswap.ProfileName:
+		wantDirection = "sell"
+		wantVersion = orcaswap.ProfileVersion
+	case orcaswap.BuyProfileName:
+		wantDirection = "buy"
+		wantVersion = orcaswap.BuyProfileVersion
+	default:
+		return errors.New("operator strategy does not match a swap profile")
+	}
+	if profileVersion != wantVersion || cluster != "devnet" {
+		return errors.New("operator strategy does not match the profile version or cluster")
+	}
+	if strategy.Direction != wantDirection || strategy.InputAmount == 0 ||
+		strategy.DailyCap < strategy.InputAmount || strategy.MaxFeeLamports == 0 ||
+		strategy.FundedTradesPerDay == 0 {
+		return errors.New("operator strategy spending bounds are invalid")
+	}
+	if strategy.FundedTradesPerDay > strategy.DailyCap/strategy.InputAmount {
+		return errors.New("operator strategy funded-trade count exceeds its daily cap")
+	}
+	if strategy.PriceDirection == "" {
+		if strategy.PriceThresholdMicros != 0 {
+			return errors.New("operator strategy price rule is incomplete")
+		}
+	} else {
+		wantPriceDirection := "sell_at_or_above"
+		if wantDirection == "buy" {
+			wantPriceDirection = "buy_at_or_below"
+		}
+		if strategy.PriceDirection != wantPriceDirection || strategy.PriceThresholdMicros == 0 {
+			return errors.New("operator strategy price rule does not match the profile")
+		}
+	}
+	if !strategy.SweepConfigured {
+		withoutSweep := strategy
+		withoutSweep.Configured = false
+		withoutSweep.Direction = ""
+		withoutSweep.InputAmount = 0
+		withoutSweep.DailyCap = 0
+		withoutSweep.MaxFeeLamports = 0
+		withoutSweep.FundedTradesPerDay = 0
+		withoutSweep.PriceDirection = ""
+		withoutSweep.PriceThresholdMicros = 0
+		if withoutSweep != (StrategyProjection{}) {
+			return errors.New("operator strategy has sweep settings without a sweep")
+		}
+		return nil
+	}
+	if strategy.SweepMaxLamports == 0 ||
+		strategy.SweepDailyLamports < strategy.SweepMaxLamports ||
+		strategy.SweepActiveAfter.IsZero() {
+		return errors.New("operator strategy sweep bounds are invalid")
 	}
 	return nil
 }

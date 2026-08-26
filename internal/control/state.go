@@ -19,15 +19,22 @@ import (
 )
 
 const (
-	maxStateFileBytes     = 4 << 10
-	maxReasonBytes        = 256
-	maxActivationLifetime = 24 * time.Hour
-	maxActivationActions  = 100
-	stateVersion          = 3
+	maxStateFileBytes        = 4 << 10
+	maxReasonBytes           = 256
+	maxActivationLifetime    = 24 * time.Hour
+	maxActivationActions     = 100
+	maxMainnetCanaryLifetime = time.Hour
+	maxMainnetCanaryActions  = 1
+	stateVersion             = 3
 
 	ModeNoNewActions  = "no_new_actions"
 	ModeDevnetEnabled = "devnet_enabled"
+	ModeMainnetCanary = "mainnet_canary"
 )
+
+// ErrRecoveryPending means an automatic stop refused to erase the only marker
+// for a transaction that may already have landed.
+var ErrRecoveryPending = errors.New("control state has pending recovery")
 
 type StateFile struct {
 	path               string
@@ -35,11 +42,13 @@ type StateFile struct {
 	now                func() time.Time
 	startedAt          time.Time
 	requireFresh       bool
+	activeMode         string
 }
 
 type Status struct {
 	Mode             string    `json:"mode"`
 	RecoveryPending  bool      `json:"recovery_pending,omitempty"`
+	ExpectedActionID string    `json:"expected_action_id,omitempty"`
 	TerminalActionID string    `json:"terminal_action_id,omitempty"`
 	TerminalOutcome  string    `json:"terminal_outcome,omitempty"`
 	ExpiresAt        time.Time `json:"expires_at,omitzero"`
@@ -51,6 +60,7 @@ type stateDocument struct {
 	Version            uint32    `json:"version"`
 	Mode               string    `json:"mode"`
 	ProfileFingerprint string    `json:"profile_sha256,omitempty"`
+	ExpectedActionID   string    `json:"expected_action_id,omitempty"`
 	RecoveryActionID   string    `json:"recovery_action_id,omitempty"`
 	TerminalActionID   string    `json:"terminal_action_id,omitempty"`
 	TerminalOutcome    string    `json:"terminal_outcome,omitempty"`
@@ -61,19 +71,38 @@ type stateDocument struct {
 	Reason             string    `json:"reason"`
 }
 
-// ValidateStatus checks the bounded control projection shared with operators.
+// ValidateStatus checks the bounded Devnet control projection shared with
+// current operators and submitter clients.
 func ValidateStatus(status Status) error {
+	return validateStatus(status, ModeDevnetEnabled)
+}
+
+// ValidateMainnetCanaryStatus checks the disabled package-only Mainnet
+// projection without widening any current Devnet client boundary.
+func ValidateMainnetCanaryStatus(status Status) error {
+	return validateStatus(status, ModeMainnetCanary)
+}
+
+func validateStatus(status Status, activeMode string) error {
 	switch status.Mode {
 	case ModeNoNewActions:
 		if !status.ExpiresAt.IsZero() || status.MaxActions != 0 ||
-			status.RemainingActions != 0 ||
+			status.RemainingActions != 0 || status.ExpectedActionID != "" ||
 			(status.RecoveryPending && status.TerminalActionID != "") ||
 			!validOptionalTerminalLatch(status.TerminalActionID, status.TerminalOutcome) {
 			return errors.New("stopped control status is invalid")
 		}
-	case ModeDevnetEnabled:
-		if status.ExpiresAt.IsZero() || status.MaxActions == 0 ||
-			status.MaxActions > maxActivationActions || status.RemainingActions == 0 ||
+	case activeMode:
+		_, actionLimit, ok := activationLimits(activeMode)
+		if !ok {
+			return errors.New("control status mode is invalid")
+		}
+		expectedActionValid := status.ExpectedActionID == ""
+		if activeMode == ModeMainnetCanary {
+			expectedActionValid = validDigest(status.ExpectedActionID)
+		}
+		if !expectedActionValid || status.ExpiresAt.IsZero() || status.MaxActions == 0 ||
+			status.MaxActions > actionLimit || status.RemainingActions == 0 ||
 			status.RemainingActions > status.MaxActions || status.TerminalActionID != "" ||
 			status.TerminalOutcome != "" || status.RecoveryPending {
 			return errors.New("enabled control status is invalid")
@@ -85,6 +114,24 @@ func ValidateStatus(status Status) error {
 }
 
 func NewStateFile(path, profileFingerprint string, requireFresh bool) (*StateFile, error) {
+	return newStateFile(path, profileFingerprint, requireFresh, ModeDevnetEnabled)
+}
+
+// NewMainnetCanaryStateFile creates the one-action Mainnet gate. The root-only
+// operator socket can prepare this state, but no command or service can submit
+// through it yet.
+func NewMainnetCanaryStateFile(
+	path, profileFingerprint string,
+	requireFresh bool,
+) (*StateFile, error) {
+	return newStateFile(path, profileFingerprint, requireFresh, ModeMainnetCanary)
+}
+
+func newStateFile(
+	path, profileFingerprint string,
+	requireFresh bool,
+	activeMode string,
+) (*StateFile, error) {
 	path, err := validateStatePath(path)
 	if err != nil {
 		return nil, err
@@ -100,6 +147,7 @@ func NewStateFile(path, profileFingerprint string, requireFresh bool) (*StateFil
 		now:                now,
 		startedAt:          now().UTC(),
 		requireFresh:       requireFresh,
+		activeMode:         activeMode,
 	}, nil
 }
 
@@ -174,6 +222,7 @@ func (s *StateFile) statusUnlocked() (Status, error) {
 	}
 	return Status{
 		Mode:             document.Mode,
+		ExpectedActionID: document.ExpectedActionID,
 		ExpiresAt:        document.ExpiresAt,
 		MaxActions:       document.MaxActions,
 		RemainingActions: document.RemainingActions,
@@ -245,7 +294,7 @@ func (s *StateFile) ClearTerminalForFinalized(actionID string) error {
 			return err
 		}
 		switch document.Mode {
-		case ModeDevnetEnabled:
+		case s.activeMode:
 			if document.RecoveryActionID == "" {
 				return nil
 			}
@@ -275,6 +324,12 @@ func (s *StateFile) ClearTerminalForFinalized(actionID string) error {
 // Stop blocks new actions while preserving any unacknowledged terminal outcome.
 func (s *StateFile) Stop(reason string) error {
 	return WriteNoNewActions(s.path, reason)
+}
+
+// StopPreservingRecovery blocks new actions without treating an automatic
+// shutdown as acknowledgement of a transaction that may already have landed.
+func (s *StateFile) StopPreservingRecovery(reason string) error {
+	return writeNoNewActions(s.path, reason, true)
 }
 
 // AcknowledgeTerminal clears a matching failed-action latch without enabling work.
@@ -348,6 +403,10 @@ func (s *StateFile) WithSendBarrier(actionID string, operation func() error) (bo
 		if err != nil || blocked {
 			return err
 		}
+		if document.Mode == ModeMainnetCanary && document.ExpectedActionID != actionID {
+			blocked = true
+			return nil
+		}
 		// Consume the bounded activation slot before the durable send marker.
 		// A crash can therefore lose capacity, but can never create extra
 		// authority. Re-enabling always requires a fresh operator action.
@@ -397,6 +456,32 @@ func (s *StateFile) WithRecoverySendBarrier(
 	return blocked, err
 }
 
+// WithStoppedBarrier runs an operator maintenance operation only while the
+// control state is durably stopped. Holding the state lock prevents a new
+// activation from racing maintenance of state bound to this control file.
+func (s *StateFile) WithStoppedBarrier(operation func() error) error {
+	if operation == nil {
+		return errors.New("stopped-state operation is required")
+	}
+	return withStateLock(s.path, func() error {
+		document, err := s.readStateUnlocked()
+		if err != nil {
+			return err
+		}
+		if document == nil {
+			return errors.New("control state is missing")
+		}
+		if err := validateStoredStateDocument(*document, s.now()); err != nil {
+			return err
+		}
+		if document.Mode != ModeNoNewActions || document.TerminalActionID != "" ||
+			document.TerminalOutcome != "" {
+			return errors.New("control state must be fully stopped")
+		}
+		return operation()
+	})
+}
+
 func (s *StateFile) noNewActionsUnlocked() (bool, error) {
 	document, err := s.readStateUnlocked()
 	if err != nil {
@@ -435,38 +520,32 @@ func (s *StateFile) validateState(document stateDocument) (bool, error) {
 	if document.Version != stateVersion || !validReason(document.Reason) {
 		return false, errors.New("control state is invalid")
 	}
-	switch document.Mode {
-	case ModeNoNewActions:
+	if document.Mode == ModeNoNewActions {
 		if document.ProfileFingerprint != "" || !document.IssuedAt.IsZero() ||
 			!document.ExpiresAt.IsZero() || document.MaxActions != 0 ||
-			document.RemainingActions != 0 || document.RecoveryActionID != "" ||
+			document.RemainingActions != 0 || document.ExpectedActionID != "" ||
+			document.RecoveryActionID != "" ||
 			!validOptionalTerminalLatch(document.TerminalActionID, document.TerminalOutcome) {
 			return false, errors.New("stopped control state has enabling fields")
 		}
 		return true, nil
-	case ModeDevnetEnabled:
-		now := s.now().UTC()
-		if document.ProfileFingerprint != s.profileFingerprint ||
-			document.IssuedAt.IsZero() || document.ExpiresAt.IsZero() ||
-			document.MaxActions == 0 ||
-			document.MaxActions > maxActivationActions ||
-			document.RemainingActions > document.MaxActions || document.TerminalActionID != "" ||
-			document.TerminalOutcome != "" ||
-			(document.RecoveryActionID != "" && !validDigest(document.RecoveryActionID)) ||
-			document.IssuedAt.After(now) ||
-			!document.ExpiresAt.After(document.IssuedAt) ||
-			document.ExpiresAt.Sub(document.IssuedAt) > maxActivationLifetime {
-			return false, errors.New("devnet activation is invalid")
-		}
-		if document.RemainingActions == 0 ||
-			!document.ExpiresAt.After(now) ||
-			(s.requireFresh && document.IssuedAt.Before(s.startedAt)) {
-			return true, nil
-		}
-		return false, nil
-	default:
+	}
+	if document.Mode != s.activeMode {
 		return false, errors.New("control mode is invalid")
 	}
+	now := s.now().UTC()
+	if err := validateActivationDocument(document, now, s.profileFingerprint); err != nil {
+		return false, err
+	}
+	// A durable send marker blocks every new action, even when the operator
+	// granted more capacity. Otherwise a second send can overwrite the only
+	// action ID that permits exact-byte recovery of the first transaction.
+	if document.RemainingActions == 0 || document.RecoveryActionID != "" ||
+		!document.ExpiresAt.After(now) ||
+		(s.requireFresh && document.IssuedAt.Before(s.startedAt)) {
+		return true, nil
+	}
+	return false, nil
 }
 
 func (s *StateFile) recoverySendAllowed(
@@ -476,36 +555,69 @@ func (s *StateFile) recoverySendAllowed(
 	if document.Version != stateVersion || !validReason(document.Reason) {
 		return false, errors.New("control state is invalid")
 	}
-	switch document.Mode {
-	case ModeNoNewActions:
+	if document.Mode == ModeNoNewActions {
 		if document.ProfileFingerprint != "" || !document.IssuedAt.IsZero() ||
 			!document.ExpiresAt.IsZero() || document.MaxActions != 0 ||
-			document.RemainingActions != 0 || document.RecoveryActionID != "" ||
+			document.RemainingActions != 0 || document.ExpectedActionID != "" ||
+			document.RecoveryActionID != "" ||
 			!validOptionalTerminalLatch(document.TerminalActionID, document.TerminalOutcome) {
 			return false, errors.New("stopped control state has enabling fields")
 		}
 		return false, nil
-	case ModeDevnetEnabled:
-		now := s.now().UTC()
-		if document.ProfileFingerprint != s.profileFingerprint ||
-			document.IssuedAt.IsZero() || document.ExpiresAt.IsZero() ||
-			document.MaxActions == 0 ||
-			document.MaxActions > maxActivationActions ||
-			document.RemainingActions > document.MaxActions || document.TerminalActionID != "" ||
-			document.TerminalOutcome != "" ||
-			(document.RecoveryActionID != "" && !validDigest(document.RecoveryActionID)) ||
-			document.IssuedAt.After(now) ||
-			!document.ExpiresAt.After(document.IssuedAt) ||
-			document.ExpiresAt.Sub(document.IssuedAt) > maxActivationLifetime {
-			return false, errors.New("devnet activation is invalid")
-		}
-		if document.RecoveryActionID != actionID || !document.ExpiresAt.After(now) {
-			return false, nil
-		}
-		return true, nil
-	default:
+	}
+	if document.Mode != s.activeMode {
 		return false, errors.New("control mode is invalid")
 	}
+	now := s.now().UTC()
+	if err := validateActivationDocument(document, now, s.profileFingerprint); err != nil {
+		return false, err
+	}
+	if document.RecoveryActionID != actionID || !document.ExpiresAt.After(now) {
+		return false, nil
+	}
+	return true, nil
+}
+
+func activationLimits(mode string) (time.Duration, uint32, bool) {
+	switch mode {
+	case ModeDevnetEnabled:
+		return maxActivationLifetime, maxActivationActions, true
+	case ModeMainnetCanary:
+		return maxMainnetCanaryLifetime, maxMainnetCanaryActions, true
+	default:
+		return 0, 0, false
+	}
+}
+
+func validateActivationDocument(
+	document stateDocument,
+	now time.Time,
+	expectedFingerprint string,
+) error {
+	lifetimeLimit, actionLimit, ok := activationLimits(document.Mode)
+	if !ok {
+		return errors.New("control mode is invalid")
+	}
+	fingerprintValid := validDigest(document.ProfileFingerprint)
+	if expectedFingerprint != "" {
+		fingerprintValid = document.ProfileFingerprint == expectedFingerprint
+	}
+	expectedActionValid := document.ExpectedActionID == ""
+	if document.Mode == ModeMainnetCanary {
+		expectedActionValid = validDigest(document.ExpectedActionID)
+	}
+	if !fingerprintValid || !expectedActionValid ||
+		document.IssuedAt.IsZero() || document.ExpiresAt.IsZero() ||
+		document.MaxActions == 0 || document.MaxActions > actionLimit ||
+		document.RemainingActions > document.MaxActions || document.TerminalActionID != "" ||
+		document.TerminalOutcome != "" ||
+		(document.RecoveryActionID != "" && !validDigest(document.RecoveryActionID)) ||
+		document.IssuedAt.After(now.UTC()) ||
+		!document.ExpiresAt.After(document.IssuedAt) ||
+		document.ExpiresAt.Sub(document.IssuedAt) > lifetimeLimit {
+		return errors.New("control activation is invalid")
+	}
+	return nil
 }
 
 func validDigest(value string) bool {
@@ -535,33 +647,24 @@ func validateStoredStateDocument(document stateDocument, now time.Time) error {
 	if document.Version != stateVersion || !validReason(document.Reason) {
 		return errors.New("control state is invalid")
 	}
-	switch document.Mode {
-	case ModeNoNewActions:
+	if document.Mode == ModeNoNewActions {
 		if document.ProfileFingerprint != "" || !document.IssuedAt.IsZero() ||
 			!document.ExpiresAt.IsZero() || document.MaxActions != 0 ||
-			document.RemainingActions != 0 || document.RecoveryActionID != "" ||
+			document.RemainingActions != 0 || document.ExpectedActionID != "" ||
+			document.RecoveryActionID != "" ||
 			!validOptionalTerminalLatch(document.TerminalActionID, document.TerminalOutcome) {
 			return errors.New("stopped control state has enabling fields")
 		}
-	case ModeDevnetEnabled:
-		if !validDigest(document.ProfileFingerprint) || document.IssuedAt.IsZero() ||
-			document.ExpiresAt.IsZero() || document.MaxActions == 0 ||
-			document.MaxActions > maxActivationActions ||
-			document.RemainingActions > document.MaxActions ||
-			document.TerminalActionID != "" || document.TerminalOutcome != "" ||
-			(document.RecoveryActionID != "" && !validDigest(document.RecoveryActionID)) ||
-			document.IssuedAt.After(now.UTC()) ||
-			!document.ExpiresAt.After(document.IssuedAt) ||
-			document.ExpiresAt.Sub(document.IssuedAt) > maxActivationLifetime {
-			return errors.New("devnet activation is invalid")
-		}
-	default:
-		return errors.New("control mode is invalid")
+		return nil
 	}
-	return nil
+	return validateActivationDocument(document, now, "")
 }
 
 func WriteNoNewActions(path, reason string) error {
+	return writeNoNewActions(path, reason, false)
+}
+
+func writeNoNewActions(path, reason string, preserveRecovery bool) error {
 	path, err := validateStatePath(path)
 	if err != nil {
 		return err
@@ -580,6 +683,9 @@ func WriteNoNewActions(path, reason string) error {
 			if err := validateStoredStateDocument(*current, time.Now()); err != nil {
 				return err
 			}
+			if preserveRecovery && current.RecoveryActionID != "" {
+				return ErrRecoveryPending
+			}
 			if validTerminalLatch(current.TerminalActionID, current.TerminalOutcome) {
 				terminalActionID = current.TerminalActionID
 				terminalOutcome = current.TerminalOutcome
@@ -587,15 +693,8 @@ func WriteNoNewActions(path, reason string) error {
 			// RecoveryActionID is deliberately NOT carried over. A stop revokes
 			// the ability to send, and an explicit operator stop is treated as
 			// the operator taking responsibility for whatever was in flight.
-			// Both properties are load-bearing and covered by tests.
-			//
-			// The cost: the systemd unit runs this same stop on every start
-			// (deploy/systemd/mithril-agent-swap.service ExecStartPre), so a
-			// crash inside the send window is indistinguishable from an
-			// operator acknowledging it. That is a deliberate trade — coming
-			// back up still armed would be far worse than losing the marker.
-			// What it leaves is an observability gap, not a control gap: the
-			// operator is never told that a restart discarded one.
+			// Supervisor-facing callers must refuse this operation while recovery
+			// is pending; a service transition is not an operator acknowledgement.
 		}
 		return replaceStateDocument(path, stateDocument{
 			Version:          stateVersion,
@@ -615,8 +714,8 @@ func WriteDevnetActivation(
 	maxActions uint32,
 	reason string,
 ) error {
-	document, err := devnetActivationDocument(
-		profileFingerprint, issuedAt, expiresAt, maxActions, reason,
+	document, err := activationDocument(
+		ModeDevnetEnabled, profileFingerprint, "", issuedAt, expiresAt, maxActions, reason,
 	)
 	if err != nil {
 		return err
@@ -633,11 +732,62 @@ func WriteDevnetActivationIfRevision(
 	maxActions uint32,
 	reason string,
 ) (bool, error) {
+	return writeActivationIfRevision(
+		path,
+		ModeDevnetEnabled,
+		profileFingerprint,
+		expectedRevision,
+		"",
+		issuedAt,
+		expiresAt,
+		maxActions,
+		reason,
+	)
+}
+
+// WriteMainnetCanaryActivationForActionIfRevision creates one short-lived
+// Mainnet admission grant for exactly the reviewed action and only if the
+// protected state has not changed since review.
+func WriteMainnetCanaryActivationForActionIfRevision(
+	path,
+	profileFingerprint,
+	expectedRevision,
+	expectedActionID string,
+	issuedAt,
+	expiresAt time.Time,
+	maxActions uint32,
+	reason string,
+) (bool, error) {
+	return writeActivationIfRevision(
+		path,
+		ModeMainnetCanary,
+		profileFingerprint,
+		expectedRevision,
+		expectedActionID,
+		issuedAt,
+		expiresAt,
+		maxActions,
+		reason,
+	)
+}
+
+func writeActivationIfRevision(
+	path,
+	mode,
+	profileFingerprint,
+	expectedRevision,
+	expectedActionID string,
+	issuedAt,
+	expiresAt time.Time,
+	maxActions uint32,
+	reason string,
+) (bool, error) {
 	if !validDigest(expectedRevision) {
 		return false, errors.New("control state revision is invalid")
 	}
-	document, err := devnetActivationDocument(
-		profileFingerprint, issuedAt, expiresAt, maxActions, reason,
+	document, err := activationDocument(
+		mode, profileFingerprint, expectedActionID,
+		issuedAt, expiresAt, maxActions, reason,
 	)
 	if err != nil {
 		return false, err
@@ -659,19 +809,8 @@ func WriteDevnetActivationIfRevision(
 		if err != nil {
 			return err
 		}
-		if currentDocument != nil {
-			if err := validateStoredStateDocument(*currentDocument, time.Now()); err != nil {
-				return err
-			}
-			if blocksReplacement(*currentDocument, time.Now().UTC()) {
-				return errors.New("stop the current activation before enabling another")
-			}
-			if validTerminalLatch(
-				currentDocument.TerminalActionID,
-				currentDocument.TerminalOutcome,
-			) {
-				return errors.New("terminal action requires acknowledgement")
-			}
+		if err := validateActivationReplacement(currentDocument, document.Mode, time.Now()); err != nil {
+			return err
 		}
 		if err := replaceStateDocument(path, document); err != nil {
 			return err
@@ -682,34 +821,45 @@ func WriteDevnetActivationIfRevision(
 	return written, err
 }
 
-func devnetActivationDocument(
-	profileFingerprint string,
+func activationDocument(
+	mode,
+	profileFingerprint,
+	expectedActionID string,
 	issuedAt,
 	expiresAt time.Time,
 	maxActions uint32,
 	reason string,
 ) (stateDocument, error) {
+	lifetimeLimit, actionLimit, ok := activationLimits(mode)
+	if !ok {
+		return stateDocument{}, errors.New("control mode is invalid")
+	}
 	decoded, err := hex.DecodeString(profileFingerprint)
 	if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != profileFingerprint {
 		return stateDocument{}, errors.New("profile fingerprint is invalid")
+	}
+	if (mode == ModeMainnetCanary && !validDigest(expectedActionID)) ||
+		(mode != ModeMainnetCanary && expectedActionID != "") {
+		return stateDocument{}, errors.New("control expected action ID is invalid")
 	}
 	issuedAt = issuedAt.UTC()
 	expiresAt = expiresAt.UTC()
 	if issuedAt.IsZero() || issuedAt.After(time.Now().UTC()) ||
 		!expiresAt.After(issuedAt) ||
-		expiresAt.Sub(issuedAt) > maxActivationLifetime {
-		return stateDocument{}, errors.New("devnet activation lifetime is invalid")
+		expiresAt.Sub(issuedAt) > lifetimeLimit {
+		return stateDocument{}, errors.New("control activation lifetime is invalid")
 	}
-	if maxActions == 0 || maxActions > maxActivationActions {
-		return stateDocument{}, errors.New("devnet activation action limit must be between 1 and 100")
+	if maxActions == 0 || maxActions > actionLimit {
+		return stateDocument{}, errors.New("control activation action limit is invalid")
 	}
 	if !validReason(reason) {
 		return stateDocument{}, errors.New("control reason is invalid")
 	}
 	return stateDocument{
 		Version:            stateVersion,
-		Mode:               ModeDevnetEnabled,
+		Mode:               mode,
 		ProfileFingerprint: profileFingerprint,
+		ExpectedActionID:   expectedActionID,
 		IssuedAt:           issuedAt,
 		ExpiresAt:          expiresAt,
 		MaxActions:         maxActions,
@@ -744,13 +894,37 @@ func stateRevision(path string) (string, error) {
 // prevent. Expiry says the authority ended, not that the chain agreed on what
 // it did; only an acknowledgement can say that.
 //
-// Both activation writers call this. It was previously the same condition
-// written out twice, and the two copies drifted the moment one was fixed.
+// Every activation writer reaches this through validateActivationReplacement.
+// The condition previously drifted when it was duplicated between writers.
 func blocksReplacement(document stateDocument, now time.Time) bool {
-	return document.Mode == ModeDevnetEnabled &&
+	_, _, active := activationLimits(document.Mode)
+	return active &&
 		(now.Before(document.ExpiresAt) ||
 			document.RemainingActions == 0 ||
 			document.RecoveryActionID != "")
+}
+
+func validateActivationReplacement(
+	current *stateDocument,
+	nextMode string,
+	now time.Time,
+) error {
+	if current == nil {
+		return nil
+	}
+	if err := validateStoredStateDocument(*current, now); err != nil {
+		return err
+	}
+	if validTerminalLatch(current.TerminalActionID, current.TerminalOutcome) {
+		return errors.New("terminal action requires acknowledgement")
+	}
+	if current.Mode != ModeNoNewActions && current.Mode != nextMode {
+		return errors.New("stop the current activation before changing control modes")
+	}
+	if blocksReplacement(*current, now.UTC()) {
+		return errors.New("stop the current activation before enabling another")
+	}
+	return nil
 }
 
 func writeState(path string, document stateDocument) error {
@@ -766,27 +940,8 @@ func writeState(path string, document stateDocument) error {
 		if err != nil {
 			return err
 		}
-		if current != nil {
-			if err := validateStoredStateDocument(*current, time.Now()); err != nil {
-				return err
-			}
-			if validTerminalLatch(current.TerminalActionID, current.TerminalOutcome) {
-				return errors.New("terminal action requires acknowledgement")
-			}
-			// Replacing a live activation would silently restore its spent
-			// capacity: a grant of three actions with one left becomes a fresh
-			// grant of three, with nothing recording that it happened. The
-			// bound an operator set is only a bound if widening it requires
-			// stopping first, so this refuses rather than overwrites.
-			//
-			// TWO writers reach a replacement: this one and
-			// WriteDevnetActivationIfRevision, and each carries its own copy of
-			// this check — verify both when adding a third.
-			// WriteNoNewActions deliberately has none: it can only narrow, so
-			// it cannot restore spent capacity.
-			if blocksReplacement(*current, time.Now().UTC()) {
-				return errors.New("stop the current activation before enabling another")
-			}
+		if err := validateActivationReplacement(current, document.Mode, time.Now()); err != nil {
+			return err
 		}
 		return replaceStateDocument(path, document)
 	})

@@ -230,11 +230,10 @@ func open(path string, rotating bool) (*Store, error) {
 // invariant derived by full-scanning it — the halted latch, the clock anchor,
 // the daily debit sums — correct across a rotation.
 //
-// Rotation is deliberately opt-in rather than the default. The signer's
-// authorization ledger reuses this type, requires its own header record at
-// records[0], and already holds an exclusive lock on the identical
-// <path>.lock name; making rotation default would both break its header
-// assumption and deadlock it against itself.
+// Rotation is deliberately opt-in rather than the default so callers that
+// expect one physical file cannot silently begin producing segments. Readers
+// that opt in receive the complete logical record stream, including the
+// original header and rotation markers.
 func OpenRotating(path string) (*Store, error) {
 	store, err := open(path, true)
 	if err != nil {
@@ -295,6 +294,12 @@ func openRotating(path, parent string) (*Store, error) {
 	active, err := openFile(path)
 	if err != nil {
 		return failed(fmt.Errorf("open journal: %w", err))
+	}
+	// Persist a newly created active path as well as the stable lock. Syncing
+	// the file later does not by itself make its directory entry crash-safe.
+	if err := syncDirectory(parent); err != nil {
+		_ = active.Close()
+		return failed(fmt.Errorf("sync journal directory: %w", err))
 	}
 	if err := lockFile(active); err != nil {
 		_ = active.Close()
@@ -568,70 +573,84 @@ func hasSegments(base string) (segments bool, staged bool, err error) {
 // contents. The writer must be stopped so the verifier can hold a shared
 // non-blocking lock for the complete read.
 func Verify(path string) (Verification, error) {
+	_, result, err := readVerified(path)
+	return result, err
+}
+
+// ReadRecords returns a verified snapshot of an existing journal without
+// creating, repairing, or otherwise changing it. It holds the same shared lock
+// as Verify for the complete read, so the records and verification describe
+// one immutable view rather than two reads joined by a race.
+func ReadRecords(path string) ([]Record, error) {
+	records, _, err := readVerified(path)
+	return records, err
+}
+
+func readVerified(path string) ([]Record, Verification, error) {
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return Verification{}, errors.New("journal path must be a clean absolute path")
+		return nil, Verification{}, errors.New("journal path must be a clean absolute path")
 	}
 	if err := validateJournalDirectory(filepath.Dir(path)); err != nil {
-		return Verification{}, err
+		return nil, Verification{}, err
 	}
 	segments, staged, err := hasSegments(path)
 	if err != nil {
-		return Verification{}, err
+		return nil, Verification{}, err
 	}
 	if staged {
-		return Verification{}, errors.New("journal has an incomplete rotation; open it once to complete recovery")
+		return nil, Verification{}, errors.New("journal has an incomplete rotation; open it once to complete recovery")
 	}
 	if segments {
-		return verifyRotated(path)
+		return readVerifiedRotated(path)
 	}
 	before, err := os.Lstat(path)
 	if err != nil {
-		return Verification{}, fmt.Errorf("inspect journal: %w", err)
+		return nil, Verification{}, fmt.Errorf("inspect journal: %w", err)
 	}
 	if before.Mode()&os.ModeSymlink != 0 {
-		return Verification{}, errors.New("journal path must not be a symlink")
+		return nil, Verification{}, errors.New("journal path must not be a symlink")
 	}
 	if err := validateJournalFile(before); err != nil {
-		return Verification{}, err
+		return nil, Verification{}, err
 	}
 	file, err := openReadFile(path)
 	if err != nil {
-		return Verification{}, fmt.Errorf("open journal read-only: %w", err)
+		return nil, Verification{}, fmt.Errorf("open journal read-only: %w", err)
 	}
 	defer file.Close()
 	if err := lockReadFile(file); err != nil {
-		return Verification{}, fmt.Errorf("lock journal for verification: %w", err)
+		return nil, Verification{}, fmt.Errorf("lock journal for verification: %w", err)
 	}
 	opened, err := file.Stat()
 	if err != nil {
-		return Verification{}, fmt.Errorf("stat journal: %w", err)
+		return nil, Verification{}, fmt.Errorf("stat journal: %w", err)
 	}
 	if !os.SameFile(before, opened) {
-		return Verification{}, errors.New("journal changed while opening")
+		return nil, Verification{}, errors.New("journal changed while opening")
 	}
 	if err := validateJournalFile(opened); err != nil {
-		return Verification{}, err
+		return nil, Verification{}, err
 	}
 	hasher := sha256.New()
 	limited := &io.LimitedReader{R: file, N: maxJournalBytes + 1}
 	records, err := scanJournal(io.TeeReader(limited, hasher), nil)
 	if limited.N == 0 {
-		return Verification{}, errors.New("journal exceeds size limit")
+		return nil, Verification{}, errors.New("journal exceeds size limit")
 	}
 	if err != nil {
-		return Verification{}, err
+		return nil, Verification{}, err
 	}
 	final, err := file.Stat()
 	if err != nil {
-		return Verification{}, fmt.Errorf("stat journal after verification: %w", err)
+		return nil, Verification{}, fmt.Errorf("stat journal after verification: %w", err)
 	}
 	if !os.SameFile(opened, final) || final.Size() != opened.Size() ||
 		!final.ModTime().Equal(opened.ModTime()) || final.Mode() != opened.Mode() {
-		return Verification{}, errors.New("journal changed while verifying")
+		return nil, Verification{}, errors.New("journal changed while verifying")
 	}
 	current, err := os.Lstat(path)
 	if err != nil || !os.SameFile(opened, current) {
-		return Verification{}, errors.New("journal path changed while verifying")
+		return nil, Verification{}, errors.New("journal path changed while verifying")
 	}
 	sendStarted, submitted := actionEventCounts(records)
 	result := Verification{
@@ -643,10 +662,10 @@ func Verify(path string) (Verification, error) {
 	if len(records) > 0 {
 		result.ChainHeadSHA256 = records[len(records)-1].Hash
 	}
-	return result, nil
+	return records, result, nil
 }
 
-// verifyRotated walks the sealed segments in order and then the active file,
+// readVerifiedRotated walks the sealed segments in order and then the active file,
 // validating one continuous chain. It holds a shared lock on the stable lock
 // file, which the writer holds exclusively, so a successful verification still
 // proves no writer was active for the whole read — the guarantee that would
@@ -654,18 +673,18 @@ func Verify(path string) (Verification, error) {
 //
 // The digest covers the segments' bytes in index order followed by the active
 // file, so it is reproducible by concatenating the files in that order.
-func verifyRotated(path string) (Verification, error) {
+func readVerifiedRotated(path string) ([]Record, Verification, error) {
 	lock, err := openReadFile(path + lockSuffix)
 	if err != nil {
-		return Verification{}, errors.New("journal lock file is missing; the journal has never been opened for rotation")
+		return nil, Verification{}, errors.New("journal lock file is missing; the journal has never been opened for rotation")
 	}
 	defer lock.Close()
 	if err := lockReadFile(lock); err != nil {
-		return Verification{}, fmt.Errorf("lock journal for verification: %w", err)
+		return nil, Verification{}, fmt.Errorf("lock journal for verification: %w", err)
 	}
 	segments, err := discoverSegments(path)
 	if err != nil {
-		return Verification{}, err
+		return nil, Verification{}, err
 	}
 	hasher := sha256.New()
 	var (
@@ -676,7 +695,7 @@ func verifyRotated(path string) (Verification, error) {
 	for _, file := range append(append([]string{}, segments...), path) {
 		records, size, scanErr := verifySegmentFile(file, seed, hasher)
 		if scanErr != nil {
-			return Verification{}, scanErr
+			return nil, Verification{}, scanErr
 		}
 		all = append(all, records...)
 		bytes += size
@@ -692,7 +711,7 @@ func verifyRotated(path string) (Verification, error) {
 	if len(all) > 0 {
 		result.ChainHeadSHA256 = all[len(all)-1].Hash
 	}
-	return result, nil
+	return all, result, nil
 }
 
 func verifySegmentFile(
@@ -1126,6 +1145,17 @@ func (s *Store) rotateLocked() error {
 }
 
 func (s *Store) Append(at time.Time, eventType, actionID string, payload any) (Record, error) {
+	return s.append(at, eventType, actionID, payload, true)
+}
+
+// AppendBuffered appends a record without syncing it to stable storage. It is
+// only for replayable bulk inputs whose caller calls Sync before acknowledging
+// progress. Security-sensitive state transitions must continue to use Append.
+func (s *Store) AppendBuffered(at time.Time, eventType, actionID string, payload any) (Record, error) {
+	return s.append(at, eventType, actionID, payload, false)
+}
+
+func (s *Store) append(at time.Time, eventType, actionID string, payload any, syncRecord bool) (Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.file == nil {
@@ -1141,12 +1171,20 @@ func (s *Store) Append(at time.Time, eventType, actionID string, payload any) (R
 	if len(s.records) > 0 && at.Before(s.records[len(s.records)-1].At) {
 		return Record{}, errors.New("journal event time regressed")
 	}
-	if s.activeRecords() >= maxRecords {
-		return Record{}, errors.New("journal record limit reached")
-	}
 	encodedPayload, err := json.Marshal(payload)
 	if err != nil {
 		return Record{}, fmt.Errorf("encode journal payload: %w", err)
+	}
+	// Idle records do not reserve action capacity, so ReleaseCapacity is never
+	// called for them. Rotate here only when no action is in flight; an open
+	// reserve keeps the current segment stable through its terminal records.
+	if s.rotating && s.reserve == nil {
+		if err := s.rotateIfFullLocked(); err != nil {
+			return Record{}, err
+		}
+	}
+	if s.activeRecords() >= maxRecords {
+		return Record{}, errors.New("journal record limit reached")
 	}
 	record := Record{
 		Sequence: uint64(len(s.records) + 1),
@@ -1187,12 +1225,32 @@ func (s *Store) Append(at time.Time, eventType, actionID string, payload any) (R
 		}
 		return Record{}, fmt.Errorf("append journal: %w", err)
 	}
-	if err := s.file.Sync(); err != nil {
-		s.poison = err
-		return Record{}, fmt.Errorf("sync journal: %w", err)
+	if syncRecord {
+		if err := s.file.Sync(); err != nil {
+			s.poison = err
+			return Record{}, fmt.Errorf("sync journal: %w", err)
+		}
 	}
 	s.records = append(s.records, record)
 	return record, nil
+}
+
+// Sync makes preceding AppendBuffered records durable before their caller
+// reports a durable cursor or accepts more than its bounded replay window.
+func (s *Store) Sync() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.file == nil {
+		return errors.New("journal is closed")
+	}
+	if s.poison != nil {
+		return fmt.Errorf("journal requires reopen after an append failure: %w", s.poison)
+	}
+	if err := s.file.Sync(); err != nil {
+		s.poison = err
+		return fmt.Errorf("sync journal: %w", err)
+	}
+	return nil
 }
 
 func recordHash(record Record) (string, error) {

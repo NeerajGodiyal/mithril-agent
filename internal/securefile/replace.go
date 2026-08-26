@@ -11,30 +11,61 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/internal/secureexec"
 )
 
+// CreatePrivate creates a bounded private file and refuses to replace anything
+// already present at path. Use it for keys, approvals, and other artifacts whose
+// identity depends on being written exactly once.
+func CreatePrivate(path string, data []byte, maxBytes int64) error {
+	path, parent, err := validatePrivateWrite(path, data, maxBytes)
+	if err != nil {
+		return err
+	}
+
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return errors.New("private file already exists")
+	}
+	if err != nil {
+		return fmt.Errorf("create private file: %w", err)
+	}
+	created, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("inspect new private file: %w", err)
+	}
+	cleanup := func() {
+		_ = file.Close()
+		current, statErr := os.Lstat(path)
+		if statErr == nil && os.SameFile(created, current) {
+			_ = os.Remove(path)
+			_ = syncDirectory(parent)
+		}
+	}
+	if err := file.Chmod(0o600); err != nil {
+		cleanup()
+		return fmt.Errorf("set private file permissions: %w", err)
+	}
+	if err := writeAll(file, data); err != nil {
+		cleanup()
+		return fmt.Errorf("write private file: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		cleanup()
+		return fmt.Errorf("sync private file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("close private file: %w", err)
+	}
+	return syncDirectory(parent)
+}
+
 // ReplacePrivate atomically replaces a bounded private file and syncs its
 // parent directory. The parent must already be private and trusted.
 func ReplacePrivate(path string, data []byte, maxBytes int64) error {
-	if path == "" || maxBytes <= 0 {
-		return errors.New("private file path and positive size limit are required")
-	}
-	if !filepath.IsAbs(path) {
-		return errors.New("private file path must be absolute")
-	}
-	if len(data) == 0 || int64(len(data)) > maxBytes {
-		return errors.New("private file content is empty or exceeds size limit")
-	}
-	path = filepath.Clean(path)
-	parent := filepath.Dir(path)
-	if err := secureexec.ValidateProtectedDirectory(parent); err != nil {
-		return errors.New("private file directory is not trusted")
-	}
-	parentInfo, err := os.Lstat(parent)
+	path, parent, err := validatePrivateWrite(path, data, maxBytes)
 	if err != nil {
-		return fmt.Errorf("inspect private file directory: %w", err)
-	}
-	if parentInfo.Mode()&os.ModeSymlink != 0 || !parentInfo.IsDir() ||
-		parentInfo.Mode().Perm()&0o022 != 0 || !fileowner.Trusted(parentInfo) {
-		return errors.New("private file directory is not trusted")
+		return err
 	}
 	if targetInfo, err := os.Lstat(path); err == nil {
 		if targetInfo.Mode()&os.ModeSymlink != 0 || !targetInfo.Mode().IsRegular() {
@@ -76,6 +107,36 @@ func ReplacePrivate(path string, data []byte, maxBytes int64) error {
 		_ = os.Remove(tempPath)
 		return fmt.Errorf("replace private file: %w", err)
 	}
+	return syncDirectory(parent)
+}
+
+func validatePrivateWrite(path string, data []byte, maxBytes int64) (string, string, error) {
+	if path == "" || maxBytes <= 0 {
+		return "", "", errors.New("private file path and positive size limit are required")
+	}
+	if !filepath.IsAbs(path) {
+		return "", "", errors.New("private file path must be absolute")
+	}
+	if len(data) == 0 || int64(len(data)) > maxBytes {
+		return "", "", errors.New("private file content is empty or exceeds size limit")
+	}
+	path = filepath.Clean(path)
+	parent := filepath.Dir(path)
+	if err := secureexec.ValidateProtectedDirectory(parent); err != nil {
+		return "", "", errors.New("private file directory is not trusted")
+	}
+	parentInfo, err := os.Lstat(parent)
+	if err != nil {
+		return "", "", fmt.Errorf("inspect private file directory: %w", err)
+	}
+	if parentInfo.Mode()&os.ModeSymlink != 0 || !parentInfo.IsDir() ||
+		parentInfo.Mode().Perm()&0o022 != 0 || !fileowner.Trusted(parentInfo) {
+		return "", "", errors.New("private file directory is not trusted")
+	}
+	return path, parent, nil
+}
+
+func syncDirectory(parent string) error {
 	directory, err := os.Open(parent)
 	if err != nil {
 		return fmt.Errorf("open private file directory: %w", err)

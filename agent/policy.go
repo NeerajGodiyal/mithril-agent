@@ -78,9 +78,8 @@ func (p Profile) Validate() error {
 		p.ScheduleAnchorUnix%int64(maxScheduleWindowSeconds) != 0 {
 		return errors.New("schedule anchor must be a positive UTC midnight Unix timestamp")
 	}
-	clockUncertainty := p.ClockUncertaintyLimit()
-	if clockUncertainty < minClockUncertainty ||
-		clockUncertainty > maxClockUncertainty {
+	if p.MaxClockUncertaintyMillis < uint64(minClockUncertainty/time.Millisecond) ||
+		p.MaxClockUncertaintyMillis > uint64(maxClockUncertainty/time.Millisecond) {
 		return errors.New("maximum clock uncertainty must be between 100 and 2000 milliseconds")
 	}
 	if p.MaxObservationAgeSeconds == 0 || p.MaxObservationAgeSeconds > maxObservationAgeSeconds {

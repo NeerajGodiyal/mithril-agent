@@ -349,6 +349,12 @@ func (m *Metrics) ServeHTTP(writer http.ResponseWriter, _ *http.Request) {
 		}
 	}
 	_, _ = fmt.Fprintf(writer, "mithril_agent_attention_required %d\n", attention)
+	_, _ = fmt.Fprintln(writer, "# TYPE mithril_agent_recovery_pending gauge")
+	_, _ = fmt.Fprintf(
+		writer,
+		"mithril_agent_recovery_pending %d\n",
+		boolMetric(controlStatus.RecoveryPending),
+	)
 	_, _ = fmt.Fprintln(
 		writer,
 		"# TYPE mithril_agent_oldest_pending_reconciliation_age_seconds gauge",
