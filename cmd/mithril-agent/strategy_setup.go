@@ -80,8 +80,8 @@ Options (each overrides the file):
                          is swept to --to. Unset keeps exactly what the trades
                          need. It can only raise that floor, never lower it
   --floor-tolerance-bps N  how far below the agreed floor a fill may still be
-                         accepted (default 100 = 1%). Zero means the strategy
-                         trades once and then refuses forever.
+                         accepted (default 100 = 1%, maximum 2000 = 20%). Zero
+                         means the strategy trades once and then refuses forever.
   --activation-delay D   override the sweep's delay before it may first act.
                          Leave unset in production: the delay is the window in
                          which you can still stop a sweep you did not intend
@@ -168,7 +168,7 @@ func runStrategySetup(ctx context.Context, args []string, output io.Writer) (fai
 	// later cycle reports price_below_floor forever. An unattended strategy has
 	// to survive the market moving — including the part we moved ourselves.
 	floorToleranceBPS := flags.Uint("floor-tolerance-bps", 100,
-		"how far below the agreed floor a fill may still be accepted, in basis points")
+		"how far below the agreed floor a fill may still be accepted, in basis points (maximum 2000)")
 	scheduleWindow := flags.Duration("schedule-window", time.Hour,
 		"one action per window, per leg (minimum 1 minute)")
 	// The signer's daily caps are what actually funds a trade, and this sized
@@ -196,6 +196,12 @@ func runStrategySetup(ctx context.Context, args []string, output io.Writer) (fai
 	}
 	if flags.NArg() != 0 {
 		return errors.New("setup strategy takes no arguments")
+	}
+	// Bound before narrowing to uint16 below. Otherwise a value such as 70000
+	// wraps to a different, valid-looking tolerance and the saved strategy does
+	// something other than the operator requested.
+	if *floorToleranceBPS > 2_000 {
+		return errors.New("strategy setup floor tolerance must be at most 2000 basis points")
 	}
 	given := map[string]bool{}
 	flags.Visit(func(item *flag.Flag) { given[item.Name] = true })
@@ -234,6 +240,7 @@ func runStrategySetup(ctx context.Context, args []string, output io.Writer) (fai
 			proofIssued: proofIssued, proofSignature: proofSignature,
 			keepSOL: keepSOL, scheduleWindow: scheduleWindow,
 			activationDelay: activationDelay, tradesPerDay: tradesPerDay,
+			primaryTrust: primaryTrust, secondaryTrust: secondaryTrust,
 		}); err != nil {
 			return err
 		}
@@ -336,15 +343,14 @@ func runStrategySetup(ctx context.Context, args []string, output io.Writer) (fai
 		detectInstalled("mithril-node", "mithril-mcp"), detectExecutable("mithril"))
 	*nodeCommand = firstNonEmpty(*nodeCommand, detectInstalled("node"), detectExecutable("node"))
 	*quoteScript = firstNonEmpty(*quoteScript, detectSourceAdapter(), detectInstalled("quote.mjs"))
-	*primaryTrust = firstNonEmpty(*primaryTrust, "primary-provider")
-	*secondaryTrust = firstNonEmpty(*secondaryTrust, "secondary-provider")
-
 	var missing []string
 	for _, item := range []struct{ name, value string }{
 		{"--to (the wallet profit goes to)", *destination},
 		{"--mithril-command", *mithrilCommand},
 		{"--node-command", *nodeCommand},
 		{"--quote-script", *quoteScript},
+		{"--primary-trust-domain (the first evidence provider company)", *primaryTrust},
+		{"--secondary-trust-domain (a different provider company)", *secondaryTrust},
 	} {
 		if item.value == "" {
 			missing = append(missing, item.name)
@@ -516,8 +522,8 @@ func runStrategySetup(ctx context.Context, args []string, output io.Writer) (fai
 		// "MCP observer: command must be an absolute path" — a config that
 		// looked complete and could never run.
 		"--mithril-command", *mithrilCommand,
-		"--primary-trust-domain", sellCfg.Evidence.PrimaryTrustDomain,
-		"--secondary-trust-domain", sellCfg.Evidence.SecondaryTrustDomain,
+		"--primary-trust-domain", *primaryTrust,
+		"--secondary-trust-domain", *secondaryTrust,
 	}
 	if given["activation-delay"] {
 		sweepArgs = append(sweepArgs, "--activation-delay", activationDelay.String())
@@ -885,11 +891,22 @@ func resumeStrategyBuyLeg(
 // same hardened, size-bounded, strictly-decoded path every other private file
 // uses — so an unknown field is a refusal, not a silently ignored setting.
 func readStrategyFile(path string) (strategyFile, error) {
-	var file strategyFile
-	if err := readStrictJSON(path, &file); err != nil {
-		return strategyFile{}, fmt.Errorf("strategy file: %w", err)
+	file, err := readStrategyFileForEdit(path)
+	if err != nil {
+		return strategyFile{}, err
 	}
 	if err := file.validate(); err != nil {
+		return strategyFile{}, fmt.Errorf("strategy file: %w", err)
+	}
+	return file, nil
+}
+
+// readStrategyFileForEdit strictly decodes known fields without requiring the
+// latest schema to be complete. Guided setup uses it to preserve an older
+// file's answers and signed destination proof while asking only for new fields.
+func readStrategyFileForEdit(path string) (strategyFile, error) {
+	var file strategyFile
+	if err := readStrictJSON(path, &file); err != nil {
 		return strategyFile{}, fmt.Errorf("strategy file: %w", err)
 	}
 	return file, nil
@@ -948,13 +965,15 @@ func askForStrategyInline(directory string, output io.Writer) (string, error) {
 	path := filepath.Join(base, "strategy.json")
 
 	current := strategyFile{}
-	if existing, err := readStrategyFile(path); err == nil {
+	if existing, err := readStrategyFileForEdit(path); err == nil {
 		// Re-running must not silently discard a destination proof somebody
 		// signed, so an existing file becomes the starting point.
 		current = existing
 		if _, err := fmt.Fprintf(output, "Using your existing answers from %s\n", path); err != nil {
 			return "", err
 		}
+	} else if _, statErr := os.Stat(path); statErr == nil {
+		return "", fmt.Errorf("could not preserve the existing strategy: %w", err)
 	}
 	prompt := newPrompter(os.Stdin, output, true)
 	next, err := guideStrategyFile(prompt, current)

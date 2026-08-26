@@ -38,12 +38,9 @@ func runJournalVerify(args []string, output io.Writer) error {
 	if flags.NArg() != 0 || *path == "" {
 		return errors.New("journal verify requires --path")
 	}
-	verified, err := journal.Verify(*path)
+	verified, err := verifyJournal(*path)
 	if err != nil {
-		if errors.Is(err, journal.ErrLocked) {
-			return errors.New("journal is active; stop the runner or verify a sealed copy")
-		}
-		return fmt.Errorf("verify journal: %w", err)
+		return err
 	}
 	return json.NewEncoder(output).Encode(struct {
 		Status          string `json:"status"`
@@ -64,4 +61,15 @@ func runJournalVerify(args []string, output io.Writer) error {
 		SendStarted:     verified.SendStartedRecords,
 		Submitted:       verified.SubmittedRecords,
 	})
+}
+
+func verifyJournal(path string) (journal.Verification, error) {
+	verified, err := journal.Verify(path)
+	if errors.Is(err, journal.ErrLocked) {
+		return journal.Verification{}, errors.New("journal is active; stop the runner or verify a sealed copy")
+	}
+	if err != nil {
+		return journal.Verification{}, fmt.Errorf("verify journal: %w", err)
+	}
+	return verified, nil
 }

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
 	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/pricesource"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
@@ -40,6 +41,8 @@ What it shows you:
   5. what a tampered audit record looks like when it is caught
 
 `
+
+const walkthroughRPCResponseLimit = 1 << 20
 
 type walkthroughStep struct {
 	number int
@@ -83,25 +86,38 @@ func runWalkthrough(ctx context.Context, args []string, output io.Writer) error 
 	fmt.Fprint(output, walkthroughIntro)
 	step := &walkthroughStep{output: output}
 
-	if err := walkthroughPrices(ctx, step, *offline); err != nil {
+	pricesProved, err := walkthroughPrices(ctx, step, *offline)
+	if err != nil {
 		return err
 	}
 	if err := walkthroughAudit(step); err != nil {
 		return err
 	}
 
-	fmt.Fprint(output, `
+	if pricesProved {
+		fmt.Fprint(output, `
 What this proved
 ----------------
-    The price sources, the comparison rule, and the audit chain are real and
-    work on any machine. A tampered audit record is detected, not trusted.
+    This run exercised both price sources, the comparison rule, and the audit
+    chain. A tampered audit record is detected, not trusted.
+`)
+	} else {
+		fmt.Fprint(output, `
+What this proved
+----------------
+    The audit chain is real and detects a tampered record. This run did not
+    prove the live price inputs or comparison rule because those steps were
+    skipped or unavailable.
+`)
+	}
 
+	fmt.Fprint(output, `
 What it did NOT prove
 ---------------------
     Placing an actual swap needs a prepared Linux host with a Mithril Devnet
-    node, a funded disposable wallet, and the pinned Orca adapter. That path
-    is deliberately not runnable from here, because it is the path that can
-    move funds.
+    node, a funded dedicated Devnet agent wallet, and the pinned Orca adapter.
+    That path is deliberately not runnable from here, because it is the path
+    that can move funds.
 
 Next: run "make test" to exercise the full state machine, including the
 failure cases, or "mithril-agent explain" for the capability boundary.
@@ -111,11 +127,11 @@ failure cases, or "mithril-agent explain" for the capability boundary.
 
 // walkthroughPrices reads the real sponsored on-chain feed and the real public
 // exchange price, then applies the same comparison the trade rule applies.
-func walkthroughPrices(ctx context.Context, step *walkthroughStep, offline bool) error {
+func walkthroughPrices(ctx context.Context, step *walkthroughStep, offline bool) (bool, error) {
 	step.start(1, "Reading a live SOL/USD price, with no API key")
 	if offline {
-		step.sayf("skipped (--offline)")
-		return nil
+		step.sayf("steps 1-3 skipped (--offline)")
+		return false, nil
 	}
 
 	endpoint := os.Getenv("MITHRIL_AGENT_WALKTHROUGH_RPC")
@@ -127,7 +143,7 @@ func walkthroughPrices(ctx context.Context, step *walkthroughStep, offline bool)
 
 	push, err := pricesource.NewPythPush(publicAccountReader(endpoint), time.Now)
 	if err != nil {
-		return err
+		return false, err
 	}
 	readCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -137,7 +153,7 @@ func walkthroughPrices(ctx context.Context, step *walkthroughStep, offline bool)
 		step.sayf("could not read the on-chain feed: %v", err)
 		step.sayf("This is the correct behaviour when evidence is unavailable:")
 		step.sayf("the agent refuses rather than guessing a price.")
-		return nil
+		return false, nil
 	}
 	step.sayf("on-chain Pyth : $%s  (published %s ago)",
 		microsToUSD(onChain.PriceMicros), time.Since(onChain.PublishedAt).Round(time.Second))
@@ -147,7 +163,7 @@ func walkthroughPrices(ctx context.Context, step *walkthroughStep, offline bool)
 	if err != nil {
 		step.sayf("could not read Coinbase: %v", err)
 		step.sayf("One source is never enough, so the agent would refuse to act.")
-		return nil
+		return false, nil
 	}
 	step.sayf("Coinbase      : $%s", microsToUSD(coinbase.PriceMicros))
 
@@ -172,7 +188,7 @@ func walkthroughPrices(ctx context.Context, step *walkthroughStep, offline bool)
 	step.sayf("  the more favourable one, so the rule cannot be flattered.")
 	step.sayf("Decision: condition met — a real run would now re-check the route,")
 	step.sayf("  simulate the exact transaction, and require an explicit grant.")
-	return nil
+	return true, nil
 }
 
 // walkthroughAudit writes a real hash-chained journal and then verifies it,
@@ -195,9 +211,9 @@ func walkthroughAudit(step *walkthroughStep) error {
 		kind string
 		note string
 	}{
-		{"walkthrough.observed", "node evidence accepted"},
-		{"walkthrough.priced", "two sources agreed"},
-		{"walkthrough.stopped", "returned to no-new-actions"},
+		{"walkthrough.started", "audit demonstration started"},
+		{"walkthrough.checkpoint", "second record appended"},
+		{"walkthrough.stopped", "audit demonstration complete"},
 	} {
 		if _, err := store.Append(now, event.kind, "", map[string]string{"note": event.note}); err != nil {
 			return err
@@ -239,15 +255,14 @@ func walkthroughAudit(step *walkthroughStep) error {
 	return nil
 }
 
-// walkthroughVerify opens the journal with the production reader, which
-// rejects a discontinuous hash chain. Opening successfully IS the verification.
+// walkthroughVerify uses the production read-only reader, which rejects a
+// discontinuous hash chain without creating or repairing the evidence.
 func walkthroughVerify(path string) error {
-	store, err := journal.Open(path)
+	records, err := journal.ReadRecords(path)
 	if err != nil {
 		return err
 	}
-	defer store.Close()
-	if len(store.Records()) == 0 {
+	if len(records) == 0 {
 		return errors.New("no records")
 	}
 	return nil
@@ -283,6 +298,9 @@ func publicAccount(
 	ctx context.Context,
 	endpoint, address string,
 ) (pricesource.AccountData, error) {
+	if err := validatePublicAccountEndpoint(endpoint); err != nil {
+		return pricesource.AccountData{}, err
+	}
 	payload := `{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["` +
 		address + `",{"encoding":"base64"}]}`
 	request, err := newJSONRequest(ctx, endpoint, payload)
@@ -294,8 +312,16 @@ func publicAccount(
 		return pricesource.AccountData{}, errors.New("read account")
 	}
 	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return pricesource.AccountData{}, errors.New("account RPC refused the request")
+	}
 
 	var decoded struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      uint64 `json:"id"`
+		Error   *struct {
+			Code int `json:"code"`
+		} `json:"error,omitempty"`
 		Result struct {
 			Context struct {
 				Slot uint64 `json:"slot"`
@@ -306,7 +332,11 @@ func publicAccount(
 			} `json:"value"`
 		} `json:"result"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&decoded); err != nil {
+	data, err := io.ReadAll(io.LimitReader(response.Body, walkthroughRPCResponseLimit+1))
+	if err != nil || len(data) > walkthroughRPCResponseLimit ||
+		strictjson.Validate(data) != nil || json.Unmarshal(data, &decoded) != nil ||
+		decoded.JSONRPC != "2.0" ||
+		decoded.ID != 1 || decoded.Error != nil {
 		return pricesource.AccountData{}, errors.New("decode account response")
 	}
 	if decoded.Result.Value == nil || len(decoded.Result.Value.Data) == 0 {
@@ -324,7 +354,19 @@ func publicAccount(
 	}, nil
 }
 
-var walkthroughHTTP = &http.Client{Timeout: 20 * time.Second}
+var walkthroughHTTP = newPublicAccountHTTPClient()
+
+func newPublicAccountHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return &http.Client{
+		Transport: transport,
+		Timeout:   20 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
 
 func newJSONRequest(ctx context.Context, endpoint, payload string) (*http.Request, error) {
 	request, err := http.NewRequestWithContext(

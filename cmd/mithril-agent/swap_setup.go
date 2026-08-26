@@ -535,10 +535,6 @@ func finishSwapSetup(
 	if err != nil {
 		return swapSetupResult{}, err
 	}
-	evidence := proposalcheck.ProviderBindings{
-		PrimaryTrustDomain: options.primaryTrust, PrimaryOriginSHA256: primaryProviderIdentity,
-		SecondaryTrustDomain: options.secondaryTrust, SecondaryOriginSHA256: secondaryProviderIdentity,
-	}
 
 	paths := newSwapSetupPaths(root)
 	signerPolicy := signer.Policy{
@@ -561,7 +557,10 @@ func finishSwapSetup(
 		ProfileFingerprint: fingerprint, ControlStatePath: paths.control, Source: owner,
 		MaxLamports: profile.InputLamports, MaxInputTokenAmount: profile.InputTokenAmount,
 		MaxFeeLamports: profile.MaxFeeLamports, SubmitterPublicKey: submitterPublic,
-		Evidence: evidence,
+		Evidence: proposalcheck.ProviderBindings{
+			PrimaryTrustDomain: options.primaryTrust, PrimaryOriginSHA256: primaryProviderIdentity,
+			SecondaryTrustDomain: options.secondaryTrust, SecondaryOriginSHA256: secondaryProviderIdentity,
+		},
 	}
 	minimumOutput := profile.Route.MinOutputAmount
 	if profile.IsBuy() {
@@ -609,7 +608,10 @@ func finishSwapSetup(
 	} else {
 		cfg.Quote.SocketPath = options.quoteSocket
 	}
-	cfg.Evidence = evidence
+	cfg.Evidence.PrimaryTrustDomain = options.primaryTrust
+	cfg.Evidence.PrimaryOriginSHA256 = primaryProviderIdentity
+	cfg.Evidence.SecondaryTrustDomain = options.secondaryTrust
+	cfg.Evidence.SecondaryOriginSHA256 = secondaryProviderIdentity
 	cfg.Control.StatePath = paths.control
 	cfg.Journal.Path = paths.journal
 
@@ -739,9 +741,9 @@ func newSwapSetupPaths(root string) swapSetupPaths {
 		riskKeypair:         filepath.Join(root, "risk-authority-keypair.json"),
 		submitterPolicy:     filepath.Join(root, "submitter-policy.json"),
 		submitterKey:        filepath.Join(root, "submitter-key.json"),
-		control:             filepath.Join(state, "control.json"),
+		control:             filepath.Join(state, controlStateDirName, "control.json"),
 		journal:             filepath.Join(state, "events.jsonl"),
-		authorizationLedger: filepath.Join(state, "signer-authorizations.jsonl"),
+		authorizationLedger: filepath.Join(state, signerStateDirName, "authorizations.jsonl"),
 	}
 }
 
@@ -789,7 +791,11 @@ func resolvedAgentExecutable() (string, error) {
 	if err != nil || !filepath.IsAbs(path) {
 		return "", errors.New("resolve agent executable")
 	}
-	return filepath.Clean(path), nil
+	path = filepath.Clean(path)
+	if err := secureexec.ValidateExecutable(path); err != nil {
+		return "", errors.New("agent executable is not trusted")
+	}
+	return path, nil
 }
 
 func validateProtectedFile(path string) error {
@@ -840,6 +846,12 @@ func installSwapSetup(root string, documents map[string]any) error {
 	if err := os.Mkdir(filepath.Join(stage, "state"), 0o700); err != nil {
 		return errors.New("create swap state directory")
 	}
+	if err := os.Mkdir(filepath.Join(stage, "state", signerStateDirName), 0o700); err != nil {
+		return errors.New("create swap signer state directory")
+	}
+	if err := os.Mkdir(filepath.Join(stage, "state", controlStateDirName), 0o700); err != nil {
+		return errors.New("create swap control state directory")
+	}
 	for name, document := range documents {
 		encoded, err := json.MarshalIndent(document, "", "  ")
 		if err != nil {
@@ -863,7 +875,7 @@ func installSwapSetup(root string, documents map[string]any) error {
 	if err := stageDirectory.Close(); err != nil {
 		return errors.New("close swap setup staging directory")
 	}
-	if err := os.Rename(stage, root); err != nil {
+	if err := securefile.RenameNoReplace(stage, root); err != nil {
 		return errors.New("install swap setup directory")
 	}
 	installed = true

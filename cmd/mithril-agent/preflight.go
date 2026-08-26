@@ -38,12 +38,14 @@ const (
 )
 
 var (
-	errPreflightFailed       = errors.New("preflight failed")
-	preflightClockSample     = clockcheck.SystemSample
-	preflightOperatingSystem = runtime.GOOS
-	preflightSignerIdentity  = verifySignerIdentity
-	preflightRiskIdentity    = verifyRiskIdentity
-	preflightSubmitIdentity  = verifySubmitterIdentity
+	errPreflightFailed          = errors.New("preflight failed")
+	preflightClockSample        = clockcheck.SystemSample
+	preflightOperatingSystem    = runtime.GOOS
+	preflightSignerIdentity     = verifySignerIdentity
+	preflightSocketIdentity     = verifySignerSocketIdentity
+	preflightRiskIdentity       = verifyRiskIdentity
+	preflightRiskSocketIdentity = verifyRiskSocketIdentity
+	preflightSubmitIdentity     = verifySubmitterIdentity
 )
 
 func verifySignerIdentity(
@@ -66,6 +68,22 @@ func verifySignerIdentity(
 	return nil
 }
 
+func verifySignerSocketIdentity(
+	ctx context.Context,
+	socketPath,
+	expected string,
+) error {
+	client, err := signerclient.New(signerclient.Config{SocketPath: socketPath})
+	if err != nil {
+		return err
+	}
+	identity, err := client.Identity(ctx)
+	if err != nil || identity.PublicKey != expected {
+		return errors.New("signer identity does not match policy")
+	}
+	return nil
+}
+
 func verifyRiskIdentity(
 	ctx context.Context,
 	command,
@@ -77,6 +95,17 @@ func verifyRiskIdentity(
 	client, err := policyclient.New(policyclient.Config{
 		Command: command, PolicyPath: policyPath, KeypairPath: keypairPath,
 		KeyID: keyID, PublicKey: publicKey,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = client.Identity(ctx)
+	return err
+}
+
+func verifyRiskSocketIdentity(ctx context.Context, socketPath, keyID, publicKey string) error {
+	client, err := policyclient.New(policyclient.Config{
+		SocketPath: socketPath, KeyID: keyID, PublicKey: publicKey,
 	})
 	if err != nil {
 		return err
@@ -175,6 +204,14 @@ func runPreflight(args []string, output io.Writer) error {
 }
 
 func checkPreflight(configPath string) preflightSummary {
+	return checkPreflightWithSigner(configPath, "")
+}
+
+func checkPreflightWithSigner(configPath, signerSocket string) preflightSummary {
+	return checkPreflightWithSockets(configPath, signerSocket, "", "")
+}
+
+func checkPreflightWithSockets(configPath, signerSocket, riskSocket, submitterSocket string) preflightSummary {
 	summary := preflightSummary{
 		Status: preflightFailed,
 		Checks: preflightChecks{
@@ -267,7 +304,7 @@ func checkPreflight(configPath string) preflightSummary {
 			) == nil
 		summary.Checks.PolicyBinding = checkStatus(policyValid)
 
-		signerKeyPathValid = validatePrivateTarget(cfg.Signer.KeypairPath) == nil
+		signerKeyPathValid = signerSocket != "" || validatePrivateTarget(cfg.Signer.KeypairPath) == nil
 		if !signerKeyPathValid {
 			summary.Checks.KeypairBinding = preflightFailed
 		}
@@ -279,21 +316,26 @@ func checkPreflight(configPath string) preflightSummary {
 			cfg.Policy.KeyID == policy.RiskAuthorityKeyID &&
 			cfg.Policy.PublicKey == policy.RiskAuthorityPublicKey
 		summary.Checks.RiskPolicy = checkStatus(riskPolicyValid)
-		riskKeyPathValid = validatePrivateTarget(cfg.Policy.KeypairPath) == nil
+		riskKeyPathValid = riskSocket != "" || validatePrivateTarget(cfg.Policy.KeypairPath) == nil
 		if !riskKeyPathValid {
 			summary.Checks.RiskKeypair = preflightFailed
 		}
 
-		submitterPolicyValid = readStrictJSON(
-			cfg.Submitter.PolicyPath,
-			&submitterPolicy,
-		) == nil &&
-			validatePrivateTarget(cfg.Submitter.PolicyPath) == nil &&
-			submitterPolicy.Validate() == nil &&
-			submitterPolicyMatchesSigner(submitterPolicy, policy) &&
-			submitterPolicy.ControlStatePath == cfg.Control.StatePath
+		if submitterSocket == "" {
+			submitterPolicyValid = readStrictJSON(
+				cfg.Submitter.PolicyPath,
+				&submitterPolicy,
+			) == nil &&
+				validatePrivateTarget(cfg.Submitter.PolicyPath) == nil &&
+				submitterPolicy.Validate() == nil &&
+				submitterPolicyMatchesSigner(submitterPolicy, policy, cfg) &&
+				submitterPolicy.ControlStatePath == cfg.Control.StatePath
+		} else {
+			submitterPolicyValid = true
+			submitterPolicy.SubmitterPublicKey = policy.SubmitterPublicKey
+		}
 		summary.Checks.SubmitterPolicy = checkStatus(submitterPolicyValid)
-		submitterKeyPathValid = validatePrivateTarget(cfg.Submitter.PrivateKeyPath) == nil
+		submitterKeyPathValid = submitterSocket != "" || validatePrivateTarget(cfg.Submitter.PrivateKeyPath) == nil
 		if !submitterKeyPathValid {
 			summary.Checks.SubmitterKey = preflightFailed
 		}
@@ -310,9 +352,13 @@ func checkPreflight(configPath string) preflightSummary {
 	if configValid && profileValid && providersValid {
 		commandsValid := validateCommandArgs(cfg.MCP.Args) &&
 			validateExecutable(cfg.MCP.Command) == nil &&
-			validateExecutable(cfg.Policy.Command) == nil &&
-			validateExecutable(cfg.Signer.Command) == nil &&
-			validateExecutable(cfg.Submitter.Command) == nil
+			(submitterSocket != "" || validateExecutable(cfg.Submitter.Command) == nil)
+		if riskSocket == "" {
+			commandsValid = commandsValid && validateExecutable(cfg.Policy.Command) == nil
+		}
+		if signerSocket == "" {
+			commandsValid = commandsValid && validateExecutable(cfg.Signer.Command) == nil
+		}
 		var quoteErr error
 		if commandsValid && cfg.Swap != nil {
 			_, quoteErr = swapbuilder.New(quoteBuilderConfig(cfg))
@@ -332,11 +378,13 @@ func checkPreflight(configPath string) preflightSummary {
 				Command:     cfg.Signer.Command,
 				PolicyPath:  cfg.Signer.PolicyPath,
 				KeypairPath: cfg.Signer.KeypairPath,
+				SocketPath:  signerSocket,
 			})
 			_, policyErr := policyclient.New(policyclient.Config{
 				Command:     cfg.Policy.Command,
 				PolicyPath:  cfg.Policy.PolicyPath,
 				KeypairPath: cfg.Policy.KeypairPath,
+				SocketPath:  riskSocket,
 				KeyID:       cfg.Policy.KeyID,
 				PublicKey:   cfg.Policy.PublicKey,
 			})
@@ -344,6 +392,7 @@ func checkPreflight(configPath string) preflightSummary {
 				Command:        cfg.Submitter.Command,
 				PolicyPath:     cfg.Submitter.PolicyPath,
 				PrivateKeyPath: cfg.Submitter.PrivateKeyPath,
+				SocketPath:     submitterSocket,
 				Env: []string{
 					"MITHRIL_AGENT_MITHRIL_RPC_URL=" + os.Getenv(
 						"MITHRIL_AGENT_MITHRIL_RPC_URL",
@@ -357,28 +406,49 @@ func checkPreflight(configPath string) preflightSummary {
 		if commandsValid && policyValid && riskPolicyValid && submitterPolicyValid &&
 			signerKeyPathValid && riskKeyPathValid && submitterKeyPathValid {
 			identityCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			signerIdentityErr := preflightSignerIdentity(
-				identityCtx,
-				cfg.Signer.Command,
-				cfg.Signer.PolicyPath,
-				cfg.Signer.KeypairPath,
-				activeSource,
-			)
-			riskIdentityErr := preflightRiskIdentity(
-				identityCtx,
-				cfg.Policy.Command,
-				cfg.Policy.PolicyPath,
-				cfg.Policy.KeypairPath,
-				cfg.Policy.KeyID,
-				cfg.Policy.PublicKey,
-			)
-			submitterIdentityErr := preflightSubmitIdentity(
-				identityCtx,
-				cfg.Submitter.Command,
-				cfg.Submitter.PolicyPath,
-				cfg.Submitter.PrivateKeyPath,
-				submitterPolicy.SubmitterPublicKey,
-			)
+			var signerIdentityErr error
+			if signerSocket == "" {
+				signerIdentityErr = preflightSignerIdentity(
+					identityCtx,
+					cfg.Signer.Command,
+					cfg.Signer.PolicyPath,
+					cfg.Signer.KeypairPath,
+					activeSource,
+				)
+			} else {
+				signerIdentityErr = preflightSocketIdentity(identityCtx, signerSocket, activeSource)
+			}
+			var riskIdentityErr error
+			if riskSocket == "" {
+				riskIdentityErr = preflightRiskIdentity(
+					identityCtx,
+					cfg.Policy.Command,
+					cfg.Policy.PolicyPath,
+					cfg.Policy.KeypairPath,
+					cfg.Policy.KeyID,
+					cfg.Policy.PublicKey,
+				)
+			} else {
+				riskIdentityErr = preflightRiskSocketIdentity(
+					identityCtx, riskSocket, cfg.Policy.KeyID, cfg.Policy.PublicKey,
+				)
+			}
+			var submitterIdentityErr error
+			if submitterSocket == "" {
+				submitterIdentityErr = preflightSubmitIdentity(
+					identityCtx, cfg.Submitter.Command, cfg.Submitter.PolicyPath,
+					cfg.Submitter.PrivateKeyPath, submitterPolicy.SubmitterPublicKey,
+				)
+			} else {
+				client, clientErr := submitterclient.New(submitterclient.Config{SocketPath: submitterSocket})
+				if clientErr != nil {
+					submitterIdentityErr = clientErr
+				} else if identity, identityErr := client.Identity(identityCtx); identityErr != nil ||
+					identity.PublicKey != policy.SubmitterPublicKey ||
+					identity.ProfileFingerprint != fingerprint || identity.Source != activeSource {
+					submitterIdentityErr = errors.New("submitter identity does not match policy")
+				}
+			}
 			cancel()
 			summary.Checks.KeypairBinding = checkStatus(signerIdentityErr == nil)
 			summary.Checks.RiskKeypair = checkStatus(riskIdentityErr == nil)
@@ -522,7 +592,11 @@ func signerPoliciesEqual(left, right signer.Policy) bool {
 func submitterPolicyMatchesSigner(
 	policy submitter.Policy,
 	signerPolicy signer.Policy,
+	cfg config,
 ) bool {
+	if policy.Evidence != providerBindings(cfg) {
+		return false
+	}
 	if policy.Cluster != signerPolicy.Cluster ||
 		policy.Source != signerPolicy.Source ||
 		policy.ProfileFingerprint != signerPolicy.ProfileFingerprint ||

@@ -31,7 +31,7 @@ var stageMeaning = map[string]string{
 	"observation_freshness": "The node's account reading was too old to rely on. " +
 		"This usually means the node is not keeping up.",
 	"wallet_balance": "The wallet holds less than the configured reserve plus fees, " +
-		"so no swap may start. Fund the disposable Devnet wallet.",
+		"so no swap may start. Fund the dedicated Devnet agent wallet.",
 
 	"mithril_cross_check_contract": "The node's slot comparison did not come back in " +
 		"the expected form, so its lag cannot be trusted.",

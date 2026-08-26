@@ -5,6 +5,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/internal/operatorstatus"
 	"github.com/Overclock-Validator/mithril-agent/readiness"
 )
 
@@ -68,7 +69,7 @@ func doctorStrategyCheck(now func() time.Time) readiness.Check {
 				Action: "run: mithril-agent strategy show, and repair the leg it names",
 			}
 		}
-		reporting := statusIsFresh(cfg.Journal.Path, now())
+		reporting := statusIsFresh(cfg, now())
 		_, grant, live := controlGrantAt(cfg.Control.StatePath)
 		if grant == "" || !live {
 			if !reporting {
@@ -108,7 +109,9 @@ func doctorStrategyCheck(now func() time.Time) readiness.Check {
 			Name: strategyCheckName, Title: strategyCheckTitle,
 			State:  readiness.Blocked,
 			Detail: detail,
-			Action: "run: mithril-agent service install",
+			Action: "run: mithril-agent service install --output " +
+				"/var/lib/mithril-agent/.mithril-agent/mithril-agent-run.service, " +
+				"then follow the printed review and install steps",
 		}
 	case armed == 0:
 		// Waiting would be the comfortable answer and it is the wrong one: the
@@ -156,10 +159,25 @@ func statusIsStale(journalPath string, now time.Time) bool {
 	return now.Sub(info.ModTime()) > strategyStatusStaleAfter
 }
 
-func statusIsFresh(journalPath string, now time.Time) bool {
-	if journalPath == "" {
+func statusIsFresh(cfg config, now time.Time) bool {
+	if cfg.Journal.Path == "" {
 		return false
 	}
-	info, err := os.Stat(journalPath + ".status.json")
-	return err == nil && now.Sub(info.ModTime()) <= strategyStatusStaleAfter
+	snapshot, err := operatorstatus.Read(operatorstatus.Path(cfg.Journal.Path))
+	if err != nil {
+		return false
+	}
+	profile, version, cluster := configStatusIdentity(cfg)
+	if snapshot.Profile != profile || snapshot.ProfileVersion != version ||
+		snapshot.Cluster != cluster || snapshot.ObservedAt.After(now.UTC().Add(5*time.Second)) {
+		return false
+	}
+	return now.UTC().Sub(snapshot.ObservedAt) <= strategyStatusStaleAfter
+}
+
+func configStatusIdentity(cfg config) (string, uint32, string) {
+	if cfg.Swap != nil {
+		return cfg.Swap.Name, cfg.Swap.Version, cfg.Swap.Cluster
+	}
+	return cfg.Profile.Name, cfg.Profile.Version, cfg.Profile.Cluster
 }

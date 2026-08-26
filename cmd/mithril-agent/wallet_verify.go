@@ -16,13 +16,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
 )
 
 const walletVerifyUsage = `Usage: mithril-agent wallet verify --session SESSION [--ssh TARGET] [--no-open]
 
 Run this on the Mac or Linux desktop that has your browser wallet. It opens a
 temporary SSH tunnel to the waiting Mithril Agent setup, opens the local wallet
-page, and closes the tunnel after the payout wallet is verified.
+page, and closes the tunnel after the displayed off-chain message is verified.
 
 TARGET is the same SSH host, alias, or user@host you normally use. If omitted,
 the command asks for it. SESSION is the short-lived value printed by remote
@@ -108,7 +110,7 @@ func runWalletVerify(ctx context.Context, args []string, output io.Writer) error
 		return err
 	}
 	if _, err := fmt.Fprintln(output,
-		"Wallet verification is ready. This only proves where profit may be sent; it cannot spend from that wallet."); err != nil {
+		"Wallet signature is ready. It cannot submit a transaction or move funds."); err != nil {
 		stopTunnel()
 		return err
 	}
@@ -125,7 +127,9 @@ func runWalletVerify(ctx context.Context, args []string, output io.Writer) error
 		}
 	}
 
-	if err := waitForWalletVerification(ctx, client, url+"/status", tunnelDone); err != nil {
+	if err := waitForWalletVerification(
+		ctx, client, url+"/status", tunnelDone, signServeTimeout,
+	); err != nil {
 		stopTunnel()
 		return err
 	}
@@ -134,7 +138,7 @@ func runWalletVerify(ctx context.Context, args []string, output io.Writer) error
 	case <-tunnelDone:
 	case <-time.After(2 * time.Second):
 	}
-	_, err = fmt.Fprintln(output, "Payout wallet verified. Return to the setup terminal.")
+	_, err = fmt.Fprintln(output, "Wallet signature verified. Return to the setup terminal.")
 	return err
 }
 
@@ -256,9 +260,12 @@ func waitForWalletVerification(
 	client *http.Client,
 	statusURL string,
 	tunnelDone <-chan error,
+	timeout time.Duration,
 ) error {
 	ticker := time.NewTicker(walletVerifyPollInterval)
 	defer ticker.Stop()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
 	for {
 		status, err := readWalletVerificationStatus(client, statusURL)
 		if err == nil && status == "verified" {
@@ -271,6 +278,8 @@ func waitForWalletVerification(
 			}
 			return fmt.Errorf("wallet verification ended before a signature was accepted: %w", err)
 		case <-ticker.C:
+		case <-deadline.C:
+			return errors.New("wallet verification session expired; rerun setup to create a new session")
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -289,13 +298,9 @@ func readWalletVerificationStatus(client *http.Client, url string) (string, erro
 	var result struct {
 		Status string `json:"status"`
 	}
-	decoder := json.NewDecoder(io.LimitReader(response.Body, walletVerifyResponseLimit))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&result); err != nil {
-		return "", errors.New("wallet verification status is unreadable")
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+	data, err := io.ReadAll(io.LimitReader(response.Body, walletVerifyResponseLimit+1))
+	if err != nil || len(data) > walletVerifyResponseLimit ||
+		strictjson.Decode(data, &result) != nil {
 		return "", errors.New("wallet verification status is unreadable")
 	}
 	if result.Status != "waiting" && result.Status != "verified" {

@@ -36,7 +36,11 @@ const strategyUsage = `Usage:
   mithril-agent strategy alerts clear        remove every alert threshold
   mithril-agent strategy init [PATH]         write one file holding every setting
   mithril-agent strategy edit PATH [--raw]   guided questions; --raw opens $EDITOR
-	mithril-agent strategy run [--interval D] [--metrics-base-port N] [--quote-socket PATH]
+  mithril-agent strategy run [--interval D] [--metrics-base-port N]
+                             [--quote-socket PATH]
+                             [--signer-socket-prefix PATH]
+                             [--risk-socket-prefix PATH]
+                             [--submitter-socket-prefix PATH]
                                              one process, every leg; leave running
   mithril-agent strategy enable --duration D [--max-trades N] --reason TEXT
                                              arm EVERY configured leg at once
@@ -46,6 +50,11 @@ const strategyUsage = `Usage:
   mithril-agent strategy stop --reason TEXT  stop EVERY configured leg at once
   mithril-agent strategy round-trip --sell-config PATH --buy-config PATH
                                     [--sweep-config PATH] [--json]
+  mithril-agent strategy dca-plan (--total-sol SOL |
+                                   --budget-usd USD --reference-sol-usd USD)
+                                  --days N [--trades-per-day N]
+                                             calculate a bounded sell schedule;
+                                             never arms, signs, or submits
 
 Alerts are notify-only: they message the operator through the deployed
 alerting stack and can never trade or move funds. Edits take effect on the
@@ -74,6 +83,8 @@ func runStrategy(ctx context.Context, args []string, output io.Writer) error {
 		return strategyStop(args[1:], output)
 	case "round-trip":
 		return strategyRoundTrip(args[1:], output)
+	case "dca-plan":
+		return strategyDCAPlan(args[1:], output)
 	case "alerts":
 		return strategyAlerts(args[1:], output)
 	case "help", "-h", "--help":
@@ -235,7 +246,8 @@ func strategyShow(args []string, output io.Writer) error {
 		}
 	}
 	if sweepPath != "" {
-		if cfg, err := readConfig(sweepPath); err == nil && cfg.hasLegacyProfile() {
+		if cfg, err := readConfig(sweepPath); err == nil && cfg.hasLegacyProfile() &&
+			cfg.Profile.Validate() == nil {
 			view.SweepConfigPath = sweepPath
 			sweep := &sweepStrategyView{
 				Destination: cfg.Profile.Destination,
@@ -253,7 +265,8 @@ func strategyShow(args []string, output io.Writer) error {
 				sweep.ProofValid = verifySweepDestinationProof(
 					proof.AgentAccount, proof.Destination,
 					proof.Nonce, proof.IssuedAt, proof.SignatureBase58,
-				) == nil && proof.Destination == cfg.Profile.Destination
+				) == nil && proof.AgentAccount == cfg.Profile.Source &&
+					proof.Destination == cfg.Profile.Destination
 			}
 			view.Sweep = sweep
 		}
@@ -405,22 +418,33 @@ func controlGrantAt(statePath string) (mode string, grant string, live bool) {
 	if json.Unmarshal(raw, &state) != nil {
 		return "", "", false
 	}
+	return describeControlGrant(
+		state.Mode, state.ExpiresAt, state.RemainingActions, time.Now().UTC())
+}
+
+// describeControlGrant renders the bounded control projection shared by the
+// config and status-socket MCP providers. Keeping this pure prevents the two
+// read-only surfaces from disagreeing about whether the same grant is live.
+func describeControlGrant(
+	mode string,
+	expiresAt time.Time,
+	remainingActions uint32,
+	now time.Time,
+) (string, string, bool) {
 	// A grant can only act while its clock runs AND actions remain. An absent
-	// expiry is not "forever": control.validateState rejects an enabled document
-	// without one, so treating it as live would contradict the state machine.
-	live = state.Mode == control.ModeDevnetEnabled &&
-		!state.ExpiresAt.IsZero() && state.ExpiresAt.After(time.Now()) &&
-		state.RemainingActions > 0
-	if state.ExpiresAt.IsZero() {
-		return state.Mode, "", live
+	// expiry is not "forever": control validates enabled documents as expiring.
+	live := mode == control.ModeDevnetEnabled && !expiresAt.IsZero() &&
+		expiresAt.After(now) && remainingActions > 0
+	if expiresAt.IsZero() {
+		return mode, "", live
 	}
-	remaining := time.Until(state.ExpiresAt).Round(time.Minute)
+	remaining := expiresAt.Sub(now).Round(time.Minute)
 	if remaining <= 0 {
-		return state.Mode, "expired " + state.ExpiresAt.UTC().Format(time.RFC3339), live
+		return mode, "expired " + expiresAt.UTC().Format(time.RFC3339), live
 	}
-	return state.Mode, fmt.Sprintf(
+	return mode, fmt.Sprintf(
 		"%d action(s) left, expires %s (in %s)",
-		state.RemainingActions, state.ExpiresAt.UTC().Format(time.RFC3339), remaining,
+		remainingActions, expiresAt.UTC().Format(time.RFC3339), remaining,
 	), live
 }
 
@@ -441,6 +465,12 @@ func readDestinationProof(dir string) (destinationProof, error) {
 // decoded struct, so unknown fields were already refused at read time and a
 // concurrent hand-edit is the only thing that can be lost.
 func strategyAlerts(args []string, output io.Writer) error {
+	for _, arg := range args {
+		if arg == "help" || arg == "-h" || arg == "--help" {
+			_, err := fmt.Fprintln(output, strategyUsage)
+			return err
+		}
+	}
 	if len(args) == 0 {
 		return errors.New("strategy alerts requires set or clear")
 	}

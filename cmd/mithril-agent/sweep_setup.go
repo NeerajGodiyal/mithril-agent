@@ -69,10 +69,10 @@ into SOL before they can be swept.
   --swap-config PATH     a swap setup on this wallet the floor must protect;
                          repeat once per leg of a round trip
   --dir PATH             setup directory (default ~/.mithril-agent/sweep)
-	--mithril-command PATH Mithril node executable for observations
-	--mithril-config PATH  Mithril node config.toml
-	--primary-trust-domain NAME   owner of the primary evidence RPC
-	--secondary-trust-domain NAME owner of the secondary evidence RPC
+  --mithril-command PATH Mithril node executable for observations
+  --mithril-config PATH  Mithril node config.toml
+  --primary-trust-domain NAME    first evidence provider
+  --secondary-trust-domain NAME  second, independent evidence provider
   --yes                  accept defaults without asking
 
 Sign the challenge ahead of time and pass it in, instead of signing at the
@@ -141,8 +141,8 @@ func runSweepSetup(ctx context.Context, args []string, output io.Writer) error {
 	dir := flags.String("dir", "", "setup directory")
 	mithrilCommand := flags.String("mithril-command", "", "Mithril node executable")
 	mithrilConfig := flags.String("mithril-config", "", "Mithril node config.toml")
-	primaryTrust := flags.String("primary-trust-domain", "", "primary evidence provider trust domain")
-	secondaryTrust := flags.String("secondary-trust-domain", "", "secondary evidence provider trust domain")
+	primaryTrust := flags.String("primary-trust-domain", "", "primary evidence provider")
+	secondaryTrust := flags.String("secondary-trust-domain", "", "second evidence provider")
 	proofNonce := flags.String("proof-nonce", "", "nonce of a proof signed earlier")
 	proofIssued := flags.String("proof-issued", "", "issue time of a proof signed earlier")
 	proofSignature := flags.String("proof-signature", "", "base58 signature of a proof signed earlier")
@@ -160,21 +160,20 @@ func runSweepSetup(ctx context.Context, args []string, output io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New("setup sweep takes no positional arguments")
 	}
-	if *walletPath == "" || *destination == "" || *primaryTrust == "" || *secondaryTrust == "" {
-		return errors.New("setup sweep requires wallet, destination, and two evidence trust domains; run with --help for the ceremony")
+	if *walletPath == "" || *destination == "" {
+		return errors.New("setup sweep requires --wallet PATH and --to ADDRESS; run with --help for the ceremony")
 	}
 	if !validTrustDomain(*primaryTrust) || !validTrustDomain(*secondaryTrust) ||
 		*primaryTrust == *secondaryTrust {
-		return errors.New("setup sweep requires two distinct evidence trust domains")
+		return errors.New("setup sweep requires two distinct evidence provider names")
 	}
 	primaryProvider, secondaryProvider, err := openEvidenceProviders(
-		os.Getenv("MITHRIL_AGENT_PRIMARY_RPC_URL"),
-		os.Getenv("MITHRIL_AGENT_SECONDARY_RPC_URL"),
+		os.Getenv("MITHRIL_AGENT_PRIMARY_RPC_URL"), os.Getenv("MITHRIL_AGENT_SECONDARY_RPC_URL"),
 	)
 	if err != nil {
 		return err
 	}
-	evidence := proposalcheck.ProviderBindings{
+	bindings := proposalcheck.ProviderBindings{
 		PrimaryTrustDomain: *primaryTrust, PrimaryOriginSHA256: primaryProvider.Identity(),
 		SecondaryTrustDomain: *secondaryTrust, SecondaryOriginSHA256: secondaryProvider.Identity(),
 	}
@@ -426,8 +425,7 @@ func runSweepSetup(ctx context.Context, args []string, output io.Writer) error {
 		ActiveAfterUnix: anchor.Unix(),
 	}
 	if err := installSweepSetup(
-		root, fingerprint, profile, *walletPath, *mithrilCommand, *mithrilConfig,
-		evidence, proof,
+		root, fingerprint, profile, *walletPath, *mithrilCommand, *mithrilConfig, bindings, proof,
 	); err != nil {
 		return err
 	}
@@ -453,7 +451,7 @@ func runSweepSetup(ctx context.Context, args []string, output io.Writer) error {
 
 func newSweepNonce() (string, error) {
 	raw := make([]byte, 16)
-	if _, err := swapSetupRandom.Read(raw); err != nil {
+	if _, err := io.ReadFull(swapSetupRandom, raw); err != nil {
 		return "", errors.New("generate destination challenge nonce")
 	}
 	return hex.EncodeToString(raw), nil
@@ -721,7 +719,11 @@ func destinationAccountInfo(ctx context.Context, address string) (bool, error) {
 // swap setups create a real directory with this name, and the sweep links to
 // its fingerprinted one. Anything outside the agent that needs to find a leg's
 // journal or operator status can use the same path shape for every leg.
-const stableStateDirName = "state"
+const (
+	stableStateDirName  = "state"
+	signerStateDirName  = "signer"
+	controlStateDirName = "control"
+)
 
 func installSweepSetup(
 	root, fingerprint string,
@@ -731,8 +733,8 @@ func installSweepSetup(
 	proof destinationProof,
 ) error {
 	stateDir := "state-" + fingerprint[:8]
-	ledgerPath := filepath.Join(root, stateDir, "signer-authorizations.jsonl")
-	controlPath := filepath.Join(root, stateDir, "control.json")
+	ledgerPath := filepath.Join(root, stateDir, signerStateDirName, "authorizations.jsonl")
+	controlPath := filepath.Join(root, stateDir, controlStateDirName, "control.json")
 	journalPath := filepath.Join(root, stateDir, "events.jsonl")
 
 	_, riskPrivate, err := ed25519.GenerateKey(swapSetupRandom)
@@ -770,7 +772,8 @@ func installSweepSetup(
 		ProfileFingerprint: fingerprint, ControlStatePath: controlPath,
 		Source: profile.Source, Destination: profile.Destination,
 		MaxLamports: profile.MaxTransferLamports, MaxFeeLamports: profile.MaxFeeLamports,
-		SubmitterPublicKey: submitterPublic, Evidence: evidence,
+		SubmitterPublicKey: submitterPublic,
+		Evidence:           evidence,
 	}
 	riskPolicy := policyauthority.Policy{TransactionPolicy: signerPolicy, GrantLifetimeSecs: 30}
 	if err := signerPolicy.ValidateAuthorizationPolicy(); err != nil {
@@ -807,7 +810,10 @@ func installSweepSetup(
 	cfg.Submitter.Command = filepath.Join(binDir, "mithril-agent-submitter")
 	cfg.Submitter.PolicyPath = filepath.Join(root, "submitter-policy.json")
 	cfg.Submitter.PrivateKeyPath = filepath.Join(root, "submitter-key.json")
-	cfg.Evidence = evidence
+	cfg.Evidence.PrimaryTrustDomain = evidence.PrimaryTrustDomain
+	cfg.Evidence.PrimaryOriginSHA256 = evidence.PrimaryOriginSHA256
+	cfg.Evidence.SecondaryTrustDomain = evidence.SecondaryTrustDomain
+	cfg.Evidence.SecondaryOriginSHA256 = evidence.SecondaryOriginSHA256
 	cfg.Control.StatePath = controlPath
 	cfg.Journal.Path = journalPath
 
@@ -844,6 +850,12 @@ func installSweepDocuments(root, stateDir string, documents map[string]any) erro
 	}
 	if err := os.Mkdir(filepath.Join(stage, stateDir), 0o700); err != nil {
 		return errors.New("create sweep state directory")
+	}
+	if err := os.Mkdir(filepath.Join(stage, stateDir, signerStateDirName), 0o700); err != nil {
+		return errors.New("create sweep signer state directory")
+	}
+	if err := os.Mkdir(filepath.Join(stage, stateDir, controlStateDirName), 0o700); err != nil {
+		return errors.New("create sweep control state directory")
 	}
 	// A STABLE name beside the fingerprinted one. The hash keeps a destination
 	// change from inheriting the previous ledger, which is the point — but it
@@ -884,7 +896,7 @@ func installSweepDocuments(root, stateDir string, documents map[string]any) erro
 	if err := stageDirectory.Close(); err != nil {
 		return errors.New("close sweep setup staging directory")
 	}
-	if err := os.Rename(stage, root); err != nil {
+	if err := securefile.RenameNoReplace(stage, root); err != nil {
 		return errors.New("install sweep setup directory; remove any existing directory at " + root + " first")
 	}
 	installed = true

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
+	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
 	"github.com/Overclock-Validator/mithril-agent/solana"
 )
@@ -38,13 +39,15 @@ import (
 const (
 	walletUsage = `Usage:
   mithril-agent wallet check --file PATH    check the account the agent will use
+  mithril-agent wallet fund  --file PATH    request up to 1 test SOL on Devnet
   mithril-agent wallet new   --file PATH    create a DEVNET-ONLY agent account
   mithril-agent wallet verify --session SESSION
                                              verify a payout wallet from your Mac
 
-The agent uses a dedicated account, never your own wallet. Fund that account
-from your own wallet with only the amount you are willing to put at risk; the
-signer then enforces route, amounts, budget and schedule on everything it does.
+The agent uses a dedicated account, never your own wallet. On Devnet, "fund"
+can request test SOL. In production, put only the amount you are willing to risk
+in the dedicated account; the signer then enforces route, amounts, budget and
+schedule on everything it does.
 
 "new" is for Devnet testing only. For Mainnet, hold the key with tooling you
 already trust (solana-keygen, a hardware wallet, an HSM) or a policy-based
@@ -56,9 +59,22 @@ signer. This tool never asks for, imports, or transmits an existing wallet key.`
 	// large file being read as a keypair.
 	maxKeypairFileBytes = 8 << 10
 	lamportsPerSOL      = 1_000_000_000
+	walletFundTarget    = lamportsPerSOL
 )
 
-var walletHTTP = &http.Client{Timeout: 30 * time.Second}
+var walletHTTP = newWalletHTTPClient()
+
+func newWalletHTTPClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return &http.Client{
+		Transport: transport,
+		Timeout:   30 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
 
 func runWallet(ctx context.Context, args []string, output io.Writer) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
@@ -68,6 +84,8 @@ func runWallet(ctx context.Context, args []string, output io.Writer) error {
 	switch args[0] {
 	case "check":
 		return runWalletCheck(ctx, args[1:], output)
+	case "fund":
+		return runWalletFund(ctx, args[1:], output)
 	case "new":
 		return runWalletNew(args[1:], output)
 	case "verify":
@@ -120,7 +138,7 @@ func runWalletNew(args []string, output io.Writer) error {
 		return errors.New("encode account key")
 	}
 	defer clear(encoded)
-	if err := securefile.ReplacePrivate(*file, encoded, maxKeypairFileBytes); err != nil {
+	if err := securefile.CreatePrivate(*file, encoded, maxKeypairFileBytes); err != nil {
 		return err
 	}
 
@@ -129,10 +147,70 @@ func runWalletNew(args []string, output io.Writer) error {
 	fmt.Fprintf(output, "  address : %s\n", address)
 	fmt.Fprintf(output, "  file    : %s (readable only by you)\n\n", *file)
 	fmt.Fprintf(output, "This account is what the agent trades with. It is separate from your own\n")
-	fmt.Fprintf(output, "wallet on purpose: fund it with only what you are willing to put at risk,\n")
-	fmt.Fprintf(output, "and your own wallet stays the owner and funding source.\n\n")
+	fmt.Fprintf(output, "wallet on purpose. In production, fund it only with what you are willing to put at risk.\n")
+	fmt.Fprintf(output, "For this Devnet test, the command below requests test SOL.\n\n")
 	fmt.Fprintf(output, "Devnet SOL is test-only and has no value. Do not reuse this key on Mainnet.\n\n")
-	fmt.Fprintf(output, "Fund it at https://faucet.solana.com using the address above, then run:\n")
+	fmt.Fprintf(output, "Request test SOL without creating a provider account:\n")
+	fmt.Fprintf(output, "  mithril-agent wallet fund --file %s\n\n", *file)
+	fmt.Fprintf(output, "Then check the balance:\n")
+	fmt.Fprintf(output, "  mithril-agent wallet check --file %s\n", *file)
+	return nil
+}
+
+// runWalletFund tops a Devnet-only agent wallet up to one test SOL through
+// Solana's official public Devnet RPC. Only the derived public address leaves
+// the host. The fixed endpoint and fixed target keep this helper out of every
+// Mainnet and custody path.
+func runWalletFund(ctx context.Context, args []string, output io.Writer) error {
+	flags := flag.NewFlagSet("wallet fund", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	file := flags.String("file", "", "absolute path to an existing Devnet keypair")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			_, writeErr := fmt.Fprintln(output, walletUsage)
+			return writeErr
+		}
+		return err
+	}
+	if flags.NArg() != 0 || *file == "" {
+		return errors.New("wallet fund requires --file PATH")
+	}
+	if !filepath.IsAbs(*file) || filepath.Clean(*file) != *file {
+		return errors.New("wallet file must be an absolute clean path")
+	}
+
+	address, err := walletAddress(*file)
+	if err != nil {
+		return err
+	}
+	balance, err := walletLamports(ctx, address)
+	if err != nil {
+		return fmt.Errorf("read the current Devnet balance before funding: %w", err)
+	}
+	if balance >= walletFundTarget {
+		fmt.Fprintf(output, "The Devnet agent account already has at least 1 SOL; no funding was requested.\n")
+		return nil
+	}
+
+	var response struct {
+		Result string `json:"result"`
+	}
+	if err := walletRPC(ctx, "requestAirdrop", []any{
+		address,
+		walletFundTarget - balance,
+		map[string]string{"commitment": "confirmed"},
+	}, &response); err != nil {
+		return fmt.Errorf(
+			"automatic Devnet funding is unavailable (%w); use https://faucet.solana.com with address %s",
+			err, address,
+		)
+	}
+	if _, err := solana.Decode64(response.Result); err != nil {
+		return errors.New("the Devnet endpoint returned an invalid funding receipt")
+	}
+
+	fmt.Fprintf(output, "Devnet funding was requested successfully. Test SOL has no value.\n")
+	fmt.Fprintf(output, "Check that it arrived with:\n")
 	fmt.Fprintf(output, "  mithril-agent wallet check --file %s\n", *file)
 	return nil
 }
@@ -172,21 +250,18 @@ func runWalletCheck(ctx context.Context, args []string, output io.Writer) error 
 	// world-readable, so reaching here proves the permissions are private.
 	fmt.Fprintf(output, "  permissions : private to you (checked)\n")
 
-	var result struct {
-		Result struct {
-			Value uint64 `json:"value"`
-		} `json:"result"`
-	}
-	if err := walletRPC(ctx, "getBalance", []any{address}, &result); err != nil {
+	lamports, err := walletLamports(ctx, address)
+	if err != nil {
 		fmt.Fprintf(output, "  balance     : could not be read (%v)\n", err)
 		return nil
 	}
-	lamports := result.Result.Value
 	fmt.Fprintf(output, "  balance     : %d.%09d SOL on devnet\n",
 		lamports/lamportsPerSOL, lamports%lamportsPerSOL)
 	if lamports == 0 {
-		fmt.Fprintf(output, "\nThis wallet is empty. Fund it at https://faucet.solana.com\n")
-		fmt.Fprintf(output, "using the address above. Devnet SOL is test-only and has no value.\n")
+		fmt.Fprintf(output, "\nThis wallet is empty. Request test SOL with:\n")
+		fmt.Fprintf(output, "  mithril-agent wallet fund --file %s\n", *file)
+		fmt.Fprintf(output, "If the public Devnet faucet is busy, use https://faucet.solana.com\n")
+		fmt.Fprintf(output, "with the address above. Devnet SOL is test-only and has no value.\n")
 	}
 	fmt.Fprintf(output, "\nThis command did not create, modify, or transmit the key.\n")
 	return nil
@@ -244,8 +319,11 @@ func walletRPC(ctx context.Context, method string, params []any, out any) error 
 		return errors.New("the Devnet endpoint could not be reached")
 	}
 	defer response.Body.Close()
-	body, err = io.ReadAll(io.LimitReader(response.Body, walletMaxResponse))
-	if err != nil {
+	if response.StatusCode != http.StatusOK {
+		return errors.New("the Devnet endpoint refused the request")
+	}
+	body, err = io.ReadAll(io.LimitReader(response.Body, walletMaxResponse+1))
+	if err != nil || len(body) > walletMaxResponse {
 		return errors.New("the Devnet endpoint returned an unreadable response")
 	}
 	return decodeWalletResponse(body, out)
@@ -259,22 +337,23 @@ func walletRPC(ctx context.Context, method string, params []any, out any) error 
 // Devnet while it held 8.55 SOL. An unknown answer must stay unknown.
 func decodeWalletResponse(body []byte, out any) error {
 	var envelope struct {
-		Error *struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      uint64 `json:"id"`
+		Error   *struct {
 			Code    int    `json:"code"`
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
+	if strictjson.Validate(body) != nil || json.Unmarshal(body, &envelope) != nil ||
+		envelope.JSONRPC != "2.0" || envelope.ID != 1 {
 		return errors.New("the Devnet endpoint returned an unreadable response")
 	}
 	if envelope.Error != nil {
-		// The provider's own text is echoed, bounded; the endpoint is not, so
-		// nothing about the operator's configuration leaks into a log.
-		message := envelope.Error.Message
-		if len(message) > 120 {
-			message = message[:120]
+		return walletRPCError{
+			code: envelope.Error.Code,
+			accountNotFound: envelope.Error.Code == -32602 && strings.Contains(
+				strings.ToLower(envelope.Error.Message), "could not find account"),
 		}
-		return fmt.Errorf("the Devnet endpoint refused the read (%d): %s", envelope.Error.Code, message)
 	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return errors.New("the Devnet endpoint returned an unreadable response")
@@ -282,17 +361,32 @@ func decodeWalletResponse(body []byte, out any) error {
 	return nil
 }
 
+type walletRPCError struct {
+	code            int
+	accountNotFound bool
+}
+
+func (e walletRPCError) Error() string {
+	if e.accountNotFound {
+		return fmt.Sprintf("the Devnet endpoint refused the read (%d): account does not exist", e.code)
+	}
+	return fmt.Sprintf("the Devnet endpoint refused the read (%d)", e.code)
+}
+
 // walletLamports reads the native balance from the pinned public Devnet
 // endpoint. It is advisory: nothing authorizes on it, so it is deliberately not
 // routed through the agent's own node or its evidence gates.
 func walletLamports(ctx context.Context, address string) (uint64, error) {
 	var result struct {
-		Result struct {
+		Result *struct {
 			Value uint64 `json:"value"`
 		} `json:"result"`
 	}
 	if err := walletRPC(ctx, "getBalance", []any{address}, &result); err != nil {
 		return 0, err
+	}
+	if result.Result == nil {
+		return 0, errors.New("the Devnet endpoint returned a balance with no result")
 	}
 	return result.Result.Value, nil
 }
@@ -346,11 +440,6 @@ func walletTokenAmount(ctx context.Context, owner, mint string) (uint64, error) 
 // rather than an empty result, so without this a rate limit and an empty wallet
 // are the same answer — and the safe reading of the two is opposite.
 func isAccountNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	// ONLY this phrase. Matching bare "not found" or "invalid param" swallowed
-	// "-32601 Method not found" and reported a broken endpoint as an empty
-	// wallet, which is the very confusion this function exists to prevent.
-	return strings.Contains(strings.ToLower(err.Error()), "could not find account")
+	var rpcError walletRPCError
+	return errors.As(err, &rpcError) && rpcError.accountNotFound
 }

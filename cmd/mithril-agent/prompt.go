@@ -62,12 +62,9 @@ func (p *prompter) ask(question, fallback string) (string, error) {
 		p.answers = append(p.answers, promptAnswer{Question: question, Value: fallback, Default: true})
 		return fallback, nil
 	}
-	line, err := p.in.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", errors.New("could not read your answer")
-	}
-	if len(line) > maxAnswerBytes {
-		return "", errors.New("that answer is too long")
+	line, err := p.readLine()
+	if err != nil {
+		return "", err
 	}
 	value := strings.TrimSpace(line)
 	usedDefault := value == ""
@@ -76,6 +73,47 @@ func (p *prompter) ask(question, fallback string) (string, error) {
 	}
 	p.answers = append(p.answers, promptAnswer{Question: question, Value: value, Default: usedDefault})
 	return value, nil
+}
+
+func (p *prompter) readLine() (string, error) {
+	line, err := p.in.ReadString('\n')
+	if errors.Is(err, io.EOF) && len(line) == 0 {
+		return "", errors.New("input closed before an answer was entered")
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", errors.New("could not read your answer")
+	}
+	if len(line) > maxAnswerBytes {
+		return "", errors.New("that answer is too long")
+	}
+	return line, nil
+}
+
+// askTrustDomain collects the short organization label stored beside a pinned
+// evidence endpoint. It validates immediately so a typo is not discovered only
+// after the rest of the wizard has been completed.
+func (p *prompter) askTrustDomain(question, fallback, differentFrom string) (string, error) {
+	const guidance = "Use a short provider name such as quicknode: lowercase letters, numbers, dot, underscore, or hyphen."
+	for attempt := 0; attempt < 3; attempt++ {
+		value, err := p.ask(question+"\n  "+guidance, fallback)
+		if err != nil {
+			return "", err
+		}
+		value = strings.TrimSpace(strings.ToLower(value))
+		if validTrustDomain(value) && value != differentFrom {
+			return value, nil
+		}
+		if !p.interactive {
+			return "", errors.New(guidance)
+		}
+		if value == differentFrom {
+			p.sayf("That is the same organization as the first provider. Choose an independent one.")
+		} else {
+			p.sayf(guidance)
+		}
+		fallback = ""
+	}
+	return "", errors.New("provider name was not valid after three attempts")
 }
 
 // confirm asks a yes/no question. It defaults to NO for anything consequential,
@@ -95,14 +133,9 @@ func (p *prompter) confirm(question string, defaultYes bool) (bool, error) {
 		}
 		return defaultYes, nil
 	}
-	line, err := p.in.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return false, errors.New("could not read your answer")
-	}
-	if len(line) > maxAnswerBytes {
-		// Bounded like ask(). Nothing this long is a yes, but a consent
-		// prompt should never buffer an unbounded line either.
-		return false, errors.New("that answer is too long")
+	line, err := p.readLine()
+	if err != nil {
+		return false, err
 	}
 	switch strings.ToLower(strings.TrimSpace(line)) {
 	case "":

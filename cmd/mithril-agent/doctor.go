@@ -83,7 +83,7 @@ func buildDoctorReport(ctx context.Context, configPath string) readiness.Report 
 		checks = append(checks, readiness.Check{
 			Name: "configuration", Title: "Configuration", State: readiness.Blocked,
 			Detail: "no config supplied",
-			Action: "Run: mithril-agent setup, then this command again",
+			Action: "Run: mithril-agent setup strategy, then this command again",
 		})
 		return readiness.NewReport(checks)
 	}
@@ -126,24 +126,20 @@ func doctorFundingCheck(ctx context.Context, keypairPath string) readiness.Check
 			Detail: "account not readable",
 		}
 	}
-	var result struct {
-		Result struct {
-			Value uint64 `json:"value"`
-		} `json:"result"`
-	}
-	if err := walletRPC(ctx, "getBalance", []any{address}, &result); err != nil {
+	lamports, err := walletLamports(ctx, address)
+	if err != nil {
 		return readiness.Check{
 			Name: "funding", Title: "Account funding", State: readiness.Unknown,
 			Detail: "balance could not be read",
 			Action: "Check network access, then re-run: mithril-agent doctor --config PATH",
 		}
 	}
-	lamports := result.Result.Value
 	if lamports == 0 {
 		return readiness.Check{
 			Name: "funding", Title: "Account funding", State: readiness.Blocked,
 			Detail: "empty",
-			Action: "Fund " + address + " at https://faucet.solana.com (Devnet SOL has no value)",
+			Action: "Run mithril-agent wallet fund --file " + keypairPath +
+				" (or use https://faucet.solana.com for " + address + ")",
 		}
 	}
 	// A balance that is merely non-zero is not a working agent. The sweep floor
@@ -289,7 +285,7 @@ func doctorConfigCheck(configPath string) readiness.Check {
 		return readiness.Check{
 			Name: "configuration", Title: "Configuration", State: readiness.Blocked,
 			Detail: "not readable at that path",
-			Action: "Check the path, or run: mithril-agent setup",
+			Action: "Check the path, or run: mithril-agent setup strategy",
 		}
 	}
 	var cfg config
@@ -297,14 +293,14 @@ func doctorConfigCheck(configPath string) readiness.Check {
 		return readiness.Check{
 			Name: "configuration", Title: "Configuration", State: readiness.Blocked,
 			Detail: "present but not valid",
-			Action: "Regenerate it with mithril-agent setup; do not hand-edit it",
+			Action: "Regenerate it with mithril-agent setup strategy; do not hand-edit it",
 		}
 	}
 	if cfg.Swap == nil {
 		return readiness.Check{
 			Name: "configuration", Title: "Configuration", State: readiness.Blocked,
 			Detail: "no swap profile configured",
-			Action: "Run: mithril-agent setup",
+			Action: "Run: mithril-agent setup strategy",
 		}
 	}
 	return readiness.Check{

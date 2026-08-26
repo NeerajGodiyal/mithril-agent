@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
@@ -72,6 +73,10 @@ func strategyEnable(args []string, output io.Writer) error {
 	duration := flags.Duration("duration", 0, "how long the whole strategy stays armed")
 	maxTrades := flags.Uint("max-trades", 1, "trades each leg may make, 1..100")
 	reason := flags.String("reason", "", "why the strategy is being armed (recorded)")
+	operatorSocketPrefix := flags.String(
+		"operator-socket-prefix", operatorSocketPrefix,
+		"root-only submitter operator socket prefix",
+	)
 	// A leg with no price condition trades at whatever the market gives. That is
 	// refused by default because it is not a choice to make for a whole strategy
 	// in one command — but it is the ONLY way to run a cycle on a pool whose
@@ -88,6 +93,10 @@ func strategyEnable(args []string, output io.Writer) error {
 	}
 	if flags.NArg() != 0 || *reason == "" || *duration == 0 {
 		return errors.New("strategy enable requires --duration and --reason")
+	}
+	if !filepath.IsAbs(*operatorSocketPrefix) ||
+		filepath.Clean(*operatorSocketPrefix) != *operatorSocketPrefix {
+		return errors.New("operator socket prefix must be an absolute clean path")
 	}
 
 	paths, unreadable := discoverStrategy()
@@ -141,6 +150,7 @@ func strategyEnable(args []string, output io.Writer) error {
 		}
 		if err := enable([]string{
 			"--config", leg.path,
+			"--operator-socket", legSubmitterOperatorSocket(*operatorSocketPrefix, leg.name),
 			"--duration", duration.String(),
 			"--max-actions", fmt.Sprint(*maxTrades),
 			"--reason", *reason,
@@ -167,6 +177,10 @@ func strategyEnable(args []string, output io.Writer) error {
 		return errors.New("no leg was armed; every one was skipped for the reason shown")
 	}
 	return nil
+}
+
+func legSubmitterOperatorSocket(prefix, leg string) string {
+	return prefix + leg + ".sock"
 }
 
 // strategyLeg is what the refusals below need to reason about a leg without

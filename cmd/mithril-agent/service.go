@@ -15,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 	"unicode"
+
+	"github.com/Overclock-Validator/mithril-agent/signer"
 )
 
 // setup ends by telling the operator to run the runner and "leave it going".
@@ -72,26 +74,55 @@ const supervisedQuoteSocket = "/run/mithril-agent-quote/quote.sock"
 // These are generated from the same recorded legs the runner unit is, so the
 // two cannot drift apart.
 const (
-	statusGroupName    = "mithril-agent-status"
-	nodeStateGroupName = "mithril-node-state"
-	alertsAccountName  = "mithril-agent-telegram"
-	alertsUnitName     = "mithril-agent-alerts.service"
-	alertsEnvFile      = "/etc/mithril-agent/telegram-operator.env"
-	alertsCursorPath   = "/var/lib/mithril-agent-telegram/update-cursor.json"
-	statusCredential   = "operator-status"
-	statusUnitPrefix   = "mithril-agent-status-"
-	statusSocketPrefix = "/run/mithril-agent-status-"
+	statusGroupName       = "mithril-agent-status"
+	nodeStateGroupName    = "mithril-node-state"
+	signerAccountName     = "mithril-agent-signer"
+	riskAccountName       = "mithril-agent-policy"
+	submitterAccountName  = "mithril-agent-submitter"
+	alertsAccountName     = "mithril-agent-telegram"
+	alertsUnitName        = "mithril-agent-alerts.service"
+	alertsEnvFile         = "/etc/mithril-agent/telegram-operator.env"
+	alertsCursorPath      = "/var/lib/mithril-agent-telegram/update-cursor.json"
+	statusCredential      = "operator-status"
+	statusUnitPrefix      = "mithril-agent-status-"
+	statusSocketPrefix    = "/run/mithril-agent-status-"
+	signerSocketPrefix    = "/run/mithril-agent-signer-"
+	riskSocketPrefix      = "/run/mithril-agent-policy-"
+	submitterSocketPrefix = "/run/mithril-agent-submitter-"
+	operatorSocketPrefix  = "/run/mithril-agent-submitter-operator-"
+	defaultOperatorSocket = operatorSocketPrefix + "agent.sock"
 )
 
 // serviceLeg is one leg's share of the alert wiring: the status file the runner
 // rewrites every cycle, and the socket that publishes it read-only.
 type serviceLeg struct {
-	Name       string
-	StatusFile string
+	Name            string
+	StatusFile      string
+	SignerPolicy    string
+	SignerKeypair   string
+	SignerStateDir  string
+	RiskPolicy      string
+	RiskKeypair     string
+	SubmitterPolicy string
+	SubmitterKey    string
+	ControlStateDir string
 }
 
 func (l serviceLeg) unit() string   { return statusUnitPrefix + l.Name }
 func (l serviceLeg) socket() string { return statusSocketPrefix + l.Name + ".sock" }
+func (l serviceLeg) signerUnit() string {
+	return "mithril-agent-signer-" + l.Name
+}
+func (l serviceLeg) signerSocket() string    { return signerSocketPrefix + l.Name + ".sock" }
+func (l serviceLeg) riskUnit() string        { return "mithril-agent-policy-" + l.Name }
+func (l serviceLeg) riskSocket() string      { return riskSocketPrefix + l.Name + ".sock" }
+func (l serviceLeg) submitterUnit() string   { return "mithril-agent-submitter-" + l.Name }
+func (l serviceLeg) submitterSocket() string { return submitterSocketPrefix + l.Name + ".sock" }
+func (l serviceLeg) recoveryUnit() string    { return "mithril-agent-recovery-" + l.Name }
+func (l serviceLeg) operatorUnit() string {
+	return "mithril-agent-submitter-operator-" + l.Name
+}
+func (l serviceLeg) operatorSocket() string { return operatorSocketPrefix + l.Name + ".sock" }
 
 // A strategy runner binds one metrics port per leg, starting at a base. The
 // default base is the same port a single-leg `swap run` uses, so on a host that
@@ -164,6 +195,9 @@ func runServiceInstall(args []string, output io.Writer) error {
 		if !systemdAtom(clean) {
 			return errors.New("--output contains characters that are unsafe in the printed install command")
 		}
+		if err := validateSafeParent(filepath.Dir(clean), 0o022); err != nil {
+			return errors.New("--output directory must be private and trusted")
+		}
 		exists, targetErr := generatedUnitTarget(clean)
 		if targetErr != nil {
 			return fmt.Errorf("--output: %w", targetErr)
@@ -203,25 +237,27 @@ func runServiceInstall(args []string, output io.Writer) error {
 	name := filepath.Base(clean)
 	directory := filepath.Dir(clean)
 	staged := []string{name}
-	// The alert units go beside the runner unit, generated from the same legs,
-	// because a runner installed without them trades in silence.
-	alerts := alertUnits(plan)
+	// Socket-activated authorities and read-only status bridges always go beside
+	// the runner. The Telegram process joins them only when it is enabled.
+	units := supportUnits(plan)
 	// Refuse every destination before writing any of them. Checking only the
 	// runner unit let a generated status or Telegram unit replace an unrelated
 	// file with the same name halfway through an otherwise successful install.
-	for _, alertName := range sortedKeys(alerts) {
-		if _, err := generatedUnitTarget(filepath.Join(directory, alertName)); err != nil {
-			return fmt.Errorf("%s: %w", alertName, err)
+	for _, unitName := range sortedKeys(units) {
+		if _, err := generatedUnitTarget(filepath.Join(directory, unitName)); err != nil {
+			return fmt.Errorf("%s: %w", unitName, err)
 		}
 	}
-	if err := os.WriteFile(clean, []byte(unit), 0o644); err != nil {
+	if err := writeGeneratedUnit(clean, []byte(unit)); err != nil {
 		return fmt.Errorf("write the unit: %w", err)
 	}
-	for _, alertName := range sortedKeys(alerts) {
-		if err := os.WriteFile(filepath.Join(directory, alertName), []byte(alerts[alertName]), 0o644); err != nil {
-			return fmt.Errorf("write %s: %w", alertName, err)
+	for _, unitName := range sortedKeys(units) {
+		if err := writeGeneratedUnit(
+			filepath.Join(directory, unitName), []byte(units[unitName]),
+		); err != nil {
+			return fmt.Errorf("write %s: %w", unitName, err)
 		}
-		staged = append(staged, alertName)
+		staged = append(staged, unitName)
 	}
 
 	installStep := ""
@@ -235,38 +271,69 @@ func runServiceInstall(args []string, output io.Writer) error {
 		installStep = fmt.Sprintf("  sudo install -o root -g root -m 0644 %s %s\n",
 			strings.Join(prefixed(directory, staged), " "), destination)
 	}
+	installedUnits := strings.Join(prefixed("/etc/systemd/system", staged), " ")
+	// An already-active socket keeps its loaded settings across daemon-reload.
+	// Stop the runner first, then restart every authority socket before bringing
+	// it back, so an update cannot mix new services with stale listeners.
 	if _, err := fmt.Fprintf(output,
 		"Wrote %d unit(s) into %s:\n  %s\n\nReview them, then install:\n  less %s\n%s"+
+			"\nPrepare the isolated signer, risk-authority, and submitter accounts:\n"+
+			"  id %s >/dev/null 2>&1 || sudo useradd --system --no-create-home --user-group %s\n%s"+
+			"  id %s >/dev/null 2>&1 || sudo useradd --system --no-create-home --user-group %s\n%s"+
+			"  id %s >/dev/null 2>&1 || sudo useradd --system --no-create-home --user-group %s\n%s"+
+			"\nVerify every installed unit before loading it:\n"+
+			"  sudo systemd-analyze verify %s\n"+
 			"  sudo systemctl daemon-reload\n"+
 			"  sudo systemctl enable %s\n"+
+			"  sudo systemctl enable %s\n"+
+			"  sudo systemctl enable %s\n"+
+			"  sudo systemctl stop %s\n"+
+			"  sudo systemctl restart %s\n"+
+			"  sudo systemctl restart %s\n"+
+			"  sudo systemctl restart %s\n"+
 			"  sudo systemctl restart %s\n",
 		len(staged), directory, strings.Join(staged, "\n  "),
 		strings.Join(prefixed(directory, staged), " "), installStep,
-		name, name); err != nil {
+		signerAccountName, signerAccountName, signerPreparationCommands(plan),
+		riskAccountName, riskAccountName, riskPreparationCommands(plan),
+		submitterAccountName, submitterAccountName, submitterPreparationCommands(plan),
+		installedUnits,
+		name, strings.Join(operatorSocketUnits(plan), " "), strings.Join(recoveryTimerUnits(plan), " "),
+		name, strings.Join(runtimeSocketUnits(plan), " "),
+		strings.Join(operatorSocketUnits(plan), " "), strings.Join(recoveryTimerUnits(plan), " "), name); err != nil {
 		return err
 	}
-	if len(alerts) != 0 {
+	statusSockets := statusSocketUnits(plan)
+	if len(statusSockets) != 0 {
+		if _, err := fmt.Fprintf(output,
+			"\nEnable the read-only status sockets used by MCP and optional alerts:\n"+
+				"  sudo groupadd -f --system %s\n"+
+				"  sudo systemctl enable %s\n"+
+				"  sudo systemctl restart %s\n",
+			statusGroupName, strings.Join(statusSockets, " "), strings.Join(statusSockets, " ")); err != nil {
+			return err
+		}
+	}
+	if plan.Telegram && len(statusSockets) != 0 {
 		// The account and group are the boundary that lets the bot be told what
 		// happened without being able to touch a key. Creating them is the one
 		// step that cannot be derived, so it is spelled out rather than assumed.
 		if _, err := fmt.Fprintf(output,
 			"\nThen the alerts, so trades do not execute in silence:\n"+
-				"  sudo groupadd -f --system %s\n"+
 				// --user-group makes the account's own group; naming it with --gid
 				// would require a group that does not exist yet on a fresh host.
 				"  id %s >/dev/null 2>&1 || sudo useradd --system --no-create-home --user-group -G %s %s\n"+
 				"  sudo install -d -o %s -g %s -m 0700 %s\n"+
-				"  sudo systemctl enable %s %s\n"+
-				"  sudo systemctl restart %s %s\n\n"+
+				"  sudo systemctl enable %s\n"+
+				"  sudo systemctl restart %s\n\n"+
 				"Check delivery before you rely on it:\n"+
 				"  sudo systemd-run --quiet --wait --pipe --collect \\\n"+
 				"    --uid=%s --gid=%s \\\n"+
 				"    -p 'EnvironmentFile=%s' \\\n"+
 				"    %s test\n",
-			statusGroupName, alertsAccountName, statusGroupName, alertsAccountName,
+			alertsAccountName, statusGroupName, alertsAccountName,
 			alertsAccountName, alertsAccountName, filepath.Dir(alertsCursorPath),
-			strings.Join(alertSocketUnits(plan), " "), alertsUnitName,
-			strings.Join(alertSocketUnits(plan), " "), alertsUnitName,
+			alertsUnitName, alertsUnitName,
 			alertsAccountName, alertsAccountName, alertsEnvFile,
 			filepath.Join(filepath.Dir(plan.Binary), "mithril-agent-telegram")); err != nil {
 			return err
@@ -274,8 +341,8 @@ func runServiceInstall(args []string, output io.Writer) error {
 	}
 	_, err = fmt.Fprintf(output,
 		"\nInstalling arms nothing. Granting spending authority stays separate:\n"+
-			"  sudo -u %s env HOME=%s %s %s\n",
-		plan.User, plan.Home, plan.Binary, plan.ArmCommand)
+			"  sudo env HOME=%s %s %s\n",
+		plan.Home, plan.Binary, plan.ArmCommand)
 	return err
 }
 
@@ -301,6 +368,49 @@ func generatedUnitTarget(path string) (bool, error) {
 		return false, errors.New("already exists and was not written by mithril-agent")
 	}
 	return true, nil
+}
+
+// writeGeneratedUnit publishes a complete sibling file with rename(2), so a
+// path replaced after generatedUnitTarget checked it is replaced, not opened
+// and followed. The caller has already validated the directory and every
+// destination before the first write.
+func writeGeneratedUnit(path string, data []byte) error {
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	cleanup := func() {
+		_ = temporary.Close()
+		_ = os.Remove(temporaryPath)
+	}
+	if err := temporary.Chmod(0o644); err != nil {
+		cleanup()
+		return err
+	}
+	if _, err := io.Copy(temporary, bytes.NewReader(data)); err != nil {
+		cleanup()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		_ = os.Remove(temporaryPath)
+		return err
+	}
+	directoryFile, err := os.Open(directory)
+	if err != nil {
+		return err
+	}
+	defer directoryFile.Close()
+	return directoryFile.Sync()
 }
 
 // metricsPortsFree reports whether the runner could bind every port it needs.
@@ -347,15 +457,115 @@ func metricsPortSpan(legs []serviceLeg) int {
 	return span
 }
 
-// alertSocketUnits names the sockets to enable. Only the sockets are enabled:
+// statusSocketUnits names the sockets to enable. Only the sockets are enabled:
 // their services are socket-activated, so enabling those too would start a
 // bridge with no reader.
-func alertSocketUnits(plan servicePlan) []string {
+func statusSocketUnits(plan servicePlan) []string {
 	names := make([]string, 0, len(plan.Legs))
 	for _, leg := range plan.Legs {
-		names = append(names, leg.unit()+".socket")
+		if leg.StatusFile != "" {
+			names = append(names, leg.unit()+".socket")
+		}
 	}
 	return names
+}
+
+func signerSocketUnits(plan servicePlan) []string {
+	names := make([]string, 0, len(plan.Legs))
+	for _, leg := range plan.Legs {
+		names = append(names, leg.signerUnit()+".socket")
+	}
+	return names
+}
+
+func riskSocketUnits(plan servicePlan) []string {
+	names := make([]string, 0, len(plan.Legs))
+	for _, leg := range plan.Legs {
+		names = append(names, leg.riskUnit()+".socket")
+	}
+	return names
+}
+
+func submitterSocketUnits(plan servicePlan) []string {
+	names := make([]string, 0, len(plan.Legs))
+	for _, leg := range plan.Legs {
+		names = append(names, leg.submitterUnit()+".socket")
+	}
+	return names
+}
+
+func runtimeSocketUnits(plan servicePlan) []string {
+	names := append(signerSocketUnits(plan), riskSocketUnits(plan)...)
+	return append(names, submitterSocketUnits(plan)...)
+}
+
+func operatorSocketUnits(plan servicePlan) []string {
+	names := make([]string, 0, len(plan.Legs))
+	for _, leg := range plan.Legs {
+		names = append(names, leg.operatorUnit()+".socket")
+	}
+	return names
+}
+
+func recoveryTimerUnits(plan servicePlan) []string {
+	names := make([]string, 0, len(plan.Legs))
+	for _, leg := range plan.Legs {
+		names = append(names, leg.recoveryUnit()+".timer")
+	}
+	return names
+}
+
+func signerPreparationCommands(plan servicePlan) string {
+	var states []string
+	for _, leg := range plan.Legs {
+		states = append(states, leg.SignerStateDir)
+	}
+	states = uniqueSorted(states)
+	var commands strings.Builder
+	if len(plan.SignerTraverse) != 0 {
+		fmt.Fprintf(&commands, "  sudo chgrp %s %s\n",
+			plan.Group, strings.Join(plan.SignerTraverse, " "))
+		fmt.Fprintf(&commands, "  sudo chmod g+x %s\n", strings.Join(plan.SignerTraverse, " "))
+	}
+	if len(states) != 0 {
+		fmt.Fprintf(&commands, "  sudo chown -R %s:%s %s\n",
+			signerAccountName, signerAccountName, strings.Join(states, " "))
+		fmt.Fprintf(&commands, "  sudo chmod 0700 %s\n", strings.Join(states, " "))
+	}
+	return commands.String()
+}
+
+func riskPreparationCommands(plan servicePlan) string {
+	keys := make([]string, 0, len(plan.Legs))
+	for _, leg := range plan.Legs {
+		keys = append(keys, leg.RiskKeypair)
+	}
+	keys = uniqueSorted(keys)
+	if len(keys) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("  sudo chown %s:%s %s\n  sudo chmod 0600 %s\n",
+		riskAccountName, riskAccountName, strings.Join(keys, " "), strings.Join(keys, " "))
+}
+
+func submitterPreparationCommands(plan servicePlan) string {
+	var controls, credentials []string
+	for _, leg := range plan.Legs {
+		controls = append(controls, leg.ControlStateDir)
+		credentials = append(credentials, leg.SubmitterPolicy, leg.SubmitterKey)
+	}
+	controls = uniqueSorted(controls)
+	credentials = uniqueSorted(credentials)
+	if len(controls) == 0 || len(credentials) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"  sudo chown %s:%s %s\n  sudo chmod 0600 %s\n"+
+			"  sudo chown -R %s:%s %s\n  sudo chmod 0700 %s\n",
+		submitterAccountName, submitterAccountName,
+		strings.Join(credentials, " "), strings.Join(credentials, " "),
+		submitterAccountName, submitterAccountName,
+		strings.Join(controls, " "), strings.Join(controls, " "))
 }
 
 func prefixed(directory string, names []string) []string {
@@ -379,18 +589,20 @@ func sortedKeys(units map[string]string) []string {
 // state rather than supplied by the operator. Anything an operator has to
 // retype is something they can get wrong.
 type servicePlan struct {
-	Binary     string
-	Home       string
-	User       string
-	Group      string
-	RunArgs    string
-	StopArgs   string
-	ReadOnly   []string
-	ReadWrite  []string
-	EnvFiles   []string
-	ArmCommand string
-	Legs       []serviceLeg
-	Alerts     bool
+	Binary         string
+	Home           string
+	User           string
+	Group          string
+	RunArgs        string
+	StopArgs       string
+	ReadOnly       []string
+	ReadWrite      []string
+	Inaccessible   []string
+	SignerTraverse []string
+	EnvFiles       []string
+	ArmCommand     string
+	Legs           []serviceLeg
+	Telegram       bool
 }
 
 // stringList collects a repeatable flag.
@@ -420,7 +632,7 @@ func buildServicePlan(metricsBasePort int) (servicePlan, error) {
 	}
 
 	plan := servicePlan{
-		Binary: binary, Home: home, EnvFiles: defaultEnvironmentFiles, Alerts: true,
+		Binary: binary, Home: home, EnvFiles: defaultEnvironmentFiles, Telegram: true,
 	}
 	paths, unreadable := discoverStrategy()
 	if len(unreadable) != 0 {
@@ -428,15 +640,16 @@ func buildServicePlan(metricsBasePort int) (servicePlan, error) {
 			"some recorded strategy legs cannot be read; run mithril-agent strategy show and repair them first")
 	}
 	if !paths.empty() {
-		plan.Alerts = paths.telegram != "disabled"
+		plan.Telegram = paths.telegram != "disabled"
 		plan.RunArgs = fmt.Sprintf(
-			"strategy run --interval 10s --metrics-base-port %d --quote-socket %s",
-			metricsBasePort, supervisedQuoteSocket)
-		plan.StopArgs = "strategy stop --reason"
+			"strategy run --interval 10s --metrics-base-port %d --quote-socket %s --signer-socket-prefix %s --risk-socket-prefix %s --submitter-socket-prefix %s",
+			metricsBasePort, supervisedQuoteSocket, signerSocketPrefix, riskSocketPrefix, submitterSocketPrefix)
+		plan.StopArgs = "strategy stop --submitter-socket-prefix " + submitterSocketPrefix + " --reason"
 		plan.ArmCommand, err = suggestedStrategyEnableCommand(paths)
 		if err != nil {
 			return servicePlan{}, err
 		}
+		plan.ArmCommand += " --operator-socket-prefix " + operatorSocketPrefix
 		for _, leg := range paths.configured() {
 			if err := plan.addLeg(leg.leg, leg.path); err != nil {
 				return servicePlan{}, err
@@ -458,11 +671,14 @@ func buildServicePlan(metricsBasePort int) (servicePlan, error) {
 			"nothing is set up yet; run mithril-agent setup first, then this command")
 	}
 	plan.RunArgs = fmt.Sprintf(
-		"swap run --config %s --interval 10s --metrics-address 127.0.0.1:%d --quote-socket %s",
-		single, metricsBasePort, supervisedQuoteSocket,
+		"swap run --config %s --interval 10s --metrics-address 127.0.0.1:%d --quote-socket %s --signer-socket %s --risk-socket %s --submitter-socket %s",
+		single, metricsBasePort, supervisedQuoteSocket, signerSocketPrefix+"agent.sock",
+		riskSocketPrefix+"agent.sock", submitterSocketPrefix+"agent.sock",
 	)
-	plan.StopArgs = "swap stop --config " + single + " --reason"
-	plan.ArmCommand = "demo --config " + single
+	plan.StopArgs = "swap stop --config " + single + " --submitter-socket " +
+		submitterSocketPrefix + "agent.sock --reason"
+	plan.ArmCommand = "demo --config " + single + " --operator-socket " +
+		operatorSocketPrefix + "agent.sock"
 	if err := plan.addLeg("agent", single); err != nil {
 		return servicePlan{}, err
 	}
@@ -477,6 +693,10 @@ func (p servicePlan) checked() (servicePlan, error) {
 		return servicePlan{}, errors.New(
 			"cannot tell which user owns this deployment, and a unit without a user runs as root; " +
 				"check that the configuration files are readable and owned by the account that should run the agent")
+	}
+	if p.Group == "" {
+		return servicePlan{}, errors.New(
+			"cannot determine the deployment group required by the isolated signer socket")
 	}
 	for label, value := range map[string]string{
 		"agent executable": p.Binary,
@@ -493,6 +713,16 @@ func (p servicePlan) checked() (servicePlan, error) {
 			return servicePlan{}, errors.New("a configured path contains characters that are unsafe in a systemd unit")
 		}
 	}
+	for _, path := range p.Inaccessible {
+		if !systemdAtom(path) {
+			return servicePlan{}, errors.New("an inaccessible path is unsafe for a systemd unit")
+		}
+	}
+	for _, path := range p.SignerTraverse {
+		if !systemdAtom(path) {
+			return servicePlan{}, errors.New("a signer traversal path is unsafe for an install command")
+		}
+	}
 	for _, path := range p.EnvFiles {
 		path = strings.TrimPrefix(path, "-")
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path || !systemdAtom(path) {
@@ -500,8 +730,17 @@ func (p servicePlan) checked() (servicePlan, error) {
 		}
 	}
 	for _, leg := range p.Legs {
-		if !systemdAtom(leg.StatusFile) {
+		if leg.StatusFile != "" && !systemdAtom(leg.StatusFile) {
 			return servicePlan{}, errors.New("a status path contains characters that are unsafe in a systemd unit")
+		}
+		for _, path := range []string{
+			leg.SignerPolicy, leg.SignerKeypair, leg.SignerStateDir,
+			leg.RiskPolicy, leg.RiskKeypair, leg.SubmitterPolicy,
+			leg.SubmitterKey, leg.ControlStateDir,
+		} {
+			if !systemdAtom(path) {
+				return servicePlan{}, errors.New("a leg path contains characters that are unsafe in a systemd unit")
+			}
 		}
 	}
 	return p.deduplicated(), nil
@@ -510,12 +749,12 @@ func (p servicePlan) checked() (servicePlan, error) {
 func systemdAtom(value string) bool {
 	return value != "" && strings.IndexFunc(value, func(char rune) bool {
 		return unicode.IsSpace(char) || unicode.IsControl(char) ||
-			strings.ContainsRune(`%\\"'$`, char)
+			strings.ContainsRune("%\\\\\"'$;&|<>`!(){}[]*?~#", char)
 	}) == -1
 }
 
-// addLeg grants the narrowest write access that lets a leg run: its control
-// state and its journal, and nothing else. The configuration itself stays
+// addLeg grants the narrowest write access that lets a leg run: its journal,
+// while the submitter service owns control state. The configuration itself stays
 // read-only, so a compromised runner cannot rewrite the profile whose caps
 // bound it.
 func (p *servicePlan) addLeg(name, configPath string) error {
@@ -527,12 +766,6 @@ func (p *servicePlan) addLeg(name, configPath string) error {
 		return fmt.Errorf("read %s: %w", configPath, err)
 	}
 	p.ReadOnly = append(p.ReadOnly, filepath.Dir(configPath))
-	// The status file is the runner's heartbeat and the only thing the alert
-	// path reads. A leg whose journal is unset publishes nothing, so it gets no
-	// socket rather than one that would serve a file that never appears.
-	if cfg.Journal.Path != "" {
-		p.Legs = append(p.Legs, serviceLeg{Name: name, StatusFile: cfg.Journal.Path + ".status.json"})
-	}
 	// A system unit with no User= runs as ROOT. This deployment's own files say
 	// who it is meant to run as, so the identity is read off them rather than
 	// defaulting to the most privileged answer available.
@@ -546,11 +779,93 @@ func (p *servicePlan) addLeg(name, configPath string) error {
 		return err
 	}
 	p.ReadWrite = append(p.ReadWrite, statePath)
+	controlDir := filepath.Dir(cfg.Control.StatePath)
+	resolvedControl, err := filepath.EvalSymlinks(controlDir)
+	if err != nil {
+		return fmt.Errorf("resolve %s control state: %w", name, err)
+	}
+	stableControl, err := filepath.EvalSymlinks(filepath.Join(statePath, controlStateDirName))
+	if err != nil || filepath.Clean(stableControl) != filepath.Clean(resolvedControl) {
+		return fmt.Errorf(
+			"%s control state is not isolated; re-run setup for this leg before installing services",
+			name,
+		)
+	}
+	controlTraverse, err := signerTraversalPaths(controlDir)
+	if err != nil {
+		return fmt.Errorf("inspect %s control state parents: %w", name, err)
+	}
+	var signerPolicy signer.Policy
+	if err := readStrictJSON(cfg.Signer.PolicyPath, &signerPolicy); err != nil {
+		return fmt.Errorf("read %s signer policy: %w", name, err)
+	}
+	signerState := filepath.Dir(signerPolicy.AuthorizationLedgerPath)
+	resolvedSigner, err := filepath.EvalSymlinks(signerState)
+	if err != nil {
+		return fmt.Errorf("resolve %s signer state: %w", name, err)
+	}
+	stableSigner, err := filepath.EvalSymlinks(filepath.Join(statePath, signerStateDirName))
+	if err != nil || filepath.Clean(stableSigner) != filepath.Clean(resolvedSigner) {
+		return fmt.Errorf(
+			"%s signer ledger is not isolated; re-run setup for this leg before installing services",
+			name,
+		)
+	}
+	traverse, err := signerTraversalPaths(signerState)
+	if err != nil {
+		return fmt.Errorf("inspect %s signer state parents: %w", name, err)
+	}
+	leg := serviceLeg{
+		Name: name, SignerPolicy: cfg.Signer.PolicyPath,
+		SignerKeypair: cfg.Signer.KeypairPath, SignerStateDir: signerState,
+		RiskPolicy: cfg.Policy.PolicyPath, RiskKeypair: cfg.Policy.KeypairPath,
+		SubmitterPolicy: cfg.Submitter.PolicyPath,
+		SubmitterKey:    cfg.Submitter.PrivateKeyPath,
+		ControlStateDir: controlDir,
+	}
+	// The status file is the runner's heartbeat and the only thing the alert
+	// path reads. A leg whose journal is unset publishes nothing, so it gets no
+	// socket rather than one that would serve a file that never appears.
+	if cfg.Journal.Path != "" {
+		leg.StatusFile = cfg.Journal.Path + ".status.json"
+	}
+	p.Legs = append(p.Legs, leg)
+	p.Inaccessible = append(
+		p.Inaccessible, cfg.Signer.KeypairPath, cfg.Policy.KeypairPath, signerState,
+		cfg.Submitter.PolicyPath, cfg.Submitter.PrivateKeyPath, controlDir,
+	)
+	p.SignerTraverse = append(p.SignerTraverse, traverse...)
+	p.SignerTraverse = append(p.SignerTraverse, controlTraverse...)
 	return nil
 }
 
+// signerTraversalPaths returns the private ancestors that need group execute
+// permission before the isolated signer can reach its own ledger. It stops at
+// the first world-traversable directory because every ancestor above it is
+// already reachable without widening another private directory.
+func signerTraversalPaths(state string) ([]string, error) {
+	var paths []string
+	for path := filepath.Dir(filepath.Clean(state)); ; path = filepath.Dir(path) {
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() {
+			return nil, errors.New("signer state parent is not a directory")
+		}
+		if info.Mode().Perm()&0o001 != 0 {
+			return paths, nil
+		}
+		paths = append(paths, path)
+		if parent := filepath.Dir(path); parent == path {
+			return nil, errors.New("signer state has no traversable ancestor")
+		}
+	}
+}
+
 // stableLegStatePath verifies that the leg's stable state path resolves to the
-// directory containing both mutable files. The unit can then survive a safe
+// directory containing runner-owned mutable files. The unit can then survive a
+// safe
 // setup replacement without granting write access to the profile directory.
 func stableLegStatePath(configPath string, cfg config) (string, error) {
 	stable := filepath.Join(filepath.Dir(configPath), stableStateDirName)
@@ -562,7 +877,7 @@ func stableLegStatePath(configPath string, cfg config) (string, error) {
 		// Older setups stored mutable files beside config.json. Keep them
 		// runnable; the next setup moves them under the stable state path.
 		var legacy string
-		for _, writable := range []string{cfg.Control.StatePath, cfg.Journal.Path} {
+		for _, writable := range []string{cfg.Journal.Path} {
 			if writable == "" {
 				continue
 			}
@@ -582,7 +897,7 @@ func stableLegStatePath(configPath string, cfg config) (string, error) {
 		return legacy, nil
 	}
 	resolvedStable = filepath.Clean(resolvedStable)
-	for _, writable := range []string{cfg.Control.StatePath, cfg.Journal.Path} {
+	for _, writable := range []string{cfg.Journal.Path} {
 		if writable == "" {
 			continue
 		}
@@ -609,6 +924,8 @@ func stableLegStatePath(configPath string, cfg config) (string, error) {
 func (p servicePlan) deduplicated() servicePlan {
 	p.ReadOnly = uniqueSorted(p.ReadOnly)
 	p.ReadWrite = uniqueSorted(p.ReadWrite)
+	p.Inaccessible = uniqueSorted(p.Inaccessible)
+	p.SignerTraverse = uniqueSorted(p.SignerTraverse)
 	// A path that must be writable cannot also be listed read-only: systemd
 	// applies ReadOnlyPaths and the runner would fail to record what it did.
 	writable := make(map[string]bool, len(p.ReadWrite))
@@ -672,6 +989,10 @@ func renderServiceUnit(plan servicePlan) string {
 	}
 	write("[Unit]\nDescription=Mithril agent runner\n")
 	write("After=network-online.target\nWants=network-online.target\n")
+	sockets := runtimeSocketUnits(plan)
+	if len(sockets) != 0 {
+		write("After=%s\nRequires=%s\n", strings.Join(sockets, " "), strings.Join(sockets, " "))
+	}
 	// systemd gives up permanently after 5 starts in 10s by default. For a
 	// runner that holds spending authority, "gave up" is the worst outcome
 	// available: the grant stays on disk, nothing executes against it, and the
@@ -718,11 +1039,207 @@ func renderServiceUnit(plan servicePlan) string {
 	if len(plan.ReadWrite) != 0 {
 		write("ReadWritePaths=%s\n", strings.Join(plan.ReadWrite, " "))
 	}
+	if len(plan.Inaccessible) != 0 {
+		write("InaccessiblePaths=%s\n", strings.Join(plan.Inaccessible, " "))
+	}
 	write("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n")
 	write("RemoveIPC=yes\nRestrictNamespaces=yes\nRestrictRealtime=yes\nRestrictSUIDSGID=yes\n")
 	write("LockPersonality=yes\nSystemCallArchitectures=native\n")
 	write("MemoryDenyWriteExecute=yes\n\n")
 	write("[Install]\nWantedBy=multi-user.target\n")
+	return unit.String()
+}
+
+func renderSignerSocket(plan servicePlan, leg serviceLeg) string {
+	var unit strings.Builder
+	fmt.Fprintf(&unit, "[Unit]\nDescription=Mithril agent %s isolated signer socket\n\n", leg.Name)
+	fmt.Fprintf(&unit, "[Socket]\nListenStream=%s\n", leg.signerSocket())
+	fmt.Fprintf(&unit, "SocketUser=%s\nSocketGroup=%s\nSocketMode=0660\n", plan.User, plan.Group)
+	// With Accept=yes, systemd requires the matching <socket-name>@.service
+	// template and rejects Service= entirely.
+	unit.WriteString("Accept=yes\nBacklog=8\nMaxConnections=8\nMaxConnectionsPerSource=2\n\n")
+	unit.WriteString("[Install]\nWantedBy=sockets.target\n")
+	return unit.String()
+}
+
+func renderSignerService(plan servicePlan, leg serviceLeg) string {
+	var unit strings.Builder
+	fmt.Fprintf(&unit, "[Unit]\nDescription=Mithril agent %s isolated signer request\n", leg.Name)
+	fmt.Fprintf(&unit, "Requires=%s.socket\nCollectMode=inactive-or-failed\n\n", leg.signerUnit())
+	unit.WriteString("[Service]\nType=exec\nUMask=0077\n")
+	fmt.Fprintf(&unit, "User=%s\nGroup=%s\nSupplementaryGroups=%s\n",
+		signerAccountName, signerAccountName, plan.Group)
+	fmt.Fprintf(&unit, "LoadCredential=signer-policy:%s\n", leg.SignerPolicy)
+	fmt.Fprintf(&unit, "LoadCredential=signer-key:%s\n", leg.SignerKeypair)
+	fmt.Fprintf(&unit, "ExecStart=%s --policy %%d/signer-policy --keypair %%d/signer-key --socket\n",
+		filepath.Join(filepath.Dir(plan.Binary), "mithril-agent-signer"))
+	unit.WriteString("StandardInput=socket\nStandardOutput=socket\nStandardError=journal\n")
+	unit.WriteString("RuntimeMaxSec=30s\nTimeoutStopSec=5s\n")
+	unit.WriteString("NoNewPrivileges=yes\nCapabilityBoundingSet=\nAmbientCapabilities=\n")
+	unit.WriteString("PrivateDevices=yes\nPrivateMounts=yes\nPrivateNetwork=yes\nPrivateTmp=yes\n")
+	unit.WriteString("ProtectControlGroups=yes\nProtectHome=read-only\nProtectHostname=yes\n")
+	unit.WriteString("ProtectKernelLogs=yes\nProtectKernelModules=yes\nProtectKernelTunables=yes\n")
+	unit.WriteString("ProtectProc=invisible\nProtectSystem=strict\n")
+	fmt.Fprintf(&unit, "ReadWritePaths=%s\n", leg.SignerStateDir)
+	unit.WriteString("RestrictAddressFamilies=AF_UNIX\nRemoveIPC=yes\nRestrictNamespaces=yes\n")
+	unit.WriteString("RestrictRealtime=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\n")
+	unit.WriteString("SystemCallArchitectures=native\nMemoryDenyWriteExecute=yes\n")
+	unit.WriteString("MemoryMax=128M\nMemorySwapMax=0\nTasksMax=8\nLimitNOFILE=32\n")
+	return unit.String()
+}
+
+func renderRiskSocket(plan servicePlan, leg serviceLeg) string {
+	var unit strings.Builder
+	fmt.Fprintf(&unit, "[Unit]\nDescription=Mithril agent %s isolated risk authority socket\n\n", leg.Name)
+	fmt.Fprintf(&unit, "[Socket]\nListenStream=%s\n", leg.riskSocket())
+	fmt.Fprintf(&unit, "SocketUser=%s\nSocketGroup=%s\nSocketMode=0660\n", plan.User, plan.Group)
+	unit.WriteString("Accept=yes\nBacklog=8\nMaxConnections=8\nMaxConnectionsPerSource=2\n\n")
+	unit.WriteString("[Install]\nWantedBy=sockets.target\n")
+	return unit.String()
+}
+
+func renderRiskService(plan servicePlan, leg serviceLeg) string {
+	var unit strings.Builder
+	fmt.Fprintf(&unit, "[Unit]\nDescription=Mithril agent %s isolated risk authority request\n", leg.Name)
+	fmt.Fprintf(&unit, "Requires=%s.socket\nCollectMode=inactive-or-failed\n\n", leg.riskUnit())
+	unit.WriteString("[Service]\nType=exec\nUMask=0077\n")
+	fmt.Fprintf(&unit, "User=%s\nGroup=%s\n", riskAccountName, riskAccountName)
+	fmt.Fprintf(&unit, "LoadCredential=risk-policy:%s\n", leg.RiskPolicy)
+	fmt.Fprintf(&unit, "LoadCredential=risk-key:%s\n", leg.RiskKeypair)
+	fmt.Fprintf(&unit, "ExecStart=%s --policy %%d/risk-policy --keypair %%d/risk-key --socket\n",
+		filepath.Join(filepath.Dir(plan.Binary), "mithril-agent-policy"))
+	unit.WriteString("StandardInput=socket\nStandardOutput=socket\nStandardError=journal\n")
+	unit.WriteString("RuntimeMaxSec=30s\nTimeoutStopSec=5s\n")
+	unit.WriteString("NoNewPrivileges=yes\nCapabilityBoundingSet=\nAmbientCapabilities=\n")
+	unit.WriteString("PrivateDevices=yes\nPrivateMounts=yes\nPrivateNetwork=yes\nPrivateTmp=yes\n")
+	unit.WriteString("ProtectControlGroups=yes\nProtectHome=yes\nProtectHostname=yes\n")
+	unit.WriteString("ProtectKernelLogs=yes\nProtectKernelModules=yes\nProtectKernelTunables=yes\n")
+	unit.WriteString("ProtectProc=invisible\nProtectSystem=strict\n")
+	unit.WriteString("RestrictAddressFamilies=AF_UNIX\nRemoveIPC=yes\nRestrictNamespaces=yes\n")
+	unit.WriteString("RestrictRealtime=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\n")
+	unit.WriteString("SystemCallArchitectures=native\nMemoryDenyWriteExecute=yes\n")
+	unit.WriteString("MemoryMax=64M\nMemorySwapMax=0\nTasksMax=8\nLimitNOFILE=32\n")
+	return unit.String()
+}
+
+func renderSubmitterSocket(plan servicePlan, leg serviceLeg) string {
+	var unit strings.Builder
+	fmt.Fprintf(&unit, "[Unit]\nDescription=Mithril agent %s isolated submitter socket\n\n", leg.Name)
+	fmt.Fprintf(&unit, "[Socket]\nListenStream=%s\n", leg.submitterSocket())
+	fmt.Fprintf(&unit, "SocketUser=%s\nSocketGroup=%s\nSocketMode=0660\n", plan.User, plan.Group)
+	unit.WriteString("Accept=yes\nBacklog=8\nMaxConnections=8\nMaxConnectionsPerSource=2\n\n")
+	unit.WriteString("[Install]\nWantedBy=sockets.target\n")
+	return unit.String()
+}
+
+func renderSubmitterService(plan servicePlan, leg serviceLeg) string {
+	var unit strings.Builder
+	fmt.Fprintf(&unit, "[Unit]\nDescription=Mithril agent %s isolated submitter request\n", leg.Name)
+	fmt.Fprintf(&unit, "Requires=%s.socket\nCollectMode=inactive-or-failed\n\n", leg.submitterUnit())
+	unit.WriteString("[Service]\nType=exec\nUMask=0077\n")
+	fmt.Fprintf(&unit, "User=%s\nGroup=%s\nSupplementaryGroups=%s\n",
+		submitterAccountName, submitterAccountName, plan.Group)
+	fmt.Fprintf(&unit, "LoadCredential=submitter-policy:%s\n", leg.SubmitterPolicy)
+	fmt.Fprintf(&unit, "LoadCredential=submitter-key:%s\n", leg.SubmitterKey)
+	unit.WriteString("EnvironmentFile=/etc/mithril-agent/rpc.env\n")
+	fmt.Fprintf(&unit, "ExecStart=%s --policy %%d/submitter-policy --key %%d/submitter-key --socket\n",
+		filepath.Join(filepath.Dir(plan.Binary), "mithril-agent-submitter"))
+	unit.WriteString("StandardInput=socket\nStandardOutput=socket\nStandardError=journal\n")
+	unit.WriteString("RuntimeMaxSec=15min\nTimeoutStopSec=5s\n")
+	unit.WriteString("NoNewPrivileges=yes\nCapabilityBoundingSet=\nAmbientCapabilities=\n")
+	unit.WriteString("PrivateDevices=yes\nPrivateMounts=yes\nPrivateTmp=yes\n")
+	unit.WriteString("ProtectControlGroups=yes\nProtectHome=yes\nProtectHostname=yes\n")
+	unit.WriteString("ProtectKernelLogs=yes\nProtectKernelModules=yes\nProtectKernelTunables=yes\n")
+	unit.WriteString("ProtectProc=invisible\nProtectSystem=strict\n")
+	fmt.Fprintf(&unit, "ReadWritePaths=%s\nInaccessiblePaths=/proc %s\n",
+		leg.ControlStateDir, leg.SubmitterKey)
+	unit.WriteString("IPAddressDeny=any\nIPAddressAllow=127.0.0.0/8\nIPAddressAllow=::1/128\n")
+	unit.WriteString("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nRemoveIPC=yes\nRestrictNamespaces=yes\n")
+	unit.WriteString("RestrictRealtime=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\n")
+	unit.WriteString("SystemCallArchitectures=native\nMemoryDenyWriteExecute=yes\n")
+	unit.WriteString("MemoryMax=128M\nMemorySwapMax=0\nTasksMax=16\nLimitNOFILE=64\n")
+	return unit.String()
+}
+
+func renderOperatorSocket(leg serviceLeg) string {
+	var unit strings.Builder
+	fmt.Fprintf(&unit, "[Unit]\nDescription=Mithril agent %s root operator socket\n\n", leg.Name)
+	fmt.Fprintf(&unit, "[Socket]\nListenStream=%s\n", leg.operatorSocket())
+	unit.WriteString("SocketUser=root\nSocketGroup=root\nSocketMode=0600\n")
+	unit.WriteString("Accept=yes\nBacklog=4\nMaxConnections=4\nMaxConnectionsPerSource=1\n\n")
+	unit.WriteString("[Install]\nWantedBy=sockets.target\n")
+	return unit.String()
+}
+
+func renderOperatorService(plan servicePlan, leg serviceLeg) string {
+	var unit strings.Builder
+	fmt.Fprintf(&unit, "[Unit]\nDescription=Mithril agent %s root operator request\n", leg.Name)
+	fmt.Fprintf(&unit, "Requires=%s.socket\nCollectMode=inactive-or-failed\n\n", leg.operatorUnit())
+	unit.WriteString("[Service]\nType=exec\nUMask=0077\n")
+	fmt.Fprintf(&unit, "User=%s\nGroup=%s\n", submitterAccountName, submitterAccountName)
+	fmt.Fprintf(&unit, "LoadCredential=submitter-policy:%s\n", leg.SubmitterPolicy)
+	fmt.Fprintf(&unit, "ExecStart=%s --policy %%d/submitter-policy --operator-socket\n",
+		filepath.Join(filepath.Dir(plan.Binary), "mithril-agent-submitter"))
+	unit.WriteString("StandardInput=socket\nStandardOutput=socket\nStandardError=journal\n")
+	unit.WriteString("RuntimeMaxSec=30s\nTimeoutStopSec=5s\n")
+	unit.WriteString("NoNewPrivileges=yes\nCapabilityBoundingSet=\nAmbientCapabilities=\n")
+	unit.WriteString("PrivateDevices=yes\nPrivateMounts=yes\nPrivateNetwork=yes\nPrivateTmp=yes\n")
+	unit.WriteString("ProtectControlGroups=yes\nProtectHome=yes\nProtectHostname=yes\n")
+	unit.WriteString("ProtectKernelLogs=yes\nProtectKernelModules=yes\nProtectKernelTunables=yes\n")
+	unit.WriteString("ProtectProc=invisible\nProtectSystem=strict\n")
+	// This keyless service shares the submitter's UID, so hiding only the source
+	// key path would still leave /proc/<submitter>/root as an alias to that key.
+	fmt.Fprintf(&unit, "ReadWritePaths=%s\nInaccessiblePaths=/proc %s\n",
+		leg.ControlStateDir, leg.SubmitterKey)
+	unit.WriteString("RestrictAddressFamilies=AF_UNIX\nRemoveIPC=yes\nRestrictNamespaces=yes\n")
+	unit.WriteString("RestrictRealtime=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\n")
+	unit.WriteString("SystemCallArchitectures=native\nMemoryDenyWriteExecute=yes\n")
+	unit.WriteString("MemoryMax=64M\nMemorySwapMax=0\nTasksMax=8\nLimitNOFILE=32\n")
+	return unit.String()
+}
+
+func renderRecoveryService(plan servicePlan, leg serviceLeg) string {
+	var unit strings.Builder
+	fmt.Fprintf(&unit, "[Unit]\nDescription=Mithril agent %s independent recovery check\n", leg.Name)
+	unit.WriteString("After=network-online.target\nWants=network-online.target\n\n")
+	unit.WriteString("[Service]\nType=oneshot\nUMask=0077\n")
+	fmt.Fprintf(&unit, "User=%s\nGroup=%s\n", submitterAccountName, submitterAccountName)
+	fmt.Fprintf(&unit, "LoadCredential=submitter-policy:%s\n", leg.SubmitterPolicy)
+	unit.WriteString("EnvironmentFile=/etc/mithril-agent/rpc.env\n")
+	fmt.Fprintf(&unit, "ExecStart=%s --policy %%d/submitter-policy --recover\n",
+		filepath.Join(filepath.Dir(plan.Binary), "mithril-agent-submitter"))
+	unit.WriteString("TimeoutStartSec=15min\nNoNewPrivileges=yes\nCapabilityBoundingSet=\nAmbientCapabilities=\n")
+	unit.WriteString("PrivateDevices=yes\nPrivateMounts=yes\nPrivateTmp=yes\nProtectControlGroups=yes\nProtectHome=yes\n")
+	unit.WriteString("ProtectClock=yes\nProtectHostname=yes\nProtectKernelLogs=yes\nProtectKernelModules=yes\nProtectKernelTunables=yes\n")
+	unit.WriteString("ProtectProc=invisible\nProtectSystem=strict\n")
+	// This process intentionally shares the submitter's UID so it can atomically
+	// clear durable recovery state. Hiding only the key path is insufficient:
+	// the same UID can otherwise reopen it through /proc/<submitter>/root while
+	// a socket-activated submitter is alive. Recovery needs no process metadata,
+	// so remove /proc from its mount namespace as well as the direct key path.
+	fmt.Fprintf(&unit, "ReadWritePaths=%s\nInaccessiblePaths=/proc %s\n",
+		leg.ControlStateDir, leg.SubmitterKey)
+	unit.WriteString("IPAddressDeny=127.0.0.0/8\nIPAddressDeny=::1/128\n")
+	unit.WriteString("IPAddressDeny=10.0.0.0/8\nIPAddressDeny=172.16.0.0/12\n")
+	unit.WriteString("IPAddressDeny=192.168.0.0/16\nIPAddressDeny=169.254.0.0/16\n")
+	unit.WriteString("IPAddressDeny=100.64.0.0/10\nIPAddressDeny=198.18.0.0/15\n")
+	unit.WriteString("IPAddressDeny=224.0.0.0/4\nIPAddressDeny=240.0.0.0/4\n")
+	unit.WriteString("IPAddressDeny=fc00::/7\nIPAddressDeny=fe80::/10\n")
+	unit.WriteString("IPAddressDeny=ff00::/8\nIPAddressDeny=fec0::/10\n")
+	unit.WriteString("IPAddressAllow=127.0.0.53/32\nIPAddressAllow=127.0.0.54/32\n")
+	unit.WriteString("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\nRemoveIPC=yes\nRestrictNamespaces=yes\n")
+	unit.WriteString("RestrictRealtime=yes\nRestrictSUIDSGID=yes\nLockPersonality=yes\n")
+	unit.WriteString("SystemCallArchitectures=native\nMemoryDenyWriteExecute=yes\n")
+	unit.WriteString("MemoryMax=128M\nMemorySwapMax=0\nTasksMax=16\nLimitNOFILE=64\n")
+	return unit.String()
+}
+
+func renderRecoveryTimer(leg serviceLeg) string {
+	var unit strings.Builder
+	fmt.Fprintf(&unit, "[Unit]\nDescription=Mithril agent %s independent recovery schedule\n\n", leg.Name)
+	unit.WriteString("[Timer]\nOnBootSec=10s\nOnUnitInactiveSec=10s\nAccuracySec=1s\n")
+	fmt.Fprintf(&unit, "Unit=%s.service\n\n", leg.recoveryUnit())
+	unit.WriteString("[Install]\nWantedBy=timers.target\n")
 	return unit.String()
 }
 
@@ -787,7 +1304,9 @@ func renderAlertsUnit(plan servicePlan) string {
 	fmt.Fprintf(&unit, "EnvironmentFile=%s\n", alertsEnvFile)
 	fmt.Fprintf(&unit, "ExecStart=%s", filepath.Join(filepath.Dir(plan.Binary), "mithril-agent-telegram"))
 	for _, leg := range plan.Legs {
-		fmt.Fprintf(&unit, " \\\n  --status-socket %s", leg.socket())
+		if leg.StatusFile != "" {
+			fmt.Fprintf(&unit, " \\\n  --status-socket %s", leg.socket())
+		}
 	}
 	fmt.Fprintf(&unit, " \\\n  --cursor %s\n", alertsCursorPath)
 	unit.WriteString("Restart=on-failure\nRestartSec=10s\n")
@@ -811,17 +1330,28 @@ func renderAlertsUnit(plan servicePlan) string {
 	return unit.String()
 }
 
-// alertUnits names every generated alert unit and its contents, in the order
-// they must be installed: sockets before the bot that connects to them.
-func alertUnits(plan servicePlan) map[string]string {
-	if !plan.Alerts || len(plan.Legs) == 0 {
-		return nil
-	}
-	units := make(map[string]string, 2*len(plan.Legs)+1)
+// supportUnits names every generated authority and status unit, plus the
+// optional Telegram process.
+func supportUnits(plan servicePlan) map[string]string {
+	units := make(map[string]string, 10*len(plan.Legs)+1)
 	for _, leg := range plan.Legs {
-		units[leg.unit()+".socket"] = renderStatusSocket(plan, leg)
-		units[leg.unit()+".service"] = renderStatusService(plan, leg)
+		units[leg.signerUnit()+".socket"] = renderSignerSocket(plan, leg)
+		units[leg.signerUnit()+"@.service"] = renderSignerService(plan, leg)
+		units[leg.riskUnit()+".socket"] = renderRiskSocket(plan, leg)
+		units[leg.riskUnit()+"@.service"] = renderRiskService(plan, leg)
+		units[leg.submitterUnit()+".socket"] = renderSubmitterSocket(plan, leg)
+		units[leg.submitterUnit()+"@.service"] = renderSubmitterService(plan, leg)
+		units[leg.operatorUnit()+".socket"] = renderOperatorSocket(leg)
+		units[leg.operatorUnit()+"@.service"] = renderOperatorService(plan, leg)
+		units[leg.recoveryUnit()+".service"] = renderRecoveryService(plan, leg)
+		units[leg.recoveryUnit()+".timer"] = renderRecoveryTimer(leg)
+		if leg.StatusFile != "" {
+			units[leg.unit()+".socket"] = renderStatusSocket(plan, leg)
+			units[leg.unit()+".service"] = renderStatusService(plan, leg)
+		}
 	}
-	units[alertsUnitName] = renderAlertsUnit(plan)
+	if plan.Telegram && len(statusSocketUnits(plan)) != 0 {
+		units[alertsUnitName] = renderAlertsUnit(plan)
+	}
 	return units
 }

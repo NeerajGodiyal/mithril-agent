@@ -13,13 +13,11 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
 
-// shadow run and shadow report score ONE direction: "was selling at this price
-// good". The other half of the question — "and could I buy back low enough for
-// the round trip to clear its own costs" — cannot be answered by running the
-// two legs separately, because the second leg spends exactly what the first
-// produced and the spread plus two fees comes out of one book.
-//
-// This command is that other half, over prices the observer actually recorded.
+// A continuous shadow run scores the rule as it happens. This command reruns a
+// sell-then-buy-back rule over prices the observer already recorded, which lets
+// an operator compare thresholds without waiting for another live period. The
+// second leg spends exactly what the first produced and the spread plus two
+// fees comes out of one book.
 //
 // One thing it does NOT do is pretend to know the pool. A recorded tick carries
 // the price, not the quote that was available at the time, so the fill has to be
@@ -78,6 +76,7 @@ func runShadowBacktest(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
+	journalPolicy := policy
 	// The return leg is the policy's own rule with the direction flipped, so a
 	// round trip cannot silently read a different feed or a different source
 	// pair than the sell it is paired with.
@@ -93,7 +92,9 @@ func runShadowBacktest(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	ticks, err := readShadowTicks(filepath.Join(*directory, "shadow-"+chosen+".jsonl"))
+	ticks, err := readShadowTicks(
+		filepath.Join(*directory, "shadow-"+chosen+".jsonl"), journalPolicy,
+	)
 	if err != nil {
 		return err
 	}
@@ -200,7 +201,7 @@ func writeBacktest(
 	w("\nRound trip over recorded prices — %s\n", day)
 	w("  legs       %d sell(s), %d buy(s), %d refused\n",
 		result.Counts.Sells, result.Counts.Buys, result.Counts.Refused)
-	w("  signals    %d sell, %d buy (a signal with the wrong inventory does nothing)\n",
+	w("  signals    %d sell, %d buy\n",
 		result.Counts.SellSignals, result.Counts.BuySignals)
 	w("  realized   $%s\n", formatSignedMicros(report.RealizedMicros))
 	w("  vs holding $%s   <- the only number that answers \"was this worth doing\"\n",
@@ -216,7 +217,10 @@ func writeBacktest(
 // loss that renders as a bare number reads as a profit at a glance.
 func formatSignedMicros(value int64) string {
 	if value < 0 {
-		return "-" + formatUnits(uint64(-value), 6)
+		// -(MinInt64) overflows an int64. Convert the magnitude without ever
+		// constructing that unrepresentable positive value.
+		magnitude := uint64(-(value + 1)) + 1
+		return "-" + formatUnits(magnitude, 6)
 	}
 	return "+" + formatUnits(uint64(value), 6)
 }

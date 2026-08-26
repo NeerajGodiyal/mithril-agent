@@ -39,7 +39,8 @@ const swapUsage = `Usage:
   mithril-agent swap check --config PATH
   mithril-agent swap demo --config PATH [--timeout DURATION] [--json]
   mithril-agent swap run --config PATH [--interval DURATION] [--metrics-address ADDRESS]
-                           [--quote-socket PATH]
+                           [--quote-socket PATH] [--signer-socket PATH]
+                           [--risk-socket PATH] [--submitter-socket PATH]
   mithril-agent swap enable --config PATH --duration DURATION [--max-actions N] --reason TEXT
   mithril-agent swap stop --config PATH --reason TEXT
   mithril-agent swap acknowledge --config PATH --action-id SHA256 --outcome failed|halted --reason TEXT
@@ -373,6 +374,44 @@ func runSwapFingerprint(args []string, output io.Writer) error {
 // had been granted.
 const maxSwapActionsPerActivation = 100
 
+var (
+	enableOperatorControl = func(
+		socketPath,
+		expectedRevision string,
+		issuedAt,
+		expiresAt time.Time,
+		maxActions uint32,
+		reason string,
+	) error {
+		client, err := submitterclient.New(submitterclient.Config{SocketPath: socketPath})
+		if err != nil {
+			return err
+		}
+		return client.Enable(
+			expectedRevision, issuedAt, expiresAt, maxActions, reason,
+		)
+	}
+	operatorControlStatus = func(socketPath string) (control.Status, string, error) {
+		client, err := submitterclient.New(submitterclient.Config{SocketPath: socketPath})
+		if err != nil {
+			return control.Status{}, "", err
+		}
+		return client.OperatorStatus()
+	}
+	acknowledgeOperatorControl = func(
+		socketPath,
+		actionID,
+		outcome,
+		reason string,
+	) (control.Status, error) {
+		client, err := submitterclient.New(submitterclient.Config{SocketPath: socketPath})
+		if err != nil {
+			return control.Status{}, err
+		}
+		return client.AcknowledgeTerminal(actionID, outcome, reason)
+	}
+)
+
 func runSwapEnable(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("swap enable", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -380,15 +419,20 @@ func runSwapEnable(args []string, output io.Writer) error {
 	duration := flags.Duration("duration", 0, "bounded activation lifetime")
 	maxActions := flags.Uint("max-actions", 1, "trades this activation permits, 1..100")
 	reason := flags.String("reason", "", "operator reason")
+	operatorSocket := flags.String("operator-socket", defaultOperatorSocket,
+		"root-only submitter operator socket")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent swap enable --config PATH --duration DURATION [--max-actions N] --reason TEXT")
+			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent swap enable --config PATH --operator-socket PATH --duration DURATION [--max-actions N] --reason TEXT")
 			return writeErr
 		}
 		return err
 	}
 	if flags.NArg() != 0 || *configPath == "" || *reason == "" {
 		return errors.New("swap enable requires --config, --duration, and --reason")
+	}
+	if !filepath.IsAbs(*operatorSocket) || filepath.Clean(*operatorSocket) != *operatorSocket {
+		return errors.New("operator socket must be an absolute clean path")
 	}
 	if *duration < time.Minute || *duration > 24*time.Hour {
 		return errors.New("swap activation must last between 1 minute and 24 hours")
@@ -441,25 +485,16 @@ func runSwapEnable(args []string, output io.Writer) error {
 				"or run setup again with a higher --trades-per-day",
 			funded, *maxActions, funded)
 	}
-	fingerprint, err := cfg.Swap.Fingerprint()
-	if err != nil {
-		return err
-	}
 	issuedAt := time.Now().UTC()
-	revision, err := requireRecentSwapRunner(cfg, issuedAt)
+	revision, err := requireRecentSwapRunner(cfg, issuedAt, *operatorSocket)
 	if err != nil {
 		return err
 	}
 	expiresAt := issuedAt.Add(*duration)
-	written, err := control.WriteDevnetActivationIfRevision(
-		cfg.Control.StatePath, fingerprint, revision, issuedAt, expiresAt,
-		uint32(*maxActions), *reason,
-	)
-	if err != nil {
+	if err := enableOperatorControl(
+		*operatorSocket, revision, issuedAt, expiresAt, uint32(*maxActions), *reason,
+	); err != nil {
 		return err
-	}
-	if !written {
-		return errors.New("control state changed while enabling; inspect status and retry")
 	}
 	return json.NewEncoder(output).Encode(struct {
 		Mode       string    `json:"mode"`
@@ -468,20 +503,32 @@ func runSwapEnable(args []string, output io.Writer) error {
 	}{control.ModeDevnetEnabled, expiresAt, uint32(*maxActions)})
 }
 
-func requireRecentSwapRunner(cfg config, now time.Time) (string, error) {
-	fingerprint, err := cfg.Swap.Fingerprint()
-	if err != nil {
-		return "", err
+func requireRecentSwapRunner(
+	cfg config,
+	now time.Time,
+	operatorSockets ...string,
+) (string, error) {
+	var (
+		status   control.Status
+		revision string
+		err      error
+	)
+	if len(operatorSockets) != 0 && operatorSockets[0] != "" {
+		status, revision, err = operatorControlStatus(operatorSockets[0])
+	} else {
+		fingerprint, fingerprintErr := cfg.Swap.Fingerprint()
+		if fingerprintErr != nil {
+			return "", fingerprintErr
+		}
+		state, stateErr := control.NewStateFile(cfg.Control.StatePath, fingerprint, false)
+		if stateErr != nil {
+			return "", stateErr
+		}
+		revision, err = state.Revision()
+		if err == nil {
+			status, err = state.Status()
+		}
 	}
-	state, err := control.NewStateFile(cfg.Control.StatePath, fingerprint, false)
-	if err != nil {
-		return "", err
-	}
-	revision, err := state.Revision()
-	if err != nil {
-		return "", err
-	}
-	status, err := state.Status()
 	if err != nil {
 		return "", err
 	}
@@ -528,6 +575,7 @@ func runSwapStop(args []string, output io.Writer) error {
 	flags.SetOutput(io.Discard)
 	configPath := flags.String("config", "", "agent config JSON")
 	reason := flags.String("reason", "", "operator reason")
+	submitterSocket := flags.String("submitter-socket", "", "isolated submitter control socket")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent swap stop --config PATH --reason TEXT")
@@ -538,11 +586,15 @@ func runSwapStop(args []string, output io.Writer) error {
 	if flags.NArg() != 0 || *configPath == "" || *reason == "" {
 		return errors.New("swap stop requires --config and --reason")
 	}
+	if *submitterSocket != "" &&
+		(!filepath.IsAbs(*submitterSocket) || filepath.Clean(*submitterSocket) != *submitterSocket) {
+		return errors.New("submitter socket must be an absolute clean path")
+	}
 	cfg, err := readSwapConfig(*configPath)
 	if err != nil {
 		return err
 	}
-	status, err := stopSwap(cfg, *reason)
+	status, err := stopSwapWithSocket(cfg, *reason, *submitterSocket)
 	if err != nil {
 		return err
 	}
@@ -561,16 +613,58 @@ func runSwapStop(args []string, output io.Writer) error {
 }
 
 func stopSwap(cfg config, reason string) (control.Status, error) {
+	return stopSwapWithSocket(cfg, reason, "")
+}
+
+func stopSwapWithSocket(cfg config, reason, submitterSocket string) (control.Status, error) {
 	fingerprint, err := cfg.Swap.Fingerprint()
 	if err != nil {
 		return control.Status{}, err
 	}
-	state, err := control.NewStateFile(cfg.Control.StatePath, fingerprint, false)
+	if submitterSocket != "" {
+		return stopSubmitterControl(submitterSocket, reason)
+	}
+	return stopControlState(cfg.Control.StatePath, fingerprint, reason)
+}
+
+func stopSubmitterControl(socketPath, reason string) (control.Status, error) {
+	client, err := submitterclient.New(submitterclient.Config{SocketPath: socketPath})
 	if err != nil {
 		return control.Status{}, err
 	}
-	if err := state.Stop(reason); err != nil {
+	if err := client.StopPreservingRecovery(reason); err != nil {
+		if errors.Is(err, control.ErrRecoveryPending) {
+			return control.Status{}, errors.New(
+				"an action may have reached submission before the service transition; " +
+					"automatic restart will not acknowledge it—review the transaction before clearing recovery")
+		}
 		return control.Status{}, err
+	}
+	return client.Status()
+}
+
+func stopControlState(statePath, fingerprint, reason string) (control.Status, error) {
+	state, err := control.NewStateFile(statePath, fingerprint, false)
+	if err != nil {
+		return control.Status{}, err
+	}
+	var stopErr error
+	if reason == "service_start" || reason == "service_stop" {
+		stopErr = state.StopPreservingRecovery(reason)
+	} else {
+		stopErr = state.Stop(reason)
+	}
+	if errors.Is(stopErr, control.ErrRecoveryPending) {
+		status, statusErr := state.Status()
+		if statusErr != nil {
+			return control.Status{}, errors.Join(stopErr, statusErr)
+		}
+		return status, errors.New(
+			"an action may have reached submission before the service transition; " +
+				"automatic restart will not acknowledge it—review the transaction, then stop it explicitly")
+	}
+	if stopErr != nil {
+		return control.Status{}, stopErr
 	}
 	return state.Status()
 }
@@ -582,9 +676,11 @@ func runSwapAcknowledge(args []string, output io.Writer) error {
 	actionID := flags.String("action-id", "", "exact terminal action ID")
 	outcome := flags.String("outcome", "", "expected terminal outcome")
 	reason := flags.String("reason", "", "operator reason")
+	operatorSocket := flags.String("operator-socket", defaultOperatorSocket,
+		"root-only submitter operator socket")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent swap acknowledge --config PATH --action-id SHA256 --outcome failed|halted --reason TEXT")
+			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent swap acknowledge --config PATH --operator-socket PATH --action-id SHA256 --outcome failed|halted --reason TEXT")
 			return writeErr
 		}
 		return err
@@ -592,6 +688,9 @@ func runSwapAcknowledge(args []string, output io.Writer) error {
 	if flags.NArg() != 0 || *configPath == "" || *actionID == "" || *reason == "" ||
 		(*outcome != "failed" && *outcome != "halted") {
 		return errors.New("swap acknowledge requires --config, --action-id, --outcome failed|halted, and --reason")
+	}
+	if !filepath.IsAbs(*operatorSocket) || filepath.Clean(*operatorSocket) != *operatorSocket {
+		return errors.New("operator socket must be an absolute clean path")
 	}
 	cfg, err := readSwapConfig(*configPath)
 	if err != nil {
@@ -604,23 +703,9 @@ func runSwapAcknowledge(args []string, output io.Writer) error {
 		}
 		return errors.New("terminal acknowledgement journal is unavailable or invalid")
 	}
-	fingerprint, err := cfg.Swap.Fingerprint()
-	if err != nil {
-		_ = store.Close()
-		return err
-	}
-	state, err := control.NewStateFile(cfg.Control.StatePath, fingerprint, false)
-	if err != nil {
-		_ = store.Close()
-		return err
-	}
 	if _, err := swaprun.ValidateTerminalAcknowledgement(
 		store, *actionID, *outcome, *reason,
 	); err != nil {
-		_ = store.Close()
-		return err
-	}
-	if err := state.StopForTerminal(*actionID, *outcome); err != nil {
 		_ = store.Close()
 		return err
 	}
@@ -635,12 +720,9 @@ func runSwapAcknowledge(args []string, output io.Writer) error {
 		return errors.New("close agent journal")
 	}
 	permanentlyBlocked := *outcome == "halted"
-	var status control.Status
-	if permanentlyBlocked {
-		status, err = state.Status()
-	} else {
-		status, err = state.AcknowledgeTerminal(*actionID, *outcome, *reason)
-	}
+	status, err := acknowledgeOperatorControl(
+		*operatorSocket, *actionID, *outcome, *reason,
+	)
 	if err != nil {
 		return err
 	}
@@ -760,9 +842,12 @@ func runSwapLoop(ctx context.Context, args []string, output io.Writer) (runErr e
 	interval := flags.Duration("interval", 10*time.Second, "delay between lifecycle steps")
 	metricsAddress := flags.String("metrics-address", "127.0.0.1:9191", "loopback Prometheus listen address")
 	quoteSocket := flags.String("quote-socket", "", "override quote transport with this local socket")
+	signerSocket := flags.String("signer-socket", "", "override signer transport with this local socket")
+	riskSocket := flags.String("risk-socket", "", "override risk authority transport with this local socket")
+	submitterSocket := flags.String("submitter-socket", "", "override submitter transport with this local socket")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent swap run --config PATH [--interval DURATION] [--metrics-address ADDRESS] [--quote-socket PATH]")
+			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent swap run --config PATH [--interval DURATION] [--metrics-address ADDRESS] [--quote-socket PATH] [--signer-socket PATH] [--risk-socket PATH] [--submitter-socket PATH]")
 			return writeErr
 		}
 		return err
@@ -777,10 +862,27 @@ func runSwapLoop(ctx context.Context, args []string, output io.Writer) (runErr e
 		(!filepath.IsAbs(*quoteSocket) || filepath.Clean(*quoteSocket) != *quoteSocket) {
 		return errors.New("quote socket must be an absolute clean path")
 	}
-	if !swapPreflightAllowsStartup(checkPreflight(*configPath)) {
+	if *signerSocket != "" &&
+		(!filepath.IsAbs(*signerSocket) || filepath.Clean(*signerSocket) != *signerSocket) {
+		return errors.New("signer socket must be an absolute clean path")
+	}
+	if *riskSocket != "" &&
+		(!filepath.IsAbs(*riskSocket) || filepath.Clean(*riskSocket) != *riskSocket) {
+		return errors.New("risk authority socket must be an absolute clean path")
+	}
+	if *submitterSocket != "" &&
+		(!filepath.IsAbs(*submitterSocket) || filepath.Clean(*submitterSocket) != *submitterSocket) {
+		return errors.New("submitter socket must be an absolute clean path")
+	}
+	if err := requireSystemdAuthoritySockets(*signerSocket, *riskSocket, *submitterSocket); err != nil {
+		return err
+	}
+	if !swapPreflightAllowsStartup(checkPreflightWithSockets(*configPath, *signerSocket, *riskSocket, *submitterSocket)) {
 		return errors.New("swap preflight failed; run mithril-agent preflight for details")
 	}
-	runtime, err := openSwapRuntime(*configPath, true, *quoteSocket)
+	runtime, err := openSwapRuntimeWithSockets(
+		*configPath, true, *quoteSocket, *signerSocket, *riskSocket, *submitterSocket,
+	)
 	if err != nil {
 		return err
 	}
@@ -831,7 +933,7 @@ type swapRuntime struct {
 	profile    swaprun.Profile
 	engine     *swaprun.Engine
 	store      *journal.Store
-	control    *control.StateFile
+	control    runtimeControl
 	configPath string
 	statusPath string
 	observer   *mcpobserve.Client
@@ -954,8 +1056,8 @@ func quoteBuilderConfig(cfg config) swapbuilder.Config {
 	}
 }
 
-func openSwapRuntime(
-	configPath string, requireFreshActivation bool, quoteSocket string,
+func openSwapRuntimeWithSockets(
+	configPath string, requireFreshActivation bool, quoteSocket, signerSocket, riskSocket, submitterSocket string,
 ) (*swapRuntime, error) {
 	cfg, err := readSwapConfig(configPath)
 	if err != nil {
@@ -973,21 +1075,21 @@ func openSwapRuntime(
 	authority, err := policyclient.New(policyclient.Config{
 		Command: cfg.Policy.Command, PolicyPath: cfg.Policy.PolicyPath,
 		KeypairPath: cfg.Policy.KeypairPath, KeyID: cfg.Policy.KeyID,
-		PublicKey: cfg.Policy.PublicKey,
+		PublicKey: cfg.Policy.PublicKey, SocketPath: riskSocket,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("risk authority: %w", err)
 	}
 	signerProcess, err := signerclient.New(signerclient.Config{
 		Command: cfg.Signer.Command, PolicyPath: cfg.Signer.PolicyPath,
-		KeypairPath: cfg.Signer.KeypairPath,
+		KeypairPath: cfg.Signer.KeypairPath, SocketPath: signerSocket,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("signer: %w", err)
 	}
 	submitter, err := submitterclient.New(submitterclient.Config{
 		Command: cfg.Submitter.Command, PolicyPath: cfg.Submitter.PolicyPath,
-		PrivateKeyPath: cfg.Submitter.PrivateKeyPath,
+		PrivateKeyPath: cfg.Submitter.PrivateKeyPath, SocketPath: submitterSocket,
 		Env: []string{
 			"MITHRIL_AGENT_MITHRIL_RPC_URL=" + os.Getenv("MITHRIL_AGENT_MITHRIL_RPC_URL"),
 		},
@@ -995,9 +1097,15 @@ func openSwapRuntime(
 	if err != nil {
 		return nil, fmt.Errorf("submitter: %w", err)
 	}
-	stateFile, err := control.NewStateFile(cfg.Control.StatePath, fingerprint, requireFreshActivation)
-	if err != nil {
-		return nil, fmt.Errorf("control state: %w", err)
+	var state runtimeControl = submitter
+	if submitterSocket == "" {
+		stateFile, stateErr := control.NewStateFile(
+			cfg.Control.StatePath, fingerprint, requireFreshActivation,
+		)
+		if stateErr != nil {
+			return nil, fmt.Errorf("control state: %w", stateErr)
+		}
+		state = stateFile
 	}
 	store, err := journal.OpenRotating(cfg.Journal.Path)
 	if err != nil {
@@ -1009,7 +1117,7 @@ func openSwapRuntime(
 	}
 	engine, err := swaprun.New(
 		store, dependencies.observer, dependencies.quotes, dependencies.node,
-		authority, signerProcess, submitter, dependencies.lifecycle, stateFile, nil,
+		authority, signerProcess, submitter, dependencies.lifecycle, state, nil,
 		options...,
 	)
 	if err != nil {
@@ -1017,7 +1125,7 @@ func openSwapRuntime(
 		return nil, err
 	}
 	return &swapRuntime{
-		profile: *cfg.Swap, engine: engine, store: store, control: stateFile,
+		profile: *cfg.Swap, engine: engine, store: store, control: state,
 		configPath: configPath,
 		statusPath: operatorstatus.Path(cfg.Journal.Path), observer: dependencies.observer,
 		quotes: dependencies.quotes, node: dependencies.node, lifecycle: dependencies.lifecycle,
@@ -1109,11 +1217,15 @@ func (runtime *swapRuntime) RecordStatus(
 			Result:     swapExecutionResult(durable),
 		}
 	}
+	strategy, err := strategyProjection(runtime.profile, runtime.configPath)
+	if err != nil {
+		return operatorstatus.Action{}, err
+	}
 	snapshot := operatorstatus.Snapshot{
 		Version: operatorstatus.Version, ObservedAt: at.UTC(),
 		Profile: runtime.profile.Name, ProfileVersion: runtime.profile.Version,
 		Cluster: runtime.profile.Cluster, Result: result, LastAction: lastAction,
-		Journal: stats, Control: status,
+		Journal: stats, Control: status, Strategy: strategy,
 	}
 	if err := operatorstatus.Write(runtime.statusPath, snapshot); err != nil {
 		return operatorstatus.Action{}, err

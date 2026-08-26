@@ -22,6 +22,7 @@ import (
 const (
 	signServeTimeout   = 15 * time.Minute
 	signServePathSize  = 16
+	signMaxBodyBytes   = 4 << 10
 	signMaxHeaderBytes = 8 << 10
 )
 
@@ -149,7 +150,8 @@ func (c *signatureCollector) collect(ctx context.Context) (string, error) {
 		var payload struct {
 			Signature string `json:"signature"`
 		}
-		decoder := json.NewDecoder(io.LimitReader(r.Body, 4096))
+		r.Body = http.MaxBytesReader(w, r.Body, signMaxBodyBytes)
+		decoder := json.NewDecoder(r.Body)
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&payload); err != nil {
 			http.Error(w, "unreadable signature", http.StatusBadRequest)
@@ -207,7 +209,8 @@ func (c *signatureCollector) collect(ctx context.Context) (string, error) {
 		IdleTimeout:       30 * time.Second,
 		MaxHeaderBytes:    signMaxHeaderBytes,
 	}
-	go func() { _ = server.Serve(c.listener) }()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.Serve(c.listener) }()
 	defer func() {
 		shutdown, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -231,6 +234,8 @@ func (c *signatureCollector) collect(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("no signature arrived within %s", signServeTimeout)
 	case <-ctx.Done():
 		return "", ctx.Err()
+	case <-serveErr:
+		return "", errors.New("wallet signing page stopped unexpectedly")
 	}
 }
 
@@ -252,6 +257,7 @@ func injectChallenge(page, challenge, basePath, nonce string) string {
     var box = document.getElementById("challenge");
     if (!box) { return false; }
     box.value = challenge;
+    box.readOnly = true;
     box.dispatchEvent(new Event("input", { bubbles: true }));
     return true;
   }

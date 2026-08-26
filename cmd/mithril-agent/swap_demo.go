@@ -30,10 +30,11 @@ var (
 	demoCheck = func(ctx context.Context, path string) error {
 		return runSwapCheck(ctx, []string{"--config", path}, io.Discard)
 	}
-	demoEnable = func(path string, duration time.Duration) error {
+	demoEnable = func(path, operatorSocket string, duration time.Duration) error {
 		var output bytes.Buffer
 		return runSwapEnable([]string{
 			"--config", path,
+			"--operator-socket", operatorSocket,
 			"--duration", duration.String(),
 			"--max-actions", "1",
 			"--reason", "operator Devnet demo",
@@ -98,11 +99,13 @@ func runSwapDemo(ctx context.Context, args []string, output io.Writer) (resultEr
 	flags := flag.NewFlagSet("swap demo", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	configPath := flags.String("config", "", "agent config JSON")
+	operatorSocket := flags.String("operator-socket", defaultOperatorSocket,
+		"root-only submitter operator socket")
 	timeout := flags.Duration("timeout", defaultDemoTimeout, "maximum time to wait")
 	jsonOutput := flags.Bool("json", false, "print JSON instead of operator text")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent swap demo --config PATH [--timeout DURATION] [--json]")
+			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent swap demo --config PATH --operator-socket PATH [--timeout DURATION] [--json]")
 			return writeErr
 		}
 		return err
@@ -156,7 +159,7 @@ func runSwapDemo(ctx context.Context, args []string, output io.Writer) (resultEr
 	if activation > maxDemoTimeout {
 		activation = maxDemoTimeout
 	}
-	if err := demoEnable(*configPath, activation); err != nil {
+	if err := demoEnable(*configPath, *operatorSocket, activation); err != nil {
 		return fmt.Errorf("enable one Devnet action: %w", err)
 	}
 	stopNeeded := true

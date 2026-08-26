@@ -38,6 +38,10 @@ type strategyFile struct {
 
 	// SizeSOL is the SOL each trade spends. Required.
 	SizeSOL string `json:"size_sol"`
+	// Trust domains identify the organizations operating the two evidence RPCs.
+	// They are names such as "helius" or "quicknode", never URLs or API keys.
+	PrimaryTrustDomain   string `json:"primary_trust_domain"`
+	SecondaryTrustDomain string `json:"secondary_trust_domain"`
 	// SellAtUSD and BuyAtUSD are optional. Set BOTH to trade only at prices you
 	// choose, or NEITHER to trade at whatever the pool gives. Setting one is
 	// refused: half a pair is always a mistake.
@@ -145,6 +149,15 @@ func (f strategyFile) validate() error {
 	if f.SizeSOL == "" {
 		return errors.New(`"size_sol" is required: how much SOL each trade spends`)
 	}
+	if !validTrustDomain(f.PrimaryTrustDomain) {
+		return errors.New(`"primary_trust_domain" must be a short provider name using lowercase letters, numbers, dot, underscore, or hyphen`)
+	}
+	if !validTrustDomain(f.SecondaryTrustDomain) {
+		return errors.New(`"secondary_trust_domain" must be a short provider name using lowercase letters, numbers, dot, underscore, or hyphen`)
+	}
+	if f.PrimaryTrustDomain == f.SecondaryTrustDomain {
+		return errors.New(`"primary_trust_domain" and "secondary_trust_domain" must name different organizations`)
+	}
 	if (f.SellAtUSD == "") != (f.BuyAtUSD == "") {
 		return errors.New(
 			`set BOTH "sell_at_usd" and "buy_at_usd", or NEITHER to trade at market`)
@@ -241,10 +254,16 @@ const strategyFileTemplate = `{
     "day. It is not a target. --max-trades may not exceed it.",
     "",
     "keep_sol is what STAYS in the agent wallet; everything above it is sent to",
-    "sweep.to. Leave it empty and the agent keeps exactly what the trades need."
+    "sweep.to. Leave it empty and the agent keeps exactly what the trades need.",
+    "",
+    "primary_trust_domain and secondary_trust_domain are the companies operating",
+    "your two evidence RPCs, for example helius and quicknode. They are not URLs",
+    "or credentials and they must be independent organizations."
   ],
 
   "size_sol": "0.05",
+  "primary_trust_domain": "",
+  "secondary_trust_domain": "",
   "sell_at_usd": "",
   "buy_at_usd": "",
   "schedule_window": "1h",
@@ -276,6 +295,10 @@ const strategyFileTemplate = `{
 // holds a destination proof somebody signed, and silently replacing it would
 // throw that away.
 func runStrategyInit(args []string, output io.Writer) error {
+	if len(args) == 1 && (args[0] == "help" || args[0] == "-h" || args[0] == "--help") {
+		_, err := fmt.Fprintln(output, strategyUsage)
+		return err
+	}
 	path := ""
 	if len(args) == 1 {
 		path = args[0]
@@ -296,7 +319,7 @@ func runStrategyInit(args []string, output io.Writer) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return errors.New("could not create the directory for the strategy file")
 	}
-	if err := securefile.ReplacePrivate(
+	if err := securefile.CreatePrivate(
 		path, []byte(strategyFileTemplate), maxInputBytes); err != nil {
 		// securefile refuses on principle and says so in four words. That is the
 		// right answer for a library and a dead end for the FIRST command anybody
@@ -319,6 +342,10 @@ func runStrategyInit(args []string, output io.Writer) error {
 // not the typing — it is refusing to leave an unusable file behind and saying
 // exactly which line is wrong.
 func runStrategyEdit(args []string, output io.Writer) error {
+	if len(args) == 1 && (args[0] == "help" || args[0] == "-h" || args[0] == "--help") {
+		_, err := fmt.Fprintln(output, strategyUsage)
+		return err
+	}
 	// The guided walkthrough is the DEFAULT. Raw JSON is the opt-in, because
 	// the person who most needs this file is the least likely to edit JSON
 	// safely — and a missing comma is a broken strategy.
@@ -434,6 +461,21 @@ func guideStrategyFile(p *prompter, current strategyFile) (strategyFile, error) 
 		return strategyFile{}, err
 	}
 	next.SizeSOL = size
+
+	primaryTrust, err := p.askTrustDomain(
+		"Who operates the first evidence RPC? (provider company, not endpoint)",
+		current.PrimaryTrustDomain, "")
+	if err != nil {
+		return strategyFile{}, err
+	}
+	next.PrimaryTrustDomain = primaryTrust
+	secondaryTrust, err := p.askTrustDomain(
+		"Who operates the second independent evidence RPC? (different provider company)",
+		current.SecondaryTrustDomain, primaryTrust)
+	if err != nil {
+		return strategyFile{}, err
+	}
+	next.SecondaryTrustDomain = secondaryTrust
 
 	// Every optional part follows the same shape: ON or OFF first, details only
 	// if on. A blank answer used to mean "trade at whatever the pool gives",
@@ -565,7 +607,7 @@ func writeStrategyFile(path string, file strategyFile) error {
 // never asks the operator to type JSON, so a missing comma is not a way to
 // break a strategy.
 func guidedStrategyEdit(path string, output io.Writer) error {
-	current, err := readStrategyFile(path)
+	current, err := readStrategyFileForEdit(path)
 	if err != nil {
 		// A file too broken to read still has to be fixable, and the guided
 		// path is exactly how somebody who cannot repair JSON does that.
@@ -620,6 +662,8 @@ type strategyFileTargets struct {
 	scheduleWindow  *time.Duration
 	activationDelay *time.Duration
 	tradesPerDay    *uint64
+	primaryTrust    *string
+	secondaryTrust  *string
 }
 
 // applyStrategyFile copies a strategy file onto the setup options.
@@ -629,7 +673,7 @@ type strategyFileTargets struct {
 // the operator actually typed.
 func applyStrategyFile(file strategyFile, given map[string]bool, targets strategyFileTargets) error {
 	apply := func(name string, target *string, value string) {
-		if !given[name] && value != "" {
+		if target != nil && !given[name] && value != "" {
 			*target = value
 		}
 	}
@@ -641,6 +685,8 @@ func applyStrategyFile(file strategyFile, given map[string]bool, targets strateg
 	apply("proof-issued", targets.proofIssued, file.Sweep.ProofIssued)
 	apply("proof-signature", targets.proofSignature, file.Sweep.ProofSignature)
 	apply("keep-sol", targets.keepSOL, file.Sweep.KeepSOL)
+	apply("primary-trust-domain", targets.primaryTrust, file.PrimaryTrustDomain)
+	apply("secondary-trust-domain", targets.secondaryTrust, file.SecondaryTrustDomain)
 
 	if !given["schedule-window"] && file.ScheduleWindow != "" {
 		parsed, err := time.ParseDuration(file.ScheduleWindow)

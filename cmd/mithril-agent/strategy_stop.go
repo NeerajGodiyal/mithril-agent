@@ -5,8 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-
-	"github.com/Overclock-Validator/mithril-agent/internal/control"
+	"path/filepath"
 )
 
 // strategyStop is the brake. A strategy is several independently armed legs, so
@@ -31,6 +30,9 @@ func strategyStop(args []string, output io.Writer) error {
 	sellPath := flags.String("sell-config", "", "override the recorded sell leg")
 	buyPath := flags.String("buy-config", "", "override the recorded buy leg")
 	sweepPath := flags.String("sweep-config", "", "override the recorded sweep")
+	submitterSocketPrefix := flags.String(
+		"submitter-socket-prefix", "", "per-leg isolated submitter socket prefix",
+	)
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, strategyUsage)
@@ -40,6 +42,11 @@ func strategyStop(args []string, output io.Writer) error {
 	}
 	if flags.NArg() != 0 || *reason == "" {
 		return errors.New("strategy stop requires --reason TEXT")
+	}
+	if *submitterSocketPrefix != "" &&
+		(!filepath.IsAbs(*submitterSocketPrefix) ||
+			filepath.Clean(*submitterSocketPrefix) != *submitterSocketPrefix) {
+		return errors.New("submitter socket prefix must be an absolute clean path")
 	}
 
 	paths, unreadable := discoverStrategy()
@@ -79,7 +86,9 @@ func strategyStop(args []string, output io.Writer) error {
 		}
 	}
 	for _, leg := range paths.configured() {
-		if err := stopStrategyLeg(leg.leg, leg.path, *reason); err != nil {
+		if err := stopStrategyLegWithSocket(
+			leg.leg, leg.path, *reason, *submitterSocketPrefix,
+		); err != nil {
 			failures++
 			if _, writeErr := fmt.Fprintf(output,
 				"  %-6s STILL ARMED — %v\n", leg.leg, err); writeErr != nil {
@@ -103,12 +112,16 @@ func strategyStop(args []string, output io.Writer) error {
 // directly. Reading the config to decide is what keeps a mistyped path from
 // stopping the wrong kind of thing and reporting success.
 func stopStrategyLeg(leg, path, reason string) error {
+	return stopStrategyLegWithSocket(leg, path, reason, "")
+}
+
+func stopStrategyLegWithSocket(leg, path, reason, socketPrefix string) error {
 	cfg, err := readConfig(path)
 	if err != nil {
 		return err
 	}
 	if cfg.Swap != nil {
-		_, err := stopSwap(cfg, reason)
+		_, err := stopSwapWithSocket(cfg, reason, legSubmitterSocket(socketPrefix, leg))
 		return err
 	}
 	if !cfg.hasLegacyProfile() {
@@ -117,5 +130,21 @@ func stopStrategyLeg(leg, path, reason string) error {
 	if cfg.Control.StatePath == "" {
 		return errors.New("this config records no control state path")
 	}
-	return control.WriteNoNewActions(cfg.Control.StatePath, reason)
+	_, _, _, fingerprint, err := cfg.activeProfile()
+	if err != nil {
+		return err
+	}
+	if socketPrefix != "" {
+		_, err := stopSubmitterControl(legSubmitterSocket(socketPrefix, leg), reason)
+		return err
+	}
+	_, err = stopControlState(cfg.Control.StatePath, fingerprint, reason)
+	return err
+}
+
+func legSubmitterSocket(prefix, leg string) string {
+	if prefix == "" {
+		return ""
+	}
+	return prefix + leg + ".sock"
 }

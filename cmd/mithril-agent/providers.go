@@ -13,7 +13,9 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/internal/control"
 	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
 	"github.com/Overclock-Validator/mithril-agent/journal"
+	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
 	"github.com/Overclock-Validator/mithril-agent/solanarpc"
+	"github.com/Overclock-Validator/mithril-agent/submitter"
 	"github.com/Overclock-Validator/mithril-agent/swaprun"
 )
 
@@ -67,13 +69,11 @@ func openBoundRPCProviders(
 	if err != nil {
 		return rpcProviders{}, err
 	}
-	if cfg.Swap != nil {
-		if err := cfg.validateEvidenceTrustDomains(); err != nil {
-			return rpcProviders{}, err
-		}
-		if err := validateEvidenceOriginBindings(cfg, providers.primary, providers.secondary); err != nil {
-			return rpcProviders{}, err
-		}
+	if err := cfg.validateEvidenceTrustDomains(); err != nil {
+		return rpcProviders{}, err
+	}
+	if err := validateEvidenceOriginBindings(cfg, providers.primary, providers.secondary); err != nil {
+		return rpcProviders{}, err
 	}
 	return providers, nil
 }
@@ -200,6 +200,19 @@ func runSwapBindProviders(args []string, output io.Writer) error {
 	}
 	cfg.Evidence.PrimaryOriginSHA256 = providers.primary.Identity()
 	cfg.Evidence.SecondaryOriginSHA256 = providers.secondary.Identity()
+	bindings := providerBindings(cfg)
+	if err := bindings.Validate(); err != nil {
+		return err
+	}
+	var submitterPolicy submitter.Policy
+	if readStrictJSON(cfg.Submitter.PolicyPath, &submitterPolicy) != nil ||
+		validatePrivateTarget(cfg.Submitter.PolicyPath) != nil ||
+		submitterPolicy.Validate() != nil ||
+		submitterPolicy.ProfileFingerprint != fingerprint ||
+		submitterPolicy.ControlStatePath != cfg.Control.StatePath {
+		return errors.New("submitter policy does not match the stopped profile")
+	}
+	submitterPolicy.Evidence = bindings
 
 	payload := providerBindingResult{
 		Status:                 "provider_binding_requested",
@@ -213,11 +226,23 @@ func runSwapBindProviders(args []string, output io.Writer) error {
 	if _, err := store.Append(time.Now().UTC(), "provider_binding_requested", "", payload); err != nil {
 		return errors.New("record provider binding request")
 	}
+	policyData, err := json.Marshal(submitterPolicy)
+	if err != nil {
+		return errors.New("encode submitter policy")
+	}
+	policyData = append(policyData, '\n')
 	encoded, err := json.Marshal(cfg)
 	if err != nil {
 		return errors.New("encode agent configuration")
 	}
 	encoded = append(encoded, '\n')
+	// Either write can be interrupted. In both partial states preflight sees a
+	// binding mismatch and refuses to run; repeating this command completes it.
+	if err := securefile.ReplacePrivate(
+		cfg.Submitter.PolicyPath, policyData, maxInputBytes,
+	); err != nil {
+		return errors.New("replace submitter policy")
+	}
 	if err := securefile.ReplacePrivate(*configPath, encoded, maxInputBytes); err != nil {
 		return errors.New("replace agent configuration")
 	}
@@ -230,6 +255,15 @@ func runSwapBindProviders(args []string, output io.Writer) error {
 	}
 	closed = true
 	return json.NewEncoder(output).Encode(payload)
+}
+
+func providerBindings(cfg config) proposalcheck.ProviderBindings {
+	return proposalcheck.ProviderBindings{
+		PrimaryTrustDomain:    cfg.Evidence.PrimaryTrustDomain,
+		PrimaryOriginSHA256:   cfg.Evidence.PrimaryOriginSHA256,
+		SecondaryTrustDomain:  cfg.Evidence.SecondaryTrustDomain,
+		SecondaryOriginSHA256: cfg.Evidence.SecondaryOriginSHA256,
+	}
 }
 
 func validateEvidenceOriginBindings(

@@ -33,7 +33,6 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/policyclient"
 	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
 	"github.com/Overclock-Validator/mithril-agent/signerclient"
-	"github.com/Overclock-Validator/mithril-agent/solanarpc"
 	"github.com/Overclock-Validator/mithril-agent/statussocket"
 	"github.com/Overclock-Validator/mithril-agent/submitterclient"
 	"github.com/Overclock-Validator/mithril-agent/swapbuilder"
@@ -41,13 +40,25 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/txflow"
 )
 
-const rootUsage = `Mithril Agent — bounded Solana Devnet pilot
+const rootUsage = `Mithril Agent — walletless Solana program and index workflows
 
 New host:
+  Read README.md, then ROADMAP.md and WALLETLESS_QUICKSTART.md. Use INDEXING.md
+  for durable cursor and recovery details.
+  These default workflows load no wallet or signing key.
+
+Start with no host configuration:
+  mithril-agent program --help          pin, read, decode, and simulate programs
+  mithril-agent index --help            ingest and query rooted program activity
+  mithril-agent explain                 plain-language capability summary
+  mithril-agent walkthrough             read-only live-price walkthrough
+
+Optional bounded Devnet trading pilot:
   Read QUICKSTART.md in this checkout, or the installed copy at:
   /usr/local/share/doc/mithril-agent/QUICKSTART.md
+  mithril-agent strategy dca-plan ...   plan only; never arms, signs, or submits
 
-The supported setup is one generated strategy: sell, buy, sweep, read-only
+The optional setup is one generated strategy: sell, buy, sweep, read-only
 Telegram alerts, and one read-only MCP socket per leg. Do not mix it with the
 legacy single-leg systemd units.
 
@@ -63,24 +74,58 @@ HOME=/var/lib/mithril-agent:
   mithril-agent strategy enable ...     grant bounded spending authority
   mithril-agent strategy stop --reason TEXT
 
-Nothing installed? These need no wallet, host, or configuration:
-  mithril-agent explain                 plain-language capability summary
-  mithril-agent walkthrough             read-only live-price walkthrough
-
 Other supported tools:
   mithril-agent wallet check --file PATH
+  mithril-agent wallet fund --file PATH
   mithril-agent doctor [--config PATH] [--json]
+  mithril-agent mcp config [--socket PATH]
   mithril-agent mcp (--config PATH | --status-socket PATH)
-  mithril-agent shadow policy --out PATH --observe ADDR --sell-at-usd N
+  mithril-agent program inspect --idl PATH --program ADDRESS
+  mithril-agent program pin --idl PATH --program ADDRESS --registry PATH
+  mithril-agent program fetch --program ADDRESS --registry PATH --cluster CLUSTER --node-rpc LOOPBACK_URL --min-context-slot N
+  mithril-agent program show --program ADDRESS --sha256 HEX --registry PATH
+  mithril-agent program build --registry PATH --program ADDRESS --sha256 HEX --instruction NAME --fee-payer ADDRESS --recent-blockhash HASH ...
+  mithril-agent program decode-account --registry PATH --program ADDRESS --sha256 HEX --account-type NAME (--data PATH | --index-dir PATH --account ADDRESS)
+  mithril-agent program decode-event --registry PATH --program ADDRESS --sha256 HEX --event-type NAME --index-dir PATH --signature SIGNATURE
+  mithril-agent program read-account --registry PATH --program ADDRESS --sha256 HEX --account-type NAME --account ADDRESS --cluster CLUSTER --node-rpc LOOPBACK_URL --min-context-slot N
+  mithril-agent program simulate --registry PATH --program ADDRESS --sha256 HEX ...
+  mithril-agent program mcp --workspace PATH --sha256 HEX
+  mithril-agent program mcp-config --workspace PATH --sha256 HEX --name NAME
+  mithril-agent index ingest --dir ABSOLUTE_PATH [--owner ADDRESS] [--account ADDRESS] [--mention ADDRESS]
+  mithril-agent index doctor --dir ABSOLUTE_PATH
+  mithril-agent index status --dir ABSOLUTE_PATH
+  mithril-agent index query --dir ABSOLUTE_PATH [--owner ADDRESS] [--account ADDRESS]
+  mithril-agent index transactions --dir ABSOLUTE_PATH [--signature SIGNATURE] [--mention ADDRESS]
+  mithril-agent shadow policy --out PATH --observe ADDR --sell-at-usd N [--buy-at-usd N]
   mithril-agent shadow run --policy PATH --dir PATH
   mithril-agent shadow report --policy PATH --dir PATH
+  mithril-agent shadow review --policy PATH --dir PATH --days N
+  mithril-agent shadow search --policy PATH --dir PATH --train-day DATE --validation-day DATE
+  mithril-agent proposal evidence-check --primary-trust-domain NAME --secondary-trust-domain NAME --archive-probe-signature SIGNATURE
+  mithril-agent proposal check --taker ADDR --input-mint ADDR --output-mint ADDR --amount N
+  mithril-agent proposal recheck --candidate ABSOLUTE_PATH [provider bindings]
+  mithril-agent proposal prepare --candidate ABSOLUTE_PATH --authority-policy PATH
+  mithril-agent proposal review --request ABSOLUTE_PATH --signer-policy PATH
+  mithril-agent proposal approval-create --request ABSOLUTE_PATH --authority-policy PATH --out PATH
+  mithril-agent proposal key-create --kind KIND --out ABSOLUTE_PATH
+  mithril-agent proposal policy-create --route-policy PATH --check-result PATH --out DIR
+  mithril-agent proposal policy-check --authority-policy PATH --signer-policy PATH --submitter-policy PATH
+  mithril-agent proposal bundle-check --candidate PATH --policy-dir DIR
+  mithril-agent proposal self-hosted-check --host HOST --user USER --policy PATH
+  mithril-agent proposal authority-check --policy PATH --key PATH
+  mithril-agent proposal submitter-check --policy PATH --key PATH
+  mithril-agent proposal canary-check --policy-dir DIR --operator-socket PATH
+  mithril-agent proposal turnkey-check --api-key-file PATH --api-public-key KEY --organization ID --sign-with RESOURCE --expected-address ADDRESS
+  mithril-agent proposal turnkey-policy --candidate PATH --policy PATH --api-user ID --out PATH
+  mithril-agent audit snapshot --config ABSOLUTE_PATH
   mithril-agent journal verify --path ABSOLUTE_PATH
   mithril-agent clock-check --config PATH
   mithril-agent version
 
 MCP and Telegram are read-only. Neither can enable, sign, or submit a trade.
-Shadow mode may watch Mainnet but holds no key and cannot sign. Trading remains
-Devnet-only in this pilot.
+Shadow holds no wallet signing key. Proposal tools may use a provider API key
+but never a wallet signing key; neither path can sign or submit.
+Trading remains Devnet-only in this pilot.
 
 Legacy single-leg check, demo, preflight, and swap commands remain available
 for existing deployments; they are not the full-strategy first-run path.`
@@ -186,7 +231,7 @@ func (c config) validateEvidenceTrustDomains() error {
 	if !validTrustDomain(c.Evidence.PrimaryTrustDomain) ||
 		!validTrustDomain(c.Evidence.SecondaryTrustDomain) ||
 		c.Evidence.PrimaryTrustDomain == c.Evidence.SecondaryTrustDomain {
-		return errors.New("evidence providers must have two distinct trust domains")
+		return errors.New("evidence providers need distinct short organization names using lowercase letters, numbers, dot, underscore, or hyphen")
 	}
 	return nil
 }
@@ -275,13 +320,73 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		if len(args) > 1 && args[1] == "report" {
 			return runShadowReport(args[2:], output)
 		}
+		if len(args) > 1 && args[1] == "review" {
+			return runShadowReview(args[2:], output)
+		}
 		if len(args) > 1 && args[1] == "policy" {
 			return runShadowPolicy(args[2:], output)
 		}
 		if len(args) > 1 && args[1] == "backtest" {
 			return runShadowBacktest(args[2:], output)
 		}
+		if len(args) > 1 && args[1] == "search" {
+			return runShadowSearch(args[2:], output)
+		}
 		return runShadow(args[1:], output)
+	case "proposal":
+		if len(args) == 1 || args[1] == "help" || args[1] == "-h" || args[1] == "--help" {
+			_, err := fmt.Fprintln(output, proposalUsage)
+			return err
+		}
+		if len(args) > 1 && args[1] == "check" {
+			return runProposalCheck(ctx, args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "evidence-check" {
+			return runProposalEvidenceCheck(ctx, args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "recheck" {
+			return runProposalRecheck(ctx, args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "prepare" {
+			return runProposalPrepare(ctx, args[2:], output, time.Now)
+		}
+		if len(args) > 1 && args[1] == "review" {
+			return runProposalReview(args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "approval-create" {
+			return runProposalApprovalCreate(ctx, args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "key-create" {
+			return runProposalKeyCreate(args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "policy-create" {
+			return runProposalPolicyCreate(args[2:], output, time.Now)
+		}
+		if len(args) > 1 && args[1] == "policy-check" {
+			return runProposalPolicyCheck(args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "bundle-check" {
+			return runProposalBundleCheck(args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "self-hosted-check" {
+			return runProposalSelfHostedCheck(ctx, args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "authority-check" {
+			return runProposalAuthorityCheck(ctx, args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "submitter-check" {
+			return runProposalSubmitterCheck(ctx, args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "canary-check" {
+			return runProposalCanaryCheck(ctx, args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "turnkey-check" {
+			return runProposalTurnkeyCheck(ctx, args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "turnkey-policy" {
+			return runProposalTurnkeyPolicy(args[2:], output)
+		}
+		return errors.New("proposal requires the check, evidence-check, recheck, prepare, review, approval-create, key-create, policy-create, policy-check, bundle-check, self-hosted-check, authority-check, submitter-check, canary-check, turnkey-check, or turnkey-policy subcommand")
 	case "devnet-once":
 		return runDevnetOnce(ctx, args[1:], output)
 	case "devnet-run":
@@ -298,6 +403,8 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		return runStrategy(ctx, args[1:], output)
 	case "journal":
 		return runJournal(args[1:], output)
+	case "audit":
+		return runAudit(args[1:], output)
 	case "status":
 		return runStatus(args[1:], output)
 	case "mcp":
@@ -305,6 +412,10 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 			return runMCPConfig(args[2:], output)
 		}
 		return runMCP(ctx, args[1:], os.Stdin, output)
+	case "program":
+		return runProgram(ctx, args[1:], output)
+	case "index":
+		return runIndex(ctx, args[1:], os.Stdin, output)
 	case "profile-fingerprint":
 		return runProfileFingerprint(args[1:], output)
 	case "clock-check":
@@ -322,8 +433,8 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 // meant to be discovered should not appear in a suggestion.
 var knownCommands = []string{
 	"explain", "walkthrough", "setup", "doctor", "wallet", "funding",
-	"preflight", "check", "demo", "status", "swap", "shadow", "journal",
-	"mcp", "clock-check", "version", "help",
+	"preflight", "check", "demo", "status", "swap", "shadow", "proposal", "journal", "audit",
+	"mcp", "program", "index", "clock-check", "version", "help",
 }
 
 // unknownCommandError suggests the closest command rather than only refusing.
@@ -493,11 +604,13 @@ func runDevnetEnable(args []string, output io.Writer) error {
 	duration := flags.Duration("duration", 0, "bounded devnet activation lifetime")
 	maxActions := flags.Uint("max-actions", 1, "maximum sends allowed by this activation")
 	reason := flags.String("reason", "", "operator reason")
+	operatorSocket := flags.String("operator-socket", defaultOperatorSocket,
+		"root-only submitter operator socket")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(
 				output,
-				"Usage: mithril-agent devnet-enable --config PATH --duration DURATION [--max-actions N] --reason TEXT",
+				"Usage: mithril-agent devnet-enable --config PATH --operator-socket PATH --duration DURATION [--max-actions N] --reason TEXT",
 			)
 			return writeErr
 		}
@@ -505,6 +618,9 @@ func runDevnetEnable(args []string, output io.Writer) error {
 	}
 	if flags.NArg() != 0 || *configPath == "" || *reason == "" {
 		return errors.New("devnet-enable requires --config, --duration, and --reason")
+	}
+	if !filepath.IsAbs(*operatorSocket) || filepath.Clean(*operatorSocket) != *operatorSocket {
+		return errors.New("operator socket must be an absolute clean path")
 	}
 	if *duration < time.Minute || *duration > 24*time.Hour {
 		return errors.New("devnet activation must last between 1 minute and 24 hours")
@@ -522,19 +638,17 @@ func runDevnetEnable(args []string, output io.Writer) error {
 	if cfg.Profile.Cluster != "devnet" {
 		return errors.New("transaction execution is restricted to devnet")
 	}
-	fingerprint, err := cfg.Profile.Fingerprint()
+	issuedAt := time.Now().UTC()
+	expiresAt := issuedAt.Add(*duration)
+	status, revision, err := operatorControlStatus(*operatorSocket)
 	if err != nil {
 		return err
 	}
-	issuedAt := time.Now().UTC()
-	expiresAt := issuedAt.Add(*duration)
-	if err := control.WriteDevnetActivation(
-		cfg.Control.StatePath,
-		fingerprint,
-		issuedAt,
-		expiresAt,
-		uint32(*maxActions),
-		*reason,
+	if status.TerminalOutcome != "" {
+		return errors.New("terminal action requires acknowledgement before enabling")
+	}
+	if err := enableOperatorControl(
+		*operatorSocket, revision, issuedAt, expiresAt, uint32(*maxActions), *reason,
 	); err != nil {
 		return err
 	}
@@ -571,15 +685,17 @@ func runDevnetStop(args []string, output io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("read config: %w", err)
 	}
-	if _, _, _, _, err := cfg.activeProfile(); err != nil {
+	_, _, _, fingerprint, err := cfg.activeProfile()
+	if err != nil {
 		return err
 	}
-	if err := control.WriteNoNewActions(cfg.Control.StatePath, *reason); err != nil {
+	status, err := stopControlState(cfg.Control.StatePath, fingerprint, *reason)
+	if err != nil {
 		return err
 	}
 	return json.NewEncoder(output).Encode(struct {
 		Mode string `json:"mode"`
-	}{Mode: control.ModeNoNewActions})
+	}{Mode: status.Mode})
 }
 
 func runDevnetStatus(args []string, output io.Writer) error {
@@ -701,6 +817,7 @@ func newStatusProvider(configPath, statusSocketPath string) (agentmcp.Provider, 
 
 type operatorProvider struct {
 	config     config
+	configPath string
 	control    *control.StateFile
 	statusPath string
 	now        func() time.Time
@@ -713,56 +830,120 @@ type operatorProvider struct {
 // It carries no address: the sweep destination is an account, and this surface
 // promises not to expose accounts.
 func (p *operatorProvider) Strategy() (agentmcp.StrategySettings, error) {
-	settings := agentmcp.StrategySettings{}
 	if p.config.Swap == nil {
-		return settings, nil
+		return agentmcp.StrategySettings{}, nil
 	}
-	swap := p.config.Swap
-	settings.Configured = true
-	settings.Direction = "sell SOL for devUSDC"
-	settings.InputPerAction = formatUnits(swap.InputLamports, 9) + " SOL"
-	settings.DailyCap = formatUnits(swap.DailyDebitCapLamports, 9) + " SOL"
-	if swap.IsBuy() {
-		settings.Direction = "buy SOL with devUSDC"
-		settings.InputPerAction = formatUnits(swap.InputTokenAmount, 6) + " devUSDC"
-		settings.DailyCap = formatUnits(swap.DailyInputTokenCap, 6) + " devUSDC"
+	projection, err := strategyProjection(*p.config.Swap, p.configPath)
+	if err != nil {
+		return agentmcp.StrategySettings{}, err
 	}
-	settings.MaxFee = formatUnits(swap.MaxFeeLamports, 9) + " SOL"
-	settings.FundedTradesPerDay = swap.FundedTradesPerDay()
-	if trigger := swap.PriceTrigger; trigger != nil {
-		settings.PriceRule = string(trigger.Direction) + " $" + formatUnits(trigger.ThresholdMicros, 6)
+	status, err := p.control.Status()
+	if err != nil {
+		return agentmcp.StrategySettings{}, err
 	}
-	var live bool
-	settings.ControlMode, settings.ControlGrant, live = controlGrantAt(p.config.Control.StatePath)
-	if settings.ControlGrant != "" && !live {
-		settings.ControlGrant += " (cannot act)"
+	return strategySettings(projection, status, p.now().UTC()), nil
+}
+
+func strategyProjection(
+	profile swaprun.Profile,
+	configPath string,
+) (operatorstatus.StrategyProjection, error) {
+	if err := profile.Validate(); err != nil {
+		return operatorstatus.StrategyProjection{}, err
 	}
-	if strategy, _ := discoverStrategy(); strategy.sweep != "" {
-		if cfg, err := readConfig(strategy.sweep); err == nil && cfg.hasLegacyProfile() {
-			settings.SweepConfigured = true
-			settings.SweepKeepBehind = formatUnits(cfg.Profile.ReserveLamports, 9) + " SOL"
-			settings.SweepMaxPerSend = formatUnits(cfg.Profile.MaxTransferLamports, 9) + " SOL"
-			settings.SweepDailyCap = formatUnits(cfg.Profile.DailyCapLamports, 9) + " SOL"
-			settings.SweepActiveAfter = time.Unix(cfg.Profile.ScheduleAnchorUnix, 0).
-				UTC().Format(time.RFC3339)
+	projection := operatorstatus.StrategyProjection{
+		Configured: true, Direction: "sell", InputAmount: profile.InputLamports,
+		DailyCap: profile.DailyDebitCapLamports, MaxFeeLamports: profile.MaxFeeLamports,
+		FundedTradesPerDay: profile.FundedTradesPerDay(),
+	}
+	if profile.IsBuy() {
+		projection.Direction = "buy"
+		projection.InputAmount = profile.InputTokenAmount
+		projection.DailyCap = profile.DailyInputTokenCap
+	}
+	if trigger := profile.PriceTrigger; trigger != nil {
+		projection.PriceDirection = string(trigger.Direction)
+		projection.PriceThresholdMicros = trigger.ThresholdMicros
+	}
+	strategy, _ := discoverStrategy()
+	belongsToRecordedStrategy := configPath != "" &&
+		(configPath == strategy.sell || configPath == strategy.buy)
+	if belongsToRecordedStrategy && strategy.sweep != "" {
+		if cfg, err := readConfig(strategy.sweep); err == nil && cfg.hasLegacyProfile() &&
+			cfg.Profile.Validate() == nil && cfg.Profile.Source == profile.Owner() &&
+			cfg.Profile.Cluster == profile.Cluster {
+			projection.SweepConfigured = true
+			projection.SweepKeepLamports = cfg.Profile.ReserveLamports
+			projection.SweepMaxLamports = cfg.Profile.MaxTransferLamports
+			projection.SweepDailyLamports = cfg.Profile.DailyCapLamports
+			projection.SweepActiveAfter = time.Unix(cfg.Profile.ScheduleAnchorUnix, 0).UTC()
 			// Re-verified here, not trusted from the file: a registration that
 			// no longer verifies is exactly what an operator needs told.
 			if proof, err := readDestinationProof(filepath.Dir(strategy.sweep)); err == nil {
-				settings.SweepProofValid = verifySweepDestinationProof(
+				projection.SweepProofValid = verifySweepDestinationProof(
 					proof.AgentAccount, proof.Destination,
 					proof.Nonce, proof.IssuedAt, proof.SignatureBase58,
-				) == nil && proof.Destination == cfg.Profile.Destination
+				) == nil && proof.AgentAccount == cfg.Profile.Source &&
+					proof.Destination == cfg.Profile.Destination
 			}
 		}
 	}
-	return settings, nil
+	if err := operatorstatus.ValidateStrategyProjection(
+		profile.Name, profile.Version, profile.Cluster, projection,
+	); err != nil {
+		return operatorstatus.StrategyProjection{}, err
+	}
+	return projection, nil
 }
 
-// Strategy on the socket provider reports "not configured": that provider reads
-// a bounded status socket and never sees a config file, and inventing settings
-// it cannot observe would be worse than saying nothing.
+func strategySettings(
+	projection operatorstatus.StrategyProjection,
+	status control.Status,
+	now time.Time,
+) agentmcp.StrategySettings {
+	settings := agentmcp.StrategySettings{Configured: projection.Configured}
+	if !projection.Configured {
+		return settings
+	}
+	settings.Direction = "sell SOL for devUSDC"
+	settings.InputPerAction = formatUnits(projection.InputAmount, 9) + " SOL"
+	settings.DailyCap = formatUnits(projection.DailyCap, 9) + " SOL"
+	if projection.Direction == "buy" {
+		settings.Direction = "buy SOL with devUSDC"
+		settings.InputPerAction = formatUnits(projection.InputAmount, 6) + " devUSDC"
+		settings.DailyCap = formatUnits(projection.DailyCap, 6) + " devUSDC"
+	}
+	settings.MaxFee = formatUnits(projection.MaxFeeLamports, 9) + " SOL"
+	settings.FundedTradesPerDay = projection.FundedTradesPerDay
+	if projection.PriceDirection != "" {
+		settings.PriceRule = projection.PriceDirection + " $" +
+			formatUnits(projection.PriceThresholdMicros, 6)
+	}
+	var live bool
+	settings.ControlMode, settings.ControlGrant, live = describeControlGrant(
+		status.Mode, status.ExpiresAt, status.RemainingActions, now)
+	if settings.ControlGrant != "" && !live {
+		settings.ControlGrant += " (cannot act)"
+	}
+	settings.SweepConfigured = projection.SweepConfigured
+	settings.SweepProofValid = projection.SweepProofValid
+	if projection.SweepConfigured {
+		settings.SweepKeepBehind = formatUnits(projection.SweepKeepLamports, 9) + " SOL"
+		settings.SweepMaxPerSend = formatUnits(projection.SweepMaxLamports, 9) + " SOL"
+		settings.SweepDailyCap = formatUnits(projection.SweepDailyLamports, 9) + " SOL"
+		settings.SweepActiveAfter = projection.SweepActiveAfter.UTC().Format(time.RFC3339)
+	}
+	return settings
+}
+
+// Strategy uses only the address-free projection carried by the bounded status
+// socket. The MCP identity never receives the private config.
 func (p *socketOperatorProvider) Strategy() (agentmcp.StrategySettings, error) {
-	return agentmcp.StrategySettings{}, nil
+	snapshot, err := p.snapshot()
+	if err != nil {
+		return agentmcp.StrategySettings{}, err
+	}
+	return strategySettings(snapshot.Strategy, snapshot.Control, p.now().UTC()), nil
 }
 
 func (c config) activeProfile() (string, uint32, string, string, error) {
@@ -798,6 +979,7 @@ func newOperatorProvider(configPath string) (*operatorProvider, error) {
 	}
 	return &operatorProvider{
 		config:     cfg,
+		configPath: configPath,
 		control:    state,
 		statusPath: operatorstatus.Path(cfg.Journal.Path),
 		now:        time.Now,
@@ -986,9 +1168,12 @@ func runDevnetLoop(ctx context.Context, args []string, output io.Writer) (runErr
 	configPath := flags.String("config", "", "agent config JSON")
 	interval := flags.Duration("interval", 10*time.Second, "delay between lifecycle steps")
 	metricsAddress := flags.String("metrics-address", "127.0.0.1:9191", "loopback Prometheus listen address")
+	signerSocket := flags.String("signer-socket", "", "override signer transport with this local socket")
+	riskSocket := flags.String("risk-socket", "", "override risk authority transport with this local socket")
+	submitterSocket := flags.String("submitter-socket", "", "override submitter transport with this local socket")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent devnet-run --config PATH --interval DURATION")
+			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent devnet-run --config PATH --interval DURATION [--metrics-address ADDRESS] [--signer-socket PATH] [--risk-socket PATH] [--submitter-socket PATH]")
 			return writeErr
 		}
 		return err
@@ -999,7 +1184,22 @@ func runDevnetLoop(ctx context.Context, args []string, output io.Writer) (runErr
 	if *interval < time.Second || *interval > 30*time.Second {
 		return errors.New("devnet-run interval must be between 1 and 30 seconds")
 	}
-	runtime, err := openDevnetRuntime(*configPath, true)
+	if *signerSocket != "" &&
+		(!filepath.IsAbs(*signerSocket) || filepath.Clean(*signerSocket) != *signerSocket) {
+		return errors.New("signer socket must be an absolute clean path")
+	}
+	if *riskSocket != "" &&
+		(!filepath.IsAbs(*riskSocket) || filepath.Clean(*riskSocket) != *riskSocket) {
+		return errors.New("risk authority socket must be an absolute clean path")
+	}
+	if *submitterSocket != "" &&
+		(!filepath.IsAbs(*submitterSocket) || filepath.Clean(*submitterSocket) != *submitterSocket) {
+		return errors.New("submitter socket must be an absolute clean path")
+	}
+	if err := requireSystemdAuthoritySockets(*signerSocket, *riskSocket, *submitterSocket); err != nil {
+		return err
+	}
+	runtime, err := openDevnetRuntimeWithSockets(*configPath, true, *signerSocket, *riskSocket, *submitterSocket)
 	if err != nil {
 		return err
 	}
@@ -1021,7 +1221,20 @@ func runDevnetLoop(ctx context.Context, args []string, output io.Writer) (runErr
 }
 
 type runnerShutdownControl interface {
-	Stop(string) error
+	StopPreservingRecovery(string) error
+}
+
+// runtimeControl is the control surface shared by foreground runs and the
+// isolated submitter service. Supervised runners receive the socket-backed
+// implementation and never open the writable activation file themselves.
+type runtimeControl interface {
+	NoNewActions() (bool, error)
+	Status() (control.Status, error)
+	StopPreservingRecovery(string) error
+	StopForTerminal(string, string) error
+	TerminalLatch() (string, string, error)
+	WithSendBarrier(string, func() error) (bool, error)
+	WithRecoverySendBarrier(string, func() error) (bool, error)
 }
 
 type runnerShutdownRuntime interface {
@@ -1029,8 +1242,9 @@ type runnerShutdownRuntime interface {
 }
 
 func shutdownRunner(runErr *error, state runnerShutdownControl, runtime runnerShutdownRuntime) {
-	if err := state.Stop("runner shutdown"); err != nil {
-		*runErr = errors.Join(*runErr, errors.New("stop new actions during runner shutdown"))
+	if err := state.StopPreservingRecovery("runner shutdown"); err != nil &&
+		!errors.Is(err, control.ErrRecoveryPending) {
+		*runErr = errors.Join(*runErr, fmt.Errorf("stop new actions during runner shutdown: %w", err))
 	}
 	if err := runtime.Close(); err != nil {
 		*runErr = errors.Join(*runErr, errors.New("close agent journal"))
@@ -1230,6 +1444,12 @@ func cycleFailureReason(err error, timedOut bool) string {
 	if errors.Is(err, txflow.ErrNodeUnavailable) {
 		return "node_unavailable"
 	}
+	// The MCP observer failed to return a usable account/health snapshot. The
+	// execution engine keeps the detailed cause for protected logs; the public
+	// status and metric need one stable label that reveals no provider detail.
+	if errors.Is(err, execution.ErrObservationUnavailable) {
+		return "observation_not_ready"
+	}
 	// The pre-trade observation not meeting policy: wallet below the reserve,
 	// evidence gone stale, the node's cross-check behind, health degraded. The
 	// engine reports all of these in full at engine.go:525 when they are seen at
@@ -1300,7 +1520,7 @@ type devnetRuntime struct {
 	profile agent.Profile
 	engine  *execution.Engine
 	store   *journal.Store
-	control *control.StateFile
+	control runtimeControl
 	// configPath lets each cycle re-read the alerts section, so an alert
 	// threshold edit takes effect without restarting the runner. Alerts
 	// authorize nothing, which is what makes a live re-read safe here and
@@ -1340,6 +1560,24 @@ func openDevnetRuntime(
 	configPath string,
 	requireFreshActivation bool,
 ) (*devnetRuntime, error) {
+	return openDevnetRuntimeWithSigner(configPath, requireFreshActivation, "")
+}
+
+func openDevnetRuntimeWithSigner(
+	configPath string,
+	requireFreshActivation bool,
+	signerSocket string,
+) (*devnetRuntime, error) {
+	return openDevnetRuntimeWithSockets(configPath, requireFreshActivation, signerSocket, "", "")
+}
+
+func openDevnetRuntimeWithSockets(
+	configPath string,
+	requireFreshActivation bool,
+	signerSocket string,
+	riskSocket string,
+	submitterSocket string,
+) (*devnetRuntime, error) {
 	cfg, err := readConfig(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
@@ -1362,19 +1600,11 @@ func openDevnetRuntime(
 			"MITHRIL_AGENT_MITHRIL_RPC_URL and two independent evidence RPC URLs are required",
 		)
 	}
-	mithrilNode, err := solanarpc.NewMithrilNode(mithrilURL, nil)
+	providers, err := openBoundRPCProviders(cfg, mithrilURL, primaryURL, secondaryURL)
 	if err != nil {
-		return nil, fmt.Errorf("Mithril RPC: %w", err)
+		return nil, err
 	}
-	primary, err := newExternalRPC(primaryURL)
-	if err != nil {
-		return nil, fmt.Errorf("primary evidence RPC: %w", err)
-	}
-	secondary, err := newExternalRPC(secondaryURL)
-	if err != nil {
-		return nil, fmt.Errorf("secondary evidence RPC: %w", err)
-	}
-	lifecycle, err := txflow.New(mithrilNode, primary, secondary)
+	lifecycle, err := txflow.New(providers.mithril, providers.primary, providers.secondary)
 	if err != nil {
 		return nil, err
 	}
@@ -1383,7 +1613,7 @@ func openDevnetRuntime(
 		Args:      cfg.MCP.Args,
 		Env:       mithrilMCPEnvironment(mithrilURL, primaryURL),
 		Cluster:   cfg.Profile.Cluster,
-		RPCOrigin: mithrilNode.Origin(),
+		RPCOrigin: providers.mithril.Origin(),
 	}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("MCP observer: %w", err)
@@ -1392,6 +1622,7 @@ func openDevnetRuntime(
 		Command:     cfg.Policy.Command,
 		PolicyPath:  cfg.Policy.PolicyPath,
 		KeypairPath: cfg.Policy.KeypairPath,
+		SocketPath:  riskSocket,
 		KeyID:       cfg.Policy.KeyID,
 		PublicKey:   cfg.Policy.PublicKey,
 	})
@@ -1402,6 +1633,7 @@ func openDevnetRuntime(
 		Command:     cfg.Signer.Command,
 		PolicyPath:  cfg.Signer.PolicyPath,
 		KeypairPath: cfg.Signer.KeypairPath,
+		SocketPath:  signerSocket,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("signer: %w", err)
@@ -1410,6 +1642,7 @@ func openDevnetRuntime(
 		Command:        cfg.Submitter.Command,
 		PolicyPath:     cfg.Submitter.PolicyPath,
 		PrivateKeyPath: cfg.Submitter.PrivateKeyPath,
+		SocketPath:     submitterSocket,
 		Env: []string{
 			"MITHRIL_AGENT_MITHRIL_RPC_URL=" + mithrilURL,
 		},
@@ -1417,13 +1650,15 @@ func openDevnetRuntime(
 	if err != nil {
 		return nil, fmt.Errorf("submitter: %w", err)
 	}
-	stateFile, err := control.NewStateFile(
-		cfg.Control.StatePath,
-		profileFingerprint,
-		requireFreshActivation,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("control state: %w", err)
+	var state runtimeControl = submitterProcess
+	if submitterSocket == "" {
+		stateFile, stateErr := control.NewStateFile(
+			cfg.Control.StatePath, profileFingerprint, requireFreshActivation,
+		)
+		if stateErr != nil {
+			return nil, fmt.Errorf("control state: %w", stateErr)
+		}
+		state = stateFile
 	}
 	store, err := journal.OpenRotating(cfg.Journal.Path)
 	if err != nil {
@@ -1432,12 +1667,12 @@ func openDevnetRuntime(
 	engine, err := execution.New(
 		store,
 		observer,
-		mithrilNode,
+		providers.mithril,
 		policyProcess,
 		signerProcess,
 		submitterProcess,
 		lifecycle,
-		stateFile,
+		state,
 		nil,
 	)
 	if err != nil {
@@ -1448,7 +1683,7 @@ func openDevnetRuntime(
 		profile:    cfg.Profile,
 		engine:     engine,
 		store:      store,
-		control:    stateFile,
+		control:    state,
 		configPath: configPath,
 		statusPath: operatorstatus.Path(cfg.Journal.Path),
 	}, nil
@@ -1529,17 +1764,26 @@ func runShadow(args []string, output io.Writer) error {
 			// Listing only the flag form meant `shadow --help` never mentioned
 			// the commands that do the work, so they could not be found at all.
 			_, writeErr := fmt.Fprintln(output, `Usage:
-  mithril-agent shadow policy --out PATH --observe ADDR --sell-at-usd N
-                                       write a shadow policy to score against
+  mithril-agent shadow policy --out PATH --observe ADDR --sell-at-usd N [--buy-at-usd N]
+                                       write a one-way or round-trip shadow policy
   mithril-agent shadow run --policy PATH --dir PATH
                                        watch a live market, record what the rule
                                        would have done. Holds no key.
   mithril-agent shadow report --policy PATH --dir PATH [--day DATE] [--json]
-                                       score one recorded day, one direction
+                                       verify and score one recorded day
+  mithril-agent shadow review --policy PATH --dir PATH --days N [--json]
+                                       verify consecutive complete Mainnet days
+                                       for operator review; never approves
   mithril-agent shadow backtest --policy PATH --dir PATH --buy-at-usd N
                                 [--spread-bps N] [--day DATE] [--json]
                                        score a sell-then-buy-back ROUND TRIP over
                                        recorded prices, on one set of books
+  mithril-agent shadow search --policy PATH --dir PATH
+                              --train-day DATE --validation-day DATE
+                              [--spread-bps N]
+                                       choose thresholds on one recorded day and
+                                       score them on a later untouched day;
+                                       research only, never authorizes
 
 Each subcommand takes --help of its own.
 

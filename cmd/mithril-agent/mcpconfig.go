@@ -22,15 +22,28 @@ import (
 const mcpConfigUsage = `Usage: mithril-agent mcp config [--socket PATH]
 
 Prints the MCP client configuration for the read-only status surface, ready
-to paste into a client's mcpServers section. Requires the supervised status
-socket; see the README's install section if it does not exist yet.`
+to paste into a client's mcpServers section. With no --socket it discovers the
+generated sell, buy, and sweep status sockets. Requires the supervised status
+socket units; see the README's install section if none exist yet.`
 
 const defaultStatusSocket = "/run/mithril-agent-status.sock"
+
+type mcpStatusSocket struct {
+	Name string
+	Path string
+}
+
+var supervisedMCPStatusSockets = []mcpStatusSocket{
+	{Name: "mithril-agent-sell", Path: "/run/mithril-agent-status-sell.sock"},
+	{Name: "mithril-agent-buy", Path: "/run/mithril-agent-status-buy.sock"},
+	{Name: "mithril-agent-sweep", Path: "/run/mithril-agent-status-sweep.sock"},
+	{Name: "mithril-agent", Path: defaultStatusSocket},
+}
 
 func runMCPConfig(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("mcp config", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	socket := flags.String("socket", defaultStatusSocket, "status socket path")
+	socket := flags.String("socket", "", "one status socket path instead of auto-discovery")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, mcpConfigUsage)
@@ -41,24 +54,37 @@ func runMCPConfig(args []string, output io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New("mcp config takes no positional arguments")
 	}
-	if _, err := os.Stat(*socket); err != nil {
-		return fmt.Errorf(
-			"the status socket %s does not exist; start the supervised service first "+
-				"(sudo systemctl start mithril-agent-status.socket) — this command "+
-				"deliberately prints only the read-only surface", *socket)
+	sockets := supervisedMCPStatusSockets
+	if *socket != "" {
+		sockets = []mcpStatusSocket{{Name: "mithril-agent", Path: *socket}}
+	}
+	available := make([]mcpStatusSocket, 0, len(sockets))
+	for _, candidate := range sockets {
+		info, err := os.Stat(candidate.Path)
+		if errors.Is(err, os.ErrNotExist) && *socket == "" {
+			continue
+		}
+		if err != nil || info.Mode()&os.ModeSocket == 0 {
+			return fmt.Errorf("the status socket %s is not an active Unix socket", candidate.Path)
+		}
+		available = append(available, candidate)
+	}
+	if len(available) == 0 {
+		return errors.New(
+			"no supervised status sockets are active; start the generated status socket units first")
 	}
 	agentPath, err := resolvedAgentExecutable()
 	if err != nil {
 		return err
 	}
-	entry := map[string]any{
-		"mcpServers": map[string]any{
-			"mithril-agent": map[string]any{
-				"command": agentPath,
-				"args":    []string{"mcp", "--status-socket", *socket},
-			},
-		},
+	servers := make(map[string]any, len(available))
+	for _, candidate := range available {
+		servers[candidate.Name] = map[string]any{
+			"command": agentPath,
+			"args":    []string{"mcp", "--status-socket", candidate.Path},
+		}
 	}
+	entry := map[string]any{"mcpServers": servers}
 	encoded, err := json.MarshalIndent(entry, "", "  ")
 	if err != nil {
 		return err

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/internal/secureexec"
 	"github.com/Overclock-Validator/mithril-agent/telegramoperator"
 )
 
@@ -249,7 +250,7 @@ func gatherSetupChoices(p *prompter, given setupChoices) (setupChoices, error) {
 	if err != nil {
 		return setupChoices{}, err
 	}
-	node, err := p.ask("Path to the pinned Node.js runtime (24.18.x)", firstNonEmpty(
+	node, err := p.ask("Path to Node.js 24.18+ in the 24.x line", firstNonEmpty(
 		given.nodeCommand, detectInstalled("node"), detectExecutable("node")))
 	if err != nil {
 		return setupChoices{}, err
@@ -408,11 +409,13 @@ func configureSwapProfile(
 		return "", nil
 	}
 
-	primary, err := p.ask("Name for your primary evidence provider", "primary-provider")
+	primary, err := p.askTrustDomain("Name for your primary evidence provider", "", "")
 	if err != nil {
 		return "", err
 	}
-	secondary, err := p.ask("Name for your second, independent evidence provider", "secondary-provider")
+	secondary, err := p.askTrustDomain(
+		"Name for your second, independent evidence provider", "", primary,
+	)
 	if err != nil {
 		return "", err
 	}
@@ -448,10 +451,6 @@ func configureSwapProfile(
 		options.dailyNativeFeeCap = options.maxFeeLamports
 		options.inputLamports = 0
 	}
-	if !validTrustDomain(primary) || !validTrustDomain(secondary) || primary == secondary {
-		return "", errors.New("the two provider names must be distinct, lowercase, and short")
-	}
-
 	result, err := createSwapSetup(ctx, options)
 	if err != nil {
 		// A declined quote is a legitimate outcome, not a failure.
@@ -545,7 +544,11 @@ func finishGuidedSetup(p *prompter, choices setupChoices, configPath string) err
 
 	p.sayf("\nNext")
 	p.sayf("----")
-	p.sayf("  1. Fund the agent account at https://faucet.solana.com")
+	walletPath := choices.accountKeypair
+	if walletPath == "" {
+		walletPath = "/absolute/path/to/devnet-keypair.json"
+	}
+	p.sayf("  1. Run: mithril-agent wallet fund --file %s", walletPath)
 	switch {
 	case configPath != "":
 		p.sayf("  2. mithril-agent doctor          (it knows where this went)")
@@ -622,9 +625,15 @@ func unsupportedNodeReason(nodeCommand string) string {
 	if _, err := os.Lstat(nodeCommand); err != nil {
 		return ""
 	}
+	if err := secureexec.ValidateExecutable(nodeCommand); err != nil {
+		return "the Node.js runtime at " + nodeCommand + " is not a protected executable"
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, nodeCommand, "--version").Output()
+	command := exec.CommandContext(ctx, nodeCommand, "--version")
+	command.Env = secureexec.MinimalEnvironment(nil)
+	command.WaitDelay = time.Second
+	output, err := command.Output()
 	if err != nil {
 		return "the Node.js runtime at " + nodeCommand + " could not be run"
 	}

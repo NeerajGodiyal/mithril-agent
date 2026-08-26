@@ -1,6 +1,6 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Mithril Agent — verify your payout wallet</title>
+<title>Mithril Agent — review wallet signature</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!--
   Proving control of the sweep destination previously had exactly one route:
@@ -38,6 +38,8 @@
   }
   button[disabled] { opacity: 0.45; cursor: not-allowed; }
   .served .manual-only { display: none; }
+  .approval-only { display: none; }
+  .approval .approval-only { display: block; }
   .row { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; }
   .note { font-size: 0.9rem; opacity: 0.75; margin: 0.6rem 0 0; }
   .bad { color: #b3261e; font-weight: 600; }
@@ -47,14 +49,14 @@
   dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem; word-break: break-all; }
 </style>
 
-<h1>Verify your payout wallet</h1>
-<p class="lede">
+<h1 id="title">Verify your payout wallet</h1>
+<p class="lede" id="lede">
   This proves you control the wallet where the agent may send profit. It does
   not give the agent access to this wallet, sign a transaction, or move funds.
 </p>
 
-<section class="manual-only">
-  <h2>Challenge</h2>
+<section>
+  <h2>Exact message</h2>
   <textarea id="challenge" spellcheck="false"
     placeholder="mithril-agent sweep destination proof v1|agent:…|destination:…|nonce:…|issued:…"></textarea>
   <p class="note" id="parsed">Paste the exact line the setup command printed.</p>
@@ -63,11 +65,17 @@
 <section>
   <h2>Review</h2>
   <dl>
-    <dt>Destination</dt><dd id="destination">—</dd>
-    <dt>Agent account</dt><dd id="agent">—</dd>
+    <dt id="expected-label">Destination</dt><dd id="destination">—</dd>
+    <dt id="subject-label">Agent account</dt><dd id="agent">—</dd>
+    <dt class="approval-only">Input</dt><dd class="approval-only" id="input">—</dd>
+    <dt class="approval-only">Minimum output</dt><dd class="approval-only" id="minimum-output">—</dd>
+    <dt class="approval-only">Maximum native debit</dt><dd class="approval-only" id="max-debit">—</dd>
+    <dt class="approval-only">Transaction fee</dt><dd class="approval-only" id="fee">—</dd>
+    <dt class="approval-only">Valid from</dt><dd class="approval-only" id="starts">—</dd>
+    <dt class="approval-only">Expires</dt><dd class="approval-only" id="expires">—</dd>
     <dt>Your wallet</dt><dd id="connected">not connected</dd>
   </dl>
-  <p class="note">
+  <p class="note" id="review-note">
     The destination must equal your wallet. If they differ, stop — you would be
     authorising an account you do not control.
   </p>
@@ -86,7 +94,7 @@
 <section class="manual-only">
   <h2>Copy the signature</h2>
   <output id="signature">—</output>
-  <p class="note">Paste this into the setup command as <code>--proof-signature</code>.</p>
+  <p class="note" id="signature-note">Paste this into the setup command as <code>--proof-signature</code>.</p>
 </section>
 
 <script>
@@ -122,27 +130,55 @@ function field(text, name) {
 
 function refresh() {
   const text = $("challenge").value.trim();
-  const destination = field(text, "destination");
-  const agent = field(text, "agent");
-  $("destination").textContent = destination || "—";
-  $("agent").textContent = agent || "—";
+  const approval = text.startsWith("Mithril Agent Mainnet trade approval v1|");
+  const sweep = text.startsWith("mithril-agent sweep destination proof v1|");
+  const expected = approval ? field(text, "approver") : field(text, "destination");
+  const subject = approval ? field(text, "action") : field(text, "agent");
+  document.body.classList.toggle("approval", approval);
+  $("destination").textContent = expected || "—";
+  $("agent").textContent = subject || "—";
+  $("expected-label").textContent = approval ? "Approver" : "Destination";
+  $("subject-label").textContent = approval ? "Action" : "Agent account";
+  $("input").textContent = field(text, "input") || "—";
+  $("minimum-output").textContent = field(text, "minimum-output") || "—";
+  $("max-debit").textContent = (field(text, "max-native-debit-lamports") || "—") + " lamports";
+  $("fee").textContent = (field(text, "fee-lamports") || "—") + " lamports";
+  $("starts").textContent = field(text, "starts-unix") || "—";
+  $("expires").textContent = field(text, "expires-unix") || "—";
+  $("title").textContent = approval ? "Approve this exact trade" : "Verify your payout wallet";
+  $("lede").textContent = approval
+    ? "This signs only the exact Mainnet limits shown below. It does not sign or submit a transaction."
+    : "This proves you control the wallet where the agent may send profit. It does not give the agent access to this wallet, sign a transaction, or move funds.";
+  $("review-note").textContent = approval
+    ? "The connected wallet must match the configured approver. Check every amount before signing."
+    : "The destination must equal your wallet. If they differ, stop — you would be authorising an account you do not control.";
+  $("sign").textContent = approval ? "Approve exact trade" : "Verify payout wallet";
+  $("signature-note").textContent = approval
+    ? "Pass this signature to proposal approval-create with --signature."
+    : "Paste this into the setup command as --proof-signature.";
 
-  const wellFormed = text.startsWith("mithril-agent sweep destination proof v1|") &&
-    destination && agent && field(text, "nonce") && field(text, "issued");
+  const wellFormed = sweep
+    ? expected && subject && field(text, "nonce") && field(text, "issued")
+    : approval && expected && subject && field(text, "input") &&
+      field(text, "minimum-output") && field(text, "max-native-debit-lamports") &&
+      field(text, "fee-lamports") && field(text, "starts-unix") &&
+      field(text, "expires-unix") &&
+      field(text, "last-valid-block-height") && field(text, "request-sha256") &&
+      field(text, "message-sha256");
   if (!text) {
     $("parsed").textContent = "Paste the exact line the setup command printed.";
     $("parsed").className = "note";
   } else if (!wellFormed) {
-    $("parsed").textContent = "That does not look like a destination proof challenge.";
+    $("parsed").textContent = "That does not look like a supported Mithril Agent message.";
     $("parsed").className = "note bad";
-  } else if (wallet && destination !== wallet) {
-    $("parsed").textContent = "STOP: the destination is not the wallet you connected.";
+  } else if (wallet && expected !== wallet) {
+    $("parsed").textContent = "STOP: this message names a different wallet.";
     $("parsed").className = "note bad";
   } else {
     $("parsed").textContent = "Challenge looks well formed.";
     $("parsed").className = "note good";
   }
-  $("sign").disabled = !(wellFormed && wallet && destination === wallet);
+  $("sign").disabled = !(wellFormed && wallet && expected === wallet);
 }
 
 $("challenge").addEventListener("input", refresh);

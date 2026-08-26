@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
 	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
@@ -28,7 +29,7 @@ import (
 const shadowReportUsage = `Usage: mithril-agent shadow report --policy PATH --dir PATH [options]
 
 Recomputes a day's shadow result from its journal and compares it against the
-stored report. Read-only.
+stored report. Read-only. With --json it emits only the recomputed report.
 
   --policy PATH   the shadow policy the run used
   --dir PATH      the journal directory
@@ -65,7 +66,9 @@ func runShadowReport(args []string, output io.Writer) error {
 		return err
 	}
 
-	ticks, err := readShadowTicks(filepath.Join(*directory, "shadow-"+chosen+".jsonl"))
+	ticks, err := readShadowTicks(
+		filepath.Join(*directory, "shadow-"+chosen+".jsonl"), policy,
+	)
 	if err != nil {
 		return err
 	}
@@ -77,8 +80,12 @@ func runShadowReport(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
+	to, err := shadowReportEnd(from, replayed.PeriodEnd)
+	if err != nil {
+		return err
+	}
 	report, err := shadow.BuildReport(policy, replayed.Ledger, replayed.Counts,
-		replayed.Stats, replayed.ClosingPrice, from, from.Add(24*time.Hour))
+		replayed.Stats, replayed.ClosingPrice, from, to)
 	if err != nil {
 		return err
 	}
@@ -107,15 +114,16 @@ func compareStoredShadowReport(
 	path := filepath.Join(directory, "report-"+day+".json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return errors.New("the stored shadow report could not be read")
+		}
 		_, writeErr := fmt.Fprintf(output,
 			"\nNo stored report for %s, so there is nothing to compare against.\n", day)
 		return writeErr
 	}
 	var stored shadow.Report
-	if err := json.Unmarshal(raw, &stored); err != nil {
-		_, writeErr := fmt.Fprintf(output,
-			"\nThe stored report for %s could not be read, so it was not compared.\n", day)
-		return writeErr
+	if err := strictjson.Decode(raw, &stored); err != nil {
+		return errors.New("the stored shadow report is invalid")
 	}
 	found := shadow.Compare(stored, recomputed)
 	if len(found) == 0 {
@@ -128,7 +136,7 @@ func compareStoredShadowReport(
 		return err
 	}
 	for _, disagreement := range found {
-		if _, err := fmt.Fprintf(output, "  %-24s stored %d, journal says %d\n",
+		if _, err := fmt.Fprintf(output, "  %-24s stored %s, journal says %s\n",
 			disagreement.Field, disagreement.Stored, disagreement.Replayed); err != nil {
 			return err
 		}
@@ -163,34 +171,66 @@ func chooseShadowDay(directory, requested string) (string, error) {
 
 // readShadowTicks opens the journal, which verifies its own hash chain, and
 // decodes the recorded ticks.
-func readShadowTicks(path string) ([]shadow.Tick, error) {
-	store, err := journal.Open(path)
+func readShadowTicks(path string, policy shadow.Policy) ([]shadow.Tick, error) {
+	records, err := journal.ReadRecords(path)
 	if err != nil {
 		return nil, err
 	}
-	defer store.Close()
-	return shadowTicksFrom(store.Records())
+	return shadowTicksFrom(records, policy, false)
 }
 
-// shadowTicksFrom decodes recorded ticks. The opening record carries a ledger
-// rather than a tick and is skipped: the replay re-derives the opening position
-// itself.
-func shadowTicksFrom(records []journal.Record) ([]shadow.Tick, error) {
+// shadowTicksFrom verifies the journal's policy-bound header and decodes its
+// ticks. allowEmpty is used only while opening today's newly-created journal.
+func shadowTicksFrom(
+	records []journal.Record, policy shadow.Policy, allowEmpty bool,
+) ([]shadow.Tick, error) {
+	if len(records) == 0 {
+		if allowEmpty {
+			return nil, nil
+		}
+		return nil, errors.New("the journal contains no records")
+	}
+	fingerprint, err := policy.Fingerprint()
+	if err != nil {
+		return nil, err
+	}
 	ticks := make([]shadow.Tick, 0, len(records))
-	for _, record := range records {
+	header := false
+	for index, record := range records {
 		if record.Type == shadow.EventOpened {
+			if header || index != 0 {
+				return nil, errors.New("the shadow journal has more than one opening header")
+			}
+			var opening shadow.Opening
+			if err := strictjson.Decode(record.Payload, &opening); err != nil ||
+				opening.Version != shadow.JournalVersion {
+				return nil, errors.New("the shadow journal uses an unsupported opening format")
+			}
+			if opening.PolicySHA256 != fingerprint {
+				return nil, errors.New("the shadow journal was written with a different policy")
+			}
+			header = true
 			continue
 		}
+		if !header {
+			return nil, errors.New("the shadow journal is missing its policy-bound opening header")
+		}
 		var tick shadow.Tick
-		if err := json.Unmarshal(record.Payload, &tick); err != nil {
+		if err := strictjson.Decode(record.Payload, &tick); err != nil {
 			return nil, errors.New("a journal record could not be read as a tick")
 		}
 		if tick.Event == "" {
 			tick.Event = record.Type
 		}
+		if tick.Event != record.Type {
+			return nil, errors.New("a journal record type does not match its tick")
+		}
 		ticks = append(ticks, tick)
 	}
-	if len(ticks) == 0 {
+	if !header {
+		return nil, errors.New("the shadow journal is missing its policy-bound opening header")
+	}
+	if len(ticks) == 0 && !allowEmpty {
 		return nil, errors.New("the journal contains no ticks")
 	}
 	return ticks, nil
