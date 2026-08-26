@@ -1,5 +1,7 @@
 [Unit]
 Description=Mithril bounded Devnet swap agent
+# Legacy review fixture only. Use `mithril-agent service install`; this unit
+# predates the isolated per-leg signer and risk-authority sockets.
 After=network-online.target mithril-agent-quote.service
 Wants=network-online.target mithril-agent-quote.service
 StartLimitIntervalSec=5min
@@ -19,15 +21,9 @@ InaccessiblePaths=-/etc/mithril-agent/quote.env
 # deliberate: the agent must never come back up still armed. It is the single
 # most important property of this unit.
 #
-# The known cost: a stop clears any in-flight recovery marker, so a crash inside
-# the send window is indistinguishable from an operator acknowledging it. If the
-# agent crashes between sending and reconciling, the marker that a transaction
-# may be on-chain and unresolved is discarded silently.
-#
-# Coming back up armed would be far worse, so the trade is the right way round —
-# but after any unclean restart, check the journal for a swap.send_started with
-# no matching swap.reconciled, and confirm the signature on-chain before
-# re-enabling. Do not remove this line to preserve the marker.
+# If an action may already have reached submission, the stop command refuses to
+# clear its recovery marker. The unit then stays down until the operator checks
+# the recorded signature and resolves the pending action explicitly.
 ExecStartPre=/usr/local/libexec/mithril-agent/mithril-agent swap stop --config /var/lib/mithril-agent/agent/config.json --reason service_start
 ExecStartPre=/usr/local/libexec/mithril-agent/mithril-agent preflight --config /var/lib/mithril-agent/agent/config.json
 ExecStart=/usr/local/libexec/mithril-agent/mithril-agent swap run --config /var/lib/mithril-agent/agent/config.json --interval 10s --metrics-address 127.0.0.1:9191 --quote-socket /run/mithril-agent-quote/quote.sock

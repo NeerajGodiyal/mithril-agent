@@ -95,7 +95,7 @@ func StandardRecoveryGuidance() []RecoveryStep {
 	return []RecoveryStep{
 		{
 			State:  "Outcome unknown / unresolved",
-			Action: "Do NOT retry or start another action. The transaction may or may not have landed. Verify the signature with an independent explorer or RPC, then acknowledge the exact action ID once the real outcome is known.",
+			Action: "Do NOT retry or start another action. The transaction may or may not have landed. Reconcile the signature with the configured independent RPC or index evidence, then acknowledge the exact action ID once the real outcome is known. An explorer is optional.",
 		},
 		{
 			State:  "Attention required",

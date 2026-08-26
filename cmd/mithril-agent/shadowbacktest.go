@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/bits"
 	"path/filepath"
 
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
@@ -134,29 +135,36 @@ func observedPrices(ticks []shadow.Tick) []uint64 {
 // SOL carries 9 decimals and devUSDC 6, and a price is USD micros per whole
 // SOL, so one lot of lamports yields lot*price/1e9 devUSDC units, and spending
 // u devUSDC units yields u*1e9/price lamports.
-func modelledPool(spreadBPS uint64) func(uint64, bool) (shadow.Quote, error) {
-	const lot = uint64(1_000_000_000) // one SOL per leg
-	return func(price uint64, sell bool) (shadow.Quote, error) {
-		if price == 0 {
+func modelledPool(spreadBPS uint64) func(uint64, bool, uint64) (shadow.Quote, error) {
+	return func(price uint64, sell bool, input uint64) (shadow.Quote, error) {
+		if price == 0 || input == 0 {
 			return shadow.Quote{}, errors.New("cannot model a fill at a zero price")
 		}
-		var in, out uint64
+		multiplier, divisor := price, uint64(lamportsPerSOL)
 		if sell {
-			in = lot
-			out = lot / lamportsPerSOL * price
-			if out == 0 {
-				out = lot * price / lamportsPerSOL
-			}
+			multiplier, divisor = price, lamportsPerSOL
 		} else {
-			in = lot * price / lamportsPerSOL
-			out = in * lamportsPerSOL / price
+			multiplier, divisor = lamportsPerSOL, price
 		}
-		out = out * (10_000 - spreadBPS) / 10_000
-		if in == 0 || out == 0 {
+		out, ok := boundedMulDiv(input, multiplier, divisor)
+		if !ok {
+			return shadow.Quote{}, errors.New("the modelled fill is out of range")
+		}
+		out, ok = boundedMulDiv(out, 10_000-spreadBPS, 10_000)
+		if !ok || out == 0 {
 			return shadow.Quote{}, errors.New("the modelled fill rounds to nothing at this price")
 		}
-		return shadow.Quote{InputAmount: in, EstimatedOutput: out, MinimumOutput: out}, nil
+		return shadow.Quote{InputAmount: input, EstimatedOutput: out, MinimumOutput: out}, nil
 	}
+}
+
+func boundedMulDiv(value, multiplier, divisor uint64) (uint64, bool) {
+	high, low := bits.Mul64(value, multiplier)
+	if divisor == 0 || high >= divisor {
+		return 0, false
+	}
+	result, _ := bits.Div64(high, low, divisor)
+	return result, true
 }
 
 type backtestResult struct {

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/jupiterquote"
 	"github.com/Overclock-Validator/mithril-agent/pricesource"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 	"github.com/Overclock-Validator/mithril-agent/swapbuilder"
@@ -35,10 +36,8 @@ signed and nothing is submitted; no key is loaded at any point.
 
   --policy PATH         shadow policy JSON
   --dir PATH            directory for the daily journals and reports
-  --node-command PATH   Node.js runtime for the read-only quote adapter
-  --quote-script PATH   read-only quote adapter
-  --pool ADDRESS        pool to quote against
-  --input-mint ADDRESS  mint being spent
+  --node-command PATH   Devnet Node.js runtime for the read-only Orca adapter
+  --quote-script PATH   Devnet read-only Orca adapter
   --once                take a single observation and stop
 
 Endpoints come from the environment and are never printed, logged, or written
@@ -58,8 +57,6 @@ type shadowRunOptions struct {
 	directory   string
 	nodeCommand string
 	quoteScript string
-	pool        string
-	inputMint   string
 	once        bool
 }
 
@@ -71,8 +68,6 @@ func runShadowRun(ctx context.Context, args []string, output io.Writer) error {
 	flags.StringVar(&options.directory, "dir", "", "journal and report directory")
 	flags.StringVar(&options.nodeCommand, "node-command", "", "Node.js runtime")
 	flags.StringVar(&options.quoteScript, "quote-script", "", "read-only quote adapter")
-	flags.StringVar(&options.pool, "pool", "", "pool address to quote against")
-	flags.StringVar(&options.inputMint, "input-mint", "", "mint being spent")
 	flags.BoolVar(&options.once, "once", false, "take one observation and stop")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -122,12 +117,14 @@ func loadShadowPolicy(path string) (shadow.Policy, error) {
 // runner from exactly these dependencies, so crossing midnight cannot silently
 // change what is being read or where it is recorded.
 type shadowRun struct {
-	policy    shadow.Policy
-	primary   shadow.PriceReader
-	secondary shadow.PriceReader
-	quoter    shadow.Quoter
-	roll      *dailyJournal
-	runner    *shadow.Runner
+	policy         shadow.Policy
+	primary        shadow.PriceReader
+	secondary      shadow.PriceReader
+	quotePrimary   shadow.PriceReader
+	quoteSecondary shadow.PriceReader
+	quoter         shadow.Quoter
+	roll           *dailyJournal
+	runner         *shadow.Runner
 	// lastPrice is the most recent price actually observed. The report closes
 	// on it rather than on a cost basis, which would not be a market price.
 	lastPrice uint64
@@ -142,7 +139,7 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 	if err != nil {
 		return nil, err
 	}
-	quoter, err := newShadowQuoter(options)
+	quoter, err := newShadowQuoter(policy, options)
 	if err != nil {
 		return nil, err
 	}
@@ -153,6 +150,10 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 	run := &shadowRun{
 		policy: policy, primary: primary, secondary: pricesource.NewCoinbase(nil),
 		quoter: quoter, roll: roll,
+	}
+	if policy.QuotePeg != nil {
+		run.quotePrimary = primary
+		run.quoteSecondary = pricesource.NewKraken(nil)
 	}
 	if run.runner, err = run.newRunner(); err != nil {
 		roll.Close()
@@ -196,6 +197,12 @@ func isLoopbackHost(host string) bool {
 }
 
 func (s *shadowRun) newRunner() (*shadow.Runner, error) {
+	if s.policy.QuotePeg != nil {
+		return shadow.NewRunner(
+			s.policy, s.primary, s.secondary, s.quoter, s.roll,
+			s.quotePrimary, s.quoteSecondary,
+		)
+	}
 	return shadow.NewRunner(s.policy, s.primary, s.secondary, s.quoter, s.roll)
 }
 
@@ -295,16 +302,35 @@ func (s *shadowRun) finishDay(output io.Writer) error {
 // the client also returns are deliberately discarded here, so there is no path
 // from a shadow quote to a transaction.
 type shadowQuoter struct {
-	client    *swapbuilder.Client
-	pool      string
-	inputMint string
+	client      *swapbuilder.Client
+	pool        string
+	inputMint   string
+	outputMint  string
+	initialSell bool
 }
 
-func newShadowQuoter(options shadowRunOptions) (*shadowQuoter, error) {
-	if options.nodeCommand == "" || options.quoteScript == "" ||
-		options.pool == "" || options.inputMint == "" {
+type jupiterShadowQuoter struct {
+	client      *jupiterquote.Client
+	inputMint   string
+	outputMint  string
+	initialSell bool
+}
+
+func newShadowQuoter(policy shadow.Policy, options shadowRunOptions) (shadow.Quoter, error) {
+	if policy.QuoteRoute.Provider == shadow.QuoteJupiter {
+		client, err := jupiterquote.New(os.Getenv("MITHRIL_AGENT_JUPITER_API_KEY"))
+		if err != nil {
+			return nil, err
+		}
+		return &jupiterShadowQuoter{
+			client: client, inputMint: policy.QuoteRoute.InputMint,
+			outputMint: policy.QuoteRoute.OutputMint, initialSell: policy.IsSell(),
+		}, nil
+	}
+	if policy.QuoteRoute.Provider != shadow.QuoteOrca ||
+		options.nodeCommand == "" || options.quoteScript == "" {
 		return nil, errors.New(
-			"shadow run requires --node-command, --quote-script, --pool, and --input-mint")
+			"Devnet shadow run requires --node-command and --quote-script")
 	}
 	// The quote adapter needs its own endpoint: it requires TLS, while the
 	// price reader may be pointed at a loopback node. When only one is set,
@@ -320,17 +346,26 @@ func newShadowQuoter(options shadowRunOptions) (*shadowQuoter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &shadowQuoter{client: client, pool: options.pool, inputMint: options.inputMint}, nil
+	return &shadowQuoter{
+		client: client, pool: policy.QuoteRoute.Pool,
+		inputMint: policy.QuoteRoute.InputMint, outputMint: policy.QuoteRoute.OutputMint,
+		initialSell: policy.IsSell(),
+	}, nil
 }
 
 func (q *shadowQuoter) Quote(
 	ctx context.Context,
 	owner string,
+	sell bool,
 	inputAmount uint64,
 	slippageBPS uint16,
 ) (shadow.Quote, error) {
+	inputMint := q.inputMint
+	if sell != q.initialSell {
+		inputMint = q.outputMint
+	}
 	result, err := q.client.Quote(ctx, swapbuilder.Request{
-		Owner: owner, Pool: q.pool, InputMint: q.inputMint,
+		Owner: owner, Pool: q.pool, InputMint: inputMint,
 		InputAmount: inputAmount, SlippageBPS: slippageBPS,
 	})
 	if err != nil {
@@ -340,5 +375,29 @@ func (q *shadowQuoter) Quote(
 		InputAmount:     result.TokenIn,
 		EstimatedOutput: result.TokenEstOut,
 		MinimumOutput:   result.TokenMinOut,
+	}, nil
+}
+
+func (q *jupiterShadowQuoter) Quote(
+	ctx context.Context,
+	owner string,
+	sell bool,
+	inputAmount uint64,
+	slippageBPS uint16,
+) (shadow.Quote, error) {
+	inputMint, outputMint := q.inputMint, q.outputMint
+	if sell != q.initialSell {
+		inputMint, outputMint = outputMint, inputMint
+	}
+	result, err := q.client.Quote(ctx, jupiterquote.Request{
+		Taker: owner, InputMint: inputMint, OutputMint: outputMint,
+		InputAmount: inputAmount, SlippageBPS: slippageBPS,
+	})
+	if err != nil {
+		return shadow.Quote{}, err
+	}
+	return shadow.Quote{
+		InputAmount: result.InputAmount, EstimatedOutput: result.EstimatedOutput,
+		MinimumOutput: result.MinimumOutput,
 	}, nil
 }

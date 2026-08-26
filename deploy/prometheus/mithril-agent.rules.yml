@@ -28,6 +28,9 @@ groups:
             unless on(instance) mithril_agent_attention_required)
           or
           (up{job="mithril-agent"} == 1
+            unless on(instance) mithril_agent_recovery_pending)
+          or
+          (up{job="mithril-agent"} == 1
             unless on(instance) mithril_agent_last_failure)
           or
           (up{job="mithril-agent"} == 1
@@ -143,6 +146,8 @@ groups:
         expr: >-
           mithril_agent_attention_required == 1
           unless on(instance)
+          mithril_agent_recovery_pending == 1
+          unless on(instance)
           mithril_agent_terminal_stop == 1
           unless on(instance)
           mithril_agent_last_failure{category="quote_unavailable"} == 1
@@ -159,6 +164,15 @@ groups:
           severity: critical
         annotations:
           summary: "Mithril agent needs operator review; keep execution stopped and inspect status"
+
+      - alert: MithrilAgentRecoveryPending
+        expr: >-
+          mithril_agent_recovery_pending == 1
+        labels:
+          severity: critical
+          lifecycle: state
+        annotations:
+          summary: "Transaction recovery is waiting for independent confirmation; do not retry"
 
       - alert: MithrilAgentQuoteUnavailable
         expr: >-

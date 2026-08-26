@@ -34,6 +34,9 @@ you; everything else has a working default.
   --amount N        how much to trade per action, in the input asset's
                     base units (default 1000000)
   --observe ADDR    the address to quote against; watch-only, never signed for
+  --pool ADDRESS    Devnet Orca pool
+  --input-mint ADDR Devnet input mint
+  --output-mint ADDR Devnet output mint
   --tick-seconds N  how often to look at the market (default 60)`
 
 func runShadowPolicy(args []string, output io.Writer) error {
@@ -45,6 +48,9 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	buyAt := flags.String("buy-at-usd", "", "buy when SOL falls to this price")
 	amount := flags.Uint64("amount", 1_000_000, "trade size in input base units")
 	observe := flags.String("observe", "", "address to quote against (watch-only)")
+	pool := flags.String("pool", "", "Devnet Orca pool")
+	inputMint := flags.String("input-mint", "", "Devnet input mint")
+	outputMint := flags.String("output-mint", "", "Devnet output mint")
 	tickSeconds := flags.Uint64("tick-seconds", 60, "seconds between observations")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -69,7 +75,10 @@ func runShadowPolicy(args []string, output io.Writer) error {
 		return errors.New("give exactly one of --sell-at-usd or --buy-at-usd")
 	}
 
-	policy, err := buildShadowPolicy(*cluster, *sellAt, *buyAt, *amount, *observe, *tickSeconds)
+	policy, err := buildShadowPolicy(
+		*cluster, *sellAt, *buyAt, *amount, *observe, *pool, *inputMint, *outputMint,
+		*tickSeconds,
+	)
 	if err != nil {
 		return err
 	}
@@ -80,12 +89,15 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	if err := securefile.ReplacePrivate(*outPath, append(encoded, '\n'), maxInputBytes); err != nil {
 		return errors.New("could not write the policy")
 	}
+	next := "mithril-agent shadow run --policy " + *outPath + " --dir DIR"
+	if policy.QuoteRoute.Provider == shadow.QuoteOrca {
+		next += " \\\n    --node-command PATH --quote-script PATH"
+	}
 	_, err = fmt.Fprintf(output,
-		"Wrote %s\n\nRun it with:\n  mithril-agent shadow run --policy %s --dir DIR \\\n"+
-			"    --node-command PATH --quote-script PATH --pool ADDRESS --input-mint ADDRESS\n\n"+
+		"Wrote %s\n\nRun it with:\n  %s\n\n"+
 			"It reads the market and writes down what the rule would have done.\n"+
 			"It holds no key and cannot sign, submit, or spend anything.\n",
-		*outPath, *outPath)
+		*outPath, next)
 	return err
 }
 
@@ -96,6 +108,9 @@ func buildShadowPolicy(
 	cluster, sellAt, buyAt string,
 	amount uint64,
 	observe string,
+	pool string,
+	inputMint string,
+	outputMint string,
 	tickSeconds uint64,
 ) (shadow.Policy, error) {
 	direction, threshold := pricetrigger.SellAtOrAbove, sellAt
@@ -112,8 +127,27 @@ func buildShadowPolicy(
 	if direction == pricetrigger.BuyAtOrBelow {
 		inputDecimals, outputDecimals = 6, 9
 	}
+	var route shadow.QuoteRoute
+	switch cluster {
+	case shadow.Mainnet:
+		if pool != "" || inputMint != "" || outputMint != "" {
+			return shadow.Policy{}, errors.New("Mainnet shadow policy uses the fixed Jupiter SOL/USDC route")
+		}
+		route = shadow.MainnetQuoteRoute(direction == pricetrigger.SellAtOrAbove)
+	case shadow.Devnet:
+		if pool == "" || inputMint == "" || outputMint == "" {
+			return shadow.Policy{}, errors.New("Devnet shadow policy requires --pool, --input-mint, and --output-mint")
+		}
+		route = shadow.QuoteRoute{
+			Provider: shadow.QuoteOrca, Pool: pool,
+			InputMint: inputMint, OutputMint: outputMint,
+		}
+	default:
+		return shadow.Policy{}, errors.New("shadow policy cluster must be mainnet-beta or devnet")
+	}
 	policy := shadow.Policy{
 		Version: shadow.Version, Cluster: cluster,
+		QuoteRoute: route,
 		Trigger: pricetrigger.Policy{
 			Version: pricetrigger.Version, Feed: pricetrigger.FeedSOLUSD,
 			Direction: direction, ThresholdMicros: micros,
@@ -132,6 +166,17 @@ func buildShadowPolicy(
 		// A notional opening position, so the result has something to be
 		// measured against and a hold benchmark to be compared with.
 		StartingInputUnits: 1_000_000_000,
+	}
+	if cluster == shadow.Mainnet {
+		policy.QuotePeg = &pricetrigger.BandPolicy{
+			Version: pricetrigger.Version, Feed: pricetrigger.FeedUSDCUSD,
+			MinimumMicros: pricetrigger.USDCBandMinimumMicros,
+			MaximumMicros: pricetrigger.USDCBandMaximumMicros,
+			MaxAgeSeconds: 60, MaxSourceSkewSeconds: 30,
+			MaxDeviationBPS: 50, MaxConfidenceBPS: 50,
+			PrimarySourceSHA256:   pricesource.PythPushUSDCIdentitySHA256(),
+			SecondarySourceSHA256: pricesource.KrakenIdentitySHA256(),
+		}
 	}
 	if err := policy.Validate(); err != nil {
 		return shadow.Policy{}, err
