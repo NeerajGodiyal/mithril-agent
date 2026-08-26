@@ -2,17 +2,16 @@
 // real funding boundary.
 //
 // The point of the boundary is that it is enforced somewhere this software
-// cannot reach. A Squads spending limit caps how much can ever leave a vault
-// for a named destination in a period, and that cap is enforced on-chain by the
-// Squads program — not by our policy, not by our signer, not by our operator.
-// So the correct role for this package is to VERIFY the cap, never to use it.
+// cannot rewrite. A Squads spending limit caps how much may leave one vault for
+// a named destination in a period, and that cap is enforced on-chain by the
+// Squads program — not by our policy, signer, or operator process. This package
+// verifies that boundary; it does not build or use spending-limit instructions.
 //
-// That is why nothing here builds, signs, or submits a transaction. If our
-// software could move funds through the boundary, the boundary would only be as
-// trustworthy as our software, which defeats the entire purpose of having one.
-// Moving funds through it is a human action taken in Squads; our job is to let
-// an operator prove the cap is real and correctly aimed before they fund
-// anything.
+// That is why nothing here builds, signs, or submits a transaction. Squads can
+// still enforce a useful cap when an authorized automation key spends through
+// it; whether replenishment is manual or automated is a separate custody
+// decision. Our job is to let an operator prove the cap is real and correctly
+// aimed before they fund anything.
 //
 // A spending limit is a funding boundary, NOT a policy engine. Squads v4's
 // spending_limit_use can only perform system_program::transfer and
@@ -31,6 +30,12 @@ import (
 // ProgramID is the Squads v4 program, verified deployed and executable on both
 // mainnet-beta and devnet with identical program data.
 const ProgramID = "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf"
+
+var (
+	vaultSeedPrefix   = []byte("multisig")
+	vaultSeed         = []byte("vault")
+	spendingLimitSeed = []byte("spending_limit")
+)
 
 // NativeMint is the all-zero mint a spending limit uses to mean native SOL
 // rather than an SPL token.
@@ -219,3 +224,42 @@ func readKeys(data []byte, offset int) ([]string, int, error) {
 
 // IsNativeSOL reports whether the limit caps native SOL rather than a token.
 func (l SpendingLimit) IsNativeSOL() bool { return l.Mint == NativeMint }
+
+// VaultAddress derives the asset-holding Vault PDA from the Multisig config
+// account and vault index. The Multisig account itself is configuration, not a
+// deposit address.
+func VaultAddress(multisig string, vaultIndex uint8) (string, error) {
+	multisigKey, err := solana.Decode32(multisig)
+	if err != nil {
+		return "", errors.New("Squads multisig address is invalid")
+	}
+	address, _, err := solana.FindProgramAddress([][]byte{
+		vaultSeedPrefix, multisigKey[:], vaultSeed, []byte{vaultIndex},
+	}, ProgramID)
+	if err != nil {
+		return "", errors.New("derive Squads vault address")
+	}
+	return address, nil
+}
+
+// SpendingLimitAddress derives the account address from the fields stored in
+// the account. Comparing this with the address that was read prevents a valid
+// payload at an unrelated address from being mistaken for the configured
+// spending limit.
+func SpendingLimitAddress(multisig, createKey string) (string, error) {
+	multisigKey, err := solana.Decode32(multisig)
+	if err != nil {
+		return "", errors.New("Squads multisig address is invalid")
+	}
+	createKeyBytes, err := solana.Decode32(createKey)
+	if err != nil {
+		return "", errors.New("Squads spending-limit create key is invalid")
+	}
+	address, _, err := solana.FindProgramAddress([][]byte{
+		vaultSeedPrefix, multisigKey[:], spendingLimitSeed, createKeyBytes[:],
+	}, ProgramID)
+	if err != nil {
+		return "", errors.New("derive Squads spending-limit address")
+	}
+	return address, nil
+}

@@ -28,6 +28,12 @@ const (
 
 	DivergenceStatus  = "status"
 	DivergenceEffects = "effects"
+
+	// UpgradeableLoaderState reserves its maximum serialized ProgramData
+	// metadata size even when the upgrade-authority option is None. Deployed
+	// program bytes therefore always start at byte 45, not immediately after
+	// the 13-byte immutable-state prefix.
+	upgradeableProgramDataMetadataLength = uint64(45)
 )
 
 var errFinalizedEffectsDiverged = errors.New("finalized transaction effects diverged")
@@ -63,6 +69,18 @@ type EvidenceProvider interface {
 	BlockHeight(context.Context) (uint64, error)
 }
 
+type blockhashValidityProvider interface {
+	BlockhashValid(context.Context, string, uint64) (solanarpc.BlockhashValidity, error)
+}
+
+type contextBlockHeightProvider interface {
+	BlockHeightAt(context.Context, uint64) (uint64, error)
+}
+
+type accountSliceProvider interface {
+	AccountSlice(context.Context, string, uint64, uint64, uint64) (solanarpc.AccountDataSlice, error)
+}
+
 type RentEvidence struct {
 	Lamports          uint64 `json:"lamports"`
 	PrimaryLamports   uint64 `json:"primary_lamports"`
@@ -83,12 +101,41 @@ func (l *Lifecycle) VerifyTokenInputAccount(
 	minimumAmount,
 	minContextSlot uint64,
 ) (TokenAccountEvidence, error) {
+	if minimumAmount == 0 {
+		return TokenAccountEvidence{}, errors.New("token account policy is invalid")
+	}
+	return l.verifyTokenAccount(
+		ctx, address, mint, owner, minimumAmount, minContextSlot,
+	)
+}
+
+// VerifyTokenOutputAccount requires an existing, initialized classic-token
+// account with no delegate, native reserve, or separate close authority. A
+// zero balance is valid because this check runs before the first swap.
+func (l *Lifecycle) VerifyTokenOutputAccount(
+	ctx context.Context,
+	address,
+	mint,
+	owner string,
+	minContextSlot uint64,
+) (TokenAccountEvidence, error) {
+	return l.verifyTokenAccount(ctx, address, mint, owner, 0, minContextSlot)
+}
+
+func (l *Lifecycle) verifyTokenAccount(
+	ctx context.Context,
+	address,
+	mint,
+	owner string,
+	minimumAmount,
+	minContextSlot uint64,
+) (TokenAccountEvidence, error) {
 	if _, err := solana.Decode32(address); err != nil {
 		return TokenAccountEvidence{}, errors.New("token account address is invalid")
 	}
 	wantMint, mintErr := solana.Decode32(mint)
 	wantOwner, ownerErr := solana.Decode32(owner)
-	if mintErr != nil || ownerErr != nil || minimumAmount == 0 || minContextSlot == 0 {
+	if mintErr != nil || ownerErr != nil || minContextSlot == 0 {
 		return TokenAccountEvidence{}, errors.New("token account policy is invalid")
 	}
 	const tokenAccountLength = uint64(165)
@@ -109,7 +156,10 @@ func (l *Lifecycle) VerifyTokenInputAccount(
 		primary.Owner != orcaswap.TokenProgram || primary.Executable ||
 		!bytes.Equal(primary.Data[:32], wantMint[:]) ||
 		!bytes.Equal(primary.Data[32:64], wantOwner[:]) ||
-		primary.Data[108] != 1 || binary.LittleEndian.Uint32(primary.Data[109:113]) != 0 {
+		binary.LittleEndian.Uint32(primary.Data[72:76]) != 0 ||
+		primary.Data[108] != 1 || binary.LittleEndian.Uint32(primary.Data[109:113]) != 0 ||
+		binary.LittleEndian.Uint64(primary.Data[121:129]) != 0 ||
+		binary.LittleEndian.Uint32(primary.Data[129:133]) != 0 {
 		return TokenAccountEvidence{}, errors.New("token account identity does not match the pinned profile")
 	}
 	amount := binary.LittleEndian.Uint64(primary.Data[64:72])
@@ -155,8 +205,9 @@ func (l *Lifecycle) VerifyWhirlpoolDeployment(
 	if policy.Validate() != nil {
 		return errors.New("Whirlpool deployment policy is invalid")
 	}
-	return l.verifyWhirlpoolDeployment(
-		ctx, policy.ProgramData, policy.UpgradeAuthority, policy.DeploymentSlot, minContextSlot,
+	return l.VerifyUpgradeableProgramDeployment(
+		ctx, orcaswap.WhirlpoolProgram, policy.ProgramData,
+		policy.UpgradeAuthority, policy.DeploymentSlot, minContextSlot,
 	)
 }
 
@@ -168,64 +219,158 @@ func (l *Lifecycle) VerifyWhirlpoolBuyDeployment(
 	if policy.Validate() != nil {
 		return errors.New("Whirlpool buy deployment policy is invalid")
 	}
-	return l.verifyWhirlpoolDeployment(
-		ctx, policy.ProgramData, policy.UpgradeAuthority, policy.DeploymentSlot, minContextSlot,
+	return l.VerifyUpgradeableProgramDeployment(
+		ctx, orcaswap.WhirlpoolProgram, policy.ProgramData,
+		policy.UpgradeAuthority, policy.DeploymentSlot, minContextSlot,
 	)
 }
 
-func (l *Lifecycle) verifyWhirlpoolDeployment(
+// VerifyUpgradeableProgramDeployment requires both independent providers to
+// match one explicitly pinned BPF upgradeable-loader deployment.
+func (l *Lifecycle) VerifyUpgradeableProgramDeployment(
 	ctx context.Context,
+	program,
 	programData,
 	upgradeAuthority string,
 	deploymentSlot,
 	minContextSlot uint64,
 ) error {
-	if minContextSlot == 0 {
+	programKey, programErr := solana.Decode32(program)
+	programDataKey, programDataErr := solana.Decode32(programData)
+	upgradeAuthorityKey, upgradeAuthorityErr := solana.Decode32(upgradeAuthority)
+	if programErr != nil || programDataErr != nil || upgradeAuthorityErr != nil ||
+		programKey == programDataKey || programKey == upgradeAuthorityKey ||
+		programDataKey == upgradeAuthorityKey {
+		return errors.New("upgradeable deployment identity is invalid")
+	}
+	if deploymentSlot == 0 || minContextSlot == 0 {
 		return errors.New("minimum deployment context slot is required")
 	}
-	programA, programB, err := queryPair(
-		ctx,
-		func(ctx context.Context) (solanarpc.AccountDataSlice, error) {
-			return l.primary.AccountSlice(ctx, orcaswap.WhirlpoolProgram, minContextSlot, 0, 36)
-		},
-		func(ctx context.Context) (solanarpc.AccountDataSlice, error) {
-			return l.secondary.AccountSlice(ctx, orcaswap.WhirlpoolProgram, minContextSlot, 0, 36)
-		},
-	)
+	programA, err := l.matchingAccountSlice(ctx, program, minContextSlot, 0, 36)
 	if err != nil {
-		return errors.New("query independent Whirlpool program evidence")
+		return errors.New("query upgradeable program evidence")
 	}
-	if !accountSlicesEqual(programA, programB, minContextSlot, 36) ||
+	if programA.DataLength != 36 ||
 		programA.Owner != orcaswap.UpgradeableLoader || !programA.Executable ||
 		binary.LittleEndian.Uint32(programA.Data[:4]) != 2 ||
 		solana.Encode(programA.Data[4:]) != programData {
-		return errors.New("Whirlpool program deployment does not match the pinned profile")
+		return errors.New("upgradeable program deployment does not match the pinned profile")
 	}
-	dataA, dataB, err := queryPair(
-		ctx,
-		func(ctx context.Context) (solanarpc.AccountDataSlice, error) {
-			return l.primary.AccountSlice(ctx, programData, minContextSlot, 0, 45)
-		},
-		func(ctx context.Context) (solanarpc.AccountDataSlice, error) {
-			return l.secondary.AccountSlice(ctx, programData, minContextSlot, 0, 45)
-		},
+	dataA, err := l.matchingAccountSlice(
+		ctx, programData, minContextSlot, 0, upgradeableProgramDataMetadataLength,
 	)
 	if err != nil {
-		return errors.New("query independent Whirlpool program-data evidence")
+		return errors.New("query upgradeable program-data evidence")
 	}
-	if !accountSlicesEqual(dataA, dataB, minContextSlot, 45) ||
+	if dataA.DataLength < upgradeableProgramDataMetadataLength ||
 		dataA.Owner != orcaswap.UpgradeableLoader || dataA.Executable ||
 		binary.LittleEndian.Uint32(dataA.Data[:4]) != 3 ||
 		binary.LittleEndian.Uint64(dataA.Data[4:12]) != deploymentSlot ||
 		dataA.Data[12] != 1 || solana.Encode(dataA.Data[13:45]) != upgradeAuthority {
-		return errors.New("Whirlpool program-data deployment does not match the pinned profile")
+		return errors.New("upgradeable program-data deployment does not match the pinned profile")
 	}
 	return nil
+}
+
+// VerifyImmutableProgramDeployment requires the local Mithril node and both
+// independent providers to agree that one upgradeable-loader program has no
+// remaining upgrade authority and the complete deployed code matches the
+// reviewed length and SHA-256. Once that option is None, the deployment cannot
+// be changed.
+func (l *Lifecycle) VerifyImmutableProgramDeployment(
+	ctx context.Context,
+	program,
+	programData string,
+	deploymentSlot,
+	codeLength uint64,
+	codeSHA256 string,
+	minContextSlot uint64,
+) error {
+	programKey, programErr := solana.Decode32(program)
+	programDataKey, programDataErr := solana.Decode32(programData)
+	wantCodeHash, hashErr := hex.DecodeString(codeSHA256)
+	const maxImmutableProgramCodeBytes = uint64(64 << 10)
+	if programErr != nil || programDataErr != nil || programKey == programDataKey ||
+		deploymentSlot == 0 || codeLength == 0 || codeLength > maxImmutableProgramCodeBytes ||
+		hashErr != nil || len(wantCodeHash) != sha256.Size ||
+		hex.EncodeToString(wantCodeHash) != codeSHA256 || minContextSlot == 0 {
+		return errors.New("immutable program policy is invalid")
+	}
+	programA, err := l.matchingAccountSlice(ctx, program, minContextSlot, 0, 36)
+	if err != nil {
+		return errors.New("query immutable program evidence")
+	}
+	if programA.DataLength != 36 || programA.Owner != orcaswap.UpgradeableLoader ||
+		!programA.Executable || binary.LittleEndian.Uint32(programA.Data[:4]) != 2 ||
+		solana.Encode(programA.Data[4:]) != programData {
+		return errors.New("immutable program deployment does not match the pinned profile")
+	}
+	dataA, err := l.matchingAccountSlice(
+		ctx, programData, minContextSlot, 0, upgradeableProgramDataMetadataLength,
+	)
+	if err != nil {
+		return errors.New("query immutable program-data evidence")
+	}
+	if dataA.DataLength != upgradeableProgramDataMetadataLength+codeLength ||
+		dataA.Owner != orcaswap.UpgradeableLoader ||
+		dataA.Executable || binary.LittleEndian.Uint32(dataA.Data[:4]) != 3 ||
+		binary.LittleEndian.Uint64(dataA.Data[4:12]) != deploymentSlot || dataA.Data[12] != 0 {
+		return errors.New("immutable program-data deployment does not match the pinned profile")
+	}
+	hasher := sha256.New()
+	for offset := uint64(0); offset < codeLength; {
+		length := min(uint64(512), codeLength-offset)
+		chunk, err := l.matchingAccountSlice(
+			ctx, programData, minContextSlot,
+			upgradeableProgramDataMetadataLength+offset, length,
+		)
+		if err != nil || chunk.DataLength != dataA.DataLength {
+			return errors.New("query immutable program code evidence")
+		}
+		_, _ = hasher.Write(chunk.Data)
+		offset += length
+	}
+	if !bytes.Equal(hasher.Sum(nil), wantCodeHash) {
+		return errors.New("immutable program code does not match the pinned profile")
+	}
+	return nil
+}
+
+func (l *Lifecycle) matchingAccountSlice(
+	ctx context.Context,
+	address string,
+	minContextSlot,
+	offset,
+	length uint64,
+) (solanarpc.AccountDataSlice, error) {
+	node, ok := l.node.(accountSliceProvider)
+	if !ok {
+		return solanarpc.AccountDataSlice{}, errors.New("Mithril RPC does not support deployment evidence")
+	}
+	nodeValue, err := node.AccountSlice(ctx, address, minContextSlot, offset, length)
+	if err != nil {
+		return solanarpc.AccountDataSlice{}, err
+	}
+	primary, secondary, err := queryPair(
+		ctx,
+		func(ctx context.Context) (solanarpc.AccountDataSlice, error) {
+			return l.primary.AccountSlice(ctx, address, minContextSlot, offset, length)
+		},
+		func(ctx context.Context) (solanarpc.AccountDataSlice, error) {
+			return l.secondary.AccountSlice(ctx, address, minContextSlot, offset, length)
+		},
+	)
+	if err != nil || !accountSlicesEqual(nodeValue, primary, minContextSlot, int(length)) ||
+		!accountSlicesEqual(primary, secondary, minContextSlot, int(length)) {
+		return solanarpc.AccountDataSlice{}, errors.New("deployment evidence disagrees")
+	}
+	return primary, nil
 }
 
 func accountSlicesEqual(left, right solanarpc.AccountDataSlice, minContextSlot uint64, length int) bool {
 	return left.ContextSlot >= minContextSlot && right.ContextSlot >= minContextSlot &&
 		left.Owner == right.Owner && left.Executable == right.Executable &&
+		left.DataLength == right.DataLength &&
 		len(left.Data) == length && len(right.Data) == length &&
 		bytes.Equal(left.Data, right.Data)
 }
@@ -245,8 +390,8 @@ func (l *Lifecycle) VerifyGenesis(ctx context.Context, expected string) error {
 }
 
 // VerifyEvidenceGenesis checks the two independent providers without requiring
-// the local node. It is used only to reconcile a transaction after a durable
-// send marker already exists.
+// the local node. Callers use it for read-only pre-send qualification and for
+// reconciliation after a durable send marker exists.
 func (l *Lifecycle) VerifyEvidenceGenesis(ctx context.Context, expected string) error {
 	if err := solana.ValidateBase58(expected, 64); err != nil {
 		return errors.New("expected genesis hash is invalid")
@@ -261,6 +406,58 @@ func (l *Lifecycle) VerifyEvidenceGenesis(ctx context.Context, expected string) 
 	}
 	if a != expected || b != expected {
 		return errors.New("RPC provider genesis hash does not match the configured cluster")
+	}
+	return nil
+}
+
+// VerifyFinalizedV0History proves before authorization that both independent
+// evidence providers can recover the exact bytes and effects of one protected,
+// historical version-0 transaction. Pinning the signature is what turns this
+// from a recent-history compatibility check into a real retention check.
+func (l *Lifecycle) VerifyFinalizedV0History(ctx context.Context, signature string) error {
+	if _, err := solana.Decode64(signature); err != nil {
+		return errors.New("archive probe signature is invalid")
+	}
+	primaryStatus, secondaryStatus, err := queryStatuses(
+		ctx, l.primary, l.secondary, signature,
+	)
+	if err != nil || !primaryStatus.Found || !secondaryStatus.Found ||
+		primaryStatus.ConfirmationStatus != "finalized" ||
+		secondaryStatus.ConfirmationStatus != "finalized" ||
+		primaryStatus.Slot != secondaryStatus.Slot ||
+		primaryStatus.Failed != secondaryStatus.Failed ||
+		primaryStatus.ErrorFingerprint != secondaryStatus.ErrorFingerprint {
+		return errors.New("independent finalized transaction history status diverged")
+	}
+	primaryEffect, secondaryEffect, err := queryPair(
+		ctx,
+		func(ctx context.Context) (solanarpc.TransactionEffect, error) {
+			return l.primary.TransactionEffect(ctx, signature)
+		},
+		func(ctx context.Context) (solanarpc.TransactionEffect, error) {
+			return l.secondary.TransactionEffect(ctx, signature)
+		},
+	)
+	if err != nil {
+		return errors.New("independent RPCs cannot recover the archive probe transaction")
+	}
+	envelope, err := solana.VerifySignedTransactionEnvelope(primaryEffect.Transaction)
+	if err != nil || envelope.Version != 0 || solana.Encode(envelope.Signature[:]) != signature {
+		return errors.New("archive probe is not the pinned finalized version-0 transaction")
+	}
+	if primaryEffect.Slot != primaryStatus.Slot ||
+		secondaryEffect.Slot != primaryStatus.Slot ||
+		primaryEffect.Failed != primaryStatus.Failed ||
+		secondaryEffect.Failed != primaryStatus.Failed ||
+		primaryEffect.ErrorFingerprint != primaryStatus.ErrorFingerprint ||
+		secondaryEffect.ErrorFingerprint != primaryStatus.ErrorFingerprint ||
+		primaryEffect.FeeLamports != secondaryEffect.FeeLamports ||
+		!bytes.Equal(primaryEffect.Transaction, secondaryEffect.Transaction) ||
+		!slices.Equal(primaryEffect.PreBalances, secondaryEffect.PreBalances) ||
+		!slices.Equal(primaryEffect.PostBalances, secondaryEffect.PostBalances) ||
+		!tokenBalancesEqual(primaryEffect.PreTokenBalances, secondaryEffect.PreTokenBalances) ||
+		!tokenBalancesEqual(primaryEffect.PostTokenBalances, secondaryEffect.PostTokenBalances) {
+		return errors.New("independent finalized transaction history effects diverged")
 	}
 	return nil
 }
@@ -507,6 +704,23 @@ type Lifecycle struct {
 	secondary EvidenceProvider
 }
 
+// MithrilNodeIdentity returns the exact local node used by all node-backed
+// readiness checks so a future submitter cannot qualify against one node and
+// broadcast through another.
+func (l *Lifecycle) MithrilNodeIdentity() string {
+	if l == nil || l.node == nil {
+		return ""
+	}
+	return l.node.Identity()
+}
+
+// EvidenceProviderIdentities returns the exact two providers used by every
+// independent evidence query. Callers can bind ownership metadata to the
+// evidence source instead of to unrelated reader objects.
+func (l *Lifecycle) EvidenceProviderIdentities() (string, string) {
+	return l.primary.Identity(), l.secondary.Identity()
+}
+
 type Submission struct {
 	Signature            string `json:"signature"`
 	LastValidBlockHeight uint64 `json:"last_valid_block_height"`
@@ -522,25 +736,26 @@ type ExpectedTransaction struct {
 }
 
 type Reconciliation struct {
-	Signature                 string              `json:"signature"`
-	Verdict                   string              `json:"verdict"`
-	Slot                      uint64              `json:"slot,omitempty"`
-	PrimaryFound              bool                `json:"primary_found"`
-	SecondaryFound            bool                `json:"secondary_found"`
-	PrimarySlot               uint64              `json:"primary_slot,omitempty"`
-	SecondarySlot             uint64              `json:"secondary_slot,omitempty"`
-	PrimaryStatus             string              `json:"primary_status,omitempty"`
-	SecondaryStatus           string              `json:"secondary_status,omitempty"`
-	PrimaryFailed             bool                `json:"primary_failed"`
-	SecondaryFailed           bool                `json:"secondary_failed"`
-	PrimaryErrorFingerprint   string              `json:"primary_error_fingerprint,omitempty"`
-	SecondaryErrorFingerprint string              `json:"secondary_error_fingerprint,omitempty"`
-	PrimaryBlockHeight        uint64              `json:"primary_block_height,omitempty"`
-	SecondaryBlockHeight      uint64              `json:"secondary_block_height,omitempty"`
-	DivergenceKind            string              `json:"divergence_kind,omitempty"`
-	Effects                   *EffectEvidence     `json:"effects,omitempty"`
-	SwapEffects               *SwapEffectEvidence `json:"swap_effects,omitempty"`
-	BuyEffects                *BuyEffectEvidence  `json:"buy_effects,omitempty"`
+	Signature                 string                 `json:"signature"`
+	Verdict                   string                 `json:"verdict"`
+	Slot                      uint64                 `json:"slot,omitempty"`
+	PrimaryFound              bool                   `json:"primary_found"`
+	SecondaryFound            bool                   `json:"secondary_found"`
+	PrimarySlot               uint64                 `json:"primary_slot,omitempty"`
+	SecondarySlot             uint64                 `json:"secondary_slot,omitempty"`
+	PrimaryStatus             string                 `json:"primary_status,omitempty"`
+	SecondaryStatus           string                 `json:"secondary_status,omitempty"`
+	PrimaryFailed             bool                   `json:"primary_failed"`
+	SecondaryFailed           bool                   `json:"secondary_failed"`
+	PrimaryErrorFingerprint   string                 `json:"primary_error_fingerprint,omitempty"`
+	SecondaryErrorFingerprint string                 `json:"secondary_error_fingerprint,omitempty"`
+	PrimaryBlockHeight        uint64                 `json:"primary_block_height,omitempty"`
+	SecondaryBlockHeight      uint64                 `json:"secondary_block_height,omitempty"`
+	DivergenceKind            string                 `json:"divergence_kind,omitempty"`
+	Effects                   *EffectEvidence        `json:"effects,omitempty"`
+	SwapEffects               *SwapEffectEvidence    `json:"swap_effects,omitempty"`
+	BuyEffects                *BuyEffectEvidence     `json:"buy_effects,omitempty"`
+	JupiterEffects            *JupiterEffectEvidence `json:"jupiter_effects,omitempty"`
 }
 
 type EffectEvidence struct {
@@ -609,6 +824,16 @@ func New(
 	return &Lifecycle{node: node, primary: primary, secondary: secondary}, nil
 }
 
+// NewEvidenceLifecycle constructs the finality-only half of a lifecycle. It
+// deliberately has no Mithril submission authority.
+func NewEvidenceLifecycle(primary, secondary EvidenceProvider) (*Lifecycle, error) {
+	if primary == nil || secondary == nil || primary.Identity() == "" ||
+		secondary.Identity() == "" || primary.Identity() == secondary.Identity() {
+		return nil, errors.New("two distinct evidence providers are required")
+	}
+	return &Lifecycle{primary: primary, secondary: secondary}, nil
+}
+
 func (l *Lifecycle) Submit(
 	ctx context.Context,
 	transaction []byte,
@@ -650,6 +875,51 @@ func (l *Lifecycle) BlockhashExpired(ctx context.Context, lastValidBlockHeight u
 		return false, err
 	}
 	return height > lastValidBlockHeight, nil
+}
+
+// NodeBlockHeight returns the local Mithril node's processed block height only
+// after it can evaluate the retained proposal context.
+func (l *Lifecycle) NodeBlockHeight(ctx context.Context, minContextSlot uint64) (uint64, error) {
+	provider, ok := l.node.(contextBlockHeightProvider)
+	if !ok || minContextSlot == 0 {
+		return 0, errors.New("context-bound Mithril block height is unavailable")
+	}
+	return provider.BlockHeightAt(ctx, minContextSlot)
+}
+
+// VerifyIndependentBlockhashValidity requires both bound evidence providers to
+// observe one retained blockhash as valid at or after the proposal context.
+// It does not consult or submit through the Mithril node.
+func (l *Lifecycle) VerifyIndependentBlockhashValidity(
+	ctx context.Context,
+	blockhash string,
+	minContextSlot uint64,
+) error {
+	if _, err := solana.Decode32(blockhash); err != nil || minContextSlot == 0 {
+		return errors.New("blockhash validity request is invalid")
+	}
+	primary, primaryOK := l.primary.(blockhashValidityProvider)
+	secondary, secondaryOK := l.secondary.(blockhashValidityProvider)
+	if !primaryOK || !secondaryOK {
+		return errors.New("independent blockhash validity is unavailable")
+	}
+	first, second, err := queryPair(
+		ctx,
+		func(ctx context.Context) (solanarpc.BlockhashValidity, error) {
+			return primary.BlockhashValid(ctx, blockhash, minContextSlot)
+		},
+		func(ctx context.Context) (solanarpc.BlockhashValidity, error) {
+			return secondary.BlockhashValid(ctx, blockhash, minContextSlot)
+		},
+	)
+	if err != nil {
+		return errors.New("query independent blockhash validity")
+	}
+	if first.ContextSlot < minContextSlot || second.ContextSlot < minContextSlot ||
+		!first.Valid || !second.Valid {
+		return errors.New("independent blockhash validity does not agree")
+	}
+	return nil
 }
 
 func (l *Lifecycle) Reconcile(
@@ -1053,10 +1323,10 @@ func ownerTokenBalancesUnchanged(
 	pre,
 	post []solanarpc.TokenBalance,
 	owner string,
-	allowed uint16,
+	allowed ...uint16,
 ) bool {
 	for _, before := range pre {
-		if before.Owner != owner || before.AccountIndex == allowed {
+		if before.Owner != owner || slices.Contains(allowed, before.AccountIndex) {
 			continue
 		}
 		matched := false
@@ -1071,7 +1341,7 @@ func ownerTokenBalancesUnchanged(
 		}
 	}
 	for _, after := range post {
-		if after.Owner != owner || after.AccountIndex == allowed {
+		if after.Owner != owner || slices.Contains(allowed, after.AccountIndex) {
 			continue
 		}
 		matched := false

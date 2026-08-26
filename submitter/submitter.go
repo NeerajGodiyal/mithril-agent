@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"path/filepath"
 
+	"github.com/Overclock-Validator/mithril-agent/internal/control"
 	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
 	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
+	"github.com/Overclock-Validator/mithril-agent/jupiterswap"
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
+	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
 	"github.com/Overclock-Validator/mithril-agent/sealedtx"
 	"github.com/Overclock-Validator/mithril-agent/signer"
 	"github.com/Overclock-Validator/mithril-agent/solana"
@@ -19,21 +21,33 @@ import (
 
 const maxKeyBytes = 1024
 
+const (
+	MainnetRecoveryStopOnly   = "stop_only"
+	MainnetRecoveryExactRetry = "exact_retry"
+)
+
 var ErrControlBlocked = errors.New("submitter control state blocks the transaction")
 
 type Policy struct {
-	Cluster             string                `json:"cluster"`
-	Profile             string                `json:"profile,omitempty"`
-	ProfileFingerprint  string                `json:"profile_sha256"`
-	ControlStatePath    string                `json:"control_state_path"`
-	Source              string                `json:"source"`
-	Destination         string                `json:"destination"`
-	MaxLamports         uint64                `json:"max_lamports"`
-	MaxInputTokenAmount uint64                `json:"max_input_token_amount,omitempty"`
-	MaxFeeLamports      uint64                `json:"max_fee_lamports"`
-	SubmitterPublicKey  string                `json:"submitter_public_key"`
-	OrcaSwap            *orcaswap.Policy      `json:"orca_swap,omitempty"`
-	OrcaBuy             *orcaswap.BuyPolicyV2 `json:"orca_buy,omitempty"`
+	Cluster               string                         `json:"cluster"`
+	Profile               string                         `json:"profile,omitempty"`
+	ProfileFingerprint    string                         `json:"profile_sha256"`
+	ControlStatePath      string                         `json:"control_state_path"`
+	Source                string                         `json:"source"`
+	Destination           string                         `json:"destination"`
+	MaxLamports           uint64                         `json:"max_lamports"`
+	MaxInputTokenAmount   uint64                         `json:"max_input_token_amount,omitempty"`
+	MaxFeeLamports        uint64                         `json:"max_fee_lamports"`
+	ScheduleWindowSeconds uint64                         `json:"schedule_window_seconds,omitempty"`
+	ScheduleAnchorUnix    int64                          `json:"schedule_anchor_unix,omitempty"`
+	MaxBlockHeightWindow  uint64                         `json:"max_block_height_window,omitempty"`
+	RecoveryMode          string                         `json:"recovery_mode,omitempty"`
+	SubmitterPublicKey    string                         `json:"submitter_public_key"`
+	AttestationPublicKey  string                         `json:"attestation_public_key,omitempty"`
+	Evidence              proposalcheck.ProviderBindings `json:"evidence"`
+	OrcaSwap              *orcaswap.Policy               `json:"orca_swap,omitempty"`
+	OrcaBuy               *orcaswap.BuyPolicyV2          `json:"orca_buy,omitempty"`
+	Jupiter               *jupiterswap.Policy            `json:"jupiter,omitempty"`
 }
 
 type KeyDocument struct {
@@ -42,6 +56,8 @@ type KeyDocument struct {
 }
 
 type Node interface {
+	GenesisHash(context.Context) (string, error)
+	BlockHeight(context.Context) (uint64, error)
 	SendTransaction(context.Context, []byte, uint64) (string, error)
 }
 
@@ -50,7 +66,9 @@ type SendGate interface {
 }
 
 func (p Policy) Validate() error {
-	if p.Cluster != "devnet" {
+	if p.Cluster != "devnet" || p.Jupiter != nil || p.ScheduleWindowSeconds != 0 ||
+		p.ScheduleAnchorUnix != 0 || p.MaxBlockHeightWindow != 0 ||
+		p.RecoveryMode != "" || p.AttestationPublicKey != "" {
 		return errors.New("submitter policy is restricted to devnet")
 	}
 	fingerprint, err := hex.DecodeString(p.ProfileFingerprint)
@@ -89,10 +107,8 @@ func (p Policy) Validate() error {
 	if (p.OrcaBuy == nil && p.MaxLamports == 0) || p.MaxFeeLamports == 0 {
 		return errors.New("submitter amount and fee limits are required")
 	}
-	decoded, err := hex.DecodeString(p.SubmitterPublicKey)
-	if err != nil || len(decoded) != 32 ||
-		hex.EncodeToString(decoded) != p.SubmitterPublicKey {
-		return errors.New("submitter public key is invalid")
+	if err := sealedtx.ValidatePublicKey(p.SubmitterPublicKey); err != nil {
+		return err
 	}
 	return nil
 }
@@ -113,7 +129,29 @@ func LoadPrivateKey(path string) (string, error) {
 	return document.PrivateKey, nil
 }
 
+// Submit opens the exact control gate named by the protected policy before
+// validating and broadcasting one Devnet transaction.
 func Submit(
+	ctx context.Context,
+	policy Policy,
+	privateKey string,
+	node Node,
+	response signer.Response,
+	minContextSlot uint64,
+) (txflow.Submission, error) {
+	if err := policy.Validate(); err != nil {
+		return txflow.Submission{}, err
+	}
+	gate, err := control.NewStateFile(
+		policy.ControlStatePath, policy.ProfileFingerprint, false,
+	)
+	if err != nil {
+		return txflow.Submission{}, errors.New("submitter control configuration is invalid")
+	}
+	return submitWithGate(ctx, policy, privateKey, node, gate, response, minContextSlot)
+}
+
+func submitWithGate(
 	ctx context.Context,
 	policy Policy,
 	privateKey string,
@@ -124,6 +162,9 @@ func Submit(
 ) (txflow.Submission, error) {
 	if err := policy.Validate(); err != nil {
 		return txflow.Submission{}, err
+	}
+	if err := policy.Evidence.Validate(); err != nil {
+		return txflow.Submission{}, errors.New("submitter evidence providers are not bound")
 	}
 	if node == nil || gate == nil || minContextSlot == 0 {
 		return txflow.Submission{}, errors.New("submitter node, control gate, and minimum context slot are required")
@@ -139,57 +180,15 @@ func Submit(
 	if err != nil {
 		return txflow.Submission{}, err
 	}
-	var message []byte
-	var signature string
-	if policy.OrcaSwap == nil && policy.OrcaBuy == nil {
-		decoded, err := solana.DecodeSignedTransfer(transaction)
-		if err != nil {
-			return txflow.Submission{}, fmt.Errorf("decode sealed transaction: %w", err)
-		}
-		if solana.Encode(decoded.Source[:]) != policy.Source ||
-			solana.Encode(decoded.Destination[:]) != policy.Destination ||
-			decoded.Lamports == 0 || decoded.Lamports > policy.MaxLamports {
-			return txflow.Submission{}, errors.New("sealed transaction is outside submitter policy")
-		}
-		message = decoded.Message
-		signature = solana.Encode(decoded.Signature[:])
-	} else if policy.OrcaSwap != nil {
-		decoded, err := solana.DecodeSignedLegacyTransaction(transaction)
-		if err != nil {
-			return txflow.Submission{}, fmt.Errorf("decode sealed transaction: %w", err)
-		}
-		intent, err := orcaswap.DecodeMessage(*policy.OrcaSwap, decoded.Message.Raw)
-		if err != nil || intent.Owner != policy.Source || intent.InputAmount != policy.MaxLamports {
-			return txflow.Submission{}, errors.New("sealed Orca swap is outside submitter policy")
-		}
-		message = decoded.Message.Raw
-		signature = solana.Encode(decoded.Signature[:])
-	} else {
-		decoded, err := solana.DecodeSignedLegacyTransaction(transaction)
-		if err != nil {
-			return txflow.Submission{}, fmt.Errorf("decode sealed transaction: %w", err)
-		}
-		intent, err := orcaswap.DecodeBuyMessageV2(*policy.OrcaBuy, decoded.Message.Raw)
-		if err != nil || intent.Owner != policy.Source ||
-			intent.InputAmount != policy.MaxInputTokenAmount {
-			return txflow.Submission{}, errors.New("sealed Orca buy is outside submitter policy")
-		}
-		message = decoded.Message.Raw
-		signature = solana.Encode(decoded.Signature[:])
+	decoded, err := decodeTransaction(policy, transaction)
+	if err != nil {
+		return txflow.Submission{}, err
 	}
+	message := decoded.message
+	signature := decoded.signature
 	messageHash := sha256.Sum256(message)
 	transactionHash := sha256.Sum256(transaction)
-	expectedMetadata := sealedtx.Metadata{
-		Version:              sealedtx.Version,
-		Domain:               sealedtx.Domain,
-		ActionID:             response.ActionID,
-		MessageSHA256:        response.MessageSHA256,
-		TransactionSHA256:    response.TransactionSHA256,
-		Signature:            response.Signature,
-		BlockhashContextSlot: response.BlockhashContextSlot,
-		FeeLamports:          response.FeeLamports,
-		LastValidBlockHeight: response.LastValidBlockHeight,
-	}
+	expectedMetadata := responseMetadata(response)
 	if response.SealedTransaction.Metadata != expectedMetadata ||
 		response.Signature != signature ||
 		response.MessageSHA256 != hex.EncodeToString(messageHash[:]) ||
@@ -205,25 +204,56 @@ func Submit(
 	}
 	var returned string
 	var sendErr error
+	var validationErr error
 	blocked, err := gate.WithRecoverySendBarrier(response.ActionID, func() error {
+		genesis, queryErr := node.GenesisHash(ctx)
+		if queryErr != nil || genesis != solana.DevnetGenesisHash {
+			validationErr = errors.New("submitter node does not match Devnet")
+			return validationErr
+		}
+		height, queryErr := node.BlockHeight(ctx)
+		if queryErr != nil || height == 0 {
+			validationErr = errors.New("submitter block height is unavailable")
+			return validationErr
+		}
+		if height >= response.LastValidBlockHeight {
+			validationErr = errors.New("transaction has insufficient block-height headroom for submission")
+			return validationErr
+		}
+		if prepareErr := prepareRecovery(policy, response, transaction); prepareErr != nil {
+			validationErr = errors.New("persist exact submission recovery evidence")
+			return validationErr
+		}
 		returned, sendErr = node.SendTransaction(ctx, transaction, response.BlockhashContextSlot)
 		return nil
 	})
 	if err != nil {
+		if validationErr != nil {
+			return txflow.Submission{}, validationErr
+		}
 		return txflow.Submission{}, errors.New("inspect submitter control state")
 	}
 	if blocked {
 		return txflow.Submission{}, ErrControlBlocked
 	}
 	state := txflow.StateAccepted
-	if sendErr != nil {
+	if sendErr != nil || returned != response.Signature {
 		state = txflow.StateAmbiguous
-	} else if returned != response.Signature {
-		return txflow.Submission{}, errors.New("RPC returned a different transaction signature")
 	}
 	return txflow.Submission{
 		Signature:            response.Signature,
 		LastValidBlockHeight: response.LastValidBlockHeight,
 		State:                state,
 	}, nil
+}
+
+func responseMetadata(response signer.Response) sealedtx.Metadata {
+	return sealedtx.Metadata{
+		Version: sealedtx.Version, Domain: sealedtx.Domain,
+		ActionID: response.ActionID, MessageSHA256: response.MessageSHA256,
+		TransactionSHA256: response.TransactionSHA256, Signature: response.Signature,
+		BlockhashContextSlot: response.BlockhashContextSlot,
+		FeeLamports:          response.FeeLamports,
+		LastValidBlockHeight: response.LastValidBlockHeight,
+	}
 }

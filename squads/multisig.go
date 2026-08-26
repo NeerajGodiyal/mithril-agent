@@ -9,8 +9,8 @@ import (
 
 // A spending limit describes how much can leave. It says nothing about who can
 // take the limit away, and that is the other half of the question: an operator
-// who cannot remove a limit has not bounded their exposure, they have fixed it.
-// Answering "can I revoke this" means reading the Multisig account the limit
+// who cannot participate in removing a limit has accepted a boundary they do
+// not control. Answering "how is this revoked" means reading the Multisig account the limit
 // belongs to, because the removal path is decided by its config_authority.
 
 // multisigDiscriminator is sha256("account:Multisig")[:8]. The value was verified by
@@ -30,7 +30,7 @@ var multisigDiscriminator = [8]byte{0xe0, 0x74, 0x79, 0xba, 0x44, 0xa1, 0x4f, 0x
 //
 // Both facts are confirmed against real accounts: a devnet multisig with
 // rent_collector None puts bump at 95, and a mainnet one with Some puts it at
-// 127. Reading either at a fixed offset misreports who controls the vault.
+// 127. Reading either at a fixed offset misreports who controls the Multisig.
 const (
 	offsetCreateKeyMS       = 8
 	offsetConfigAuthority   = 40
@@ -56,8 +56,14 @@ type Member struct {
 	Permissions uint8 `json:"permissions"`
 }
 
+const (
+	PermissionInitiate uint8 = 1
+	PermissionVote     uint8 = 2
+	PermissionExecute  uint8 = 4
+)
+
 // Multisig is the subset of the account needed to answer who controls the
-// vault and who can change that.
+// configuration and who can change it.
 type Multisig struct {
 	CreateKey string `json:"create_key"`
 	// ConfigAuthority is the key that can change members and threshold without

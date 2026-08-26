@@ -16,7 +16,9 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/agent"
 	"github.com/Overclock-Validator/mithril-agent/independentdecode"
 	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
+	"github.com/Overclock-Validator/mithril-agent/jupiterswap"
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
+	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
 	"github.com/Overclock-Validator/mithril-agent/riskgrant"
 	"github.com/Overclock-Validator/mithril-agent/sealedtx"
 	"github.com/Overclock-Validator/mithril-agent/solana"
@@ -27,6 +29,11 @@ const (
 	RequestDomain         = TransferRequestDomain
 	maxKeypairBytes       = 1024
 )
+
+// MaxRequestBytes is the shared limit for one signer request across the policy
+// and signer process boundaries. It accommodates the bounded portable Jupiter
+// candidate, including complete address-table evidence.
+const MaxRequestBytes = 1 << 20
 
 type Policy struct {
 	Cluster                   string                `json:"cluster"`
@@ -48,29 +55,33 @@ type Policy struct {
 	RiskAuthorityKeyID        string                `json:"risk_authority_key_id"`
 	RiskAuthorityPublicKey    string                `json:"risk_authority_public_key"`
 	SubmitterPublicKey        string                `json:"submitter_public_key"`
+	AttestationPublicKey      string                `json:"attestation_public_key,omitempty"`
 	OrcaSwap                  *orcaswap.Policy      `json:"orca_swap,omitempty"`
 	OrcaBuy                   *orcaswap.BuyPolicyV2 `json:"orca_buy,omitempty"`
+	Jupiter                   *jupiterswap.Policy   `json:"jupiter,omitempty"`
 }
 
 type Request struct {
-	Domain                  string          `json:"domain"`
-	Cluster                 string          `json:"cluster"`
-	Profile                 string          `json:"profile"`
-	ProfileVersion          uint32          `json:"profile_version"`
-	ProfileFingerprint      string          `json:"profile_sha256"`
-	ActionID                string          `json:"action_id"`
-	ScheduleWindowStartUnix int64           `json:"schedule_window_start_unix"`
-	ScheduleWindowEndUnix   int64           `json:"schedule_window_end_unix"`
-	MessageBase64           string          `json:"message_base64"`
-	BlockhashContextSlot    uint64          `json:"blockhash_context_slot"`
-	FeeLamports             uint64          `json:"fee_lamports"`
-	FeeMinContextSlot       uint64          `json:"fee_min_context_slot"`
-	PrimaryFeeContextSlot   uint64          `json:"primary_fee_context_slot"`
-	SecondaryFeeContextSlot uint64          `json:"secondary_fee_context_slot"`
-	RecentBlockhash         string          `json:"recent_blockhash"`
-	ObservedBlockHeight     uint64          `json:"observed_block_height"`
-	LastValidBlockHeight    uint64          `json:"last_valid_block_height"`
-	RiskGrant               riskgrant.Grant `json:"risk_grant"`
+	Domain                  string                          `json:"domain"`
+	Cluster                 string                          `json:"cluster"`
+	Profile                 string                          `json:"profile"`
+	ProfileVersion          uint32                          `json:"profile_version"`
+	ProfileFingerprint      string                          `json:"profile_sha256"`
+	ActionID                string                          `json:"action_id"`
+	ScheduleWindowStartUnix int64                           `json:"schedule_window_start_unix"`
+	ScheduleWindowEndUnix   int64                           `json:"schedule_window_end_unix"`
+	MessageBase64           string                          `json:"message_base64"`
+	BlockhashContextSlot    uint64                          `json:"blockhash_context_slot"`
+	FeeLamports             uint64                          `json:"fee_lamports"`
+	FeeMinContextSlot       uint64                          `json:"fee_min_context_slot"`
+	PrimaryFeeContextSlot   uint64                          `json:"primary_fee_context_slot"`
+	SecondaryFeeContextSlot uint64                          `json:"secondary_fee_context_slot"`
+	RecentBlockhash         string                          `json:"recent_blockhash"`
+	ObservedBlockHeight     uint64                          `json:"observed_block_height"`
+	LastValidBlockHeight    uint64                          `json:"last_valid_block_height"`
+	RiskGrant               riskgrant.Grant                 `json:"risk_grant"`
+	JupiterCandidate        *proposalcheck.Candidate        `json:"jupiter_candidate,omitempty"`
+	JupiterProviders        *proposalcheck.ProviderBindings `json:"jupiter_providers,omitempty"`
 }
 
 type ValidatedRequest struct {
@@ -88,6 +99,7 @@ type ValidatedRequest struct {
 
 type Response struct {
 	ActionID             string              `json:"action_id"`
+	RequestSHA256        string              `json:"request_sha256"`
 	Signature            string              `json:"signature"`
 	MessageSHA256        string              `json:"message_sha256"`
 	TransactionSHA256    string              `json:"transaction_sha256"`
@@ -99,7 +111,7 @@ type Response struct {
 }
 
 func (p Policy) Validate() error {
-	if p.Cluster != "devnet" {
+	if p.Cluster != "devnet" || p.Jupiter != nil || p.AttestationPublicKey != "" {
 		return errors.New("signer policy is restricted to devnet")
 	}
 	isTransfer := p.Profile == agent.ProfileTreasurySweepV1 && p.ProfileVersion == 1
@@ -173,10 +185,8 @@ func (p Policy) Validate() error {
 	if _, err := riskgrant.DecodePublicKey(p.RiskAuthorityPublicKey); err != nil {
 		return err
 	}
-	submitterKey, err := hex.DecodeString(p.SubmitterPublicKey)
-	if err != nil || len(submitterKey) != 32 ||
-		hex.EncodeToString(submitterKey) != p.SubmitterPublicKey {
-		return errors.New("submitter public key is invalid")
+	if err := sealedtx.ValidatePublicKey(p.SubmitterPublicKey); err != nil {
+		return err
 	}
 	return nil
 }
@@ -267,21 +277,7 @@ func signAt(
 	if err != nil || publicKeyValue != policy.Source {
 		return Response{}, errors.New("signer key does not match policy")
 	}
-	publicKey, err := riskgrant.DecodePublicKey(policy.RiskAuthorityPublicKey)
-	if err != nil {
-		return Response{}, err
-	}
-	binding, err := RiskBinding(request, validated.MessageSHA256)
-	if err != nil {
-		return Response{}, err
-	}
-	if err := riskgrant.Verify(
-		publicKey,
-		policy.RiskAuthorityKeyID,
-		binding,
-		request.RiskGrant,
-		now.UTC(),
-	); err != nil {
+	if err := verifyRiskGrant(policy, request, validated, now); err != nil {
 		return Response{}, err
 	}
 	var transaction []byte
@@ -294,43 +290,110 @@ func signAt(
 	if err != nil {
 		return Response{}, err
 	}
+	return buildResponse(
+		policy, request, validated.Message, transaction, signature, policy.Source,
+		func(message []byte) ([]byte, error) {
+			return ed25519.Sign(privateKey, message), nil
+		},
+	)
+}
+
+func verifyRiskGrant(
+	policy Policy,
+	request Request,
+	validated ValidatedRequest,
+	now time.Time,
+) error {
+	publicKey, err := riskgrant.DecodePublicKey(policy.RiskAuthorityPublicKey)
+	if err != nil {
+		return err
+	}
+	binding, err := RiskBinding(request, validated.MessageSHA256)
+	if err != nil {
+		return err
+	}
+	return riskgrant.Verify(
+		publicKey,
+		policy.RiskAuthorityKeyID,
+		binding,
+		request.RiskGrant,
+		now.UTC(),
+	)
+}
+
+func buildResponse(
+	policy Policy,
+	request Request,
+	message, transaction []byte,
+	signature [64]byte,
+	attestationPublicKey string,
+	attest func([]byte) ([]byte, error),
+) (Response, error) {
+	return buildResponseAt(
+		policy, request, message, transaction, signature,
+		attestationPublicKey, attest, false,
+	)
+}
+
+func buildConfidentialResponse(
+	policy Policy,
+	request Request,
+	message, transaction []byte,
+	signature [64]byte,
+	attestationPublicKey string,
+	attest func([]byte) ([]byte, error),
+) (Response, error) {
+	return buildResponseAt(
+		policy, request, message, transaction, signature,
+		attestationPublicKey, attest, true,
+	)
+}
+
+func buildResponseAt(
+	policy Policy,
+	request Request,
+	message, transaction []byte,
+	signature [64]byte,
+	attestationPublicKey string,
+	attest func([]byte) ([]byte, error),
+	confidential bool,
+) (Response, error) {
+	messageHash := sha256.Sum256(message)
 	transactionHash := sha256.Sum256(transaction)
+	requestHash, err := immutableRequestHash(request)
+	if err != nil {
+		return Response{}, err
+	}
 	response := Response{
 		ActionID:             request.ActionID,
-		Signature:            solana.Encode(signature[:]),
-		MessageSHA256:        validated.MessageSHA256,
+		RequestSHA256:        requestHash,
+		MessageSHA256:        hex.EncodeToString(messageHash[:]),
 		TransactionSHA256:    hex.EncodeToString(transactionHash[:]),
 		BlockhashContextSlot: request.BlockhashContextSlot,
 		FeeLamports:          request.FeeLamports,
 		LastValidBlockHeight: request.LastValidBlockHeight,
 	}
-	response.SealedTransaction, err = sealedtx.Seal(
-		policy.SubmitterPublicKey,
-		sealedtx.Metadata{
-			Version:              sealedtx.Version,
-			Domain:               sealedtx.Domain,
-			ActionID:             response.ActionID,
-			MessageSHA256:        response.MessageSHA256,
-			TransactionSHA256:    response.TransactionSHA256,
-			Signature:            response.Signature,
-			BlockhashContextSlot: response.BlockhashContextSlot,
-			FeeLamports:          response.FeeLamports,
-			LastValidBlockHeight: response.LastValidBlockHeight,
-		},
-		transaction,
-		rand.Reader,
-	)
+	if confidential {
+		response.SealedTransaction, err = sealedtx.SealConfidential(
+			policy.SubmitterPublicKey, responseMetadata(response), transaction, rand.Reader,
+		)
+	} else {
+		response.Signature = solana.Encode(signature[:])
+		response.SealedTransaction, err = sealedtx.Seal(
+			policy.SubmitterPublicKey, responseMetadata(response), transaction, rand.Reader,
+		)
+	}
 	if err != nil {
 		return Response{}, err
 	}
-	response.SignerAttestation, err = AttestResponse(
-		privateKey, policy.SubmitterPublicKey, response,
+	response.SignerAttestation, err = AttestResponseWith(
+		attestationPublicKey, policy.SubmitterPublicKey, response, attest,
 	)
 	if err != nil {
 		return Response{}, err
 	}
 	if err := VerifyResponseAttestation(
-		policy.Source, policy.SubmitterPublicKey, response,
+		attestationPublicKey, policy.SubmitterPublicKey, response,
 	); err != nil {
 		return Response{}, err
 	}
@@ -351,26 +414,21 @@ func ValidateRequest(policy Policy, request Request) (ValidatedRequest, error) {
 		request.Cluster != policy.Cluster ||
 		request.Profile != policy.Profile ||
 		request.ProfileVersion != policy.ProfileVersion ||
-		request.ProfileFingerprint != policy.ProfileFingerprint {
+		request.ProfileFingerprint != policy.ProfileFingerprint || request.JupiterCandidate != nil ||
+		request.JupiterProviders != nil {
 		return ValidatedRequest{}, errors.New("signing request is outside policy")
 	}
 	if request.FeeLamports == 0 || request.FeeLamports > policy.MaxFeeLamports {
 		return ValidatedRequest{}, errors.New("transaction fee is outside policy")
 	}
-	if request.BlockhashContextSlot == 0 || request.ObservedBlockHeight == 0 ||
-		request.FeeMinContextSlot != request.BlockhashContextSlot ||
-		request.PrimaryFeeContextSlot < request.FeeMinContextSlot ||
-		request.SecondaryFeeContextSlot < request.FeeMinContextSlot {
+	if !validFeeContext(request) {
 		return ValidatedRequest{}, errors.New("transaction fee context is outside policy")
 	}
 	actionID, err := hex.DecodeString(request.ActionID)
 	if err != nil || len(actionID) != sha256.Size {
 		return ValidatedRequest{}, errors.New("action ID must be a 32-byte hex digest")
 	}
-	windowSeconds := int64(policy.ScheduleWindowSeconds)
-	if request.ScheduleWindowStartUnix < policy.ScheduleAnchorUnix ||
-		request.ScheduleWindowEndUnix-request.ScheduleWindowStartUnix != windowSeconds ||
-		(request.ScheduleWindowStartUnix-policy.ScheduleAnchorUnix)%windowSeconds != 0 {
+	if !validScheduleWindow(policy, request) {
 		return ValidatedRequest{}, errors.New("signing request schedule window is outside policy")
 	}
 	var expectedActionID string
@@ -467,6 +525,26 @@ func ValidateRequest(policy Policy, request Request) (ValidatedRequest, error) {
 		validated.TemporaryRentLamports = buyIntent.TemporaryRentLamports
 	}
 	return validated, nil
+}
+
+func validFeeContext(request Request) bool {
+	if request.BlockhashContextSlot == 0 || request.ObservedBlockHeight == 0 ||
+		request.FeeMinContextSlot != request.BlockhashContextSlot ||
+		request.PrimaryFeeContextSlot < request.FeeMinContextSlot ||
+		request.SecondaryFeeContextSlot < request.FeeMinContextSlot {
+		return false
+	}
+	oldest := min(request.PrimaryFeeContextSlot, request.SecondaryFeeContextSlot)
+	newest := max(request.PrimaryFeeContextSlot, request.SecondaryFeeContextSlot)
+	return newest-oldest <= proposalcheck.MaxEvidenceSlotSkew
+}
+
+func validScheduleWindow(policy Policy, request Request) bool {
+	window := int64(policy.ScheduleWindowSeconds)
+	return request.ScheduleWindowStartUnix >= policy.ScheduleAnchorUnix &&
+		request.ScheduleWindowEndUnix > request.ScheduleWindowStartUnix &&
+		request.ScheduleWindowEndUnix-request.ScheduleWindowStartUnix == window &&
+		(request.ScheduleWindowStartUnix-policy.ScheduleAnchorUnix)%window == 0
 }
 
 func RiskBinding(request Request, messageSHA256 string) (riskgrant.Binding, error) {

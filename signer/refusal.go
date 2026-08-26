@@ -1,6 +1,9 @@
 package signer
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
 
 // A refusal is the policy deciding NO. It is not a fault, and the difference
 // matters to whoever is watching: a spent daily cap means "try tomorrow", a
@@ -28,4 +31,19 @@ func refused(message string) error { return &refusalError{message: message} }
 func IsRefusal(err error) bool {
 	var refusal *refusalError
 	return errors.As(err, &refusal)
+}
+
+// ValidateScheduleWindowAt rejects a request outside its execution window as
+// a policy refusal. Signer front ends call it before opening custody, while the
+// stateful signer calls it again at the authorization boundary.
+func ValidateScheduleWindowAt(request Request, now time.Time) error {
+	now = now.UTC()
+	if now.IsZero() {
+		return errors.New("trusted signer time is unavailable")
+	}
+	if now.Unix() < request.ScheduleWindowStartUnix ||
+		now.Unix() >= request.ScheduleWindowEndUnix {
+		return refused("signing request schedule window does not include current UTC time")
+	}
+	return nil
 }

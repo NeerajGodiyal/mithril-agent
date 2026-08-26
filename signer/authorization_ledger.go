@@ -9,12 +9,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
 	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
+	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
 )
 
 const (
@@ -48,11 +48,11 @@ type authorizationReservation struct {
 	DayStartUnix            int64  `json:"day_start_unix"`
 	ScheduleWindowStartUnix int64  `json:"schedule_window_start_unix"`
 	ScheduleWindowEndUnix   int64  `json:"schedule_window_end_unix"`
+	CustodyTimestampMS      int64  `json:"custody_timestamp_ms,omitempty"`
 }
 
 type authorizationLedger struct {
 	store        *journal.Store
-	lock         *os.File
 	policy       Policy
 	reservations map[string]authorizationReservation
 	dailyDebits  map[int64]uint64
@@ -73,15 +73,10 @@ func AuthorizeAndSign(
 	if policy.Profile == orcaswap.BuyProfileName {
 		return authorizeAndSignBuy(policy, privateKey, request, now)
 	}
+	if err := ValidateScheduleWindowAt(request, now); err != nil {
+		return Response{}, err
+	}
 	now = now.UTC()
-	if now.IsZero() {
-		return Response{}, errors.New("trusted signer time is unavailable")
-	}
-	nowUnix := now.Unix()
-	if nowUnix < request.ScheduleWindowStartUnix ||
-		nowUnix >= request.ScheduleWindowEndUnix {
-		return Response{}, refused("signing request schedule window does not include current UTC time")
-	}
 
 	ledger, err := openAuthorizationLedger(policy, now)
 	if err != nil {
@@ -111,30 +106,20 @@ func openAuthorizationLedger(policy Policy, now time.Time) (*authorizationLedger
 	if err := validateLedgerPath(policy.AuthorizationLedgerPath); err != nil {
 		return nil, err
 	}
-	lock, err := acquireAuthorizationLock(policy.AuthorizationLedgerPath)
-	if err != nil {
-		return nil, err
-	}
-	closeLock := func() {
-		_ = lock.Close()
-	}
 	_, statErr := os.Lstat(policy.AuthorizationLedgerPath)
 	existed := statErr == nil
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		closeLock()
 		return nil, errors.New("authorization ledger is invalid or unavailable")
 	}
-	store, err := journal.Open(policy.AuthorizationLedgerPath)
+	store, err := journal.OpenRotating(policy.AuthorizationLedgerPath)
 	if err != nil {
-		closeLock()
-		if strings.Contains(err.Error(), "already open") {
+		if errors.Is(err, journal.ErrLocked) {
 			return nil, errors.New("authorization ledger is already in use")
 		}
 		return nil, errors.New("authorization ledger is invalid or unavailable")
 	}
 	fail := func() (*authorizationLedger, error) {
 		_ = store.Close()
-		closeLock()
 		return nil, errors.New("authorization ledger is invalid or unavailable")
 	}
 	if err := validateOpenedLedger(policy.AuthorizationLedgerPath); err != nil {
@@ -153,7 +138,6 @@ func openAuthorizationLedger(policy Policy, now time.Time) (*authorizationLedger
 			// the state so the operator can inspect and remove the file rather
 			// than reading this as generic corruption.
 			_ = store.Close()
-			closeLock()
 			return nil, errors.New("authorization ledger is empty and cannot be reinitialized automatically; inspect and remove it if this followed a first-run crash")
 		}
 		header := authorizationHeader{
@@ -168,7 +152,6 @@ func openAuthorizationLedger(policy Policy, now time.Time) (*authorizationLedger
 
 	ledger := &authorizationLedger{
 		store:        store,
-		lock:         lock,
 		policy:       policy,
 		reservations: make(map[string]authorizationReservation),
 		dailyDebits:  make(map[int64]uint64),
@@ -176,24 +159,22 @@ func openAuthorizationLedger(policy Policy, now time.Time) (*authorizationLedger
 	if err := ledger.load(records, policyHash); err != nil {
 		if errors.Is(err, errLedgerPolicyChanged) {
 			_ = store.Close()
-			closeLock()
-			// The exposure is the part an operator cannot work out for
-			// themselves. The day's spend is bound to the caps it was spent
-			// under, so it cannot carry across an edit — a replacement setup
-			// starts the day at zero. That means TIGHTENING a cap partway
-			// through a day raises the total that day allows, which is the
-			// opposite of what tightening is for. Saying only "invalid or
-			// unavailable" left them to discover that by spending.
-			return nil, errors.New(
-				"this ledger recorded today's spending under different caps, so a cap was " +
-					"edited. The day's accumulated spend cannot carry across that edit: a new " +
-					"setup starts today at zero, so tightening a cap now RAISES what today " +
-					"still allows, until 00:00 UTC. Wait for the reset to tighten safely, or " +
-					"accept the wider day deliberately")
+			return nil, ledgerPolicyChangedError()
 		}
 		return fail()
 	}
 	return ledger, nil
+}
+
+// ledgerPolicyChangedError names the exposure an operator cannot infer from a
+// hash mismatch: rebuilding before the UTC reset starts another full allowance.
+func ledgerPolicyChangedError() error {
+	return errors.New(
+		"this ledger recorded today's spending under different caps, so a cap was " +
+			"edited. The day's accumulated spend cannot carry across that edit: a new " +
+			"setup starts today at zero, so tightening a cap now RAISES what today " +
+			"still allows, until 00:00 UTC. Wait for the reset to tighten safely, or " +
+			"accept the wider day deliberately")
 }
 
 func validateLedgerPath(path string) error {
@@ -242,11 +223,16 @@ func (l *authorizationLedger) load(records []journal.Record, policyHash string) 
 	}
 	var header authorizationHeader
 	if err := strictjson.Decode(records[0].Payload, &header); err != nil ||
-		header.Version != authorizationLedgerVersion ||
-		header.PolicySHA256 != policyHash {
+		header.Version != authorizationLedgerVersion {
+		return errors.New("authorization ledger header is invalid")
+	}
+	if header.PolicySHA256 != policyHash {
 		return errLedgerPolicyChanged
 	}
 	for _, record := range records[1:] {
+		if record.Type == journal.EventRotated && record.ActionID == "" {
+			continue
+		}
 		if record.Type != authorizationReserveType || record.ActionID == "" {
 			return errors.New("authorization ledger has an invalid record type")
 		}
@@ -303,10 +289,6 @@ func reservationFor(
 	response Response,
 	now time.Time,
 ) (authorizationReservation, error) {
-	requestHash, err := immutableRequestHash(request)
-	if err != nil {
-		return authorizationReservation{}, err
-	}
 	message, err := base64.StdEncoding.Strict().DecodeString(request.MessageBase64)
 	if err != nil {
 		return authorizationReservation{}, errors.New("decode authorization message")
@@ -315,9 +297,21 @@ func reservationFor(
 	if response.MessageSHA256 != hex.EncodeToString(messageHash[:]) {
 		return authorizationReservation{}, errors.New("signed message binding does not match")
 	}
-	validated, err := ValidateRequest(policy, request)
+	validated, err := validateAuthorizationRequest(policy, request)
 	if err != nil {
 		return authorizationReservation{}, errors.New("decode authorization debit")
+	}
+	return reservationForValidated(request, validated, now)
+}
+
+func reservationForValidated(
+	request Request,
+	validated ValidatedRequest,
+	now time.Time,
+) (authorizationReservation, error) {
+	requestHash, err := immutableRequestHash(request)
+	if err != nil {
+		return authorizationReservation{}, err
 	}
 	baseDebit := validated.AmountLamports + request.FeeLamports
 	if validated.DebitLamports < baseDebit {
@@ -328,7 +322,7 @@ func reservationFor(
 	return authorizationReservation{
 		Version:                 authorizationLedgerVersion,
 		RequestSHA256:           requestHash,
-		MessageSHA256:           response.MessageSHA256,
+		MessageSHA256:           validated.MessageSHA256,
 		AmountLamports:          validated.AmountLamports,
 		FeeLamports:             request.FeeLamports,
 		ExtraDebitLamports:      validated.DebitLamports - baseDebit,
@@ -339,25 +333,34 @@ func reservationFor(
 	}, nil
 }
 
+func validateAuthorizationRequest(policy Policy, request Request) (ValidatedRequest, error) {
+	if policy.Jupiter != nil {
+		return ValidateJupiterRequest(policy, request)
+	}
+	return ValidateRequest(policy, request)
+}
+
 func immutableRequestHash(request Request) (string, error) {
 	unsigned := struct {
-		Domain                  string `json:"domain"`
-		Cluster                 string `json:"cluster"`
-		Profile                 string `json:"profile"`
-		ProfileVersion          uint32 `json:"profile_version"`
-		ProfileFingerprint      string `json:"profile_sha256"`
-		ActionID                string `json:"action_id"`
-		ScheduleWindowStartUnix int64  `json:"schedule_window_start_unix"`
-		ScheduleWindowEndUnix   int64  `json:"schedule_window_end_unix"`
-		MessageBase64           string `json:"message_base64"`
-		BlockhashContextSlot    uint64 `json:"blockhash_context_slot"`
-		FeeLamports             uint64 `json:"fee_lamports"`
-		FeeMinContextSlot       uint64 `json:"fee_min_context_slot"`
-		PrimaryFeeContextSlot   uint64 `json:"primary_fee_context_slot"`
-		SecondaryFeeContextSlot uint64 `json:"secondary_fee_context_slot"`
-		RecentBlockhash         string `json:"recent_blockhash"`
-		ObservedBlockHeight     uint64 `json:"observed_block_height"`
-		LastValidBlockHeight    uint64 `json:"last_valid_block_height"`
+		Domain                  string                          `json:"domain"`
+		Cluster                 string                          `json:"cluster"`
+		Profile                 string                          `json:"profile"`
+		ProfileVersion          uint32                          `json:"profile_version"`
+		ProfileFingerprint      string                          `json:"profile_sha256"`
+		ActionID                string                          `json:"action_id"`
+		ScheduleWindowStartUnix int64                           `json:"schedule_window_start_unix"`
+		ScheduleWindowEndUnix   int64                           `json:"schedule_window_end_unix"`
+		MessageBase64           string                          `json:"message_base64"`
+		BlockhashContextSlot    uint64                          `json:"blockhash_context_slot"`
+		FeeLamports             uint64                          `json:"fee_lamports"`
+		FeeMinContextSlot       uint64                          `json:"fee_min_context_slot"`
+		PrimaryFeeContextSlot   uint64                          `json:"primary_fee_context_slot"`
+		SecondaryFeeContextSlot uint64                          `json:"secondary_fee_context_slot"`
+		RecentBlockhash         string                          `json:"recent_blockhash"`
+		ObservedBlockHeight     uint64                          `json:"observed_block_height"`
+		LastValidBlockHeight    uint64                          `json:"last_valid_block_height"`
+		JupiterCandidate        *proposalcheck.Candidate        `json:"jupiter_candidate,omitempty"`
+		JupiterProviders        *proposalcheck.ProviderBindings `json:"jupiter_providers,omitempty"`
 	}{
 		Domain: request.Domain, Cluster: request.Cluster,
 		Profile: request.Profile, ProfileVersion: request.ProfileVersion,
@@ -370,6 +373,8 @@ func immutableRequestHash(request Request) (string, error) {
 		SecondaryFeeContextSlot: request.SecondaryFeeContextSlot,
 		RecentBlockhash:         request.RecentBlockhash, ObservedBlockHeight: request.ObservedBlockHeight,
 		LastValidBlockHeight: request.LastValidBlockHeight,
+		JupiterCandidate:     request.JupiterCandidate,
+		JupiterProviders:     request.JupiterProviders,
 	}
 	encoded, err := json.Marshal(unsigned)
 	if err != nil {
@@ -387,22 +392,44 @@ func (l *authorizationLedger) reserve(
 	actionID string,
 	reservation authorizationReservation,
 ) error {
+	_, err := l.reserveEffective(now, actionID, reservation)
+	return err
+}
+
+func (l *authorizationLedger) reserveEffective(
+	now time.Time,
+	actionID string,
+	reservation authorizationReservation,
+) (authorizationReservation, error) {
 	if existing, ok := l.reservations[actionID]; ok {
-		if existing == reservation {
-			return nil
+		if sameAuthorizationReservation(existing, reservation) {
+			return existing, l.releaseCapacity()
 		}
-		return errors.New("action ID is already reserved for a different request")
+		return authorizationReservation{}, errors.New("action ID is already reserved for a different request")
 	}
 	total := l.dailyDebits[reservation.DayStartUnix]
 	if total > l.policy.DailyDebitCapLamports ||
 		reservation.DebitLamports > l.policy.DailyDebitCapLamports-total {
-		return refused("signer daily debit cap would be exceeded")
+		return authorizationReservation{}, refused("signer daily debit cap would be exceeded")
 	}
 	if _, err := l.store.Append(now.UTC(), authorizationReserveType, actionID, reservation); err != nil {
-		return errors.New("authorization reservation could not be made durable")
+		return authorizationReservation{}, errors.New("authorization reservation could not be made durable")
 	}
 	l.reservations[actionID] = reservation
 	l.dailyDebits[reservation.DayStartUnix] = total + reservation.DebitLamports
+	return reservation, l.releaseCapacity()
+}
+
+func sameAuthorizationReservation(first, second authorizationReservation) bool {
+	first.CustodyTimestampMS = 0
+	second.CustodyTimestampMS = 0
+	return first == second
+}
+
+func (l *authorizationLedger) releaseCapacity() error {
+	if err := l.store.ReleaseCapacity(); err != nil {
+		return errors.New("authorization ledger rotation could not be made durable")
+	}
 	return nil
 }
 
@@ -414,12 +441,6 @@ func (l *authorizationLedger) close() error {
 	if l.store != nil {
 		closeErr = l.store.Close()
 		l.store = nil
-	}
-	if l.lock != nil {
-		if err := l.lock.Close(); err != nil && closeErr == nil {
-			closeErr = err
-		}
-		l.lock = nil
 	}
 	if closeErr != nil {
 		return errors.New("authorization ledger could not be closed safely")

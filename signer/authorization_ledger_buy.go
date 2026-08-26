@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
@@ -15,7 +14,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/solana"
 )
 
-const buyAuthorizationLedgerVersion = 5
+const buyAuthorizationLedgerVersion = 6
 
 type buyAuthorizationReservation struct {
 	Version                 uint32 `json:"version"`
@@ -30,15 +29,43 @@ type buyAuthorizationReservation struct {
 	DayStartUnix            int64  `json:"day_start_unix"`
 	ScheduleWindowStartUnix int64  `json:"schedule_window_start_unix"`
 	ScheduleWindowEndUnix   int64  `json:"schedule_window_end_unix"`
+	CustodyTimestampMS      int64  `json:"custody_timestamp_ms,omitempty"`
 }
 
 type buyAuthorizationLedger struct {
 	store        *journal.Store
-	lock         *os.File
 	policy       Policy
 	reservations map[string]buyAuthorizationReservation
 	dailyInputs  map[int64]uint64
 	dailyFees    map[int64]uint64
+}
+
+type tokenAuthorizationLimits struct {
+	inputMint, outputMint   string
+	maxInput, minimumOutput uint64
+	maxTemporaryRent        uint64
+	requireExactInput       bool
+	requireCustodyTimestamp bool
+}
+
+func tokenLimits(policy Policy) (tokenAuthorizationLimits, bool) {
+	if policy.OrcaBuy != nil {
+		return tokenAuthorizationLimits{
+			inputMint: policy.OrcaBuy.TokenMintB, outputMint: policy.OrcaBuy.TokenMintA,
+			maxInput: policy.MaxInputTokenAmount, minimumOutput: policy.OrcaBuy.MinOutputLamports,
+			maxTemporaryRent:  policy.OrcaBuy.MaxTemporaryRentLamports,
+			requireExactInput: true,
+		}, true
+	}
+	if policy.Jupiter != nil && !policy.Jupiter.NativeInput() && policy.Jupiter.NativeOutput() {
+		return tokenAuthorizationLimits{
+			inputMint: policy.Jupiter.InputMint, outputMint: policy.Jupiter.OutputMint,
+			maxInput: policy.MaxInputTokenAmount, minimumOutput: policy.Jupiter.MinOutputAmount,
+			maxTemporaryRent:        policy.Jupiter.MaxTokenAccountRentLamports,
+			requireCustodyTimestamp: true,
+		}, true
+	}
+	return tokenAuthorizationLimits{}, false
 }
 
 func authorizeAndSignBuy(
@@ -47,14 +74,10 @@ func authorizeAndSignBuy(
 	request Request,
 	now time.Time,
 ) (Response, error) {
+	if err := ValidateScheduleWindowAt(request, now); err != nil {
+		return Response{}, err
+	}
 	now = now.UTC()
-	if now.IsZero() {
-		return Response{}, errors.New("trusted signer time is unavailable")
-	}
-	nowUnix := now.Unix()
-	if nowUnix < request.ScheduleWindowStartUnix || nowUnix >= request.ScheduleWindowEndUnix {
-		return Response{}, refused("signing request schedule window does not include current UTC time")
-	}
 	ledger, err := openBuyAuthorizationLedger(policy, now)
 	if err != nil {
 		return Response{}, err
@@ -83,28 +106,20 @@ func openBuyAuthorizationLedger(policy Policy, now time.Time) (*buyAuthorization
 	if err := validateLedgerPath(policy.AuthorizationLedgerPath); err != nil {
 		return nil, err
 	}
-	lock, err := acquireAuthorizationLock(policy.AuthorizationLedgerPath)
-	if err != nil {
-		return nil, err
-	}
-	closeLock := func() { _ = lock.Close() }
 	_, statErr := os.Lstat(policy.AuthorizationLedgerPath)
 	existed := statErr == nil
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		closeLock()
 		return nil, errors.New("authorization ledger is invalid or unavailable")
 	}
-	store, err := journal.Open(policy.AuthorizationLedgerPath)
+	store, err := journal.OpenRotating(policy.AuthorizationLedgerPath)
 	if err != nil {
-		closeLock()
-		if strings.Contains(err.Error(), "already open") {
+		if errors.Is(err, journal.ErrLocked) {
 			return nil, errors.New("authorization ledger is already in use")
 		}
 		return nil, errors.New("authorization ledger is invalid or unavailable")
 	}
 	fail := func() (*buyAuthorizationLedger, error) {
 		_ = store.Close()
-		closeLock()
 		return nil, errors.New("authorization ledger is invalid or unavailable")
 	}
 	if err := validateOpenedLedger(policy.AuthorizationLedgerPath); err != nil {
@@ -117,7 +132,8 @@ func openBuyAuthorizationLedger(policy Policy, now time.Time) (*buyAuthorization
 	records := store.Records()
 	if len(records) == 0 {
 		if existed {
-			return fail()
+			_ = store.Close()
+			return nil, errors.New("authorization ledger is empty and cannot be reinitialized automatically; inspect and remove it if this followed a first-run crash")
 		}
 		header := authorizationHeader{
 			Version: buyAuthorizationLedgerVersion, PolicySHA256: policyHash,
@@ -128,12 +144,16 @@ func openBuyAuthorizationLedger(policy Policy, now time.Time) (*buyAuthorization
 		records = store.Records()
 	}
 	ledger := &buyAuthorizationLedger{
-		store: store, lock: lock, policy: policy,
+		store: store, policy: policy,
 		reservations: make(map[string]buyAuthorizationReservation),
 		dailyInputs:  make(map[int64]uint64),
 		dailyFees:    make(map[int64]uint64),
 	}
 	if err := ledger.load(records, policyHash); err != nil {
+		if errors.Is(err, errLedgerPolicyChanged) {
+			_ = store.Close()
+			return nil, ledgerPolicyChangedError()
+		}
 		return fail()
 	}
 	return ledger, nil
@@ -145,10 +165,16 @@ func (l *buyAuthorizationLedger) load(records []journal.Record, policyHash strin
 	}
 	var header authorizationHeader
 	if err := strictjson.Decode(records[0].Payload, &header); err != nil ||
-		header.Version != buyAuthorizationLedgerVersion || header.PolicySHA256 != policyHash {
-		return errors.New("authorization ledger policy binding does not match")
+		header.Version != buyAuthorizationLedgerVersion {
+		return errors.New("authorization ledger header is invalid")
+	}
+	if header.PolicySHA256 != policyHash {
+		return errLedgerPolicyChanged
 	}
 	for _, record := range records[1:] {
+		if record.Type == journal.EventRotated && record.ActionID == "" {
+			continue
+		}
 		if record.Type != authorizationReserveType || record.ActionID == "" {
 			return errors.New("authorization ledger has an invalid record type")
 		}
@@ -179,15 +205,21 @@ func (l *buyAuthorizationLedger) validReservation(
 	record journal.Record,
 	reservation buyAuthorizationReservation,
 ) bool {
+	limits, ok := tokenLimits(l.policy)
+	if !ok {
+		return false
+	}
 	if reservation.Version != buyAuthorizationLedgerVersion ||
 		!validDigest(reservation.RequestSHA256) || !validDigest(reservation.MessageSHA256) ||
-		reservation.InputMint != l.policy.OrcaBuy.TokenMintB ||
-		reservation.OutputMint != l.policy.OrcaBuy.TokenMintA ||
-		reservation.InputAmount != l.policy.MaxInputTokenAmount ||
-		reservation.MinimumOutputLamports < l.policy.OrcaBuy.MinOutputLamports ||
+		reservation.InputMint != limits.inputMint || reservation.OutputMint != limits.outputMint ||
+		reservation.InputAmount == 0 || reservation.InputAmount > limits.maxInput ||
+		(limits.requireExactInput && reservation.InputAmount != limits.maxInput) ||
+		reservation.MinimumOutputLamports < limits.minimumOutput ||
 		reservation.FeeLamports == 0 || reservation.FeeLamports > l.policy.MaxFeeLamports ||
 		reservation.TemporaryRentLamports == 0 ||
-		reservation.TemporaryRentLamports > l.policy.OrcaBuy.MaxTemporaryRentLamports ||
+		reservation.TemporaryRentLamports > limits.maxTemporaryRent ||
+		(limits.requireCustodyTimestamp && reservation.CustodyTimestampMS <= 0) ||
+		(!limits.requireCustodyTimestamp && reservation.CustodyTimestampMS != 0) ||
 		reservation.DayStartUnix <= 0 || reservation.DayStartUnix%secondsPerDay != 0 ||
 		reservation.ScheduleWindowStartUnix >= reservation.ScheduleWindowEndUnix {
 		return false
@@ -228,16 +260,31 @@ func buyReservationFor(
 		validated.TemporaryRentLamports == 0 {
 		return buyAuthorizationReservation{}, errors.New("decode buy authorization debit")
 	}
+	return tokenReservationForValidated(
+		request, requestHash, response.MessageSHA256, validated, now,
+	)
+}
+
+func tokenReservationForValidated(
+	request Request,
+	requestHash, messageHash string,
+	validated ValidatedRequest,
+	now time.Time,
+) (buyAuthorizationReservation, error) {
+	if !validDigest(requestHash) || !validDigest(messageHash) ||
+		validated.InputAmount == 0 || validated.InputMint == "" || validated.OutputMint == "" ||
+		validated.MinimumOutput == 0 || validated.NativeDebitLamports != request.FeeLamports ||
+		validated.TemporaryRentLamports == 0 {
+		return buyAuthorizationReservation{}, errors.New("decode token-input authorization debit")
+	}
 	nowUnix := now.UTC().Unix()
 	dayStart := nowUnix - nowUnix%secondsPerDay
 	return buyAuthorizationReservation{
-		Version:       buyAuthorizationLedgerVersion,
-		RequestSHA256: requestHash, MessageSHA256: response.MessageSHA256,
-		InputMint: validated.InputMint, InputAmount: validated.InputAmount,
-		OutputMint: validated.OutputMint, MinimumOutputLamports: validated.MinimumOutput,
-		FeeLamports:             request.FeeLamports,
-		TemporaryRentLamports:   validated.TemporaryRentLamports,
-		DayStartUnix:            dayStart,
+		Version: buyAuthorizationLedgerVersion, RequestSHA256: requestHash,
+		MessageSHA256: messageHash, InputMint: validated.InputMint,
+		InputAmount: validated.InputAmount, OutputMint: validated.OutputMint,
+		MinimumOutputLamports: validated.MinimumOutput, FeeLamports: request.FeeLamports,
+		TemporaryRentLamports: validated.TemporaryRentLamports, DayStartUnix: dayStart,
 		ScheduleWindowStartUnix: request.ScheduleWindowStartUnix,
 		ScheduleWindowEndUnix:   request.ScheduleWindowEndUnix,
 	}, nil
@@ -248,28 +295,50 @@ func (l *buyAuthorizationLedger) reserve(
 	actionID string,
 	reservation buyAuthorizationReservation,
 ) error {
+	_, err := l.reserveEffective(now, actionID, reservation)
+	return err
+}
+
+func (l *buyAuthorizationLedger) reserveEffective(
+	now time.Time,
+	actionID string,
+	reservation buyAuthorizationReservation,
+) (buyAuthorizationReservation, error) {
 	if existing, ok := l.reservations[actionID]; ok {
-		if existing == reservation {
-			return nil
+		if sameBuyAuthorizationReservation(existing, reservation) {
+			return existing, l.releaseCapacity()
 		}
-		return errors.New("action ID is already reserved for a different request")
+		return buyAuthorizationReservation{}, errors.New("action ID is already reserved for a different request")
 	}
 	input := l.dailyInputs[reservation.DayStartUnix]
 	fees := l.dailyFees[reservation.DayStartUnix]
 	if input > l.policy.DailyInputTokenCap ||
 		reservation.InputAmount > l.policy.DailyInputTokenCap-input {
-		return refused("signer daily input-token cap would be exceeded")
+		return buyAuthorizationReservation{}, refused("signer daily input-token cap would be exceeded")
 	}
 	if fees > l.policy.DailyNativeFeeCapLamports ||
 		reservation.FeeLamports > l.policy.DailyNativeFeeCapLamports-fees {
-		return refused("signer daily native-debit cap would be exceeded")
+		return buyAuthorizationReservation{}, refused("signer daily native-debit cap would be exceeded")
 	}
 	if _, err := l.store.Append(now.UTC(), authorizationReserveType, actionID, reservation); err != nil {
-		return errors.New("authorization reservation could not be made durable")
+		return buyAuthorizationReservation{}, errors.New("authorization reservation could not be made durable")
 	}
 	l.reservations[actionID] = reservation
 	l.dailyInputs[reservation.DayStartUnix] = input + reservation.InputAmount
 	l.dailyFees[reservation.DayStartUnix] = fees + reservation.FeeLamports
+	return reservation, l.releaseCapacity()
+}
+
+func sameBuyAuthorizationReservation(first, second buyAuthorizationReservation) bool {
+	first.CustodyTimestampMS = 0
+	second.CustodyTimestampMS = 0
+	return first == second
+}
+
+func (l *buyAuthorizationLedger) releaseCapacity() error {
+	if err := l.store.ReleaseCapacity(); err != nil {
+		return errors.New("authorization ledger rotation could not be made durable")
+	}
 	return nil
 }
 
@@ -281,12 +350,6 @@ func (l *buyAuthorizationLedger) close() error {
 	if l.store != nil {
 		closeErr = l.store.Close()
 		l.store = nil
-	}
-	if l.lock != nil {
-		if err := l.lock.Close(); err != nil && closeErr == nil {
-			closeErr = err
-		}
-		l.lock = nil
 	}
 	if closeErr != nil {
 		return errors.New("authorization ledger could not be closed safely")

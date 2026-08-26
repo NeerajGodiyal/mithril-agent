@@ -49,8 +49,12 @@ const (
 )
 
 var (
-	errNodeLagExceeded   = errors.New("Mithril node lag exceeds the active profile")
-	errFeeBudgetExceeded = errors.New("transaction fee exceeds the active profile")
+	// ErrObservationUnavailable means the Mithril observer did not produce a
+	// usable account and health observation. The wrapped cause remains available
+	// to protected logs while operator surfaces can use this bounded identity.
+	ErrObservationUnavailable = errors.New("Mithril observation is unavailable")
+	errNodeLagExceeded        = errors.New("Mithril node lag exceeds the active profile")
+	errFeeBudgetExceeded      = errors.New("transaction fee exceeds the active profile")
 )
 
 type Observer interface {
@@ -77,6 +81,7 @@ type PolicyAuthority interface {
 
 type StopChecker interface {
 	NoNewActions() (bool, error)
+	StopForTerminal(string, string) error
 	WithSendBarrier(string, func() error) (bool, error)
 }
 
@@ -842,6 +847,11 @@ func (e *Engine) RunOnce(ctx context.Context, profile agent.Profile) (Result, er
 	if err != nil {
 		return Result{}, err
 	}
+	if outcome := terminalControlOutcome(reconciled.Verdict); outcome != "" && e.stop != nil {
+		if err := e.stop.StopForTerminal(state.proposal.ActionID, outcome); err != nil {
+			return Result{}, errors.New("stop new actions before terminal reconciliation")
+		}
+	}
 	if shouldRecordReconciliation(state.reconciliation, reconciled) {
 		if _, err := e.store.Append(e.now().UTC(), EventTransactionReconciled, state.proposal.ActionID, reconciled); err != nil {
 			return Result{}, err
@@ -998,7 +1008,7 @@ func (e *Engine) observe(ctx context.Context, source string) (agent.NodeObservat
 		if appendErr != nil {
 			return agent.NodeObservation{}, fmt.Errorf("record failed Mithril observation: %w", appendErr)
 		}
-		return agent.NodeObservation{}, err
+		return agent.NodeObservation{}, fmt.Errorf("%w: %w", ErrObservationUnavailable, err)
 	}
 	if err := validateNodeObservationShape(observation, source); err != nil {
 		if appendErr := e.recordObservationFailure("invalid_observation"); appendErr != nil {
@@ -1007,7 +1017,7 @@ func (e *Engine) observe(ctx context.Context, source string) (agent.NodeObservat
 				appendErr,
 			)
 		}
-		return agent.NodeObservation{}, err
+		return agent.NodeObservation{}, fmt.Errorf("%w: %w", ErrObservationUnavailable, err)
 	}
 	return observation, nil
 }
@@ -1857,9 +1867,14 @@ func validateSigned(proposal agent.Proposal, built builtTransaction, signed sign
 		return errors.New("journal message is not canonical base64")
 	}
 	messageHash := sha256.Sum256(message)
-	if response.MessageSHA256 != hex.EncodeToString(messageHash[:]) ||
-		!validHexDigest(response.TransactionSHA256) {
+	if response.MessageSHA256 != hex.EncodeToString(messageHash[:]) {
 		return errors.New("journal signer response has invalid hashes")
+	}
+	binding, err := signer.RiskBinding(
+		signingRequest(proposal, built), response.MessageSHA256,
+	)
+	if err != nil || response.RequestSHA256 != binding.RequestSHA256 {
+		return errors.New("journal signer response has the wrong request hash")
 	}
 	signature, err := solana.Decode64(response.Signature)
 	if err != nil {
@@ -1868,6 +1883,14 @@ func validateSigned(proposal agent.Proposal, built builtTransaction, signed sign
 	source, err := solana.Decode32(proposal.Source)
 	if err != nil || !ed25519.Verify(ed25519.PublicKey(source[:]), message, signature[:]) {
 		return errors.New("journal signer signature does not match its message")
+	}
+	transaction := make([]byte, 0, 1+len(signature)+len(message))
+	transaction = append(transaction, 1)
+	transaction = append(transaction, signature[:]...)
+	transaction = append(transaction, message...)
+	transactionHash := sha256.Sum256(transaction)
+	if response.TransactionSHA256 != hex.EncodeToString(transactionHash[:]) {
+		return errors.New("journal signer response has invalid hashes")
 	}
 	metadata := sealedtx.Metadata{
 		Version:              sealedtx.Version,
@@ -2248,6 +2271,17 @@ func terminalVerdict(verdict string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func terminalControlOutcome(verdict string) string {
+	switch verdict {
+	case txflow.VerdictFailed:
+		return "failed"
+	case txflow.VerdictUnresolved, txflow.VerdictDiverged:
+		return "halted"
+	default:
+		return ""
 	}
 }
 

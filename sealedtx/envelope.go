@@ -46,6 +46,28 @@ func Seal(
 	transaction []byte,
 	random io.Reader,
 ) (Envelope, error) {
+	return seal(recipientPublicKey, metadata, transaction, random, true)
+}
+
+// SealConfidential keeps the transaction signature inside the ciphertext.
+// The runner can verify the attested transaction hash but cannot reconstruct
+// and submit the transaction before the independently controlled submitter.
+func SealConfidential(
+	recipientPublicKey string,
+	metadata Metadata,
+	transaction []byte,
+	random io.Reader,
+) (Envelope, error) {
+	return seal(recipientPublicKey, metadata, transaction, random, false)
+}
+
+func seal(
+	recipientPublicKey string,
+	metadata Metadata,
+	transaction []byte,
+	random io.Reader,
+	requireSignature bool,
+) (Envelope, error) {
 	if random == nil {
 		random = rand.Reader
 	}
@@ -56,17 +78,13 @@ func Seal(
 	if metadata.TransactionSHA256 != hex.EncodeToString(transactionHash[:]) {
 		return Envelope{}, errors.New("sealed transaction hash does not match metadata")
 	}
-	if err := validateMetadata(metadata); err != nil {
+	if err := validateMetadata(metadata, requireSignature); err != nil {
 		return Envelope{}, err
 	}
 	curve := ecdh.X25519()
-	recipientBytes, err := hex.DecodeString(recipientPublicKey)
-	if err != nil || len(recipientBytes) != 32 || hex.EncodeToString(recipientBytes) != recipientPublicKey {
-		return Envelope{}, errors.New("submitter public key is invalid")
-	}
-	recipient, err := curve.NewPublicKey(recipientBytes)
+	recipient, err := parsePublicKey(curve, recipientPublicKey)
 	if err != nil {
-		return Envelope{}, errors.New("submitter public key is invalid")
+		return Envelope{}, err
 	}
 	ephemeral, err := curve.GenerateKey(random)
 	if err != nil {
@@ -103,7 +121,17 @@ func Seal(
 }
 
 func Open(recipientPrivateKey string, envelope Envelope) ([]byte, error) {
-	if err := validateMetadata(envelope.Metadata); err != nil {
+	return open(recipientPrivateKey, envelope, true)
+}
+
+// OpenConfidential opens an envelope whose transaction signature was kept out
+// of its public authenticated metadata.
+func OpenConfidential(recipientPrivateKey string, envelope Envelope) ([]byte, error) {
+	return open(recipientPrivateKey, envelope, false)
+}
+
+func open(recipientPrivateKey string, envelope Envelope, requireSignature bool) ([]byte, error) {
+	if err := validateMetadata(envelope.Metadata, requireSignature); err != nil {
 		return nil, err
 	}
 	curve := ecdh.X25519()
@@ -184,15 +212,46 @@ func PublicKey(privateKey string) (string, error) {
 	return hex.EncodeToString(key.PublicKey().Bytes()), nil
 }
 
-func validateMetadata(metadata Metadata) error {
+// ValidatePublicKey rejects malformed and low-order X25519 submitter keys.
+func ValidatePublicKey(publicKey string) error {
+	_, err := parsePublicKey(ecdh.X25519(), publicKey)
+	return err
+}
+
+func parsePublicKey(curve ecdh.Curve, value string) (*ecdh.PublicKey, error) {
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != value {
+		return nil, errors.New("submitter public key is invalid")
+	}
+	publicKey, err := curve.NewPublicKey(decoded)
+	if err != nil {
+		return nil, errors.New("submitter public key is invalid")
+	}
+	var scalar [32]byte
+	scalar[0] = 1
+	privateKey, err := curve.NewPrivateKey(scalar[:])
+	if err != nil {
+		return nil, errors.New("submitter public key is invalid")
+	}
+	if _, err := privateKey.ECDH(publicKey); err != nil {
+		return nil, errors.New("submitter public key is invalid")
+	}
+	return publicKey, nil
+}
+
+func validateMetadata(metadata Metadata, requireSignature bool) error {
 	if metadata.Version != Version || metadata.Domain != Domain ||
 		!validDigest(metadata.ActionID) || !validDigest(metadata.MessageSHA256) ||
 		!validDigest(metadata.TransactionSHA256) || metadata.FeeLamports == 0 ||
 		metadata.BlockhashContextSlot == 0 || metadata.LastValidBlockHeight == 0 {
 		return errors.New("sealed transaction metadata is invalid")
 	}
-	if _, err := solana.Decode64(metadata.Signature); err != nil {
-		return errors.New("sealed transaction signature is invalid")
+	if requireSignature {
+		if _, err := solana.Decode64(metadata.Signature); err != nil {
+			return errors.New("sealed transaction signature is invalid")
+		}
+	} else if metadata.Signature != "" {
+		return errors.New("confidential sealed transaction reveals its signature")
 	}
 	return nil
 }
