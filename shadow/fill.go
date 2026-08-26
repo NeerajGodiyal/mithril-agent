@@ -36,6 +36,9 @@ type Fill struct {
 	SpentUnits    uint64 `json:"spent_units"`
 	ReceivedUnits uint64 `json:"received_units"`
 	FeeLamports   uint64 `json:"fee_lamports"`
+	// DecisionQuote is the exact read-only quote used to derive this fill. It
+	// lets replay prove every amount instead of trusting already-derived P&L.
+	DecisionQuote Quote `json:"decision_quote"`
 
 	DecisionPriceMicros uint64 `json:"decision_price_micros"`
 	SettlePriceMicros   uint64 `json:"settle_price_micros"`
@@ -124,15 +127,27 @@ func AdvantageBPS(reference, actual uint64, isSell bool) (int32, error) {
 // the oracle compares two quantities that are not commensurable, and the
 // resulting "impact" is meaningless.
 func QuotedPriceMicros(policy Policy, quote Quote) (uint64, error) {
-	if policy.IsSell() {
+	return quotedPriceMicrosDirected(policy, quote, policy.IsSell())
+}
+
+// quotedPriceMicrosDirected is QuotedPriceMicros for an explicitly named leg.
+// A round-trip policy's input/output decimals describe its first leg, so using
+// them unchanged for the return leg compares reciprocal quantities.
+func quotedPriceMicrosDirected(policy Policy, quote Quote, sell bool) (uint64, error) {
+	baseDecimals := baseDecimalsFor(policy)
+	quoteDecimals := policy.OutputDecimals
+	if !policy.IsSell() {
+		quoteDecimals = policy.InputDecimals
+	}
+	if sell {
 		return PriceMicros(
 			quote.InputAmount, quote.EstimatedOutput,
-			policy.InputDecimals, policy.OutputDecimals,
+			baseDecimals, quoteDecimals,
 		)
 	}
 	return PriceMicros(
 		quote.EstimatedOutput, quote.InputAmount,
-		policy.OutputDecimals, policy.InputDecimals,
+		baseDecimals, quoteDecimals,
 	)
 }
 
@@ -163,7 +178,7 @@ func SettleFillDirected(
 	if quote.MinimumOutput > quote.EstimatedOutput {
 		return Fill{}, errors.New("quote minimum exceeds its own estimate")
 	}
-	quoted, err := QuotedPriceMicros(policy, quote)
+	quoted, err := quotedPriceMicrosDirected(policy, quote, sell)
 	if err != nil {
 		return Fill{}, err
 	}
@@ -188,6 +203,7 @@ func SettleFillDirected(
 		Sell:                sell,
 		SpentUnits:          quote.InputAmount,
 		FeeLamports:         policy.FeeLamports,
+		DecisionQuote:       quote,
 		DecisionPriceMicros: decisionPrice,
 		SettlePriceMicros:   settlePrice,
 		QuotedPriceMicros:   quoted,

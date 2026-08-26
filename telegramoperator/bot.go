@@ -52,6 +52,11 @@ func newHTTPBot(token, baseURL string, client *http.Client) (*HTTPBot, error) {
 		client = &http.Client{}
 	}
 	copyClient := *client
+	if copyClient.Transport == nil {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		copyClient.Transport = transport
+	}
 	if copyClient.Timeout <= 0 || copyClient.Timeout > maxTelegramHTTPTime {
 		copyClient.Timeout = maxTelegramHTTPTime
 	}

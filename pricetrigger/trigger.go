@@ -10,9 +10,12 @@ import (
 )
 
 const (
-	Version        = uint32(1)
-	FeedSOLUSD     = "SOL/USD"
-	MaxPriceMicros = uint64(1_000_000_000_000)
+	Version               = uint32(1)
+	FeedSOLUSD            = "SOL/USD"
+	FeedUSDCUSD           = "USDC/USD"
+	MaxPriceMicros        = uint64(1_000_000_000_000)
+	USDCBandMinimumMicros = uint64(990_000)
+	USDCBandMaximumMicros = uint64(1_010_000)
 )
 
 type Direction string
@@ -75,6 +78,98 @@ type Evidence struct {
 	ConservativePrice uint64    `json:"conservative_price_micros"`
 	Triggered         bool      `json:"triggered"`
 	ObservedAt        time.Time `json:"observed_at"`
+}
+
+// BandPolicy bounds a non-triggering market invariant with the same two-source
+// freshness and identity checks used by a price trigger. The first use is the
+// USDC/USD guard: shadow accounting may treat USDC as a dollar only while both
+// independent confidence intervals remain inside this band.
+type BandPolicy struct {
+	Version               uint32 `json:"version"`
+	Feed                  string `json:"feed"`
+	MinimumMicros         uint64 `json:"minimum_micros"`
+	MaximumMicros         uint64 `json:"maximum_micros"`
+	MaxAgeSeconds         uint64 `json:"max_age_seconds"`
+	MaxSourceSkewSeconds  uint64 `json:"max_source_skew_seconds"`
+	MaxDeviationBPS       uint16 `json:"max_deviation_bps"`
+	MaxConfidenceBPS      uint16 `json:"max_confidence_bps"`
+	PrimarySourceSHA256   string `json:"primary_source_sha256"`
+	SecondarySourceSHA256 string `json:"secondary_source_sha256"`
+}
+
+func (p BandPolicy) Validate() error {
+	if p.Version != Version || p.Feed != FeedUSDCUSD {
+		return errors.New("price band must use the USDC/USD v1 contract")
+	}
+	// This contract is a stablecoin guard, not a general-purpose range oracle.
+	// Keeping the allowed policy itself close to one dollar prevents a typo from
+	// turning a depeg check into an always-open gate.
+	if p.MinimumMicros != USDCBandMinimumMicros ||
+		p.MaximumMicros != USDCBandMaximumMicros {
+		return errors.New("USDC/USD price band must be $0.99-$1.01")
+	}
+	if p.MaxAgeSeconds == 0 || p.MaxAgeSeconds > 120 ||
+		p.MaxSourceSkewSeconds > p.MaxAgeSeconds {
+		return errors.New("price band freshness limits are invalid")
+	}
+	if p.MaxDeviationBPS == 0 || p.MaxDeviationBPS > 500 ||
+		p.MaxConfidenceBPS == 0 || p.MaxConfidenceBPS > 500 {
+		return errors.New("price band evidence limits are invalid")
+	}
+	if !validDigest(p.PrimarySourceSHA256) ||
+		!validDigest(p.SecondarySourceSHA256) ||
+		p.PrimarySourceSHA256 == p.SecondarySourceSHA256 {
+		return errors.New("price band sources must have distinct bound identities")
+	}
+	return nil
+}
+
+type BandEvidence struct {
+	Primary     Sample    `json:"primary"`
+	Secondary   Sample    `json:"secondary"`
+	LowerMicros uint64    `json:"lower_micros"`
+	UpperMicros uint64    `json:"upper_micros"`
+	InBand      bool      `json:"in_band"`
+	ObservedAt  time.Time `json:"observed_at"`
+}
+
+// EvaluateBand returns the widest confidence-adjusted interval supported by
+// both sources. A caller must require InBand; an out-of-band observation is a
+// real risk halt, not permission to silently keep assuming one dollar.
+func EvaluateBand(
+	policy BandPolicy,
+	primary, secondary Sample,
+	now time.Time,
+) (BandEvidence, error) {
+	if err := policy.Validate(); err != nil {
+		return BandEvidence{}, err
+	}
+	now = now.UTC()
+	if now.IsZero() {
+		return BandEvidence{}, errors.New("price band observation time is required")
+	}
+	if err := validatePair(
+		policy.Feed, policy.MaxAgeSeconds, policy.MaxSourceSkewSeconds,
+		policy.MaxDeviationBPS, policy.MaxConfidenceBPS,
+		policy.PrimarySourceSHA256, policy.SecondarySourceSHA256,
+		primary, secondary, now,
+	); err != nil {
+		return BandEvidence{}, err
+	}
+	lower := min(
+		primary.PriceMicros-primary.ConfidenceMicros,
+		secondary.PriceMicros-secondary.ConfidenceMicros,
+	)
+	upper := max(
+		primary.PriceMicros+primary.ConfidenceMicros,
+		secondary.PriceMicros+secondary.ConfidenceMicros,
+	)
+	return BandEvidence{
+		Primary: primary, Secondary: secondary,
+		LowerMicros: lower, UpperMicros: upper,
+		InBand:     lower >= policy.MinimumMicros && upper <= policy.MaximumMicros,
+		ObservedAt: now,
+	}, nil
 }
 
 // Status is the bounded, non-secret price-rule projection exposed to operators.
@@ -167,23 +262,13 @@ func Evaluate(policy Policy, primary, secondary Sample, now time.Time) (Evidence
 	if now.IsZero() {
 		return Evidence{}, errors.New("price trigger observation time is required")
 	}
-	if err := validateSample(policy, primary, policy.PrimarySourceSHA256, now); err != nil {
-		return Evidence{}, errors.New("primary price evidence is invalid")
-	}
-	if err := validateSample(policy, secondary, policy.SecondarySourceSHA256, now); err != nil {
-		return Evidence{}, errors.New("secondary price evidence is invalid")
-	}
-	skew := primary.PublishedAt.Sub(secondary.PublishedAt)
-	if skew < 0 {
-		skew = -skew
-	}
-	if skew > time.Duration(policy.MaxSourceSkewSeconds)*time.Second {
-		return Evidence{}, errors.New("price evidence timestamps disagree")
-	}
-	higher := max(primary.PriceMicros, secondary.PriceMicros)
-	lower := min(primary.PriceMicros, secondary.PriceMicros)
-	if !ratioWithinBPS(higher-lower, higher, policy.MaxDeviationBPS) {
-		return Evidence{}, errors.New("price evidence exceeds the deviation limit")
+	if err := validatePair(
+		policy.Feed, policy.MaxAgeSeconds, policy.MaxSourceSkewSeconds,
+		policy.MaxDeviationBPS, policy.MaxConfidenceBPS,
+		policy.PrimarySourceSHA256, policy.SecondarySourceSHA256,
+		primary, secondary, now,
+	); err != nil {
+		return Evidence{}, err
 	}
 	evidence := Evidence{
 		Primary: primary, Secondary: secondary, ObservedAt: now,
@@ -204,21 +289,61 @@ func Evaluate(policy Policy, primary, secondary Sample, now time.Time) (Evidence
 	return evidence, nil
 }
 
-func validateSample(policy Policy, sample Sample, source string, now time.Time) error {
-	if sample.SourceSHA256 != source || sample.Feed != policy.Feed ||
+func validatePair(
+	feed string,
+	maxAgeSeconds, maxSourceSkewSeconds uint64,
+	maxDeviationBPS, maxConfidenceBPS uint16,
+	primarySource, secondarySource string,
+	primary, secondary Sample,
+	now time.Time,
+) error {
+	if err := validateSample(
+		feed, maxAgeSeconds, maxConfidenceBPS, primary, primarySource, now,
+	); err != nil {
+		return errors.New("primary price evidence is invalid")
+	}
+	if err := validateSample(
+		feed, maxAgeSeconds, maxConfidenceBPS, secondary, secondarySource, now,
+	); err != nil {
+		return errors.New("secondary price evidence is invalid")
+	}
+	skew := primary.PublishedAt.Sub(secondary.PublishedAt)
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew > time.Duration(maxSourceSkewSeconds)*time.Second {
+		return errors.New("price evidence timestamps disagree")
+	}
+	higher := max(primary.PriceMicros, secondary.PriceMicros)
+	lower := min(primary.PriceMicros, secondary.PriceMicros)
+	if !ratioWithinBPS(higher-lower, higher, maxDeviationBPS) {
+		return errors.New("price evidence exceeds the deviation limit")
+	}
+	return nil
+}
+
+func validateSample(
+	feed string,
+	maxAgeSeconds uint64,
+	maxConfidenceBPS uint16,
+	sample Sample,
+	source string,
+	now time.Time,
+) error {
+	if sample.SourceSHA256 != source || sample.Feed != feed ||
 		sample.PriceMicros == 0 || sample.PriceMicros > MaxPriceMicros ||
 		sample.ConfidenceMicros >= sample.PriceMicros || sample.PublishedAt.IsZero() {
 		return errors.New("price evidence identity is invalid")
 	}
 	publishedAt := sample.PublishedAt.UTC()
 	if publishedAt.After(now.Add(time.Second)) ||
-		now.Sub(publishedAt) > time.Duration(policy.MaxAgeSeconds)*time.Second {
+		now.Sub(publishedAt) > time.Duration(maxAgeSeconds)*time.Second {
 		return errors.New("price evidence is stale")
 	}
 	if !ratioWithinBPS(
 		sample.ConfidenceMicros,
 		sample.PriceMicros,
-		policy.MaxConfidenceBPS,
+		maxConfidenceBPS,
 	) {
 		return errors.New("price confidence exceeds policy")
 	}

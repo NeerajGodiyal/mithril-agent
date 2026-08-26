@@ -39,9 +39,9 @@ type RoundTripCounts struct {
 	// Refused counts legs the slippage floor stopped. High refusal with high
 	// signal means the thresholds are reachable but the pool cannot fill them.
 	Refused uint64 `json:"refused"`
-	// SellSignals and BuySignals are ticks where the rule fired but inventory
-	// was on the wrong side, so nothing could be done. A large number here
-	// means the thresholds are badly matched to how the price actually moves.
+	// SellSignals and BuySignals are ticks where the active rule fired. Comparing
+	// them with completed legs and refusals shows whether the route could act on
+	// the prices the strategy selected.
 	SellSignals uint64 `json:"sell_signals"`
 	BuySignals  uint64 `json:"buy_signals"`
 }
@@ -55,14 +55,15 @@ type RoundTripResult struct {
 
 // ReplayRoundTrip scores a price series against both legs on one book.
 //
-// quoteFor supplies the pool's answer at a given price and direction. It is a
-// parameter rather than a field so a caller can drive this from recorded live
-// quotes, from a constant spread, or from a model — the accounting is identical
-// and the honesty of the result is entirely a property of what this returns.
+// quoteFor supplies the pool's answer at a given price, direction, and exact
+// input amount. It is a parameter rather than a field so a caller can drive
+// this from recorded live quotes, from a constant spread, or from a model — the
+// accounting is identical and the honesty of the result is entirely a property
+// of what this returns.
 func ReplayRoundTrip(
 	policy Policy,
 	prices []uint64,
-	quoteFor func(priceMicros uint64, sell bool) (Quote, error),
+	quoteFor func(priceMicros uint64, sell bool, inputAmount uint64) (Quote, error),
 ) (RoundTripResult, error) {
 	if err := policy.Validate(); err != nil {
 		return RoundTripResult{}, err
@@ -89,6 +90,7 @@ func ReplayRoundTrip(
 	result := RoundTripResult{Ledger: ledger}
 	// The leg the run is waiting to make.
 	sell := policy.IsSell()
+	nextAmount := policy.InputAmount
 
 	// The last price has no later price to settle against, and settling a
 	// decision against the price that produced it is the single easiest way to
@@ -113,18 +115,21 @@ func ReplayRoundTrip(
 			result.Counts.BuySignals++
 		}
 
-		quote, err := quoteFor(decision, sell)
-		if err != nil {
-			return RoundTripResult{}, err
-		}
-		// Spend what is actually held, so the book can never go short and the
-		// second leg is sized by the first rather than by the policy.
+		// Spend what the previous leg produced, bounded by what is actually held,
+		// so the book can never go short and the return leg cannot invent size.
 		held := result.Ledger.QuoteUnits
 		if sell {
 			held = result.Ledger.BaseUnits
 		}
-		if held == 0 || quote.InputAmount > held {
+		if nextAmount == 0 || nextAmount > held {
 			continue
+		}
+		quote, err := quoteFor(decision, sell, nextAmount)
+		if err != nil {
+			return RoundTripResult{}, err
+		}
+		if quote.InputAmount != nextAmount {
+			return RoundTripResult{}, errors.New("round-trip quote changed the requested input amount")
 		}
 
 		fill, err := SettleFillDirected(policy, quote, decision, settle, sell)
@@ -150,6 +155,7 @@ func ReplayRoundTrip(
 			return RoundTripResult{}, err
 		}
 		result.Ledger = applied
+		nextAmount = fill.ReceivedUnits
 		if sell {
 			result.Counts.Sells++
 		} else {
@@ -157,6 +163,9 @@ func ReplayRoundTrip(
 		}
 		// Handed over: the next leg is the other direction.
 		sell = !sell
+		if sell && nextAmount > result.Ledger.BaseUnits {
+			nextAmount = result.Ledger.BaseUnits
+		}
 	}
 
 	result.ClosingPrice = prices[len(prices)-1]

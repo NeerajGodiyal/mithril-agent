@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 )
 
 // A shadow report has one job: let a reader decide whether the result means
@@ -29,9 +31,11 @@ type Report struct {
 	Counts Counts `json:"counts"`
 	Stats  Stats  `json:"stats"`
 
-	ClosingPriceMicros uint64 `json:"closing_price_micros"`
-	BaseUnits          uint64 `json:"base_units"`
-	QuoteUnits         uint64 `json:"quote_units"`
+	ClosingPriceMicros    uint64 `json:"closing_price_micros"`
+	BaseUnits             uint64 `json:"base_units"`
+	QuoteUnits            uint64 `json:"quote_units"`
+	QuotePegMinimumMicros uint64 `json:"quote_peg_minimum_micros,omitempty"`
+	QuotePegMaximumMicros uint64 `json:"quote_peg_maximum_micros,omitempty"`
 
 	OpeningEquityMicros uint64 `json:"opening_equity_micros"`
 	ClosingEquityMicros uint64 `json:"closing_equity_micros"`
@@ -45,9 +49,11 @@ type Report struct {
 	// VersusHoldMicros is the only number that answers "was this worth doing".
 	VersusHoldMicros int64 `json:"versus_hold_micros"`
 
-	// ObservableTicks is the share of ticks in which the market could be read,
-	// in basis points. A low figure invalidates everything above it.
-	ObservableBPS int32 `json:"observable_bps"`
+	// ObservableBPS is the share of expected ticks in which the market could be
+	// read. ExpectedTicks includes scheduled observations missed while the
+	// runner was down, so downtime cannot look like perfect market coverage.
+	ExpectedTicks uint64 `json:"expected_ticks"`
+	ObservableBPS int32  `json:"observable_bps"`
 	// ActedBPS is the share of signals that reached a settled decision.
 	ActedBPS int32 `json:"acted_bps"`
 }
@@ -63,6 +69,14 @@ func BuildReport(
 	closingPriceMicros uint64,
 	from, to time.Time,
 ) (Report, error) {
+	policyFingerprint, err := policy.Fingerprint()
+	if err != nil {
+		return Report{}, err
+	}
+	ledgerFingerprint, err := ledger.Policy.Fingerprint()
+	if err != nil || ledgerFingerprint != policyFingerprint {
+		return Report{}, errors.New("report policy does not match the shadow ledger")
+	}
 	if closingPriceMicros == 0 {
 		return Report{}, errZeroReference
 	}
@@ -89,7 +103,7 @@ func BuildReport(
 	if err != nil {
 		return Report{}, err
 	}
-	return Report{
+	report := Report{
 		Version: Version, Cluster: policy.Cluster, From: from, To: to,
 		Counts: counts, Stats: stats,
 		ClosingPriceMicros: closingPriceMicros,
@@ -103,9 +117,27 @@ func BuildReport(
 		MaxDrawdownMicros:   ledger.MaxDrawdownMicros,
 		HoldBenchmarkMicros: benchmark,
 		VersusHoldMicros:    signedClosing - signedBenchmark,
-		ObservableBPS:       share(observed(counts), counts.Ticks),
+		ExpectedTicks:       expectedTicks(policy, counts, from, to),
 		ActedBPS:            share(stats.Settled, actionable(counts)),
-	}, nil
+	}
+	report.ObservableBPS = share(observed(counts), report.ExpectedTicks)
+	if policy.QuotePeg != nil {
+		report.QuotePegMinimumMicros = policy.QuotePeg.MinimumMicros
+		report.QuotePegMaximumMicros = policy.QuotePeg.MaximumMicros
+	}
+	return report, nil
+}
+
+func expectedTicks(policy Policy, counts Counts, from, to time.Time) uint64 {
+	interval := policy.Tick()
+	duration := to.Sub(from)
+	expected := uint64(duration / interval)
+	if duration%interval != 0 {
+		expected++
+	}
+	// A scheduler can observe both period boundaries. Do not hide actual
+	// attempts merely because that yields one more tick than the estimate.
+	return max(expected, counts.Ticks)
 }
 
 // Trustworthy reports whether the period saw enough of the market to be worth
@@ -113,12 +145,38 @@ func BuildReport(
 // against is a confident conclusion drawn from a run that was mostly blind.
 func (r Report) Trustworthy() bool {
 	const minimumObservable = int32(9_500) // 95%
-	return r.Counts.Ticks > 0 && r.ObservableBPS >= minimumObservable
+	return r.Counts.Ticks > 0 && r.ExpectedTicks >= r.Counts.Ticks &&
+		r.ObservableBPS >= minimumObservable &&
+		(r.Cluster != Mainnet || r.validQuotePeg())
+}
+
+func (r Report) validQuotePeg() bool {
+	return r.QuotePegMinimumMicros == pricetrigger.USDCBandMinimumMicros &&
+		r.QuotePegMaximumMicros == pricetrigger.USDCBandMaximumMicros
 }
 
 // Render writes the report for a person, in whole sentences, leading with the
 // caveat when there is one.
 func (r Report) Render(out io.Writer) error {
+	if r.ExpectedTicks < r.Counts.Ticks || r.ExpectedTicks == 0 {
+		return errors.New("shadow report has an invalid expected observation count")
+	}
+	drawdown, err := signed(r.MaxDrawdownMicros)
+	if err != nil {
+		return errors.New("shadow report has an unrepresentable drawdown")
+	}
+	turnover, err := signed(r.TurnoverMicros)
+	if err != nil {
+		return errors.New("shadow report has unrepresentable turnover")
+	}
+	benchmark, err := signed(r.HoldBenchmarkMicros)
+	if err != nil {
+		return errors.New("shadow report has an unrepresentable hold benchmark")
+	}
+	closing, err := signed(r.ClosingEquityMicros)
+	if err != nil {
+		return errors.New("shadow report has unrepresentable closing equity")
+	}
 	write := func(format string, args ...any) error {
 		_, err := fmt.Fprintf(out, format+"\n", args...)
 		return err
@@ -132,17 +190,30 @@ func (r Report) Render(out io.Writer) error {
 	}
 	if !r.Trustworthy() {
 		if err := write(
-			"Read this with care: the market could only be read in %s of ticks.\n"+
+			"Read this with care: the market could only be read for %s of the scheduled observations.\n"+
 				"A result from a period that was largely unobservable does not\n"+
 				"support a conclusion.\n", percent(r.ObservableBPS)); err != nil {
+			return err
+		}
+	}
+	if r.Cluster == Mainnet {
+		if !r.validQuotePeg() {
+			return errors.New("mainnet shadow report has an invalid USDC/USD accounting bound")
+		}
+		if err := write(
+			"USD figures use USDC at one dollar only after each observable tick passes\n"+
+				"two independent USDC/USD confidence checks inside $%d.%06d-$%d.%06d.\n",
+			r.QuotePegMinimumMicros/1_000_000, r.QuotePegMinimumMicros%1_000_000,
+			r.QuotePegMaximumMicros/1_000_000, r.QuotePegMaximumMicros%1_000_000,
+		); err != nil {
 			return err
 		}
 	}
 	if err := write("What it would have done"); err != nil {
 		return err
 	}
-	if err := write("  %d observations, %d signals, %d trades, %d refused by the slippage floor",
-		r.Counts.Ticks, r.Counts.Signals, r.Counts.Fills, r.Counts.Refused); err != nil {
+	if err := write("  %d observations out of %d expected, %d signals, %d trades, %d refused by the slippage floor",
+		r.Counts.Ticks, r.ExpectedTicks, r.Counts.Signals, r.Counts.Fills, r.Counts.Refused); err != nil {
 		return err
 	}
 	if err := write("  %d signals could not be acted on, %d ticks could not be read",
@@ -164,19 +235,19 @@ func (r Report) Render(out io.Writer) error {
 	if err := write("  Unrealized             %s", usd(r.UnrealizedMicros)); err != nil {
 		return err
 	}
-	if err := write("  Worst fall             %s", usd(-int64(r.MaxDrawdownMicros))); err != nil {
+	if err := write("  Worst fall             %s", usd(-drawdown)); err != nil {
 		return err
 	}
-	if err := write("  Turnover               %s", usd(int64(r.TurnoverMicros))); err != nil {
+	if err := write("  Turnover               %s", usd(turnover)); err != nil {
 		return err
 	}
 	if err := write("\nAgainst simply holding"); err != nil {
 		return err
 	}
-	if err := write("  Holding would be worth  %s", usd(int64(r.HoldBenchmarkMicros))); err != nil {
+	if err := write("  Holding would be worth  %s", usd(benchmark)); err != nil {
 		return err
 	}
-	if err := write("  This strategy is worth  %s", usd(int64(r.ClosingEquityMicros))); err != nil {
+	if err := write("  This strategy is worth  %s", usd(closing)); err != nil {
 		return err
 	}
 	if err := write("  Difference              %s", usd(r.VersusHoldMicros)); err != nil {
@@ -239,11 +310,14 @@ func usd(micros int64) string {
 	if micros < 0 {
 		sign = "-"
 	}
-	value := micros
-	if value < 0 {
-		value = -value
+	whole, fraction := micros/1_000_000, micros%1_000_000
+	if whole < 0 {
+		whole = -whole
 	}
-	return fmt.Sprintf("%s$%d.%06d", sign, value/1_000_000, value%1_000_000)
+	if fraction < 0 {
+		fraction = -fraction
+	}
+	return fmt.Sprintf("%s$%d.%06d", sign, whole, fraction)
 }
 
 func abs32(value int32) int32 {

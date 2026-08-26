@@ -70,7 +70,7 @@ func (source *Pyth) Latest(ctx context.Context, feed string) (pricetrigger.Sampl
 			} `json:"price"`
 		} `json:"parsed"`
 	}
-	if err := readJSON(ctx, source.client, request, &response); err != nil {
+	if _, err := readJSON(ctx, source.client, request, &response); err != nil {
 		return pricetrigger.Sample{}, errors.New("Pyth price is unavailable")
 	}
 	if len(response.Parsed) != 1 || response.Parsed[0].ID != SOLUSDFeedID ||
@@ -108,11 +108,14 @@ func validAccessToken(token string) bool {
 
 func boundedClient(client *http.Client) *http.Client {
 	if client == nil {
-		transport := http.DefaultTransport.(*http.Transport).Clone()
-		transport.Proxy = nil
-		client = &http.Client{Transport: transport}
+		client = &http.Client{}
 	}
 	copy := *client
+	if copy.Transport == nil {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		copy.Transport = transport
+	}
 	if copy.Timeout <= 0 || copy.Timeout > maxHTTPTime {
 		copy.Timeout = maxHTTPTime
 	}
@@ -122,37 +125,42 @@ func boundedClient(client *http.Client) *http.Client {
 	return &copy
 }
 
-func readJSON(ctx context.Context, client *http.Client, request *http.Request, target any) error {
+func readJSON(
+	ctx context.Context,
+	client *http.Client,
+	request *http.Request,
+	target any,
+) (http.Header, error) {
 	response, err := client.Do(request)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxResponseBytes))
-		return errors.New("price provider rejected the request")
+		return nil, errors.New("price provider rejected the request")
 	}
 	if mediaType := response.Header.Get("Content-Type"); mediaType != "" &&
 		!strings.HasPrefix(strings.ToLower(mediaType), "application/json") {
-		return errors.New("price provider returned an invalid content type")
+		return nil, errors.New("price provider returned an invalid content type")
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil || len(data) == 0 || len(data) > maxResponseBytes {
-		return errors.New("price provider response is invalid")
+		return nil, errors.New("price provider response is invalid")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	if err := decoder.Decode(target); err != nil {
-		return errors.New("price provider response is invalid")
+		return nil, errors.New("price provider response is invalid")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return errors.New("price provider response is invalid")
+		return nil, errors.New("price provider response is invalid")
 	}
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
-	return nil
+	return response.Header, nil
 }
 
 func scaleMicros(raw string, exponent int32, roundUp bool) (uint64, error) {

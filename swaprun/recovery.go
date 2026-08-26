@@ -95,7 +95,8 @@ func validateRecoveredSwap(
 	}
 
 	response := current.signed.Response
-	transactionSHA256, err := validateSwapSignerResponse(actionID, profile, *built, message, response)
+	request := signerRequestFor(actionID, profile, fingerprint, *current.started, *built)
+	transactionSHA256, err := validateSwapSignerResponse(profile, *built, message, request, response)
 	if err != nil {
 		return err
 	}
@@ -129,10 +130,10 @@ func validateRecoveredSwap(
 }
 
 func validateSwapSignerResponse(
-	actionID string,
 	profile Profile,
 	built builtRecord,
 	message []byte,
+	request signer.Request,
 	response signer.Response,
 ) (string, error) {
 	messageHash := sha256.Sum256(message)
@@ -151,7 +152,11 @@ func validateSwapSignerResponse(
 	signedTransaction = append(signedTransaction, message...)
 	transactionHash := sha256.Sum256(signedTransaction)
 	transactionSHA256 := hex.EncodeToString(transactionHash[:])
-	if response.ActionID != actionID || response.MessageSHA256 != messageSHA256 ||
+	binding, err := signer.RiskBinding(request, messageSHA256)
+	if err != nil || response.RequestSHA256 != binding.RequestSHA256 {
+		return "", errors.New("signer response does not match its exact request")
+	}
+	if response.ActionID != request.ActionID || response.MessageSHA256 != messageSHA256 ||
 		response.TransactionSHA256 != transactionSHA256 ||
 		response.BlockhashContextSlot != built.BlockhashContextSlot ||
 		response.FeeLamports != built.FeeLamports ||
@@ -161,7 +166,7 @@ func validateSwapSignerResponse(
 	wantMetadata := sealedtx.Metadata{
 		Version:              sealedtx.Version,
 		Domain:               sealedtx.Domain,
-		ActionID:             actionID,
+		ActionID:             request.ActionID,
 		MessageSHA256:        messageSHA256,
 		TransactionSHA256:    transactionSHA256,
 		Signature:            response.Signature,
@@ -181,6 +186,31 @@ func validateSwapSignerResponse(
 		return "", errors.New("sealed transaction attestation is invalid")
 	}
 	return transactionSHA256, nil
+}
+
+func signerRequestFor(
+	actionID string,
+	profile Profile,
+	fingerprint string,
+	started startedRecord,
+	built builtRecord,
+) signer.Request {
+	return signer.Request{
+		Domain: profile.requestDomain(), Cluster: profile.Cluster,
+		Profile: profile.Name, ProfileVersion: profile.Version,
+		ProfileFingerprint: fingerprint, ActionID: actionID,
+		ScheduleWindowStartUnix: started.ScheduleWindowStartUnix,
+		ScheduleWindowEndUnix:   started.ScheduleWindowEndUnix,
+		MessageBase64:           built.MessageBase64,
+		BlockhashContextSlot:    built.BlockhashContextSlot,
+		FeeLamports:             built.FeeLamports,
+		FeeMinContextSlot:       built.FeeMinContextSlot,
+		PrimaryFeeContextSlot:   built.PrimaryFeeContextSlot,
+		SecondaryFeeContextSlot: built.SecondaryFeeContextSlot,
+		RecentBlockhash:         built.RecentBlockhash,
+		ObservedBlockHeight:     built.ObservedBlockHeight,
+		LastValidBlockHeight:    built.LastValidBlockHeight,
+	}
 }
 
 func validBase64Value(value string) bool {

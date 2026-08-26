@@ -119,7 +119,6 @@ type StopChecker interface {
 	NoNewActions() (bool, error)
 	StopForTerminal(string, string) error
 	TerminalLatch() (string, string, error)
-	ClearTerminalForFinalized(string) error
 	WithSendBarrier(string, func() error) (bool, error)
 	WithRecoverySendBarrier(string, func() error) (bool, error)
 }
@@ -374,14 +373,17 @@ func (e *Engine) RunOnce(ctx context.Context, profile Profile) (Result, error) {
 		}
 		return stateResult(terminalID, profile, terminalState, true), nil
 	}
-	repairedID, repairedState, repaired, err := e.repairFinalizedTerminal(
+	repairedID, _, repaired, err := e.repairFinalizedTerminal(
 		projection, profile, fingerprint, e.now().UTC(),
 	)
 	if err != nil {
 		return Result{}, err
 	}
 	if repaired {
-		return stateResult(repairedID, profile, repairedState, true), nil
+		return Result{
+			ActionID: repairedID, Decision: "waiting",
+			Reason: "independent recovery finalizer is pending",
+		}, nil
 	}
 	projectedID, projectedState := latestUnprojectedStatus(projection)
 	if projectedState != nil {
@@ -806,21 +808,9 @@ func (e *Engine) RunOnce(ctx context.Context, profile Profile) (Result, error) {
 				return priceWaitResult(actionID, status, err), nil
 			}
 		}
-		request := signer.Request{
-			Domain: profile.requestDomain(), Cluster: profile.Cluster,
-			Profile: profile.Name, ProfileVersion: profile.Version,
-			ProfileFingerprint: fingerprint, ActionID: actionID,
-			ScheduleWindowStartUnix: windowStart, ScheduleWindowEndUnix: windowEnd,
-			MessageBase64:           current.built.MessageBase64,
-			BlockhashContextSlot:    current.built.BlockhashContextSlot,
-			FeeLamports:             current.built.FeeLamports,
-			FeeMinContextSlot:       current.built.FeeMinContextSlot,
-			PrimaryFeeContextSlot:   current.built.PrimaryFeeContextSlot,
-			SecondaryFeeContextSlot: current.built.SecondaryFeeContextSlot,
-			RecentBlockhash:         current.built.RecentBlockhash,
-			ObservedBlockHeight:     current.built.ObservedBlockHeight,
-			LastValidBlockHeight:    current.built.LastValidBlockHeight,
-		}
+		request := signerRequestFor(
+			actionID, profile, fingerprint, *current.started, *current.built,
+		)
 		grant, err := e.authority.Authorize(ctx, request)
 		if err != nil {
 			return Result{}, err
@@ -835,7 +825,7 @@ func (e *Engine) RunOnce(ctx context.Context, profile Profile) (Result, error) {
 			return Result{}, errors.New("swap message is invalid")
 		}
 		if _, err := validateSwapSignerResponse(
-			actionID, profile, *current.built, message, response,
+			profile, *current.built, message, request, response,
 		); err != nil {
 			return Result{}, err
 		}
@@ -851,7 +841,9 @@ func (e *Engine) RunOnce(ctx context.Context, profile Profile) (Result, error) {
 			return Result{}, errors.New("recovered swap message is invalid")
 		}
 		if _, err := validateSwapSignerResponse(
-			actionID, profile, *current.built, message, current.signed.Response,
+			profile, *current.built, message,
+			signerRequestFor(actionID, profile, fingerprint, *current.started, *current.built),
+			current.signed.Response,
 		); err != nil {
 			return Result{}, err
 		}
@@ -1062,7 +1054,9 @@ func ValidateClockSample(sample clockcheck.Sample, now time.Time, maxUncertainty
 }
 
 func validateClockShape(sample clockcheck.Sample, maxUncertainty time.Duration) error {
-	if sample.WallTime.IsZero() || len(sample.BootID) != 36 || sample.MonotonicNanos == 0 ||
+	if maxUncertainty < clockcheck.InitialMaxUncertainty ||
+		maxUncertainty > clockcheck.MaxUncertaintyCap ||
+		sample.WallTime.IsZero() || len(sample.BootID) != 36 || sample.MonotonicNanos == 0 ||
 		sample.OffsetNanos < -int64(clockcheck.MaxOffset) ||
 		sample.OffsetNanos > int64(clockcheck.MaxOffset) ||
 		sample.UncertaintyNanos > uint64(maxUncertainty) {
@@ -1791,9 +1785,7 @@ func (e *Engine) recordReconciliation(
 	// operator's durable acknowledgement. A finalized action keeps its reserve
 	// until the operator status projection is durable.
 	if outcome == "" {
-		if err := e.stop.ClearTerminalForFinalized(actionID); err != nil {
-			return Result{}, errors.New("clear provisional terminal control state")
-		}
+		return stateResult(actionID, profile, current, recovered), nil
 	}
 	return stateResult(actionID, profile, current, recovered), nil
 }
@@ -1816,9 +1808,6 @@ func (e *Engine) repairFinalizedTerminal(
 	if err := validateStartedAction(actionID, current, profile, fingerprint); err != nil ||
 		validateStarted(profile, *current.started, now) != nil {
 		return "", nil, false, errors.New("finalized terminal swap is invalid")
-	}
-	if err := e.stop.ClearTerminalForFinalized(actionID); err != nil {
-		return "", nil, false, errors.New("repair finalized terminal control state")
 	}
 	return actionID, current, true, nil
 }

@@ -14,10 +14,11 @@ import (
 
 // Pyth publishes SOL/USD as a sponsored on-chain push feed, so the price can be
 // read through the operator's own Mithril node with no data subscription. The
-// Core upgrade on 2026-08-18 is an in-place program upgrade at unchanged
-// addresses, so both the current and upgraded accounts are pinned here: reading
-// both makes the cutover a non-event, and while both publish they cross-check
-// each other for free.
+// Core upgrade on 2026-08-18 has separate early-upgrade program and feed
+// addresses, while Pyth will upgrade the current contract in place at cutover.
+// Both sponsored accounts and their exact owners are pinned here: reading both
+// avoids an operator-side address switch, and while both publish they
+// cross-check each other for free.
 //
 // The dangerous failure of a sponsored feed is not disappearance but silent
 // staleness — a stopped feed keeps serving a well-formed, plausible price
@@ -31,6 +32,9 @@ const (
 
 	pythPushUpgradedAccount = "7AviUf9nL62mcxNbQGKm4nKDQnPjswo6c5MX4D57HmyE"
 	pythPushUpgradedOwner   = "rec2HHDDnjLfj4kE7VyEtFA1HPGQLK33259532cRyHp"
+
+	pythPushUSDCAccount = "Dpw1EAVrSB1ibxiDQyTAW6Zip3J4Btk2x4SgApQCeFbX"
+	USDCUSDFeedID       = "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"
 
 	// PriceUpdateV2 is a fixed-size Anchor account: an 8-byte discriminator,
 	// a 32-byte write authority, a 1-byte verification level, the 32-byte feed
@@ -54,7 +58,8 @@ const (
 	// drifted and neither should be trusted silently.
 	pythPushMaxCrossDeviationBPS = 200
 
-	pythPushIdentityDescription = "mithril-agent/price-source-v2|pyth-push-onchain|mithril-getaccountinfo|stable:SOL/USD|aggregate-confidence"
+	pythPushIdentityDescription     = "mithril-agent/price-source-v2|pyth-push-onchain|mithril-getaccountinfo|stable:SOL/USD|aggregate-confidence"
+	pythPushUSDCIdentityDescription = "mithril-agent/price-source-v2|pyth-push-onchain|mithril-getaccountinfo|stable:USDC/USD|aggregate-confidence"
 )
 
 var pythPushDiscriminator = [8]byte{0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd}
@@ -72,8 +77,38 @@ var pythPushFeeds = []pythPushFeed{
 	{account: pythPushUpgradedAccount, owner: pythPushUpgradedOwner},
 }
 
+var pythPushUSDCFeeds = []pythPushFeed{
+	// Pyth's sponsored-feed registry publishes one current USDC/USD account.
+	// The current receiver contract is upgraded in place at the 2026-08-18
+	// cutover, so this account does not need an early-upgrade sibling.
+	{account: pythPushUSDCAccount, owner: pythPushLegacyOwner},
+}
+
+type pythPushDefinition struct {
+	feed     string
+	feedID   string
+	identity string
+	accounts []pythPushFeed
+}
+
+var (
+	pythPushSOLDefinition = pythPushDefinition{
+		feed: pricetrigger.FeedSOLUSD, feedID: SOLUSDFeedID,
+		identity: pythPushIdentityDescription, accounts: pythPushFeeds,
+	}
+	pythPushUSDCDefinition = pythPushDefinition{
+		feed: pricetrigger.FeedUSDCUSD, feedID: USDCUSDFeedID,
+		identity: pythPushUSDCIdentityDescription, accounts: pythPushUSDCFeeds,
+	}
+)
+
 func PythPushIdentitySHA256() string {
 	hash := sha256.Sum256([]byte(pythPushIdentityDescription))
+	return hex.EncodeToString(hash[:])
+}
+
+func PythPushUSDCIdentitySHA256() string {
+	hash := sha256.Sum256([]byte(pythPushUSDCIdentityDescription))
 	return hex.EncodeToString(hash[:])
 }
 
@@ -94,21 +129,37 @@ type AccountData struct {
 
 // PythPush reads the sponsored SOL/USD push feed through a Mithril node.
 type PythPush struct {
-	reader AccountReader
-	now    func() time.Time
+	reader     AccountReader
+	now        func() time.Time
+	definition pythPushDefinition
 }
 
 func NewPythPush(reader AccountReader, now func() time.Time) (*PythPush, error) {
+	return newPythPush(reader, now, pythPushSOLDefinition)
+}
+
+func NewPythPushUSDC(reader AccountReader, now func() time.Time) (*PythPush, error) {
+	return newPythPush(reader, now, pythPushUSDCDefinition)
+}
+
+func newPythPush(
+	reader AccountReader,
+	now func() time.Time,
+	definition pythPushDefinition,
+) (*PythPush, error) {
 	if reader == nil {
 		return nil, errors.New("Pyth push source requires a Mithril account reader")
 	}
 	if now == nil {
 		now = time.Now
 	}
-	return &PythPush{reader: reader, now: now}, nil
+	return &PythPush{reader: reader, now: now, definition: definition}, nil
 }
 
-func (*PythPush) IdentitySHA256() string { return PythPushIdentitySHA256() }
+func (source *PythPush) IdentitySHA256() string {
+	hash := sha256.Sum256([]byte(source.definition.identity))
+	return hex.EncodeToString(hash[:])
+}
 
 // Latest performs an advisory read with no slot floor. It is for deciding
 // whether to keep waiting and for operator display; it never authorizes an
@@ -137,7 +188,7 @@ func (source *PythPush) read(
 	feed string,
 	minContextSlot uint64,
 ) (pricetrigger.Sample, error) {
-	if feed != pricetrigger.FeedSOLUSD {
+	if feed != source.definition.feed {
 		return pricetrigger.Sample{}, errors.New("Pyth push price feed is unsupported")
 	}
 
@@ -149,7 +200,7 @@ func (source *PythPush) read(
 	var accepted []candidate
 	var lastErr error
 
-	for _, pinned := range pythPushFeeds {
+	for _, pinned := range source.definition.accounts {
 		account, err := source.reader.AccountSlice(
 			ctx, pinned.account, minContextSlot, 0, pythPushAccountBytes)
 		if err != nil {
@@ -157,7 +208,7 @@ func (source *PythPush) read(
 			lastErr = errors.New("read Pyth push account")
 			continue
 		}
-		sample, age, err := decodePythPush(account, pinned, now)
+		sample, age, err := decodePythPush(account, pinned, source.definition, now)
 		if err != nil {
 			lastErr = err
 			continue
@@ -171,7 +222,7 @@ func (source *PythPush) read(
 		}
 		return pricetrigger.Sample{}, lastErr
 	}
-	if len(accepted) == 2 {
+	if len(accepted) > 1 {
 		if err := requireCloseEnough(
 			accepted[0].sample.PriceMicros,
 			accepted[1].sample.PriceMicros,
@@ -194,6 +245,7 @@ func (source *PythPush) read(
 func decodePythPush(
 	account AccountData,
 	pinned pythPushFeed,
+	definition pythPushDefinition,
 	now time.Time,
 ) (pricetrigger.Sample, time.Duration, error) {
 	if account.Owner != pinned.owner {
@@ -208,8 +260,8 @@ func decodePythPush(
 	if account.Data[8+32] != pythPushVerificationFull {
 		return pricetrigger.Sample{}, 0, errors.New("Pyth push price is not fully verified")
 	}
-	if hex.EncodeToString(account.Data[8+32+1:8+32+1+32]) != SOLUSDFeedID {
-		return pricetrigger.Sample{}, 0, errors.New("Pyth push account is not the SOL/USD feed")
+	if hex.EncodeToString(account.Data[8+32+1:8+32+1+32]) != definition.feedID {
+		return pricetrigger.Sample{}, 0, errors.New("Pyth push account is for the wrong feed")
 	}
 
 	body := account.Data[pythPushPriceOffset:]
@@ -243,12 +295,17 @@ func decodePythPush(
 	}
 
 	return pricetrigger.Sample{
-		SourceSHA256:     PythPushIdentitySHA256(),
-		Feed:             pricetrigger.FeedSOLUSD,
+		SourceSHA256:     sourceIdentity(definition.identity),
+		Feed:             definition.feed,
 		PriceMicros:      priceMicros,
 		ConfidenceMicros: confidenceMicros,
 		PublishedAt:      publishedAt,
 	}, age, nil
+}
+
+func sourceIdentity(description string) string {
+	hash := sha256.Sum256([]byte(description))
+	return hex.EncodeToString(hash[:])
 }
 
 // pythPushMicros converts value*10^exponent into micro-units exactly. Pyth's

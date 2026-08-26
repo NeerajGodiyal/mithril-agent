@@ -11,14 +11,18 @@
 package shadow
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/internal/base58"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 )
 
-// Cluster names a market to observe. Shadow mode is the one part of this system
-// that is allowed to look at Mainnet, precisely because it cannot act on it.
+// Cluster names a market to observe. Shadow mode may look at Mainnet precisely
+// because it cannot act on it.
 const (
 	Mainnet = "mainnet-beta"
 	Devnet  = "devnet"
@@ -26,7 +30,48 @@ const (
 
 // Version is written into every record so a report can refuse to mix results
 // produced by different accounting rules.
-const Version = uint32(1)
+const Version = uint32(3)
+
+const (
+	QuoteJupiter = "jupiter"
+	QuoteOrca    = "orca"
+
+	wrappedSOLMint  = "So11111111111111111111111111111111111111112"
+	mainnetUSDCMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+)
+
+// JournalVersion identifies the run header written before the first tick. The
+// original journal format wrote a ledger as shadow.opened and could not safely
+// resume, so it is deliberately incompatible with this restart-safe format.
+const JournalVersion = uint32(2)
+
+// Opening binds one daily journal to the exact policy that produced it.
+// Without this header a restart could silently continue the same evidence file
+// under different thresholds, sizing, sources, or accounting rules.
+type Opening struct {
+	Version      uint32 `json:"version"`
+	PolicySHA256 string `json:"policy_sha256"`
+}
+
+// QuoteRoute binds the executable-price evidence to the venue and assets that
+// produced it. These values used to be process flags, so one journal could be
+// resumed with a different pool or token pair while retaining the same policy
+// fingerprint. A report from mixed routes is not strategy evidence.
+type QuoteRoute struct {
+	Provider   string `json:"provider"`
+	Pool       string `json:"pool,omitempty"`
+	InputMint  string `json:"input_mint"`
+	OutputMint string `json:"output_mint"`
+}
+
+// MainnetQuoteRoute returns the fixed Jupiter SOL/USDC route for one direction.
+func MainnetQuoteRoute(sell bool) QuoteRoute {
+	input, output := mainnetUSDCMint, wrappedSOLMint
+	if sell {
+		input, output = wrappedSOLMint, mainnetUSDCMint
+	}
+	return QuoteRoute{Provider: QuoteJupiter, InputMint: input, OutputMint: output}
+}
 
 // Policy is a complete description of a shadow run: what to watch, what rule to
 // apply, and how to score the result.
@@ -38,6 +83,17 @@ type Policy struct {
 	// pure function. If the two ever disagree it is a bug, not a difference of
 	// configuration.
 	Trigger pricetrigger.Policy `json:"trigger"`
+
+	// QuotePeg is mandatory on Mainnet because the accounting below labels its
+	// USDC proceeds as USD. Two independent USDC/USD confidence intervals must
+	// stay inside this band on every observable tick. Devnet's test token is not
+	// USDC, so Devnet remains an execution-mechanics proxy and must not claim
+	// this evidence.
+	QuotePeg *pricetrigger.BandPolicy `json:"quote_peg,omitempty"`
+
+	// QuoteRoute is part of the policy fingerprint. Runtime flags may repeat
+	// these values for compatibility, but can never replace them.
+	QuoteRoute QuoteRoute `json:"quote_route"`
 
 	// Observe is the address whose route is quoted. It is watch-only: quoting
 	// requires an address but never a key, and nothing here can spend from it.
@@ -79,10 +135,25 @@ type Policy struct {
 	// only way to answer "does buying low and selling high actually make money
 	// here", because a one-directional run cannot see the round trip's cost.
 	//
-	// Direction on any given tick is not a choice: holding the asset the only
-	// possible action is to sell it, holding the cash the only action is to buy.
-	// Inventory decides, so the two rules can never both fire at once.
+	// Direction starts with Trigger and changes only after that leg fills. A
+	// refusal keeps the same leg armed, so the two rules can never both fire at
+	// once and spare opening inventory cannot accidentally cause a second sell.
 	ReturnTrigger *pricetrigger.Policy `json:"return_trigger,omitempty"`
+}
+
+// Fingerprint returns a deterministic identity for every decision-affecting
+// policy field. Policy contains no maps, so encoding/json's struct order is a
+// stable hash input.
+func (p Policy) Fingerprint() (string, error) {
+	if err := p.Validate(); err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(p)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // RoundTrip reports whether this policy scores both legs on one book.
@@ -107,6 +178,19 @@ func (p Policy) Validate() error {
 		return errors.New("shadow policy cluster must be mainnet-beta or devnet")
 	}
 	if err := p.Trigger.Validate(); err != nil {
+		return err
+	}
+	if p.Cluster == Mainnet {
+		if p.QuotePeg == nil {
+			return errors.New("mainnet shadow policy needs independent USDC/USD evidence")
+		}
+		if err := p.QuotePeg.Validate(); err != nil {
+			return err
+		}
+	} else if p.QuotePeg != nil {
+		return errors.New("devnet shadow policy cannot treat its test quote token as USDC")
+	}
+	if err := p.validateQuoteRoute(); err != nil {
 		return err
 	}
 	if p.ReturnTrigger != nil {
@@ -160,6 +244,51 @@ func (p Policy) Validate() error {
 	}
 	if p.StartingInputUnits == 0 && p.StartingOutputUnits == 0 {
 		return errors.New("shadow policy needs an opening inventory to measure against")
+	}
+	if p.StartingInputUnits < p.InputAmount {
+		return errors.New("shadow policy opening input inventory is smaller than one trade")
+	}
+	if p.IsSell() && p.StartingInputUnits-p.InputAmount < p.FeeLamports {
+		return errors.New("shadow policy opening SOL inventory does not leave its transaction fee")
+	}
+	return nil
+}
+
+func (p Policy) validateQuoteRoute() error {
+	for _, address := range []string{p.QuoteRoute.InputMint, p.QuoteRoute.OutputMint} {
+		if _, err := base58.Decode32(address); err != nil {
+			return errors.New("shadow quote route contains an invalid mint")
+		}
+	}
+	if p.QuoteRoute.InputMint == p.QuoteRoute.OutputMint {
+		return errors.New("shadow quote route mints must differ")
+	}
+	switch p.QuoteRoute.Provider {
+	case QuoteJupiter:
+		if p.Cluster != Mainnet || p.QuoteRoute.Pool != "" {
+			return errors.New("Jupiter shadow quotes require Mainnet and no pool")
+		}
+	case QuoteOrca:
+		if p.Cluster != Devnet {
+			return errors.New("Orca shadow quotes are supported only for Devnet evidence")
+		}
+		if _, err := base58.Decode32(p.QuoteRoute.Pool); err != nil {
+			return errors.New("Orca shadow quote route contains an invalid pool")
+		}
+	default:
+		return errors.New("shadow quote provider must be jupiter or orca")
+	}
+	if p.Cluster != Mainnet {
+		return nil
+	}
+	want := MainnetQuoteRoute(p.IsSell())
+	wantInputDecimals, wantOutputDecimals := uint8(6), uint8(9)
+	if p.IsSell() {
+		wantInputDecimals, wantOutputDecimals = 9, 6
+	}
+	if p.QuoteRoute != want ||
+		p.InputDecimals != wantInputDecimals || p.OutputDecimals != wantOutputDecimals {
+		return errors.New("Mainnet shadow quote route must match the SOL/USDC rule direction")
 	}
 	return nil
 }

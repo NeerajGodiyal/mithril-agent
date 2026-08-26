@@ -334,18 +334,18 @@ func (s *Service) announceSource(ctx context.Context, index int, source StatusRe
 	// dedup slot, so each overwrote the other and both re-announced every
 	// cycle. That is a message every ten seconds, forever.
 	leg := strconv.Itoa(index)
+	action := announcementAction(snapshot)
 	if !s.announceSeeded[leg] {
 		// Seed only a SETTLED action. An action still in flight has not been
 		// announced yet — announcements fire on settlement — so claiming it as
 		// history means its outcome is deduped away and the operator never
 		// hears about the trade they started the bot to watch.
-		if announceWorthy(snapshot.LastAction.Result.Decision) {
-			s.announcedAction[leg] = announceKey(snapshot.LastAction.Result)
+		if announceWorthy(action.Result.Decision) {
+			s.announcedAction[leg] = announceKey(action.Result)
 		}
 		s.announceSeeded[leg] = true
 		return
 	}
-	action := snapshot.LastAction
 	if !announceWorthy(action.Result.Decision) {
 		return
 	}
@@ -408,7 +408,17 @@ func (s *Service) announceSource(ctx context.Context, index int, source StatusRe
 			log.Printf("telegram: %v", err)
 		}
 	}
-	return
+}
+
+// announcementAction normally reports the durable last action. A refusal can
+// fail before an action ID exists, so it cannot become LastAction; in that one
+// case the current result is the only operator-visible record of the failure.
+func announcementAction(snapshot operatorstatus.Snapshot) operatorstatus.Action {
+	if snapshot.Result.ActionID == "" &&
+		(snapshot.Result.Decision == "failed" || snapshot.Result.Decision == "halted") {
+		return operatorstatus.Action{ObservedAt: snapshot.ObservedAt, Result: snapshot.Result}
+	}
+	return snapshot.LastAction
 }
 
 // announceKey identifies an outcome for deduplication.
@@ -542,7 +552,9 @@ func statusReportFor(source StatusReader, now time.Time) (string, operatorstatus
 		return "Status: unknown\nReason: operator status timestamp is in the future\n" +
 			observedFooter(snapshot.ObservedAt, now), operatorstatus.Snapshot{}, false, false
 	}
-	attention := operatorstatus.RequiresAttention(snapshot.Result, snapshot.Control, now)
+	attention := operatorstatus.RequiresAttentionForCluster(
+		snapshot.Result, snapshot.Control, snapshot.Cluster, now,
+	)
 	report := fmt.Sprintf(
 		"Status: %s\nFreshness: %s (%ds old)\nControl: %s\nAttention required: %s\nSubmitted: %s",
 		safeField(describeDecision(snapshot.Result.Decision), 64), freshness, age,
@@ -552,7 +564,15 @@ func statusReportFor(source StatusReader, now time.Time) (string, operatorstatus
 		report += "\nOutcome: " + safeField(describeVerdict(snapshot.Result.Verdict), 64)
 	}
 	if snapshot.Result.Reason != "" {
-		report += "\nReason: " + safeField(snapshot.Result.Reason, 160)
+		report += "\nReason: " + safeField(describeReason(snapshot.Result.Reason), 160)
+	}
+	if snapshot.Control.RecoveryPending {
+		report += "\nRecovery: Waiting for independent confirmation — do not retry"
+	}
+	if snapshot.Control.TerminalOutcome != "" {
+		report += "\nTerminal stop: " + safeField(
+			describeDecision(snapshot.Control.TerminalOutcome), 64,
+		)
 	}
 	if trigger := snapshot.Result.PriceTrigger; trigger != nil {
 		report += "\nPrice rule: " + triggerState(*trigger)
@@ -736,10 +756,21 @@ func (s *Service) tradeReport(snapshot operatorstatus.Snapshot, now time.Time) s
 			observedFooter(snapshot.ObservedAt, now)
 	}
 	action := snapshot.LastAction
-	if action.Result.ActionID == "" && snapshot.Result.ActionID != "" {
+	if action.Result.ActionID == "" && (snapshot.Result.ActionID != "" ||
+		snapshot.Result.Decision == "failed" || snapshot.Result.Decision == "halted") {
 		action = operatorstatus.Action{ObservedAt: snapshot.ObservedAt, Result: snapshot.Result}
 	}
 	if action.Result.ActionID == "" {
+		if action.Result.Decision == "failed" || action.Result.Decision == "halted" {
+			report := "Agent could not start the action — nothing left your wallet."
+			if reason := safeField(describeReason(action.Result.Reason), 160); reason != "" {
+				report += "\n" + reason
+			}
+			return report + fmt.Sprintf(
+				"\n\n%s, checked %ds ago\n%s",
+				freshness, age, observedFooter(snapshot.ObservedAt, now),
+			)
+		}
 		return fmt.Sprintf(
 			"No trades yet\nThis setup has not made a trade.\n%s, checked %ds ago\n%s",
 			freshness, age, observedFooter(snapshot.ObservedAt, now),
@@ -751,7 +782,7 @@ func (s *Service) tradeReport(snapshot operatorstatus.Snapshot, now time.Time) s
 	// field list to learn whether their money moved.
 	kind := kindOf(result)
 	report := tradeHeadline(kind, result.Decision, result.Verdict, result.Submitted)
-	if reason := safeField(result.Reason, 96); reason != "" && result.Decision != "complete" {
+	if reason := safeField(describeReason(result.Reason), 160); reason != "" && result.Decision != "complete" {
 		report += "\n" + reason
 	}
 	// Whether the setup is actually stuck is a property of the control state,

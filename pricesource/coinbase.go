@@ -49,7 +49,7 @@ func (source *Coinbase) Latest(ctx context.Context, feed string) (pricetrigger.S
 		Price json.Number `json:"price"`
 		Time  string      `json:"time"`
 	}
-	if err := readJSON(ctx, source.client, request, &response); err != nil {
+	if _, err := readJSON(ctx, source.client, request, &response); err != nil {
 		return pricetrigger.Sample{}, errors.New("Coinbase price is unavailable")
 	}
 	lower, _, lowerErr := decimalMicros(response.Bid.String())

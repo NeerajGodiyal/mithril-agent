@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/big"
+	"math/bits"
 )
 
 // The ledger is kept in two assets, named for their role rather than their
@@ -123,11 +124,23 @@ func (l Ledger) Apply(fill Fill, markPriceMicros uint64) (Ledger, error) {
 		if err != nil {
 			return Ledger{}, err
 		}
+		quoteUnits, err := addUnits(next.QuoteUnits, fill.ReceivedUnits)
+		if err != nil {
+			return Ledger{}, err
+		}
+		realized, err := addSigned(next.RealizedMicros, signedProceeds-signedCost)
+		if err != nil {
+			return Ledger{}, err
+		}
+		turnover, err := addMagnitude(next.TurnoverMicros, proceeds)
+		if err != nil {
+			return Ledger{}, err
+		}
 		next.BaseUnits -= fill.SpentUnits
 		next.CostBasisMicros -= cost
-		next.QuoteUnits += fill.ReceivedUnits
-		next.RealizedMicros += signedProceeds - signedCost
-		next.TurnoverMicros += proceeds
+		next.QuoteUnits = quoteUnits
+		next.RealizedMicros = realized
+		next.TurnoverMicros = turnover
 	} else {
 		if fill.SpentUnits > l.QuoteUnits {
 			return Ledger{}, errInsufficientInventory
@@ -136,11 +149,23 @@ func (l Ledger) Apply(fill Fill, markPriceMicros uint64) (Ledger, error) {
 		if err != nil {
 			return Ledger{}, err
 		}
+		baseUnits, err := addUnits(next.BaseUnits, fill.ReceivedUnits)
+		if err != nil {
+			return Ledger{}, err
+		}
+		costBasis, err := addMagnitude(next.CostBasisMicros, spent)
+		if err != nil {
+			return Ledger{}, err
+		}
+		turnover, err := addMagnitude(next.TurnoverMicros, spent)
+		if err != nil {
+			return Ledger{}, err
+		}
 		// Buying simply adds what it cost to the basis of everything held.
-		next.BaseUnits += fill.ReceivedUnits
-		next.CostBasisMicros += spent
+		next.BaseUnits = baseUnits
+		next.CostBasisMicros = costBasis
 		next.QuoteUnits -= fill.SpentUnits
-		next.TurnoverMicros += spent
+		next.TurnoverMicros = turnover
 	}
 
 	// The fee is always paid in the native asset, which is the base.
@@ -155,14 +180,26 @@ func (l Ledger) Apply(fill Fill, markPriceMicros uint64) (Ledger, error) {
 	if err != nil {
 		return Ledger{}, err
 	}
+	fees, err := addSigned(next.FeesMicros, signedFee)
+	if err != nil {
+		return Ledger{}, err
+	}
+	realized, err := addSigned(next.RealizedMicros, -signedFee)
+	if err != nil {
+		return Ledger{}, err
+	}
+	fills, err := addUnits(next.Fills, 1)
+	if err != nil {
+		return Ledger{}, err
+	}
 	// The fee lamports leave the book, so their share of the basis leaves with
 	// them. The small unrealized gain on those few thousand lamports is not
 	// separately booked; at a transaction fee's scale it is far below a micro.
 	next.CostBasisMicros -= shareOf(next.CostBasisMicros, fill.FeeLamports, next.BaseUnits)
 	next.BaseUnits -= fill.FeeLamports
-	next.FeesMicros += signedFee
-	next.RealizedMicros -= signedFee
-	next.Fills++
+	next.FeesMicros = fees
+	next.RealizedMicros = realized
+	next.Fills = fills
 	if next.AverageCostMicros, err = averageCost(
 		next.CostBasisMicros, next.BaseUnits, baseDecimals,
 	); err != nil {
@@ -204,7 +241,7 @@ func (l Ledger) EquityMicros(priceMicros uint64) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return base + quote, nil
+	return addMagnitude(base, quote)
 }
 
 // UnrealizedMicros is the profit sitting in inventory that has not been sold.
@@ -235,7 +272,33 @@ func (l Ledger) HoldBenchmarkMicros(priceMicros uint64) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return base + quote, nil
+	return addMagnitude(base, quote)
+}
+
+func addUnits(left, right uint64) (uint64, error) {
+	value, carry := bits.Add64(left, right, 0)
+	if carry != 0 {
+		return 0, errUnrepresentable
+	}
+	return value, nil
+}
+
+// USD micros eventually appear beside signed profit and loss, so magnitudes
+// outside int64 are not representable even when uint64 addition itself fits.
+func addMagnitude(left, right uint64) (uint64, error) {
+	value, err := addUnits(left, right)
+	if err != nil || value > math.MaxInt64 {
+		return 0, errUnrepresentable
+	}
+	return value, nil
+}
+
+func addSigned(left, right int64) (int64, error) {
+	if (right > 0 && left > math.MaxInt64-right) ||
+		(right < 0 && left < math.MinInt64-right) {
+		return 0, errUnrepresentable
+	}
+	return left + right, nil
 }
 
 func (l Ledger) baseDecimals() uint8 { return baseDecimalsFor(l.Policy) }

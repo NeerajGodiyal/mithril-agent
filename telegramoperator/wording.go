@@ -25,6 +25,20 @@ var verdictWording = map[string]string{
 	"diverged":   "Sources disagree on the outcome — needs review",
 }
 
+var reasonWording = map[string]string{
+	"operation_timeout":         "The action timed out before it could finish.",
+	"quote_unavailable":         "A usable market quote is temporarily unavailable.",
+	"price_below_floor":         "The market price is below the configured sell limit.",
+	"before_schedule_anchor":    "The configured start time has not arrived yet.",
+	"blockhash_expired":         "The transaction expired before it could be sent; the next cycle will rebuild it.",
+	"signer_refused":            "The signer refused the action under the configured limits.",
+	"node_unavailable":          "The Mithril node is not responding.",
+	"observation_not_ready":     "The node or independent evidence is not ready for a safe action.",
+	"clock_unusable":            "The host clock is not accurate enough for a safe action.",
+	"control_state_unavailable": "The local spending-authority state cannot be verified.",
+	"operation_failed":          "The action failed unexpectedly; review the local service log.",
+}
+
 // describeDecision returns operator language, falling back to the raw token so
 // an unmapped state is still visible rather than silently blank.
 func describeDecision(decision string) string {
@@ -42,4 +56,11 @@ func describeVerdict(verdict string) string {
 		return text
 	}
 	return verdict
+}
+
+func describeReason(reason string) string {
+	if text, ok := reasonWording[reason]; ok {
+		return text
+	}
+	return reason
 }
