@@ -23,6 +23,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/policyauthority"
 	"github.com/Overclock-Validator/mithril-agent/pricesource"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
+	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
 	"github.com/Overclock-Validator/mithril-agent/riskgrant"
 	"github.com/Overclock-Validator/mithril-agent/sealedtx"
 	"github.com/Overclock-Validator/mithril-agent/signer"
@@ -534,6 +535,10 @@ func finishSwapSetup(
 	if err != nil {
 		return swapSetupResult{}, err
 	}
+	evidence := proposalcheck.ProviderBindings{
+		PrimaryTrustDomain: options.primaryTrust, PrimaryOriginSHA256: primaryProviderIdentity,
+		SecondaryTrustDomain: options.secondaryTrust, SecondaryOriginSHA256: secondaryProviderIdentity,
+	}
 
 	paths := newSwapSetupPaths(root)
 	signerPolicy := signer.Policy{
@@ -556,6 +561,7 @@ func finishSwapSetup(
 		ProfileFingerprint: fingerprint, ControlStatePath: paths.control, Source: owner,
 		MaxLamports: profile.InputLamports, MaxInputTokenAmount: profile.InputTokenAmount,
 		MaxFeeLamports: profile.MaxFeeLamports, SubmitterPublicKey: submitterPublic,
+		Evidence: evidence,
 	}
 	minimumOutput := profile.Route.MinOutputAmount
 	if profile.IsBuy() {
@@ -603,10 +609,7 @@ func finishSwapSetup(
 	} else {
 		cfg.Quote.SocketPath = options.quoteSocket
 	}
-	cfg.Evidence.PrimaryTrustDomain = options.primaryTrust
-	cfg.Evidence.PrimaryOriginSHA256 = primaryProviderIdentity
-	cfg.Evidence.SecondaryTrustDomain = options.secondaryTrust
-	cfg.Evidence.SecondaryOriginSHA256 = secondaryProviderIdentity
+	cfg.Evidence = evidence
 	cfg.Control.StatePath = paths.control
 	cfg.Journal.Path = paths.journal
 

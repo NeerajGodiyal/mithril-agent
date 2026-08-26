@@ -31,6 +31,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/mcpobserve"
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
 	"github.com/Overclock-Validator/mithril-agent/policyclient"
+	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
 	"github.com/Overclock-Validator/mithril-agent/signerclient"
 	"github.com/Overclock-Validator/mithril-agent/solanarpc"
 	"github.com/Overclock-Validator/mithril-agent/statussocket"
@@ -157,13 +158,8 @@ type config struct {
 		ScriptPath string `json:"script_path,omitempty"`
 		SocketPath string `json:"socket_path,omitempty"`
 	} `json:"quote,omitempty"`
-	Evidence struct {
-		PrimaryTrustDomain    string `json:"primary_trust_domain"`
-		PrimaryOriginSHA256   string `json:"primary_origin_sha256"`
-		SecondaryTrustDomain  string `json:"secondary_trust_domain"`
-		SecondaryOriginSHA256 string `json:"secondary_origin_sha256"`
-	} `json:"evidence,omitempty"`
-	Control struct {
+	Evidence proposalcheck.ProviderBindings `json:"evidence,omitempty"`
+	Control  struct {
 		StatePath string `json:"state_path"`
 	} `json:"control,omitempty"`
 	Journal struct {

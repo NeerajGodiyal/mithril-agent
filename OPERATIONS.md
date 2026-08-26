@@ -1762,7 +1762,9 @@ source cannot silently disable the operator's alerts.
 Caps and price triggers live inside the signed profile; change them by
 running `setup` again. The sweep destination requires more than that:
 
-    mithril-agent setup sweep --wallet WALLET.json --to YOUR_ADDRESS
+    mithril-agent setup sweep --wallet WALLET.json --to YOUR_ADDRESS \
+      --primary-trust-domain PRIMARY_PROVIDER_OWNER \
+      --secondary-trust-domain SECONDARY_PROVIDER_OWNER
 
 Sweeping sends the agent account's excess balance — above a floor that
 protects rent, fees, and any armed trade — to the operator's own wallet on a

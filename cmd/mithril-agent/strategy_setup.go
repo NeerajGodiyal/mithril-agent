@@ -516,6 +516,8 @@ func runStrategySetup(ctx context.Context, args []string, output io.Writer) (fai
 		// "MCP observer: command must be an absolute path" — a config that
 		// looked complete and could never run.
 		"--mithril-command", *mithrilCommand,
+		"--primary-trust-domain", sellCfg.Evidence.PrimaryTrustDomain,
+		"--secondary-trust-domain", sellCfg.Evidence.SecondaryTrustDomain,
 	}
 	if given["activation-delay"] {
 		sweepArgs = append(sweepArgs, "--activation-delay", activationDelay.String())

@@ -20,6 +20,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/internal/offchainmsg"
 	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
 	"github.com/Overclock-Validator/mithril-agent/policyauthority"
+	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
 	"github.com/Overclock-Validator/mithril-agent/riskgrant"
 	"github.com/Overclock-Validator/mithril-agent/sealedtx"
 	"github.com/Overclock-Validator/mithril-agent/signer"
@@ -68,8 +69,10 @@ into SOL before they can be swept.
   --swap-config PATH     a swap setup on this wallet the floor must protect;
                          repeat once per leg of a round trip
   --dir PATH             setup directory (default ~/.mithril-agent/sweep)
-  --mithril-command PATH Mithril node executable for observations
-  --mithril-config PATH  Mithril node config.toml
+	--mithril-command PATH Mithril node executable for observations
+	--mithril-config PATH  Mithril node config.toml
+	--primary-trust-domain NAME   owner of the primary evidence RPC
+	--secondary-trust-domain NAME owner of the secondary evidence RPC
   --yes                  accept defaults without asking
 
 Sign the challenge ahead of time and pass it in, instead of signing at the
@@ -138,6 +141,8 @@ func runSweepSetup(ctx context.Context, args []string, output io.Writer) error {
 	dir := flags.String("dir", "", "setup directory")
 	mithrilCommand := flags.String("mithril-command", "", "Mithril node executable")
 	mithrilConfig := flags.String("mithril-config", "", "Mithril node config.toml")
+	primaryTrust := flags.String("primary-trust-domain", "", "primary evidence provider trust domain")
+	secondaryTrust := flags.String("secondary-trust-domain", "", "secondary evidence provider trust domain")
 	proofNonce := flags.String("proof-nonce", "", "nonce of a proof signed earlier")
 	proofIssued := flags.String("proof-issued", "", "issue time of a proof signed earlier")
 	proofSignature := flags.String("proof-signature", "", "base58 signature of a proof signed earlier")
@@ -155,8 +160,23 @@ func runSweepSetup(ctx context.Context, args []string, output io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New("setup sweep takes no positional arguments")
 	}
-	if *walletPath == "" || *destination == "" {
-		return errors.New("setup sweep requires --wallet PATH and --to ADDRESS; run with --help for the ceremony")
+	if *walletPath == "" || *destination == "" || *primaryTrust == "" || *secondaryTrust == "" {
+		return errors.New("setup sweep requires wallet, destination, and two evidence trust domains; run with --help for the ceremony")
+	}
+	if !validTrustDomain(*primaryTrust) || !validTrustDomain(*secondaryTrust) ||
+		*primaryTrust == *secondaryTrust {
+		return errors.New("setup sweep requires two distinct evidence trust domains")
+	}
+	primaryProvider, secondaryProvider, err := openEvidenceProviders(
+		os.Getenv("MITHRIL_AGENT_PRIMARY_RPC_URL"),
+		os.Getenv("MITHRIL_AGENT_SECONDARY_RPC_URL"),
+	)
+	if err != nil {
+		return err
+	}
+	evidence := proposalcheck.ProviderBindings{
+		PrimaryTrustDomain: *primaryTrust, PrimaryOriginSHA256: primaryProvider.Identity(),
+		SecondaryTrustDomain: *secondaryTrust, SecondaryOriginSHA256: secondaryProvider.Identity(),
 	}
 	// The delay exists so that a destination change made by someone who should
 	// not be making it cannot receive funds before anyone notices. That is a
@@ -406,7 +426,8 @@ func runSweepSetup(ctx context.Context, args []string, output io.Writer) error {
 		ActiveAfterUnix: anchor.Unix(),
 	}
 	if err := installSweepSetup(
-		root, fingerprint, profile, *walletPath, *mithrilCommand, *mithrilConfig, proof,
+		root, fingerprint, profile, *walletPath, *mithrilCommand, *mithrilConfig,
+		evidence, proof,
 	); err != nil {
 		return err
 	}
@@ -706,6 +727,7 @@ func installSweepSetup(
 	root, fingerprint string,
 	profile agent.Profile,
 	walletPath, mithrilCommand, mithrilConfig string,
+	evidence proposalcheck.ProviderBindings,
 	proof destinationProof,
 ) error {
 	stateDir := "state-" + fingerprint[:8]
@@ -748,7 +770,7 @@ func installSweepSetup(
 		ProfileFingerprint: fingerprint, ControlStatePath: controlPath,
 		Source: profile.Source, Destination: profile.Destination,
 		MaxLamports: profile.MaxTransferLamports, MaxFeeLamports: profile.MaxFeeLamports,
-		SubmitterPublicKey: submitterPublic,
+		SubmitterPublicKey: submitterPublic, Evidence: evidence,
 	}
 	riskPolicy := policyauthority.Policy{TransactionPolicy: signerPolicy, GrantLifetimeSecs: 30}
 	if err := signerPolicy.ValidateAuthorizationPolicy(); err != nil {
@@ -785,6 +807,7 @@ func installSweepSetup(
 	cfg.Submitter.Command = filepath.Join(binDir, "mithril-agent-submitter")
 	cfg.Submitter.PolicyPath = filepath.Join(root, "submitter-policy.json")
 	cfg.Submitter.PrivateKeyPath = filepath.Join(root, "submitter-key.json")
+	cfg.Evidence = evidence
 	cfg.Control.StatePath = controlPath
 	cfg.Journal.Path = journalPath
 
