@@ -24,6 +24,7 @@ type fakeProvider struct {
 	statusErr         error
 	height            uint64
 	heightErr         error
+	heightMinSlot     uint64
 	sendCalls         int
 	genesis           string
 	genesisErr        error
@@ -39,6 +40,7 @@ type fakeProvider struct {
 	accountDataLength uint64
 	accountSliceErr   error
 	accountSlices     map[string]solanarpc.AccountDataSlice
+	accountBodies     map[string][]byte
 	rent              uint64
 	rentErr           error
 	simulation        solanarpc.Simulation
@@ -46,6 +48,14 @@ type fakeProvider struct {
 	effect            solanarpc.TransactionEffect
 	effectErr         error
 	sendMinSlot       uint64
+	addressTables     map[string]solanarpc.AddressLookupTable
+	addressTableErr   error
+	v0Fee             solanarpc.FeeQuote
+	v0FeeErr          error
+	v0Simulation      solanarpc.LegacySimulation
+	v0SimulationErr   error
+	blockhashValidity solanarpc.BlockhashValidity
+	blockhashValidErr error
 }
 
 func (f *fakeProvider) Identity() string { return f.identity }
@@ -84,11 +94,22 @@ func (f *fakeProvider) AccountSlice(
 	_ context.Context,
 	address string,
 	minContextSlot,
-	_,
+	offset,
 	length uint64,
 ) (solanarpc.AccountDataSlice, error) {
 	if f.accountSliceErr != nil {
 		return solanarpc.AccountDataSlice{}, f.accountSliceErr
+	}
+	if body, ok := f.accountBodies[address]; ok {
+		value, metadataOK := f.accountSlices[address]
+		if !metadataOK || offset > uint64(len(body)) || length > uint64(len(body))-offset {
+			return solanarpc.AccountDataSlice{}, errors.New("missing account data slice")
+		}
+		if value.ContextSlot == 0 {
+			value.ContextSlot = minContextSlot
+		}
+		value.Data = bytes.Clone(body[offset : offset+length])
+		return value, nil
 	}
 	if value, ok := f.accountSlices[address]; ok {
 		if value.ContextSlot == 0 {
@@ -113,6 +134,7 @@ func (f *fakeProvider) AccountSlice(
 		ContextSlot: minContextSlot,
 		Owner:       orcaswap.UpgradeableLoader,
 		Executable:  address == orcaswap.WhirlpoolProgram,
+		DataLength:  length,
 		Data:        data,
 	}, nil
 }
@@ -162,6 +184,68 @@ func (f *fakeProvider) BlockHeight(context.Context) (uint64, error) {
 	return f.height, f.heightErr
 }
 
+func (f *fakeProvider) BlockHeightAt(_ context.Context, minContextSlot uint64) (uint64, error) {
+	f.heightMinSlot = minContextSlot
+	return f.height, f.heightErr
+}
+
+func (f *fakeProvider) BlockhashValid(
+	_ context.Context,
+	_ string,
+	minContextSlot uint64,
+) (solanarpc.BlockhashValidity, error) {
+	validity := f.blockhashValidity
+	if validity.ContextSlot == 0 {
+		validity.ContextSlot = minContextSlot
+	}
+	return validity, f.blockhashValidErr
+}
+
+func (f *fakeProvider) AddressLookupTable(
+	_ context.Context,
+	address string,
+	minContextSlot uint64,
+) (solanarpc.AddressLookupTable, error) {
+	if f.addressTableErr != nil {
+		return solanarpc.AddressLookupTable{}, f.addressTableErr
+	}
+	table, ok := f.addressTables[address]
+	if !ok {
+		return solanarpc.AddressLookupTable{}, errors.New("missing address lookup table")
+	}
+	if table.ContextSlot == 0 {
+		table.ContextSlot = minContextSlot
+	}
+	return table, nil
+}
+
+func (f *fakeProvider) FeeForV0Message(
+	_ context.Context,
+	_ []byte,
+	_ map[[32]byte][][32]byte,
+	_ string,
+	minContextSlot uint64,
+) (solanarpc.FeeQuote, error) {
+	quote := f.v0Fee
+	if quote.ContextSlot == 0 {
+		quote.ContextSlot = minContextSlot
+	}
+	return quote, f.v0FeeErr
+}
+
+func (f *fakeProvider) SimulateV0(
+	_ context.Context,
+	_ []byte,
+	_ map[[32]byte][][32]byte,
+	minContextSlot uint64,
+) (solanarpc.LegacySimulation, error) {
+	simulation := f.v0Simulation
+	if simulation.ContextSlot == 0 {
+		simulation.ContextSlot = minContextSlot
+	}
+	return simulation, f.v0SimulationErr
+}
+
 func TestVerifyWhirlpoolDeployment(t *testing.T) {
 	policy := swapPolicy("3qbR1eZRqXUWroWKKYhbDmR3FfqTHfqSU8zZSxtANzYh")
 	valid := func() map[string]solanarpc.AccountDataSlice {
@@ -194,7 +278,7 @@ func TestVerifyWhirlpoolDeployment(t *testing.T) {
 
 	primary := &fakeProvider{identity: "primary", accountSlices: valid()}
 	secondary := &fakeProvider{identity: "secondary", accountSlices: valid()}
-	lifecycle, err := New(&fakeProvider{identity: "node"}, primary, secondary)
+	lifecycle, err := New(&fakeProvider{identity: "node", accountSlices: valid()}, primary, secondary)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,6 +352,11 @@ func TestVerifyWhirlpoolDeployment(t *testing.T) {
 				binary.LittleEndian.PutUint64(values[orcaswap.WhirlpoolProgramData].Data[4:12], 1)
 			}
 		},
+		"program data length disagreement": func(first, _ map[string]solanarpc.AccountDataSlice) {
+			value := first[orcaswap.WhirlpoolProgramData]
+			value.DataLength++
+			first[orcaswap.WhirlpoolProgramData] = value
+		},
 		"missing upgrade authority": func(first, second map[string]solanarpc.AccountDataSlice) {
 			for _, values := range []map[string]solanarpc.AccountDataSlice{first, second} {
 				values[orcaswap.WhirlpoolProgramData].Data[12] = 0
@@ -284,7 +373,7 @@ func TestVerifyWhirlpoolDeployment(t *testing.T) {
 			first, second := clone(valid()), clone(valid())
 			mutate(first, second)
 			candidate, err := New(
-				&fakeProvider{identity: "node"},
+				&fakeProvider{identity: "node", accountSlices: valid()},
 				&fakeProvider{identity: "primary", accountSlices: first},
 				&fakeProvider{identity: "secondary", accountSlices: second},
 			)
@@ -296,9 +385,22 @@ func TestVerifyWhirlpoolDeployment(t *testing.T) {
 			}
 		})
 	}
+	nodeMismatch := clone(valid())
+	nodeMismatch[orcaswap.WhirlpoolProgram].Data[4] ^= 1
+	mismatched, err := New(
+		&fakeProvider{identity: "node", accountSlices: nodeMismatch},
+		&fakeProvider{identity: "primary", accountSlices: valid()},
+		&fakeProvider{identity: "secondary", accountSlices: valid()},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mismatched.VerifyWhirlpoolDeployment(t.Context(), policy, 100); err == nil {
+		t.Fatal("Mithril deployment disagreement was accepted")
+	}
 
 	failing, err := New(
-		&fakeProvider{identity: "node"},
+		&fakeProvider{identity: "node", accountSlices: valid()},
 		&fakeProvider{identity: "primary", accountSliceErr: errors.New("unavailable")},
 		&fakeProvider{identity: "secondary"},
 	)
@@ -310,6 +412,124 @@ func TestVerifyWhirlpoolDeployment(t *testing.T) {
 	}
 	if err := lifecycle.VerifyWhirlpoolDeployment(t.Context(), policy, 0); err == nil {
 		t.Fatal("zero deployment context was accepted")
+	}
+}
+
+func TestVerifyImmutableProgramDeploymentRequiresThreeSourceAgreementAndNoAuthority(t *testing.T) {
+	program := solana.Encode(bytes.Repeat([]byte{21}, 32))
+	programData := solana.Encode(bytes.Repeat([]byte{22}, 32))
+	const deploymentSlot = uint64(123_456)
+	code := bytes.Repeat([]byte{99}, 1_025)
+	codeHashBytes := sha256.Sum256(code)
+	codeHash := hex.EncodeToString(codeHashBytes[:])
+	valid := func() map[string]solanarpc.AccountDataSlice {
+		programDataKey, _ := solana.Decode32(programData)
+		programHeader := make([]byte, 36)
+		binary.LittleEndian.PutUint32(programHeader[:4], 2)
+		copy(programHeader[4:], programDataKey[:])
+		dataHeader := make([]byte, int(upgradeableProgramDataMetadataLength)+len(code))
+		binary.LittleEndian.PutUint32(dataHeader[:4], 3)
+		binary.LittleEndian.PutUint64(dataHeader[4:12], deploymentSlot)
+		// Removing the authority changes its Option tag but does not move the
+		// loader's fixed code offset or promise to clear the old authority bytes.
+		copy(dataHeader[13:upgradeableProgramDataMetadataLength], bytes.Repeat([]byte{7}, 32))
+		copy(dataHeader[upgradeableProgramDataMetadataLength:], code)
+		return map[string]solanarpc.AccountDataSlice{
+			program: {
+				ContextSlot: 100, Owner: orcaswap.UpgradeableLoader,
+				Executable: true, DataLength: 36, Data: programHeader,
+			},
+			programData: {
+				ContextSlot: 100, Owner: orcaswap.UpgradeableLoader,
+				DataLength: uint64(len(dataHeader)), Data: dataHeader,
+			},
+		}
+	}
+	clone := func(input map[string]solanarpc.AccountDataSlice) map[string]solanarpc.AccountDataSlice {
+		output := make(map[string]solanarpc.AccountDataSlice, len(input))
+		for key, value := range input {
+			value.Data = bytes.Clone(value.Data)
+			output[key] = value
+		}
+		return output
+	}
+	newLifecycle := func(
+		node, primary, secondary map[string]solanarpc.AccountDataSlice,
+	) *Lifecycle {
+		provider := func(identity string, values map[string]solanarpc.AccountDataSlice) *fakeProvider {
+			bodies := make(map[string][]byte, len(values))
+			for address, value := range values {
+				bodies[address] = value.Data
+			}
+			return &fakeProvider{
+				identity: identity, accountSlices: values, accountBodies: bodies,
+			}
+		}
+		lifecycle, err := New(
+			provider("node", node), provider("primary", primary), provider("secondary", secondary),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return lifecycle
+	}
+
+	lifecycle := newLifecycle(valid(), valid(), valid())
+	if err := lifecycle.VerifyImmutableProgramDeployment(
+		t.Context(), program, programData, deploymentSlot, uint64(len(code)), codeHash, 100,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := map[string]func(map[string]solanarpc.AccountDataSlice){
+		"remaining authority": func(values map[string]solanarpc.AccountDataSlice) {
+			values[programData].Data[12] = 1
+		},
+		"wrong deployment slot": func(values map[string]solanarpc.AccountDataSlice) {
+			binary.LittleEndian.PutUint64(values[programData].Data[4:12], deploymentSlot+1)
+		},
+		"empty program body": func(values map[string]solanarpc.AccountDataSlice) {
+			value := values[programData]
+			value.DataLength = upgradeableProgramDataMetadataLength
+			values[programData] = value
+		},
+		"wrong program-data link": func(values map[string]solanarpc.AccountDataSlice) {
+			values[program].Data[4] ^= 1
+		},
+		"changed program code": func(values map[string]solanarpc.AccountDataSlice) {
+			values[programData].Data[upgradeableProgramDataMetadataLength] ^= 1
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			changed := clone(valid())
+			mutate(changed)
+			candidate := newLifecycle(changed, clone(changed), clone(changed))
+			if err := candidate.VerifyImmutableProgramDeployment(
+				t.Context(), program, programData, deploymentSlot,
+				uint64(len(code)), codeHash, 100,
+			); err == nil {
+				t.Fatal("invalid immutable deployment was accepted")
+			}
+		})
+	}
+
+	changed := clone(valid())
+	changed[program].Data[4] ^= 1
+	if err := newLifecycle(valid(), valid(), changed).VerifyImmutableProgramDeployment(
+		t.Context(), program, programData, deploymentSlot, uint64(len(code)), codeHash, 100,
+	); err == nil {
+		t.Fatal("provider disagreement was accepted")
+	}
+	if err := lifecycle.VerifyImmutableProgramDeployment(
+		t.Context(), program, program, deploymentSlot, uint64(len(code)), codeHash, 100,
+	); err == nil {
+		t.Fatal("aliased program identity was accepted")
+	}
+	if err := lifecycle.VerifyImmutableProgramDeployment(
+		t.Context(), program, programData, deploymentSlot, uint64(len(code)), "bad", 100,
+	); err == nil {
+		t.Fatal("invalid program code hash was accepted")
 	}
 }
 
@@ -370,6 +590,18 @@ func TestVerifyTokenInputAccountRequiresIndependentIdentityAndBalance(t *testing
 			binary.LittleEndian.PutUint32(first.Data[109:113], 1)
 			binary.LittleEndian.PutUint32(second.Data[109:113], 1)
 		},
+		"delegated token account": func(first, second *solanarpc.AccountDataSlice) {
+			binary.LittleEndian.PutUint32(first.Data[72:76], 1)
+			binary.LittleEndian.PutUint32(second.Data[72:76], 1)
+		},
+		"delegated amount": func(first, second *solanarpc.AccountDataSlice) {
+			binary.LittleEndian.PutUint64(first.Data[121:129], 1)
+			binary.LittleEndian.PutUint64(second.Data[121:129], 1)
+		},
+		"separate close authority": func(first, second *solanarpc.AccountDataSlice) {
+			binary.LittleEndian.PutUint32(first.Data[129:133], 1)
+			binary.LittleEndian.PutUint32(second.Data[129:133], 1)
+		},
 		"insufficient": func(first, second *solanarpc.AccountDataSlice) {
 			binary.LittleEndian.PutUint64(first.Data[64:], 999)
 			binary.LittleEndian.PutUint64(second.Data[64:], 999)
@@ -390,6 +622,32 @@ func TestVerifyTokenInputAccountRequiresIndependentIdentityAndBalance(t *testing
 				t.Fatal("invalid token account evidence was accepted")
 			}
 		})
+	}
+}
+
+func TestVerifyTokenOutputAccountAllowsAnEmptySafeAccount(t *testing.T) {
+	owner := solana.Encode(bytes.Repeat([]byte{4}, 32))
+	mint := solana.Encode(bytes.Repeat([]byte{5}, 32))
+	address := solana.Encode(bytes.Repeat([]byte{6}, 32))
+	data := make([]byte, 165)
+	copy(data[:32], bytes.Repeat([]byte{5}, 32))
+	copy(data[32:64], bytes.Repeat([]byte{4}, 32))
+	data[108] = 1
+	slice := solanarpc.AccountDataSlice{
+		ContextSlot: 100, Owner: orcaswap.TokenProgram, DataLength: 165, Data: data,
+	}
+	lifecycle, err := New(
+		&fakeProvider{identity: "node"},
+		&fakeProvider{identity: "primary", accountSlices: map[string]solanarpc.AccountDataSlice{address: slice}},
+		&fakeProvider{identity: "secondary", accountSlices: map[string]solanarpc.AccountDataSlice{address: slice}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := lifecycle.VerifyTokenOutputAccount(t.Context(), address, mint, owner, 100)
+	if err != nil || evidence.Amount != 0 || evidence.PrimaryContextSlot != 100 ||
+		evidence.SecondaryContextSlot != 100 {
+		t.Fatalf("evidence=%+v error=%v", evidence, err)
 	}
 }
 
@@ -471,6 +729,57 @@ func TestSubmitRequiresExpectedSignature(t *testing.T) {
 	}
 	if _, err := lifecycle.Submit(t.Context(), transaction, 200, 150); err == nil {
 		t.Fatal("mismatched RPC signature was accepted")
+	}
+}
+
+func TestVerifyFinalizedV0HistoryRequiresMatchingArchiveEvidence(t *testing.T) {
+	_, submission, effect := jupiterEffectFixture(t)
+	first := &fakeProvider{
+		identity: "primary", status: finalizedStatus(false), effect: cloneEffect(effect),
+	}
+	second := &fakeProvider{
+		identity: "secondary", status: finalizedStatus(false), effect: cloneEffect(effect),
+	}
+	lifecycle, err := NewEvidenceLifecycle(first, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.VerifyFinalizedV0History(
+		t.Context(), submission.Signature,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.VerifyFinalizedV0History(t.Context(), "bad"); err == nil {
+		t.Fatal("invalid archive probe signature was accepted")
+	}
+	if err := lifecycle.VerifyFinalizedV0History(
+		t.Context(), solana.Encode(bytes.Repeat([]byte{9}, 64)),
+	); err == nil {
+		t.Fatal("archive response for a different transaction was accepted")
+	}
+	second.effect.PostBalances[0]++
+	if err := lifecycle.VerifyFinalizedV0History(
+		t.Context(), submission.Signature,
+	); err == nil {
+		t.Fatal("divergent historical transaction effects were accepted")
+	}
+}
+
+func TestVerifyFinalizedV0HistoryRejectsLegacyArchiveProbe(t *testing.T) {
+	transaction, signature := signedTransfer(t)
+	effect := transferEffect(transaction, false)
+	first := &fakeProvider{
+		identity: "primary", status: finalizedStatus(false), effect: effect,
+	}
+	second := &fakeProvider{
+		identity: "secondary", status: finalizedStatus(false), effect: cloneEffect(effect),
+	}
+	lifecycle, err := NewEvidenceLifecycle(first, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.VerifyFinalizedV0History(t.Context(), signature); err == nil {
+		t.Fatal("legacy transaction was accepted as a version-0 archive probe")
 	}
 }
 
@@ -608,6 +917,56 @@ func TestBlockhashExpiredUsesMithrilProcessedHeight(t *testing.T) {
 	expired, err = lifecycle.BlockhashExpired(t.Context(), 200)
 	if err != nil || !expired {
 		t.Fatalf("Mithril expiry = %v, %v", expired, err)
+	}
+}
+
+func TestNodeBlockHeightRequiresRetainedContext(t *testing.T) {
+	node := &fakeProvider{identity: "node", height: 200}
+	lifecycle, err := New(
+		node,
+		&fakeProvider{identity: "a"},
+		&fakeProvider{identity: "b"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	height, err := lifecycle.NodeBlockHeight(t.Context(), 90)
+	if err != nil || height != 200 || node.heightMinSlot != 90 {
+		t.Fatalf("context-bound height = %d, %v; min slot = %d", height, err, node.heightMinSlot)
+	}
+	if _, err := lifecycle.NodeBlockHeight(t.Context(), 0); err == nil {
+		t.Fatal("zero minimum context slot was accepted")
+	}
+}
+
+func TestIndependentBlockhashValidityRequiresTwoFreshAgreements(t *testing.T) {
+	blockhash := solana.Encode(bytes.Repeat([]byte{7}, 32))
+	primary := &fakeProvider{
+		identity:          "primary",
+		blockhashValidity: solanarpc.BlockhashValidity{ContextSlot: 100, Valid: true},
+	}
+	secondary := &fakeProvider{
+		identity:          "secondary",
+		blockhashValidity: solanarpc.BlockhashValidity{ContextSlot: 101, Valid: true},
+	}
+	lifecycle, err := NewEvidenceLifecycle(primary, secondary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lifecycle.VerifyIndependentBlockhashValidity(t.Context(), blockhash, 90); err != nil {
+		t.Fatal(err)
+	}
+	secondary.blockhashValidity.Valid = false
+	if err := lifecycle.VerifyIndependentBlockhashValidity(t.Context(), blockhash, 90); err == nil {
+		t.Fatal("one provider declaring the blockhash expired was accepted")
+	}
+	secondary.blockhashValidity = solanarpc.BlockhashValidity{ContextSlot: 89, Valid: true}
+	if err := lifecycle.VerifyIndependentBlockhashValidity(t.Context(), blockhash, 90); err == nil {
+		t.Fatal("stale blockhash validity was accepted")
+	}
+	secondary.blockhashValidErr = errors.New("unavailable")
+	if err := lifecycle.VerifyIndependentBlockhashValidity(t.Context(), blockhash, 90); err == nil {
+		t.Fatal("unavailable blockhash validity was accepted")
 	}
 }
 

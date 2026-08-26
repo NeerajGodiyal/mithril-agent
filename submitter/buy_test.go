@@ -6,9 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
+	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
 	"github.com/Overclock-Validator/mithril-agent/sealedtx"
 	"github.com/Overclock-Validator/mithril-agent/signer"
 	"github.com/Overclock-Validator/mithril-agent/solana"
@@ -18,7 +21,7 @@ import (
 func TestSubmitAcceptsOnlyExactSealedBuy(t *testing.T) {
 	policy, privateKey, response, transaction := buySubmitterFixture(t)
 	node := &submitterTestNode{returned: response.Signature}
-	submission, err := Submit(
+	submission, err := submitWithGate(
 		t.Context(), policy, privateKey, node,
 		submitterTestGate{allowed: true}, response, 90,
 	)
@@ -33,7 +36,7 @@ func TestSubmitAcceptsOnlyExactSealedBuy(t *testing.T) {
 	changed := policy
 	changed.MaxInputTokenAmount--
 	node = &submitterTestNode{returned: response.Signature}
-	if _, err := Submit(
+	if _, err := submitWithGate(
 		t.Context(), changed, privateKey, node,
 		submitterTestGate{allowed: true}, response, 90,
 	); err == nil || node.transaction != nil {
@@ -43,6 +46,7 @@ func TestSubmitAcceptsOnlyExactSealedBuy(t *testing.T) {
 
 func buySubmitterFixture(t *testing.T) (Policy, string, signer.Response, []byte) {
 	t.Helper()
+	controlDir := t.TempDir()
 	seed := sha256.Sum256([]byte("buy submitter owner"))
 	ownerKey := ed25519.NewKeyFromSeed(seed[:])
 	owner := solana.Encode(ownerKey.Public().(ed25519.PublicKey))
@@ -83,8 +87,10 @@ func buySubmitterFixture(t *testing.T) (Policy, string, signer.Response, []byte)
 	messageHash := sha256.Sum256(message)
 	transactionHash := sha256.Sum256(transaction)
 	actionHash := sha256.Sum256([]byte("buy action"))
+	requestHash := sha256.Sum256([]byte("buy submitter request"))
 	response := signer.Response{
 		ActionID: hex.EncodeToString(actionHash[:]), Signature: solana.Encode(signature[:]),
+		RequestSHA256:        hex.EncodeToString(requestHash[:]),
 		MessageSHA256:        hex.EncodeToString(messageHash[:]),
 		TransactionSHA256:    hex.EncodeToString(transactionHash[:]),
 		BlockhashContextSlot: 90,
@@ -107,9 +113,13 @@ func buySubmitterFixture(t *testing.T) (Policy, string, signer.Response, []byte)
 	return Policy{
 		Cluster: "devnet", Profile: orcaswap.BuyProfileName,
 		ProfileFingerprint: hex.EncodeToString(actionHash[:]),
-		ControlStatePath:   "/private/control.json", Source: owner,
+		ControlStatePath:   filepath.Join(controlDir, "control.json"), Source: owner,
 		MaxInputTokenAmount: 1_000, MaxFeeLamports: 5_000,
 		SubmitterPublicKey: publicKey, OrcaBuy: &route,
+		Evidence: proposalcheck.ProviderBindings{
+			PrimaryTrustDomain: "provider-one", PrimaryOriginSHA256: strings.Repeat("b", 64),
+			SecondaryTrustDomain: "provider-two", SecondaryOriginSHA256: strings.Repeat("c", 64),
+		},
 	}, privateKey, response, transaction
 }
 
