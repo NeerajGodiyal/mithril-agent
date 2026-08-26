@@ -36,15 +36,15 @@ func writeShadowPolicy(t *testing.T, policy shadow.Policy) string {
 }
 
 func validShadowPolicy() shadow.Policy {
-	return shadow.Policy{
+	policy := shadow.Policy{
 		Version: shadow.Version, Cluster: shadow.Mainnet,
 		Trigger: pricetrigger.Policy{
 			Version: pricetrigger.Version, Feed: pricetrigger.FeedSOLUSD,
 			Direction: pricetrigger.SellAtOrAbove, ThresholdMicros: 200_000_000,
 			MaxAgeSeconds: 120, MaxSourceSkewSeconds: 90,
 			MaxDeviationBPS: 200, MaxConfidenceBPS: 200,
-			PrimarySourceSHA256:   strings.Repeat("a", 64),
-			SecondarySourceSHA256: strings.Repeat("b", 64),
+			PrimarySourceSHA256:   pricesource.PythPushIdentitySHA256(),
+			SecondarySourceSHA256: pricesource.CoinbaseIdentitySHA256(),
 		},
 		Observe:     "So11111111111111111111111111111111111111112",
 		InputAmount: 1_000_000, InputDecimals: 9, OutputDecimals: 6,
@@ -52,6 +52,17 @@ func validShadowPolicy() shadow.Policy {
 		TickSeconds: 60, SettleSeconds: 30,
 		StartingInputUnits: 1_000_000_000,
 	}
+	policy.QuoteRoute = shadow.MainnetQuoteRoute(true)
+	policy.QuotePeg = &pricetrigger.BandPolicy{
+		Version: pricetrigger.Version, Feed: pricetrigger.FeedUSDCUSD,
+		MinimumMicros: pricetrigger.USDCBandMinimumMicros,
+		MaximumMicros: pricetrigger.USDCBandMaximumMicros,
+		MaxAgeSeconds: 60, MaxSourceSkewSeconds: 30,
+		MaxDeviationBPS: 50, MaxConfidenceBPS: 50,
+		PrimarySourceSHA256:   pricesource.PythPushUSDCIdentitySHA256(),
+		SecondarySourceSHA256: pricesource.KrakenIdentitySHA256(),
+	}
+	return policy
 }
 
 // A shadow policy has no field that could name a key, so a configuration that
@@ -116,13 +127,27 @@ func TestShadowEndpointIsNeverEchoed(t *testing.T) {
 // Shadow mode must refuse to run without a real quote source rather than
 // inventing one. A modelled fill is not evidence.
 func TestShadowRunRequiresARealQuoteAdapter(t *testing.T) {
-	if _, err := newShadowQuoter(shadowRunOptions{}); err == nil {
+	policy := validShadowPolicy()
+	policy.Cluster = shadow.Devnet
+	policy.QuotePeg = nil
+	policy.QuoteRoute = shadow.QuoteRoute{
+		Provider:   shadow.QuoteOrca,
+		Pool:       "11111111111111111111111111111111",
+		InputMint:  "So11111111111111111111111111111111111111112",
+		OutputMint: "SysvarRent111111111111111111111111111111111",
+	}
+	if _, err := newShadowQuoter(policy, shadowRunOptions{}); err == nil {
 		t.Fatal("a quoter was built with no adapter at all")
 	}
-	if _, err := newShadowQuoter(shadowRunOptions{
-		nodeCommand: "/usr/bin/node", quoteScript: "/tmp/quote.mjs",
-	}); err == nil {
-		t.Error("a quoter was built with no pool or mint")
+}
+
+func TestMainnetShadowUsesTheKeylessJupiterQuoter(t *testing.T) {
+	quoter, err := newShadowQuoter(validShadowPolicy(), shadowRunOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := quoter.(*jupiterShadowQuoter); !ok {
+		t.Fatalf("Mainnet quoter type = %T", quoter)
 	}
 }
 
@@ -202,7 +227,7 @@ func TestDailyJournalRefusesAnUnsafeDirectory(t *testing.T) {
 type liveStubQuoter struct{ estimated uint64 }
 
 func (q liveStubQuoter) Quote(
-	context.Context, string, uint64, uint16,
+	context.Context, string, bool, uint64, uint16,
 ) (shadow.Quote, error) {
 	return shadow.Quote{
 		InputAmount: 1_000_000, EstimatedOutput: q.estimated,

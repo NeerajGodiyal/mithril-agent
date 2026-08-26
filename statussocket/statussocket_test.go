@@ -52,7 +52,8 @@ func TestUnixBridgeServesAtMostOneValidatedSnapshotWithoutARequest(t *testing.T)
 		t.Fatal(err)
 	}
 	if snapshot.Profile != reader.snapshot.Profile ||
-		snapshot.Result.Decision != "stopped" || reader.reads != 1 {
+		snapshot.Result.Decision != "stopped" ||
+		snapshot.Strategy.FundedTradesPerDay != 3 || reader.reads != 1 {
 		t.Fatalf("snapshot=%+v reads=%d", snapshot, reader.reads)
 	}
 	if err := <-serverError; err != nil {
@@ -194,6 +195,10 @@ func validSnapshot(at time.Time) operatorstatus.Snapshot {
 		Result:  execution.Result{Decision: "stopped", Reason: "Devnet actions are not enabled"},
 		Journal: journal.Stats{MaxRecords: 100, MaxBytes: 1024},
 		Control: control.Status{Mode: control.ModeNoNewActions},
+		Strategy: operatorstatus.StrategyProjection{
+			Configured: true, Direction: "sell", InputAmount: 50_000_000,
+			DailyCap: 150_300_000, MaxFeeLamports: 100_000, FundedTradesPerDay: 3,
+		},
 	}
 }
 

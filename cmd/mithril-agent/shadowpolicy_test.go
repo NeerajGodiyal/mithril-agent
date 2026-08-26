@@ -9,6 +9,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril-agent/pricesource"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
+	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
 
 func generatedPolicyPath(t *testing.T, args ...string) string {
@@ -48,6 +49,29 @@ func TestAGeneratedPolicyLoadsWithoutEditing(t *testing.T) {
 	}
 	if policy.Trigger.Direction != pricetrigger.SellAtOrAbove {
 		t.Errorf("direction = %q, want a sell", policy.Trigger.Direction)
+	}
+	if policy.QuoteRoute != shadow.MainnetQuoteRoute(true) || policy.QuotePeg == nil {
+		t.Fatalf("generated Mainnet evidence route = %+v, peg=%+v", policy.QuoteRoute, policy.QuotePeg)
+	}
+}
+
+func TestDevnetPolicyBindsItsOrcaRoute(t *testing.T) {
+	pool := "11111111111111111111111111111111"
+	input := "So11111111111111111111111111111111111111112"
+	output := "SysvarRent111111111111111111111111111111111"
+	path := generatedPolicyPath(t,
+		"--cluster", "devnet", "--sell-at-usd", "80.00",
+		"--pool", pool, "--input-mint", input, "--output-mint", output,
+	)
+	policy, err := loadShadowPolicy(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := shadow.QuoteRoute{
+		Provider: shadow.QuoteOrca, Pool: pool, InputMint: input, OutputMint: output,
+	}
+	if policy.QuoteRoute != want || policy.QuotePeg != nil {
+		t.Fatalf("generated Devnet route = %+v, peg=%+v", policy.QuoteRoute, policy.QuotePeg)
 	}
 }
 

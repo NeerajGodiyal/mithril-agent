@@ -63,6 +63,8 @@ tests:
         values: '1+0x12'
       - series: 'mithril_agent_attention_required{instance="agent"}'
         values: '1+0x12'
+      - series: 'mithril_agent_recovery_pending{instance="agent"}'
+        values: '0+0x12'
       - series: 'mithril_agent_last_failure{instance="agent"}'
         values: '1+0x12'
       - series: 'mithril_agent_last_action_timestamp_seconds{instance="agent"}'
@@ -181,6 +183,27 @@ tests:
               severity: critical
             exp_annotations:
               summary: "Mithril agent needs operator review; keep execution stopped and inspect status"
+
+  - name: pending recovery gets one actionable state alert
+    interval: 15s
+    input_series:
+      - series: 'mithril_agent_attention_required{instance="agent"}'
+        values: '1+0x4'
+      - series: 'mithril_agent_recovery_pending{instance="agent"}'
+        values: '1+0x4'
+    alert_rule_test:
+      - eval_time: 15s
+        alertname: MithrilAgentAttentionRequired
+        exp_alerts: []
+      - eval_time: 15s
+        alertname: MithrilAgentRecoveryPending
+        exp_alerts:
+          - exp_labels:
+              instance: agent
+              lifecycle: state
+              severity: critical
+            exp_annotations:
+              summary: "Transaction recovery is waiting for independent confirmation; do not retry"
 
   - name: quote service loss warns only when it persists
     interval: 15s

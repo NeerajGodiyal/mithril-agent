@@ -289,11 +289,6 @@ func TestServingIsTheDefaultNotAFlag(t *testing.T) {
 	if !strings.Contains(text, "collectSweepSignature(") {
 		t.Fatal("the interactive ceremony does not offer the served page")
 	}
-	wizard := text[strings.Index(text, "collectSweepSignature("):]
-	if end := strings.Index(wizard, "\nfunc "); end > 0 {
-		wizard = wizard[:end]
-	}
-
 	// And pasting must survive: somebody signing with the Solana CLI should not
 	// be made to open a tunnel.
 	if !strings.Contains(text, "paste the base58 signature here") {

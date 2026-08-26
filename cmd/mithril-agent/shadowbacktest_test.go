@@ -89,7 +89,7 @@ func TestModelledPoolIsAlwaysWorseThanTheOracle(t *testing.T) {
 	const price = uint64(21_000_000) // $21.00
 	quote := modelledPool(100)       // 1% each way
 
-	sell, err := quote(price, true)
+	sell, err := quote(price, true, 1_000_000_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestModelledPoolIsAlwaysWorseThanTheOracle(t *testing.T) {
 	if sell.EstimatedOutput >= 21_000_000 {
 		t.Errorf("the modelled sell is not worse than the oracle: %d", sell.EstimatedOutput)
 	}
-	buy, err := quote(price, false)
+	buy, err := quote(price, false, 21_000_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestModelledPoolIsAlwaysWorseThanTheOracle(t *testing.T) {
 		t.Errorf("the modelled buy is not worse than the oracle: %d", buy.EstimatedOutput)
 	}
 	// A wider spread must always fill worse than a narrow one.
-	wide, err := modelledPool(2_500)(price, true)
+	wide, err := modelledPool(2_500)(price, true, 1_000_000_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,8 +115,15 @@ func TestModelledPoolIsAlwaysWorseThanTheOracle(t *testing.T) {
 			wide.EstimatedOutput, sell.EstimatedOutput)
 	}
 	// A zero price cannot be modelled rather than dividing by it.
-	if _, err := quote(0, true); err == nil {
+	if _, err := quote(0, true, 1_000_000_000); err == nil {
 		t.Error("a zero price was modelled instead of refused")
+	}
+	small, err := quote(price, true, 500_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if small.InputAmount != 500_000_000 || small.EstimatedOutput*2 != sell.EstimatedOutput {
+		t.Errorf("model ignored the requested input: full=%+v half=%+v", sell, small)
 	}
 }
 
