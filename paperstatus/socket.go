@@ -43,7 +43,8 @@ func (r *CredentialReader) Read() (Snapshot, error) {
 }
 
 type SocketReader struct {
-	reader *statuswire.Reader
+	reader   *statuswire.Reader
+	sourceID string
 }
 
 func NewSocketReader(path string) (*SocketReader, error) {
@@ -59,7 +60,17 @@ func newSocketReader(
 	if err != nil {
 		return nil, err
 	}
-	return &SocketReader{reader: reader}, nil
+	return &SocketReader{reader: reader, sourceID: path}, nil
+}
+
+// SourceID is the stable local endpoint identity used to deduplicate alerts
+// when multiple paper sources are reordered. Telegram may show only a short
+// digest-derived source tag; the path itself is never sent.
+func (r *SocketReader) SourceID() string {
+	if r == nil {
+		return ""
+	}
+	return r.sourceID
 }
 
 func (r *SocketReader) Read() (Snapshot, error) {

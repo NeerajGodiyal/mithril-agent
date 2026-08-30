@@ -18,12 +18,13 @@ import (
 )
 
 const (
-	Version            = 1
-	MaxEvents          = 64
-	MaxMessageBytes    = 3000
-	maxSnapshotBytes   = 256 << 10
-	messagePrefix      = "PAPER SIMULATION —"
-	requiredDisclaimer = "No transaction was signed or submitted."
+	Version             = 1
+	MaxEvents           = 64
+	MaxMessageBytes     = 3000
+	maxSnapshotBytes    = 256 << 10
+	messagePrefix       = "PAPER ·"
+	legacyMessagePrefix = "PAPER SIMULATION —"
+	legacyDisclaimer    = "No transaction was signed or submitted."
 )
 
 const (
@@ -81,8 +82,7 @@ func (w *Writer) append(at time.Time, kind, key, message string, reconcile bool)
 	if w == nil || !cleanPath(w.path) || at.IsZero() || !at.Equal(at.UTC()) ||
 		!validKind(kind) || key == "" || len(key) > 512 ||
 		len(message) == 0 || len(message) > MaxMessageBytes ||
-		!strings.HasPrefix(message, messagePrefix) ||
-		!strings.Contains(message, requiredDisclaimer) {
+		!validMessage(message) {
 		return errors.New("paper alert event is invalid")
 	}
 	snapshot := Snapshot{Version: Version, ObservedAt: at, Events: []Event{}}
@@ -137,7 +137,7 @@ func TruncationEvent(snapshot Snapshot) (Event, bool) {
 	return Event{
 		ID: eventID("history_truncated", fmt.Sprintf("truncated/%d", bucket)),
 		At: snapshot.ObservedAt, Kind: "history_truncated",
-		Message: "PAPER SIMULATION — ⚠️ ALERT HISTORY TRUNCATED\nReview the hash-chained journal.\nNo transaction was signed or submitted.",
+		Message: "PAPER · ⚠️ Alert history trimmed\nFull history is in the journal.",
 	}, true
 }
 
@@ -156,8 +156,7 @@ func ValidateSnapshot(snapshot Snapshot) error {
 			!event.At.Equal(event.At.UTC()) || event.At.After(snapshot.ObservedAt) ||
 			!validKind(event.Kind) || len(event.Message) == 0 ||
 			len(event.Message) > MaxMessageBytes ||
-			!strings.HasPrefix(event.Message, messagePrefix) ||
-			!strings.Contains(event.Message, requiredDisclaimer) ||
+			!validMessage(event.Message) ||
 			!previous.IsZero() && event.At.Before(previous) {
 			return errors.New("paper alert snapshot event is invalid")
 		}
@@ -168,6 +167,12 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		previous = event.At
 	}
 	return nil
+}
+
+func validMessage(message string) bool {
+	return strings.HasPrefix(message, messagePrefix) ||
+		strings.HasPrefix(message, legacyMessagePrefix) &&
+			strings.Contains(message, legacyDisclaimer)
 }
 
 func eventID(kind, key string) string {

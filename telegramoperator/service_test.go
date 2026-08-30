@@ -37,10 +37,18 @@ func (s *statusStub) Read() (operatorstatus.Snapshot, error) {
 type paperStatusStub struct {
 	snapshot paperstatus.Snapshot
 	err      error
+	sourceID string
 }
 
 func (s *paperStatusStub) Read() (paperstatus.Snapshot, error) {
 	return s.snapshot, s.err
+}
+
+func (s *paperStatusStub) SourceID() string {
+	if s.sourceID != "" {
+		return s.sourceID
+	}
+	return "/run/paper-test.sock"
 }
 
 func TestPaperAnnouncementsAreCompactPersistentAndReadOnly(t *testing.T) {
@@ -50,7 +58,7 @@ func TestPaperAnnouncementsAreCompactPersistentAndReadOnly(t *testing.T) {
 		Version: paperstatus.Version, ObservedAt: now,
 		Events: []paperstatus.Event{{
 			ID: id, At: now, Kind: paperstatus.KindOrderFilled,
-			Message: "PAPER SIMULATION — 🟢 SOLD\n0.001 SOL → 0.2 USDC at $200\nNo transaction was signed or submitted.",
+			Message: "PAPER · 🟢 SELL filled\n0.001 SOL → 0.2 USDC · ref $200\nEquity $1.25",
 		}},
 	}}
 	path := filepath.Join(protectedTempDir(t), "announced.json")
@@ -69,10 +77,9 @@ func TestPaperAnnouncementsAreCompactPersistentAndReadOnly(t *testing.T) {
 		t.Fatalf("paper sends = %+v", bot.sent)
 	}
 	for _, sent := range bot.sent {
-		if sent.Text != "PAPER SIMULATION — 🟢 SOLD\n"+
-			"0.001 SOL → 0.2 USDC at $200\n"+
-			"No transaction was signed or submitted.\n"+
-			"2026-08-30 01:02 UTC · bbbbbbbbbbbb" ||
+		if sent.Text != "PAPER · 🟢 SELL filled\n"+
+			"0.001 SOL → 0.2 USDC · ref $200\n"+
+			"Equity $1.25 · 2026-08-30 01:02 UTC" ||
 			strings.Contains(sent.Text, "explorer.solana.com") {
 			t.Fatalf("ambiguous paper alert = %q", sent.Text)
 		}
@@ -146,19 +153,22 @@ func TestPaperAnnouncementDeduplicatesPerChatAfterPartialDelivery(t *testing.T) 
 func TestPaperAnnouncementDedupIsScopedToItsSource(t *testing.T) {
 	now := time.Date(2026, time.August, 30, 1, 2, 3, 0, time.UTC)
 	id := strings.Repeat("e", 64)
-	build := func(message string) *paperStatusStub {
+	build := func(sourceID, message string) *paperStatusStub {
 		return &paperStatusStub{snapshot: paperstatus.Snapshot{
 			Version: paperstatus.Version, ObservedAt: now,
 			Events: []paperstatus.Event{{
 				ID: id, At: now, Kind: paperstatus.KindStrategyChanged,
 				Message: "PAPER SIMULATION — " + message + ". No transaction was signed or submitted.",
 			}},
-		}}
+		}, sourceID: sourceID}
 	}
 	bot := &botStub{}
 	service, err := New(Config{
 		Bot: bot, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
-		PaperSources:   []PaperStatusReader{build("champion changed"), build("challenger changed")},
+		PaperSources: []PaperStatusReader{
+			build("/run/paper-champion.sock", "champion changed"),
+			build("/run/paper-challenger.sock", "challenger changed"),
+		},
 		AllowedChatIDs: []int64{123},
 	})
 	if err != nil {
@@ -168,6 +178,123 @@ func TestPaperAnnouncementDedupIsScopedToItsSource(t *testing.T) {
 	service.announce(t.Context())
 	if len(bot.sent) != 2 || bot.sent[0].Text == bot.sent[1].Text {
 		t.Fatalf("paper source deliveries = %+v", bot.sent)
+	}
+}
+
+func TestPaperAnnouncementDedupSurvivesSourceReordering(t *testing.T) {
+	now := time.Date(2026, time.August, 30, 1, 2, 3, 0, time.UTC)
+	build := func(sourceID, eventID, message string) *paperStatusStub {
+		return &paperStatusStub{sourceID: sourceID, snapshot: paperstatus.Snapshot{
+			Version: paperstatus.Version, ObservedAt: now,
+			Events: []paperstatus.Event{{
+				ID: eventID, At: now, Kind: paperstatus.KindOrderFilled, Message: message,
+			}},
+		}}
+	}
+	first := build("/run/paper-first.sock", strings.Repeat("1", 64), "PAPER · First fill")
+	second := build("/run/paper-second.sock", strings.Repeat("2", 64), "PAPER · Second fill")
+	path := filepath.Join(protectedTempDir(t), "announced.json")
+	bot := &botStub{}
+	service, err := New(Config{
+		Bot: bot, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
+		PaperSources: []PaperStatusReader{first, second}, AnnouncedPath: path,
+		AllowedChatIDs: []int64{123},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.announce(t.Context())
+	if len(bot.sent) != 2 {
+		t.Fatalf("initial paper sends = %+v", bot.sent)
+	}
+	restartedBot := &botStub{}
+	restarted, err := New(Config{
+		Bot: restartedBot, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
+		PaperSources: []PaperStatusReader{second, first}, AnnouncedPath: path,
+		AllowedChatIDs: []int64{123},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.announce(t.Context())
+	if len(restartedBot.sent) != 0 {
+		t.Fatalf("source reorder resent paper events: %+v", restartedBot.sent)
+	}
+}
+
+func TestLegacyPaperDedupMigratesForOneSource(t *testing.T) {
+	now := time.Date(2026, time.August, 30, 1, 2, 3, 0, time.UTC)
+	eventID := strings.Repeat("5", 64)
+	reader := &paperStatusStub{snapshot: paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now,
+		Events: []paperstatus.Event{{
+			ID: eventID, At: now, Kind: paperstatus.KindOrderFilled,
+			Message: "PAPER SIMULATION — filled. No transaction was signed or submitted.",
+		}},
+	}}
+	path := filepath.Join(protectedTempDir(t), "announced.json")
+	bot := &botStub{}
+	service, err := New(Config{
+		Bot: bot, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
+		PaperSources: []PaperStatusReader{reader}, AnnouncedPath: path,
+		AllowedChatIDs: []int64{123},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.paperAnnounced.record(legacyPaperDeliveryID(0, eventID, 123)); err != nil {
+		t.Fatal(err)
+	}
+	service.announce(t.Context())
+	if len(bot.sent) != 0 {
+		t.Fatalf("legacy migration resent paper events: %+v", bot.sent)
+	}
+	if !service.paperAnnounced.announced(paperDeliveryID(reader.SourceID(), eventID, 123)) {
+		t.Fatal("legacy delivery was not migrated to a stable source ID")
+	}
+}
+
+func TestMultiSourceUpgradeNeverMisattributesLegacyIndex(t *testing.T) {
+	now := time.Date(2026, time.August, 30, 1, 2, 3, 0, time.UTC)
+	eventID := strings.Repeat("6", 64)
+	build := func(sourceID, marker string) *paperStatusStub {
+		return &paperStatusStub{sourceID: sourceID, snapshot: paperstatus.Snapshot{
+			Version: paperstatus.Version, ObservedAt: now,
+			Events: []paperstatus.Event{{
+				ID: eventID, At: now, Kind: paperstatus.KindOrderFilled,
+				Message: "PAPER · " + marker,
+			}},
+		}}
+	}
+	first := build("/run/paper-first.sock", "FIRST")
+	second := build("/run/paper-second.sock", "SECOND")
+	bot := &botStub{}
+	service, err := New(Config{
+		Bot: bot, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
+		PaperSources: []PaperStatusReader{first, second}, AllowedChatIDs: []int64{123},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.paperAnnounced.record(legacyPaperDeliveryID(0, eventID, 123)); err != nil {
+		t.Fatal(err)
+	}
+	service.announce(t.Context())
+	if len(bot.sent) != 2 {
+		t.Fatalf("multi-source legacy index suppressed a source: %+v", bot.sent)
+	}
+}
+
+func TestLegacyPaperAnnouncementGetsAMultiSourceLabel(t *testing.T) {
+	event := paperstatus.Event{
+		ID: strings.Repeat("3", 64), At: time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC),
+		Kind:    paperstatus.KindOrderFilled,
+		Message: "PAPER SIMULATION — filled. No transaction was signed or submitted.",
+	}
+	message := paperAnnouncement(event, "SRC 123ABC")
+	if !strings.HasPrefix(message, "PAPER SIMULATION · SRC 123ABC ·") ||
+		!strings.HasSuffix(message, "2026-08-30 01:02 UTC") {
+		t.Fatalf("legacy multi-source announcement = %q", message)
 	}
 }
 
@@ -245,6 +372,75 @@ func TestPaperSourceLogsOnlyAvailabilityTransitions(t *testing.T) {
 	service.announce(t.Context())
 	if got := strings.Count(logs.String(), "paper status source 1 available again"); got != 1 {
 		t.Fatalf("recovery logs = %q", logs.String())
+	}
+}
+
+func TestPaperCommandReturnsTheLatestBoundedEvent(t *testing.T) {
+	now := time.Date(2026, time.August, 30, 1, 2, 3, 0, time.UTC)
+	reader := &paperStatusStub{snapshot: paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now,
+		Events: []paperstatus.Event{{
+			ID: strings.Repeat("4", 64), At: now, Kind: paperstatus.KindStrategyActive,
+			Message: "PAPER · 🧠 Strategy on\nAdaptive · SOL/USDC · initial 0.001 SOL",
+		}},
+	}}
+	service, err := New(Config{
+		Bot: &botStub{}, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
+		PaperSources: []PaperStatusReader{reader}, AllowedChatIDs: []int64{123},
+		Now: func() time.Time { return now }, MinimumInterval: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, ok := service.Reply(t.Context(), 123, "/paper")
+	if !ok || !strings.Contains(reply, "PAPER · 🧠 Strategy on") ||
+		!strings.Contains(reply, "2026-08-30 01:02 UTC") {
+		t.Fatalf("paper reply = %q", reply)
+	}
+	if help := service.help(now); !strings.Contains(help, "/paper — latest paper event") ||
+		strings.Contains(help, "Checked:") {
+		t.Fatalf("paper help = %q", help)
+	}
+}
+
+func TestPaperCommandFairlyReportsEveryLongSource(t *testing.T) {
+	now := time.Date(2026, time.August, 30, 1, 2, 3, 0, time.UTC)
+	build := func(sourceID, eventID, marker string) *paperStatusStub {
+		return &paperStatusStub{sourceID: sourceID, snapshot: paperstatus.Snapshot{
+			Version: paperstatus.Version, ObservedAt: now,
+			Events: []paperstatus.Event{{
+				ID: eventID, At: now, Kind: paperstatus.KindOrderMissed,
+				Message: "PAPER · " + marker + " " + strings.Repeat("x", 2_000),
+			}},
+		}}
+	}
+	first := build("/run/first.sock", strings.Repeat("7", 64), "FIRST")
+	second := build("/run/second.sock", strings.Repeat("8", 64), "SECOND")
+	service, err := New(Config{
+		Bot: &botStub{}, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
+		PaperSources: []PaperStatusReader{first, second}, AllowedChatIDs: []int64{123},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := service.paperReports()
+	if !strings.Contains(report, "FIRST") || !strings.Contains(report, "SECOND") ||
+		strings.Count(report, "full alert retained locally") != 2 ||
+		len(report) > maxOutputBytes {
+		t.Fatalf("multi-source paper report = %q", report)
+	}
+}
+
+func TestPaperCommandCallsInvalidOrUnreadableStatusUnavailable(t *testing.T) {
+	service, err := New(Config{
+		Bot: &botStub{}, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
+		PaperSources: []PaperStatusReader{&paperStatusStub{}}, AllowedChatIDs: []int64{123},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report := service.paperReports(); report != "PAPER ALERTS · ⚠️ Unavailable" {
+		t.Fatalf("invalid paper status = %q", report)
 	}
 }
 

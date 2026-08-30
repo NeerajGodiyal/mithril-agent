@@ -180,6 +180,10 @@ type shadowRun struct {
 	runner            *shadow.Runner
 	alerts            *paperstatus.Writer
 	reconcilingAlerts bool
+	// activationSequence counts durable period-close records in today's
+	// journal. A crash restart reuses the same sequence and stays deduplicated;
+	// a restart after a clean stop announces that the strategy resumed.
+	activationSequence uint64
 	// lastPrice is the most recent price actually observed. The report closes
 	// on it rather than on a cost basis, which would not be a market price.
 	lastPrice uint64
@@ -286,6 +290,7 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 			roll.Close()
 			return nil, err
 		}
+		run.activationSequence = periodCloseCount(ticks)
 	}
 	if err := run.reconcileStoredShadowReports(); err != nil {
 		roll.Close()
@@ -414,11 +419,16 @@ func (s *shadowRun) resumeRunner(
 	if err != nil {
 		return nil, 0, err
 	}
-	var lastPrice uint64
-	for index := len(ticks) - 1; index >= 0 && lastPrice == 0; index-- {
-		lastPrice = ticks[index].PriceMicros
+	return runner, lastShadowPrice(ticks), nil
+}
+
+func lastShadowPrice(ticks []shadow.Tick) uint64 {
+	for index := len(ticks) - 1; index >= 0; index-- {
+		if ticks[index].PriceMicros != 0 {
+			return ticks[index].PriceMicros
+		}
 	}
-	return runner, lastPrice, nil
+	return 0
 }
 
 func ensureShadowPolicySnapshot(directory string, policy shadow.Policy) error {
@@ -521,9 +531,11 @@ func (s *shadowRun) rollDay(now time.Time, output io.Writer) (bool, error) {
 	if err := s.finishDayAt(output, periodEnd); err != nil {
 		return false, err
 	}
+	previousPolicy := s.policySHA256
 	if err := s.refreshSelectedCandidate(now); err != nil {
 		return false, err
 	}
+	strategyChanged := s.policySHA256 != previousPolicy
 	// A new day resets the operational canary with its own opening mark.
 	if s.roll.Day() != dayKey(now) {
 		fresh, err := s.newRunner()
@@ -531,6 +543,12 @@ func (s *shadowRun) rollDay(now time.Time, output io.Writer) (bool, error) {
 			return false, err
 		}
 		s.runner, s.lastPrice = fresh, 0
+	}
+	s.activationSequence = 0
+	if !strategyChanged {
+		if err := s.alertStrategy(now, paperstatus.KindStrategyActive); err != nil {
+			return false, err
+		}
 	}
 	return true, nil
 }
@@ -611,9 +629,7 @@ func (s *shadowRun) finishDay(output io.Writer) error {
 
 func (s *shadowRun) finishDayAt(output io.Writer, periodEnd time.Time) error {
 	day := s.roll.Day()
-	if day == "" || s.lastPrice == 0 {
-		// Nothing was ever observed, so there is nothing to report. Writing a
-		// report full of zeroes would read as a flat, uneventful day.
+	if day == "" {
 		return nil
 	}
 	from, err := time.Parse("2006-01-02", day)
@@ -622,6 +638,11 @@ func (s *shadowRun) finishDayAt(output io.Writer, periodEnd time.Time) error {
 	}
 	if !periodEnd.After(from) || periodEnd.After(from.Add(24*time.Hour)) {
 		return errors.New("shadow report end is outside its UTC day")
+	}
+	if s.lastPrice == 0 {
+		// No price means there is no honest P&L report, but silence would leave
+		// Telegram claiming the strategy is still active after a clean stop.
+		return s.alertUnavailableReport(from, periodEnd)
 	}
 	// Derived by replaying the day's whole journal, not from this process's
 	// counters. A runner that restarted mid-day would otherwise report only
@@ -649,6 +670,16 @@ func (s *shadowRun) finishDayAt(output io.Writer, periodEnd time.Time) error {
 	return report.Render(output)
 }
 
+func periodCloseCount(ticks []shadow.Tick) uint64 {
+	var count uint64
+	for _, tick := range ticks {
+		if tick.PeriodClose {
+			count++
+		}
+	}
+	return count
+}
+
 // reconcileMissingShadowReports closes the journal-to-report crash window. A
 // period-close record is the durable fact; this rebuilds only a missing
 // derived report and never changes the journal.
@@ -663,7 +694,8 @@ func (s *shadowRun) reconcileMissingShadowReports() error {
 	for _, path := range paths {
 		name := filepath.Base(path)
 		day := name[len("shadow-") : len(name)-len(".jsonl")]
-		if _, err := time.Parse("2006-01-02", day); err != nil {
+		from, err := time.Parse("2006-01-02", day)
+		if err != nil {
 			return errors.New("shadow journal filename has an invalid UTC day")
 		}
 		reportPath := filepath.Join(s.roll.directory, "report-"+day+".json")
@@ -677,6 +709,20 @@ func (s *shadowRun) reconcileMissingShadowReports() error {
 			return err
 		}
 		if len(ticks) == 0 || !ticks[len(ticks)-1].PeriodClose {
+			continue
+		}
+		if lastShadowPrice(ticks) == 0 {
+			periodEnd, err := shadowReportEnd(from, ticks[len(ticks)-1].At)
+			if err != nil {
+				return err
+			}
+			previous := s.reconcilingAlerts
+			s.reconcilingAlerts = true
+			alertErr := s.alertUnavailableReport(from, periodEnd)
+			s.reconcilingAlerts = previous
+			if alertErr != nil {
+				return alertErr
+			}
 			continue
 		}
 		report, err := buildShadowReport(s.policy, day, ticks)

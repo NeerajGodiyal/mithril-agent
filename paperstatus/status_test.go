@@ -28,12 +28,12 @@ func TestWriterIsPrivateBoundedAndDeduplicated(t *testing.T) {
 	start := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
 	for index := 0; index < MaxEvents+2; index++ {
 		if err := writer.Append(start.Add(time.Duration(index)*time.Second), KindOrderFilled,
-			string(rune('a'+index)), "PAPER SIMULATION — filled. No transaction was signed or submitted."); err != nil {
+			string(rune('a'+index)), "PAPER · Filled"); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if err := writer.Append(start.Add((MaxEvents+1)*time.Second), KindOrderFilled,
-		string(rune('a'+MaxEvents+1)), "PAPER SIMULATION — duplicate. No transaction was signed or submitted."); err != nil {
+		string(rune('a'+MaxEvents+1)), "PAPER · Duplicate"); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
@@ -56,7 +56,7 @@ func TestWriterIsPrivateBoundedAndDeduplicated(t *testing.T) {
 		t.Fatalf("events=%d dropped=%d first=%s", len(snapshot.Events), snapshot.DroppedEvents, snapshot.Events[0].At)
 	}
 	gap, ok := TruncationEvent(snapshot)
-	if !ok || gap.Kind != "history_truncated" || !strings.Contains(gap.Message, "hash-chained journal") {
+	if !ok || gap.Kind != "history_truncated" || !strings.Contains(gap.Message, "journal") {
 		t.Fatalf("truncation event = %+v, %v", gap, ok)
 	}
 }

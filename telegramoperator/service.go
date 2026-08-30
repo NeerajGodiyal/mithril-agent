@@ -41,6 +41,7 @@ const (
 	maxPaperAlertChats     = 8
 	maxPaperAnnounced      = 2304
 	maxPaperAnnouncedBytes = 192 << 10
+	maxPaperReportBytes    = 800
 )
 
 // Update is the only Telegram update shape consumed by Service.
@@ -73,6 +74,7 @@ type StatusReader interface {
 // cannot read a journal, select a strategy, sign, or submit.
 type PaperStatusReader interface {
 	Read() (paperstatus.Snapshot, error)
+	SourceID() string
 }
 
 // ExplanationRequest is the complete optional model boundary. It contains a
@@ -150,18 +152,33 @@ type Service struct {
 	// delivery IDs that are still present in a bounded paper snapshot.
 	announced       *announcedStore
 	paperAnnounced  *announcedStore
-	paperHealthSeen map[int]bool
-	paperHealthy    map[int]bool
+	paperHealthSeen map[string]bool
+	paperHealthy    map[string]bool
 }
 
 func New(config Config) (*Service, error) {
 	if config.Bot == nil || config.Cursor == nil || len(config.Sources) == 0 {
 		return nil, errors.New("Telegram bot, cursor, and operator status reader are required")
 	}
+	paperSourceIDs := make(map[string]struct{}, len(config.PaperSources))
+	paperSourceLabels := make(map[string]struct{}, len(config.PaperSources))
 	for _, source := range config.PaperSources {
 		if source == nil {
 			return nil, errors.New("paper status readers must not be nil")
 		}
+		identity := source.SourceID()
+		if identity == "" || len(identity) > 512 {
+			return nil, errors.New("paper status readers need a bounded stable identity")
+		}
+		if _, duplicate := paperSourceIDs[identity]; duplicate {
+			return nil, errors.New("paper status reader identities must be unique")
+		}
+		paperSourceIDs[identity] = struct{}{}
+		label := paperSourceLabel(identity)
+		if _, duplicate := paperSourceLabels[label]; duplicate {
+			return nil, errors.New("paper status reader identities have colliding display tags")
+		}
+		paperSourceLabels[label] = struct{}{}
 	}
 	if len(config.PaperSources) > maxPaperSources {
 		return nil, fmt.Errorf("at most %d paper status readers are supported", maxPaperSources)
@@ -220,7 +237,7 @@ func New(config Config) (*Service, error) {
 		paperAnnounced: loadBoundedAnnouncedStore(
 			paperAnnouncedPath, maxPaperAnnounced, maxPaperAnnouncedBytes,
 		),
-		paperHealthSeen: map[int]bool{}, paperHealthy: map[int]bool{},
+		paperHealthSeen: map[string]bool{}, paperHealthy: map[string]bool{},
 		explainer: config.Explainer, explanationBudget: config.ExplanationBudget, now: config.Now,
 		pollTimeout: config.PollTimeout, minInterval: config.MinimumInterval,
 		pollRetryDelay: defaultPollRetryDelay,
@@ -345,9 +362,9 @@ func (s *Service) Run(ctx context.Context) error {
 // unprompted message the operator sends, and it still cannot authorize
 // anything: it reads the same bounded status the read-only commands read.
 //
-// Only settled outcomes are announced. Waiting, stopped, and degraded are the
-// steady state of a healthy agent that has nothing to do, and narrating them
-// would train the operator to ignore the channel that carries the real events.
+// Routine waiting stays quiet. Meaningful paper events are announced; source
+// health transitions stay in local logs and /paper reports the current state.
+// None of these messages can authorize an action.
 func (s *Service) announce(ctx context.Context) {
 	for index, source := range s.sources {
 		s.announceSource(ctx, index, source)
@@ -358,12 +375,13 @@ func (s *Service) announce(ctx context.Context) {
 }
 
 func (s *Service) announcePaperSource(ctx context.Context, index int, source PaperStatusReader) {
+	sourceID := source.SourceID()
 	snapshot, err := source.Read()
 	if err != nil || paperstatus.ValidateSnapshot(snapshot) != nil {
-		s.recordPaperHealth(index, false)
+		s.recordPaperHealth(index, sourceID, false)
 		return
 	}
-	s.recordPaperHealth(index, true)
+	s.recordPaperHealth(index, sourceID, true)
 	events := snapshot.Events
 	if gap, ok := paperstatus.TruncationEvent(snapshot); ok {
 		events = append([]paperstatus.Event{gap}, events...)
@@ -375,11 +393,28 @@ func (s *Service) announcePaperSource(ctx context.Context, index int, source Pap
 			if blocked[chatID] {
 				continue
 			}
-			deliveryID := paperDeliveryID(index, event.ID, chatID)
+			deliveryID := paperDeliveryID(sourceID, event.ID, chatID)
 			if s.paperAnnounced.announced(deliveryID) {
 				continue
 			}
-			if err := s.bot.Send(ctx, chatID, bounded(paperAnnouncement(event))); err != nil {
+			// Version 1 keyed delivery only by list position, which cannot be
+			// rebound safely when several sources exist. Migrate the unambiguous
+			// one-source case; multi-source upgrades may replay retained alerts
+			// once rather than silently suppressing the wrong source.
+			if len(s.paperSources) == 1 {
+				legacyID := legacyPaperDeliveryID(index, event.ID, chatID)
+				if s.paperAnnounced.announced(legacyID) {
+					if err := s.paperAnnounced.record(deliveryID); err != nil {
+						log.Printf("telegram: %v", err)
+					}
+					continue
+				}
+			}
+			label := ""
+			if len(s.paperSources) > 1 {
+				label = paperSourceLabel(sourceID)
+			}
+			if err := s.bot.Send(ctx, chatID, bounded(paperAnnouncement(event, label))); err != nil {
 				if ctx.Err() != nil {
 					return
 				}
@@ -398,13 +433,21 @@ func (s *Service) announcePaperSource(ctx context.Context, index int, source Pap
 	}
 }
 
-func paperAnnouncement(event paperstatus.Event) string {
-	return event.Message + "\n" + event.At.Format("2006-01-02 15:04 UTC") + " · " + shortActionID(event.ID)
+func paperAnnouncement(event paperstatus.Event, label string) string {
+	message := event.Message
+	if label != "" {
+		if strings.HasPrefix(message, "PAPER ·") {
+			message = strings.Replace(message, "PAPER ·", "PAPER · "+label+" ·", 1)
+		} else {
+			message = strings.Replace(message, "PAPER SIMULATION —", "PAPER SIMULATION · "+label+" ·", 1)
+		}
+	}
+	return message + " · " + event.At.Format("2006-01-02 15:04 UTC")
 }
 
-func (s *Service) recordPaperHealth(index int, healthy bool) {
-	seen, previous := s.paperHealthSeen[index], s.paperHealthy[index]
-	s.paperHealthSeen[index], s.paperHealthy[index] = true, healthy
+func (s *Service) recordPaperHealth(index int, sourceID string, healthy bool) {
+	seen, previous := s.paperHealthSeen[sourceID], s.paperHealthy[sourceID]
+	s.paperHealthSeen[sourceID], s.paperHealthy[sourceID] = true, healthy
 	if !healthy && (!seen || previous) {
 		log.Printf("telegram: paper status source %d unavailable", index+1)
 	}
@@ -413,12 +456,25 @@ func (s *Service) recordPaperHealth(index int, healthy bool) {
 	}
 }
 
-func paperDeliveryID(source int, eventID string, chatID int64) string {
+func paperDeliveryID(sourceID, eventID string, chatID int64) string {
+	digest := sha256.Sum256([]byte(
+		"mithril-agent/paper-telegram-delivery/v2\x00" + sourceID + "\x00" +
+			eventID + "\x00" + strconv.FormatInt(chatID, 10),
+	))
+	return fmt.Sprintf("%x", digest)
+}
+
+func legacyPaperDeliveryID(source int, eventID string, chatID int64) string {
 	digest := sha256.Sum256([]byte(
 		"mithril-agent/paper-telegram-delivery/v1\x00" + strconv.Itoa(source) + "\x00" +
 			eventID + "\x00" + strconv.FormatInt(chatID, 10),
 	))
 	return fmt.Sprintf("%x", digest)
+}
+
+func paperSourceLabel(sourceID string) string {
+	digest := sha256.Sum256([]byte("mithril-agent/paper-source-label/v1\x00" + sourceID))
+	return fmt.Sprintf("SRC %X", digest[:3])
 }
 
 // announceSource reports one leg. The dedup state is per SOURCE, so a restart
@@ -608,6 +664,11 @@ func (s *Service) Reply(ctx context.Context, chatID int64, text string) (string,
 			return bounded("Usage: /status\n" + footer(now)), true
 		}
 		return bounded(s.statusReports(now)), true
+	case "/paper":
+		if argument != "" {
+			return bounded("Usage: /paper"), true
+		}
+		return bounded(s.paperReports()), true
 	case "/last_trade":
 		if argument != "" {
 			return bounded("Usage: /last_trade\n" + footer(now)), true
@@ -635,16 +696,59 @@ func (s *Service) allowAt(chatID int64, now time.Time) bool {
 	return true
 }
 
-func (s *Service) help(now time.Time) string {
-	commands := "/help — show this read-only command list\n/status — current status for every configured leg\n/price — current price rule and observation for every leg\n/last_trade — most recent recorded action for every leg"
+func (s *Service) help(_ time.Time) string {
+	commands := "/help — commands\n/status — live strategy status\n/price — live price rule\n/last_trade — latest live action"
+	if len(s.paperSources) > 0 {
+		commands += "\n/paper — latest paper event"
+	}
 	if s.explainer != nil {
-		commands += "\n/explain QUESTION — optional explanation of the same bounded status"
+		commands += "\n/explain QUESTION — explain live status"
 	}
 	return "Mithril operator — read only\n" + commands +
-		"\nUnprompted messages arrive when a trade settles: completed, failed," +
-		"\nor halted. Restarts, price targets, and a waiting agent are not sent;" +
-		"\nask with the commands above.\n" +
-		"This process cannot enable, sign, submit, stop, or configure actions.\n" + footer(now)
+		"\nAlerts: settled live outcomes and meaningful paper events." +
+		"\nWaiting updates stay quiet. This bot cannot trade or change settings."
+}
+
+func (s *Service) paperReports() string {
+	if len(s.paperSources) == 0 {
+		return "Paper: not configured"
+	}
+	reports := make([]string, 0, len(s.paperSources))
+	for _, source := range s.paperSources {
+		snapshot, err := source.Read()
+		label := ""
+		if len(s.paperSources) > 1 {
+			label = paperSourceLabel(source.SourceID())
+		}
+		if err != nil || paperstatus.ValidateSnapshot(snapshot) != nil {
+			report := "PAPER ALERTS · ⚠️ Unavailable"
+			if label != "" {
+				report = "PAPER ALERTS · " + label + " · ⚠️ Unavailable"
+			}
+			reports = append(reports, report)
+			continue
+		}
+		if len(snapshot.Events) == 0 {
+			report := "PAPER · No events yet"
+			if label != "" {
+				report = "PAPER · " + label + " · No events yet"
+			}
+			reports = append(reports, report)
+			continue
+		}
+		reports = append(reports, paperReportExcerpt(
+			paperAnnouncement(snapshot.Events[len(snapshot.Events)-1], label),
+		))
+	}
+	return strings.Join(reports, "\n\n")
+}
+
+func paperReportExcerpt(message string) string {
+	const suffix = "\n…truncated; full alert retained locally"
+	if len(message) <= maxPaperReportBytes {
+		return message
+	}
+	return truncateUTF8(message, maxPaperReportBytes-len(suffix)) + suffix
 }
 
 func (s *Service) statusReport(now time.Time) (string, operatorstatus.Snapshot, bool, bool) {

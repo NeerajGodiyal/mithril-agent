@@ -308,6 +308,10 @@ func TestRolloverDiscardsPreparedObservationBeforeRunnerMutation(t *testing.T) {
 	oldAt := time.Date(2026, 8, 30, 23, 59, 59, 0, time.UTC)
 	newAt := oldAt.Add(2 * time.Second)
 	policy := candidateTestPolicy()
+	fingerprint, err := policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
 	primary := candidatePriceSource{identity: policy.Trigger.PrimarySourceSHA256, at: newAt}
 	secondary := candidatePriceSource{identity: policy.Trigger.SecondarySourceSHA256, at: newAt}
 	roll, err := newDailyJournal(root)
@@ -318,9 +322,13 @@ func TestRolloverDiscardsPreparedObservationBeforeRunnerMutation(t *testing.T) {
 	if err := roll.openFor(oldAt); err != nil {
 		t.Fatal(err)
 	}
+	alerts, err := paperstatus.OpenWriter(filepath.Join(root, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	run := &shadowRun{
-		policy: policy, primary: primary, secondary: secondary,
-		quoter: liveStubQuoter{estimated: 21_525}, roll: roll,
+		policy: policy, policySHA256: fingerprint, primary: primary, secondary: secondary,
+		quoter: liveStubQuoter{estimated: 21_525}, roll: roll, alerts: alerts,
 	}
 	if run.runner, err = run.newRunner(); err != nil {
 		t.Fatal(err)
@@ -339,6 +347,17 @@ func TestRolloverDiscardsPreparedObservationBeforeRunnerMutation(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "shadow-2026-08-31.jsonl")); !os.IsNotExist(err) {
 		t.Fatalf("old observation opened the new-day journal: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot paperstatus.Snapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 2 ||
+		snapshot.Events[0].Kind != paperstatus.KindPeriodClosed ||
+		snapshot.Events[1].Kind != paperstatus.KindStrategyActive ||
+		!strings.Contains(snapshot.Events[0].Message, "No usable market price") {
+		t.Fatalf("rollover alert lifecycle=%+v err=%v", snapshot, err)
 	}
 }
 
@@ -572,6 +591,83 @@ func TestShadowReportIsAtomicallyReplacedAndUsesTheActualPartialPeriod(t *testin
 	if err := json.Unmarshal(alertRaw, &snapshot); err != nil || len(snapshot.Events) != 1 ||
 		snapshot.Events[0].Kind != paperstatus.KindPeriodClosed {
 		t.Fatalf("reconciled report alert = %+v, %v", snapshot, err)
+	}
+}
+
+func TestClosedUnobservablePeriodReconcilesAfterRestart(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	policy := validShadowPolicy()
+	fingerprint, err := policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+	dayEnd := start.Add(24 * time.Hour)
+	closed := dayEnd.Add(-time.Nanosecond)
+	roll, err := newDailyJournal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := roll.Record(start, shadow.EventOpened, shadow.Opening{
+		Version: shadow.JournalVersion, PolicySHA256: fingerprint,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := roll.Record(start, shadow.EventUnobservable, shadow.Tick{
+		At: start, Event: shadow.EventUnobservable,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := roll.Record(closed, shadow.EventClosed, shadow.Tick{
+		At: closed, Event: shadow.EventClosed, PeriodClose: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := roll.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	alerts, err := paperstatus.OpenWriter(filepath.Join(root, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := newDailyJournal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	run := shadowRun{
+		policy: policy, policySHA256: fingerprint, roll: reopened, alerts: alerts,
+	}
+	if err := run.reconcileMissingShadowReports(); err != nil {
+		t.Fatal(err)
+	}
+	if err := run.reconcileMissingShadowReports(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "report-2026-08-31.json")); !os.IsNotExist(err) {
+		t.Fatalf("unobservable period report exists or could not be checked: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot paperstatus.Snapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Events) != 1 ||
+		snapshot.Events[0].Kind != paperstatus.KindPeriodClosed ||
+		!snapshot.Events[0].At.Equal(dayEnd) ||
+		!strings.Contains(snapshot.Events[0].Message, "Day closed") ||
+		!strings.Contains(snapshot.Events[0].Message, "No usable market price") {
+		t.Fatalf("reconciled unavailable period alert = %+v", snapshot.Events)
 	}
 }
 

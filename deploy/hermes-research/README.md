@@ -385,8 +385,8 @@ sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
   --output /var/lib/mithril-agent/.mithril-agent/mithril-agent-run.service
 ```
 
-The first attachment may deliver retained bounded history. Verify every message
-starts with `PAPER SIMULATION` and that the bridge never exposes the source
+The first attachment may deliver retained bounded history. Verify every new message
+starts with `PAPER ·` and that the bridge never exposes the source
 path or any live transaction authority.
 
 The initial deployment uses Hermes' keyless web ring for both search and
