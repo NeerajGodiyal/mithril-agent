@@ -30,11 +30,13 @@ you; everything else has a working default.
 
   --out PATH        where to write the policy
   --cluster NAME    mainnet-beta (default) or devnet
+  --adaptive        derive actions from rolling trend, volatility, and range;
+                    do not provide fixed buy or sell prices
   --sell-at-usd N   sell when SOL reaches this price
   --buy-at-usd N    buy when SOL falls to this price
                     give both for a repeating sell-then-buy-back round trip
-  --amount N        how much to trade per action, in the input asset's
-                    base units (default 1000000)
+  --amount N        initial lot in the input asset's base units; later
+                    round-trip legs use simulated proceeds (default 1000000)
   --slippage-bps N  conservative fill allowance (default 100)
   --fee-lamports N  fee charged to every hypothetical fill (default 5000)
   --observe ADDR    the address to quote against; watch-only, never signed for
@@ -50,6 +52,7 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	flags.SetOutput(io.Discard)
 	outPath := flags.String("out", "", "where to write the policy")
 	cluster := flags.String("cluster", shadow.Mainnet, "mainnet-beta or devnet")
+	adaptive := flags.Bool("adaptive", false, "use the adaptive paper strategy")
 	sellAt := flags.String("sell-at-usd", "", "sell when SOL reaches this price")
 	buyAt := flags.String("buy-at-usd", "", "buy when SOL falls to this price")
 	amount := flags.Uint64("amount", 1_000_000, "trade size in input base units")
@@ -82,15 +85,26 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	if *slippageBPS == 0 || *slippageBPS > 500 {
 		return errors.New("--slippage-bps must be between 1 and 500")
 	}
-	if *sellAt == "" && *buyAt == "" {
+	if *adaptive && (*sellAt != "" || *buyAt != "") {
+		return errors.New("--adaptive cannot be combined with fixed buy or sell prices")
+	}
+	if !*adaptive && *sellAt == "" && *buyAt == "" {
 		return errors.New("give --sell-at-usd, --buy-at-usd, or both for a round trip")
 	}
 
-	policy, err := buildShadowPolicy(
-		*cluster, *sellAt, *buyAt, *amount, uint16(*slippageBPS), *feeLamports,
-		*observe, *tickSeconds,
-		*pool, *inputMint, *outputMint,
-	)
+	var policy shadow.Policy
+	var err error
+	if *adaptive {
+		policy, err = buildAdaptiveShadowPolicy(
+			*cluster, *amount, uint16(*slippageBPS), *feeLamports,
+			*observe, *tickSeconds, *pool, *inputMint, *outputMint,
+		)
+	} else {
+		policy, err = buildShadowPolicy(
+			*cluster, *sellAt, *buyAt, *amount, uint16(*slippageBPS), *feeLamports,
+			*observe, *tickSeconds, *pool, *inputMint, *outputMint,
+		)
+	}
 	if err != nil {
 		return err
 	}
@@ -106,6 +120,42 @@ func runShadowPolicy(args []string, output io.Writer) error {
 		"It holds no wallet signing key and cannot sign, submit, or spend anything.\n",
 		*outPath, shadowRunHint(policy, *outPath))
 	return err
+}
+
+func buildAdaptiveShadowPolicy(
+	cluster string,
+	amount uint64, slippageBPS uint16, feeLamports uint64,
+	observe string,
+	tickSeconds uint64,
+	pool, inputMint, outputMint string,
+) (shadow.Policy, error) {
+	// The trigger pair remains only as the feed/source and inventory-direction
+	// contract. Unreachable boundary prices ensure no fixed threshold can become
+	// an accidental fallback if the adaptive policy is ever absent.
+	policy, err := buildShadowPolicy(
+		cluster, "1000000", "0.000001", amount, slippageBPS, feeLamports,
+		observe, tickSeconds, pool, inputMint, outputMint,
+	)
+	if err != nil {
+		return shadow.Policy{}, err
+	}
+	if feeLamports > math.MaxUint64/2 || amount > math.MaxUint64-2*feeLamports {
+		return shadow.Policy{}, errors.New("adaptive paper inventory is too large")
+	}
+	// The adaptive controller switches this one paper position between SOL and
+	// USDC. Keeping an unrelated extra SOL benchmark would make a risk exit sell
+	// only a tiny fraction of the position it claims to protect.
+	policy.StartingInputUnits = amount + 2*feeLamports
+	policy.StartingOutputUnits = 0
+	adaptive, err := shadow.DefaultAdaptivePolicy(slippageBPS, feeLamports, amount, tickSeconds)
+	if err != nil {
+		return shadow.Policy{}, err
+	}
+	policy.Adaptive = &adaptive
+	if err := policy.Validate(); err != nil {
+		return shadow.Policy{}, err
+	}
+	return policy, nil
 }
 
 func shadowRunHint(policy shadow.Policy, path string) string {

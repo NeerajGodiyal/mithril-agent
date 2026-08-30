@@ -61,6 +61,25 @@ func TestAGeneratedPolicyLoadsWithoutEditing(t *testing.T) {
 	}
 }
 
+func TestGeneratedAdaptivePolicyUsesRelativeMarketDecisions(t *testing.T) {
+	path := generatedPolicyPath(t, "--adaptive", "--slippage-bps", "500")
+	policy, err := loadShadowPolicy(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Adaptive == nil || !policy.RoundTrip() {
+		t.Fatalf("generated adaptive policy has no adaptive round trip: %+v", policy)
+	}
+	if policy.Adaptive.MinimumSignalBPS != 1_110 ||
+		policy.Adaptive.MaxVolatilityBPS <= policy.Adaptive.MinimumSignalBPS {
+		t.Fatalf("adaptive defaults do not cover configured execution cost: %+v", policy.Adaptive)
+	}
+	if policy.Trigger.ThresholdMicros <= 100_000_000 ||
+		policy.ReturnTrigger.ThresholdMicros >= 100_000_000 {
+		t.Fatal("adaptive feed bindings could accidentally act as a normal SOL price threshold")
+	}
+}
+
 // Buying is the mirror image and the decimals have to swap with it, or every
 // price the report computes is out by a factor of a thousand.
 func TestABuyPolicySwapsTheDecimals(t *testing.T) {
@@ -153,6 +172,8 @@ func TestPolicyGeneratorRefusesAmbiguousInstructions(t *testing.T) {
 		"Mainnet route override": {"--out", out, "--observe", observe,
 			"--sell-at-usd", "80", "--pool", observe,
 			"--input-mint", observe, "--output-mint", mainnetUSDCMint},
+		"adaptive fixed price": {"--out", out, "--observe", observe,
+			"--adaptive", "--sell-at-usd", "80"},
 	} {
 		if err := runShadowPolicy(args, &bytes.Buffer{}); err == nil {
 			t.Errorf("%s was accepted", name)

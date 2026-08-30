@@ -63,7 +63,7 @@ func TestShadowAlertsAreBoundedExplicitAndContainNoLiveAuthority(t *testing.T) {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 	for _, event := range snapshot.Events {
-		if !strings.HasPrefix(event.Message, "PAPER SIMULATION") ||
+		if !strings.HasPrefix(event.Message, "PAPER SIMULATION —") ||
 			!strings.Contains(event.Message, "No transaction was signed or submitted") ||
 			strings.Contains(event.Message, "explorer.solana.com") ||
 			len(event.Message) > paperstatus.MaxMessageBytes {
@@ -75,14 +75,13 @@ func TestShadowAlertsAreBoundedExplicitAndContainNoLiveAuthority(t *testing.T) {
 		!strings.Contains(message, "Size 0.001 SOL · Policy ") {
 		t.Fatalf("unreadable strategy alert: %q", message)
 	}
-	if message := snapshot.Events[1].Message; !strings.Contains(message, "PAPER SIMULATION — 🟡 ORDER PLACED\n") ||
-		!strings.Contains(message, "SELL SOL · reference $200\n") ||
-		!strings.Contains(message, "0.001 SOL → about 0.2 USDC\n") {
+	if message := snapshot.Events[1].Message; !strings.Contains(message, "PAPER SIMULATION — 🟡 SELL ORDER\n") ||
+		!strings.Contains(message, "0.001 SOL · ref $200") {
 		t.Fatalf("unreadable opened-order alert: %q", message)
 	}
 	if message := snapshot.Events[2].Message; !strings.Contains(message, "PAPER SIMULATION — 🟢 SOLD\n") ||
-		!strings.Contains(message, "0.001 SOL → 0.2 USDC · reference $200\n") ||
-		!strings.Contains(message, "Daily paper equity $1.25\n") {
+		!strings.Contains(message, "0.001 SOL → 0.2 USDC · ref $200\n") ||
+		!strings.Contains(message, "Equity $1.25") {
 		t.Fatalf("unreadable filled-order alert: %q", message)
 	}
 }
@@ -105,6 +104,91 @@ func TestShadowThresholdsKeepTheInclusiveBuyRule(t *testing.T) {
 	policy.ReturnTrigger = &buy
 	if got := shadowThresholds(policy); got != "sell at or above $200 and buy at or below $100" {
 		t.Fatalf("thresholds = %q", got)
+	}
+}
+
+func TestAdaptiveShadowAlertExplainsTheSelectedActionBriefly(t *testing.T) {
+	policy := validShadowPolicy()
+	buy := policy.Trigger
+	buy.Direction = pricetrigger.BuyAtOrBelow
+	buy.ThresholdMicros = 1
+	policy.ReturnTrigger = &buy
+	adaptive, err := shadow.DefaultAdaptivePolicy(
+		policy.SlippageBPS, policy.FeeLamports, policy.InputAmount, policy.TickSeconds,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Adaptive = &adaptive
+	decision := &shadow.AdaptiveDecision{
+		Regime: shadow.RegimeDowntrend, Strategy: shadow.StrategyMomentum,
+		Reason: "trend_aligned_sell", SignalBPS: -825,
+	}
+	if got := shadowThresholds(policy); got != "adaptive trend + range reversion" {
+		t.Fatalf("adaptive summary = %q", got)
+	}
+	if got := adaptiveDecisionLine(decision); got != "\ntrend aligned sell · signal -825 bps" {
+		t.Fatalf("adaptive decision line = %q", got)
+	}
+}
+
+func TestAdaptiveShadowAlertReportsTheRiskPauseOnce(t *testing.T) {
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := paperstatus.OpenWriter(filepath.Join(directory, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := validShadowPolicy()
+	run := shadowRun{policy: policy, policySHA256: strings.Repeat("a", 64), alerts: writer}
+	now := time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC)
+	for index, reason := range []string{"drawdown_halt", "risk_halt"} {
+		if err := run.alertTick(shadow.Tick{
+			At: now.Add(time.Duration(index) * time.Second), Event: shadow.EventWaiting,
+			Decision: &shadow.AdaptiveDecision{Reason: reason},
+		}, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(directory, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot paperstatus.Snapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 1 {
+		t.Fatalf("risk snapshot=%+v err=%v", snapshot, err)
+	}
+	event := snapshot.Events[0]
+	if event.Kind != paperstatus.KindRiskHalted ||
+		!strings.Contains(event.Message, "🔴 RISK PAUSED\nDrawdown limit reached") {
+		t.Fatalf("risk alert = %+v", event)
+	}
+
+	secondWriter, err := paperstatus.OpenWriter(filepath.Join(directory, "risk-exit-alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	riskExitRun := shadowRun{
+		policy: policy, policySHA256: strings.Repeat("b", 64), alerts: secondWriter,
+	}
+	if err := riskExitRun.alertTick(shadow.Tick{
+		At: now, Event: shadow.EventWaiting,
+		Decision: &shadow.AdaptiveDecision{Reason: "risk_halt"},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(filepath.Join(directory, "risk-exit-alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 1 ||
+		snapshot.Events[0].Kind != paperstatus.KindRiskHalted {
+		t.Fatalf("risk-exit pause snapshot=%+v err=%v", snapshot, err)
 	}
 }
 
@@ -156,13 +240,13 @@ func TestShadowAlertsFormatBuyRefusalAndMissedEvidence(t *testing.T) {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 	refused := snapshot.Events[0].Message
-	if !strings.Contains(refused, "PAPER SIMULATION — ⚪ ORDER REFUSED\n") ||
-		!strings.Contains(refused, "BUY · settlement crossed the slippage floor\n") {
+	if !strings.Contains(refused, "PAPER SIMULATION — ⚪ BUY REFUSED\n") ||
+		!strings.Contains(refused, "settlement crossed the slippage floor") {
 		t.Fatalf("unreadable buy refusal: %q", refused)
 	}
 	missed := snapshot.Events[1].Message
 	if !strings.Contains(missed, "PAPER SIMULATION — ⚠️ ORDER MISSED\n") ||
-		!strings.Contains(missed, "market price unavailable\n") {
+		!strings.Contains(missed, "market price unavailable") {
 		t.Fatalf("unreadable missed order: %q", missed)
 	}
 }
@@ -251,7 +335,7 @@ func TestShadowAlertReconciliationKeepsOneWayDirectionAfterFill(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := snapshot.Events[len(snapshot.Events)-1].Message
-	if !strings.Contains(last, "SELL SOL · reference") || strings.Contains(last, "BUY SOL · reference") {
+	if !strings.Contains(last, "🟡 SELL ORDER\n") || strings.Contains(last, "🟡 BUY ORDER\n") {
 		t.Fatalf("one-way restart changed direction: %q", last)
 	}
 }

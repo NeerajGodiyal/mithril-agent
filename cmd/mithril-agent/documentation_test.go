@@ -399,6 +399,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"auth add openai-codex", "never join the Docker group",
 		"rootless Docker", "last recorded time", "Hetzner server backups",
 		"mithril-agent-paper-challenger.path", "--paper-alert-status",
+		"mithril-agent-paper-auto-select.timer", "shadow restore", "champion/previous.json",
 		"/var/lib/mithril-agent-research/status/champion/alerts.json",
 		"single-URL extraction canary: pass", "state/cache/web",
 		"REVIEWED_SHA256", "'root:root 755'",
@@ -481,6 +482,8 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"./deploy/systemd/mithril-agent-paper-champion.service",
 		"./deploy/systemd/mithril-agent-paper-challenger.service",
 		"./deploy/systemd/mithril-agent-paper-challenger.path",
+		"./deploy/systemd/mithril-agent-paper-auto-select.service",
+		"./deploy/systemd/mithril-agent-paper-auto-select.timer",
 		"./deploy/systemd/mithril-hermes-research-egress.service",
 		"./deploy/systemd/mithril-hermes-research.service",
 		"./deploy/systemd/mithril-hermes-research.timer",
@@ -529,6 +532,25 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	if !strings.Contains(challengerPath, "PathChanged=/var/lib/mithril-agent-research/challenger/active.json") ||
 		strings.Contains(challengerPath, "PathExists=") {
 		t.Fatal("challenger path does not watch pointer changes safely")
+	}
+	autoSelectUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-auto-select.service")
+	for _, want := range []string{
+		"shadow auto-select", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
+		"--rollback-pointer /var/lib/mithril-agent-research/champion/previous.json",
+		"ReadWritePaths=/var/lib/mithril-agent-research/champion /var/lib/mithril-agent-research/challenger",
+	} {
+		if !strings.Contains(autoSelectUnit, want) {
+			t.Errorf("paper auto-selector is missing %q", want)
+		}
+	}
+	autoSelectTimer := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-auto-select.timer")
+	for _, want := range []string{
+		"OnCalendar=*-*-* *:20:00 UTC", "Persistent=true",
+		"Unit=mithril-agent-paper-auto-select.service", "WantedBy=timers.target",
+	} {
+		if !strings.Contains(autoSelectTimer, want) {
+			t.Errorf("paper auto-selector timer is missing %q", want)
+		}
 	}
 	networkCheck := readDocumentation(t, "../../deploy/hermes-research/check-network.sh")
 	for _, want := range []string{

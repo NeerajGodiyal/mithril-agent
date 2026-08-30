@@ -372,6 +372,18 @@ mithril-agent shadow policy --out POLICY --observe WATCH_ONLY_ADDRESS \
   --sell-at-usd 240 --buy-at-usd 200 --amount 1000000
 ```
 
+For a price-relative paper strategy that selects trend, range-reversion, risk
+exit, or no-trade from the observed market instead of fixed prices:
+
+```sh
+mithril-agent shadow policy --out POLICY --observe WATCH_ONLY_ADDRESS \
+  --adaptive --amount 1000000
+```
+
+The deterministic adaptive policy warms up from the live stream and records the
+regime, selected strategy, raw signal, and return volatility supporting every observation.
+It rewarms after a data gap and stays risk-off after a filled drawdown exit.
+
 The command stores the quoted venue and token pair in the policy and prints the
 exact `shadow run` invocation; replace only the labelled paths.
 
@@ -392,9 +404,10 @@ profitability.
 
 A same-day restart resumes the verified books and round-trip direction instead
 of starting the strategy over. If the prior process stopped with a quote in
-flight, that decision is recorded as missed on the next fresh observation; no
-fill is invented. Changing the policy requires a new journal directory or a
-new UTC day.
+flight, it remains pending through its recorded deadline and can settle only
+from a valid fresh observation at or before that deadline. The first later
+observation records it as missed; no fill is invented. Changing the policy
+requires a new journal directory or a new UTC day.
 
 You can recompute any day's result yourself from the record:
 

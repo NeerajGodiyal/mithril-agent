@@ -80,9 +80,15 @@ type Policy struct {
 	Version uint32 `json:"version"`
 	Cluster string `json:"cluster"`
 
-	// Trigger is the same rule type the real trader uses, evaluated by the same
-	// pure function. If the two ever disagree it is a bug, not a difference of
-	// configuration.
+	// Adaptive replaces absolute entry prices with a rolling, price-relative
+	// decision model. Trigger and ReturnTrigger still bind the independently
+	// validated feed and the two inventory directions; their thresholds are not
+	// used when this field is present.
+	Adaptive *AdaptivePolicy `json:"adaptive,omitempty"`
+
+	// Trigger is the same rule type the real trader uses. A fixed policy applies
+	// its comparison; an adaptive policy uses it only to bind and validate the
+	// price feed, sources, and first inventory direction.
 	Trigger pricetrigger.Policy `json:"trigger"`
 
 	// QuotePeg is mandatory on Mainnet because the accounting below labels its
@@ -100,8 +106,9 @@ type Policy struct {
 	// requires an address but never a key, and nothing here can spend from it.
 	Observe string `json:"observe"`
 
-	// InputAmount is the size of the hypothetical trade in the input asset's
-	// base units, and InputDecimals scales it for display and for price maths.
+	// InputAmount is the initial hypothetical lot in the input asset's base
+	// units. Later round-trip legs use simulated proceeds; InputDecimals scales
+	// amounts for display and price maths.
 	InputAmount   uint64 `json:"input_amount"`
 	InputDecimals uint8  `json:"input_decimals"`
 	// OutputDecimals scales the quoted output the same way.
@@ -181,6 +188,27 @@ func (p Policy) Validate() error {
 	if err := p.Trigger.Validate(); err != nil {
 		return err
 	}
+	if p.Adaptive != nil {
+		if err := p.Adaptive.Validate(); err != nil {
+			return err
+		}
+		costFloor, err := adaptiveCostFloorBPS(p.SlippageBPS, p.FeeLamports, p.InputAmount)
+		if err != nil {
+			return err
+		}
+		if uint32(p.Adaptive.MinimumSignalBPS) < costFloor {
+			return errors.New("adaptive minimum signal must cover opening slippage, fees, and a safety margin")
+		}
+		if p.Adaptive.MaxObservationGapSeconds < p.TickSeconds {
+			return errors.New("adaptive observation gap must allow at least one policy tick")
+		}
+		if !p.IsSell() {
+			return errors.New("adaptive shadow policy must start from its SOL sell leg")
+		}
+		if p.ReturnTrigger == nil {
+			return errors.New("adaptive shadow policy needs both inventory directions")
+		}
+	}
 	if p.Cluster == Mainnet {
 		if p.QuotePeg == nil {
 			return errors.New("mainnet shadow policy needs independent USDC/USD evidence")
@@ -242,6 +270,10 @@ func (p Policy) Validate() error {
 	}
 	if p.SettleSeconds == 0 || p.SettleSeconds > maxSettleSeconds {
 		return errors.New("shadow policy must settle a decision strictly later than it was made")
+	}
+	if p.Adaptive != nil &&
+		(uint64(p.Adaptive.SlowWindow)-1)*p.TickSeconds+p.SettleSeconds >= 86_400 {
+		return errors.New("adaptive warmup and settlement must fit inside one UTC evaluation day")
 	}
 	if p.StartingInputUnits == 0 && p.StartingOutputUnits == 0 {
 		return errors.New("shadow policy needs an opening inventory to measure against")

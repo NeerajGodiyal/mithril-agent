@@ -40,6 +40,9 @@ type RoundTripCounts struct {
 	// Refused counts legs the slippage floor stopped. High refusal with high
 	// signal means the thresholds are reachable but the pool cannot fill them.
 	Refused uint64 `json:"refused"`
+	// Filtered counts signals deliberately rejected by their executable-quote
+	// gate. They are valid no-trades, not failed observations or executions.
+	Filtered uint64 `json:"filtered"`
 	// Missed counts a decision whose settlement time arrived without an
 	// observable market price, matching the live runner's fail-closed behavior.
 	Missed uint64 `json:"missed"`
@@ -111,6 +114,7 @@ func ReplayRoundTripTicks(
 		}
 		observations = append(observations, roundTripObservation{
 			at: tick.At, priceMicros: tick.PriceMicros, observable: tick.PriceMicros != 0,
+			primary: tick.PrimaryPrice, secondary: tick.SecondaryPrice,
 		})
 	}
 	return replayRoundTrip(policy, observations, quoteFor)
@@ -121,12 +125,15 @@ type roundTripObservation struct {
 	priceMicros uint64
 	observable  bool
 	periodClose bool
+	primary     *pricetrigger.Sample
+	secondary   *pricetrigger.Sample
 }
 
 type roundTripPending struct {
 	priceMicros uint64
 	quote       Quote
 	sell        bool
+	riskExit    bool
 	settleAfter time.Time
 }
 
@@ -153,7 +160,11 @@ func replayRoundTrip(
 	openingPrice := uint64(0)
 	for _, observation := range observations {
 		if observation.observable {
-			openingPrice = observation.priceMicros
+			var priceErr error
+			openingPrice, priceErr = roundTripObservationPrice(policy, policy.IsSell(), observation)
+			if priceErr != nil {
+				return RoundTripResult{}, priceErr
+			}
 			break
 		}
 	}
@@ -165,6 +176,10 @@ func replayRoundTrip(
 		return RoundTripResult{}, err
 	}
 	result := RoundTripResult{Ledger: ledger}
+	strategy, err := newAdaptiveStrategy(policy.Adaptive)
+	if err != nil {
+		return RoundTripResult{}, err
+	}
 	// The leg the run is waiting to make.
 	sell := policy.IsSell()
 	nextAmount := policy.InputAmount
@@ -194,7 +209,10 @@ func replayRoundTrip(
 			}
 			continue
 		}
-		price := observation.priceMicros
+		price, err := roundTripObservationPrice(policy, sell, observation)
+		if err != nil {
+			return RoundTripResult{}, err
+		}
 		if price == 0 {
 			return RoundTripResult{}, errZeroReference
 		}
@@ -209,6 +227,17 @@ func replayRoundTrip(
 			rule = sellRule
 		}
 		triggered := thresholdMet(rule, price)
+		var decision *AdaptiveDecision
+		if strategy != nil {
+			adaptiveDecision, adaptiveTriggered, decisionErr := strategy.decide(
+				observation.at, price, sell, result.Ledger,
+			)
+			if decisionErr != nil {
+				return RoundTripResult{}, decisionErr
+			}
+			decision = &adaptiveDecision
+			triggered = adaptiveTriggered
+		}
 		if triggered {
 			if sell {
 				result.Counts.SellSignals++
@@ -221,19 +250,45 @@ func replayRoundTrip(
 			if observation.at.Before(pending.settleAfter) {
 				continue
 			}
-			settlementQuote, err := quoteFor(price, pending.sell, pending.quote.InputAmount)
+			settling := *pending
+			pending = nil
+			settlementQuote, err := quoteFor(price, settling.sell, settling.quote.InputAmount)
 			if err != nil {
+				if strategy != nil {
+					result.Counts.Missed++
+					continue
+				}
 				return RoundTripResult{}, err
 			}
-			if settlementQuote.InputAmount != pending.quote.InputAmount {
+			if settlementQuote.InputAmount != settling.quote.InputAmount {
+				if strategy != nil {
+					result.Counts.Missed++
+					continue
+				}
 				return RoundTripResult{}, errors.New("round-trip settlement quote changed the requested input amount")
 			}
+			if strategy != nil {
+				if validateQuote(settlementQuote) != nil {
+					result.Counts.Missed++
+					continue
+				}
+				_, bounded, guardErr := adaptiveQuoteImpact(
+					policy, settlementQuote, price, settling.sell,
+				)
+				if guardErr != nil || !bounded {
+					result.Counts.Missed++
+					continue
+				}
+			}
 			fill, err := SettleRequotedFillDirected(
-				policy, pending.quote, settlementQuote,
-				pending.priceMicros, price, pending.sell,
+				policy, settling.quote, settlementQuote,
+				settling.priceMicros, price, settling.sell,
 			)
-			pending = nil
 			if err != nil {
+				if strategy != nil {
+					result.Counts.Missed++
+					continue
+				}
 				return RoundTripResult{}, err
 			}
 			applied, err := result.Ledger.Apply(fill, price)
@@ -255,6 +310,9 @@ func replayRoundTrip(
 			} else {
 				result.Counts.Buys++
 			}
+			if strategy != nil {
+				strategy.filled(observation.at, settling.riskExit)
+			}
 			sell = !sell
 			if sell {
 				nextAmount = capSellAmount(
@@ -268,34 +326,85 @@ func replayRoundTrip(
 		if !triggered {
 			continue
 		}
+		attemptAmount, feeReserve := paperAttempt(
+			policy, result.Ledger, sell, nextAmount, decision,
+		)
 		// Spend what the previous leg produced, bounded by what is actually held,
 		// so the book can never go short and the return leg cannot invent size.
-		if !canFundAttempt(
-			result.Ledger, sell, nextAmount, attemptFeeReserve(policy, sell),
-		) {
+		if !canFundAttempt(result.Ledger, sell, attemptAmount, feeReserve) {
 			result.Counts.Missed++
 			continue
 		}
-		decisionQuote, err := quoteFor(price, sell, nextAmount)
+		decisionQuote, err := quoteFor(price, sell, attemptAmount)
 		if err != nil {
+			if strategy != nil {
+				result.Counts.Missed++
+				continue
+			}
 			return RoundTripResult{}, err
 		}
-		if decisionQuote.InputAmount != nextAmount {
+		if quoteErr := validateQuote(decisionQuote); quoteErr != nil {
+			if strategy != nil {
+				result.Counts.Missed++
+				continue
+			}
+			return RoundTripResult{}, quoteErr
+		}
+		if decisionQuote.InputAmount != attemptAmount {
+			if strategy != nil {
+				result.Counts.Missed++
+				continue
+			}
 			return RoundTripResult{}, errors.New("round-trip quote changed the requested input amount")
+		}
+		passes, guardErr := adaptiveQuotePasses(
+			policy, decision, decisionQuote, price, sell,
+		)
+		if guardErr != nil {
+			result.Counts.Missed++
+			continue
+		}
+		if !passes {
+			result.Counts.Filtered++
+			continue
 		}
 		pending = &roundTripPending{
 			priceMicros: price, quote: decisionQuote, sell: sell,
+			riskExit:    decision != nil && decision.Strategy == StrategyRiskExit,
 			settleAfter: observation.at.Add(policy.Settle()),
 		}
 	}
 
 	for index := len(observations) - 1; index >= 0; index-- {
 		if observations[index].observable {
-			result.ClosingPrice = observations[index].priceMicros
+			result.ClosingPrice, err = roundTripObservationPrice(
+				policy, sell, observations[index],
+			)
+			if err != nil {
+				return RoundTripResult{}, err
+			}
 			break
 		}
 	}
 	return result, nil
+}
+
+func roundTripObservationPrice(
+	policy Policy, sell bool, observation roundTripObservation,
+) (uint64, error) {
+	if observation.primary == nil && observation.secondary == nil {
+		return observation.priceMicros, nil
+	}
+	if observation.primary == nil || observation.secondary == nil {
+		return 0, errors.New("round-trip observation has incomplete market source evidence")
+	}
+	evidence, err := pricetrigger.Evaluate(
+		triggerFor(policy, sell), *observation.primary, *observation.secondary, observation.at,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return evidence.ConservativePrice, nil
 }
 
 // thresholdMet applies the rule's own comparison, in the same direction the

@@ -33,7 +33,7 @@ type shadowChallengeResult struct {
 	Authorized                       bool      `json:"authorized"`
 	Promotable                       bool      `json:"promotable"`
 	PaperOnly                        bool      `json:"paper_only"`
-	RequiresOperatorDecision         bool      `json:"requires_operator_decision"`
+	EligibleForPaperSelection        bool      `json:"eligible_for_paper_selection"`
 	PointerUpdated                   bool      `json:"pointer_updated"`
 	From                             time.Time `json:"from"`
 	To                               time.Time `json:"to"`
@@ -126,7 +126,7 @@ func evaluateShadowChallenge(
 		}
 		// Automated challengers get one immutable forward window. Without this
 		// anchor a later bad day could turn a qualified challenger into a rejected
-		// one and allow the research loop to replace evidence awaiting an operator.
+		// one and let the research loop replace evidence awaiting paper selection.
 		evidenceNow = cutoff
 	}
 
@@ -135,18 +135,34 @@ func evaluateShadowChallenge(
 		days, evidenceNow,
 	)
 	if err != nil {
-		return shadowChallengeResult{}, fmt.Errorf("%w: champion evidence: %v", errShadowChallengeEvidencePending, err)
+		if eligibleFrom.IsZero() {
+			return shadowChallengeResult{}, fmt.Errorf("%w: champion evidence: %v", errShadowChallengeEvidencePending, err)
+		}
+		result := incompleteForwardChallenge(eligibleFrom, evidenceNow, "champion_evidence_window_incomplete")
+		return finishShadowChallenge(
+			result, base, pointerBefore, championPointer, champion, championPath,
+			championSHA256, challenger, challengerPath, challengerSHA256,
+		)
 	}
 	challengerReports, err := loadShadowReviewReports(
 		challenger.Policy, filepath.Join(challengerRoot, challenger.CandidatePolicySHA256),
 		days, evidenceNow,
 	)
 	if err != nil {
-		return shadowChallengeResult{}, fmt.Errorf("%w: challenger evidence: %v", errShadowChallengeEvidencePending, err)
+		if eligibleFrom.IsZero() {
+			return shadowChallengeResult{}, fmt.Errorf("%w: challenger evidence: %v", errShadowChallengeEvidencePending, err)
+		}
+		result := incompleteForwardChallenge(eligibleFrom, evidenceNow, "challenger_evidence_window_incomplete")
+		return finishShadowChallenge(
+			result, base, pointerBefore, championPointer, champion, championPath,
+			championSHA256, challenger, challengerPath, challengerSHA256,
+		)
 	}
 	if !eligibleFrom.IsZero() && championReports[0].From.Before(eligibleFrom) {
-		return shadowChallengeResult{}, fmt.Errorf(
-			"%w: paired evidence predates challenger eligibility", errShadowChallengeEvidencePending,
+		result := incompleteForwardChallenge(eligibleFrom, evidenceNow, "evidence_predates_challenger_eligibility")
+		return finishShadowChallenge(
+			result, base, pointerBefore, championPointer, champion, championPath,
+			championSHA256, challenger, challengerPath, challengerSHA256,
 		)
 	}
 	result, err := qualifyShadowChallenger(
@@ -156,13 +172,36 @@ func evaluateShadowChallenge(
 		return shadowChallengeResult{}, err
 	}
 	result = constrainRetrospectiveChallenge(result, eligibleFrom)
+	return finishShadowChallenge(
+		result, base, pointerBefore, championPointer, champion, championPath,
+		championSHA256, challenger, challengerPath, challengerSHA256,
+	)
+}
+
+func incompleteForwardChallenge(from, to time.Time, reason string) shadowChallengeResult {
+	return shadowChallengeResult{
+		Version: 1, Status: "challenger_not_qualified", PaperOnly: true,
+		EvaluationMode: shadow.EvaluationResetDaily,
+		From:           from.UTC(), To: to.UTC(), Reasons: []string{reason},
+	}
+}
+
+func finishShadowChallenge(
+	result shadowChallengeResult,
+	base shadow.Policy,
+	pointerBefore []byte,
+	championPointer string,
+	champion shadowPaperCandidate,
+	championPath, championSHA256 string,
+	challenger shadowPaperCandidate,
+	challengerPath, challengerSHA256 string,
+) (shadowChallengeResult, error) {
 	result.ChampionCandidatePath = championPath
 	result.ChampionCandidateSHA256 = championSHA256
 	result.ChampionPolicySHA256 = champion.CandidatePolicySHA256
 	result.ChallengerCandidatePath = challengerPath
 	result.ChallengerCandidateSHA256 = challengerSHA256
 	result.ChallengerPolicySHA256 = challenger.CandidatePolicySHA256
-
 	pointerAfter, err := securefile.ReadPrivate(championPointer, shadowCandidatePointerBytes)
 	if err != nil || !bytes.Equal(pointerBefore, pointerAfter) {
 		return shadowChallengeResult{}, errors.New("champion pointer changed while the challenge was running")
@@ -181,8 +220,9 @@ func evaluateShadowChallenge(
 func constrainRetrospectiveChallenge(
 	result shadowChallengeResult, eligibleFrom time.Time,
 ) shadowChallengeResult {
-	if eligibleFrom.IsZero() && result.Status == "challenger_qualified_for_operator_paper_selection" {
+	if eligibleFrom.IsZero() && result.Status == "challenger_qualified_for_paper_selection" {
 		result.Status = "retrospective_comparison_not_forward_qualified"
+		result.EligibleForPaperSelection = false
 		result.Reasons = append(result.Reasons, "preselection_evidence_not_forward_qualified")
 	}
 	return result
@@ -222,9 +262,8 @@ func qualifyShadowChallenger(
 
 	result := shadowChallengeResult{
 		Version: 1, Status: "challenger_not_qualified", PaperOnly: true,
-		EvaluationMode:           shadow.EvaluationResetDaily,
-		RequiresOperatorDecision: true,
-		From:                     championSummary.From, To: championSummary.To,
+		EvaluationMode: shadow.EvaluationResetDaily,
+		From:           championSummary.From, To: championSummary.To,
 		CompleteDays:           championSummary.CompleteDays,
 		RequiredFullRoundTrips: max(uint64(3), uint64(len(challengerReports)+1)/2),
 		RequiredDailyWins:      uint32(len(challengerReports)/2 + 1),
@@ -282,7 +321,8 @@ func qualifyShadowChallenger(
 		result.Reasons = append(result.Reasons, "drawdown_regressed")
 	}
 	if len(result.Reasons) == 0 {
-		result.Status = "challenger_qualified_for_operator_paper_selection"
+		result.Status = "challenger_qualified_for_paper_selection"
+		result.EligibleForPaperSelection = true
 	}
 	return result, nil
 }

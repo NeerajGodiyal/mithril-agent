@@ -96,13 +96,15 @@ Other supported tools:
   mithril-agent index status --dir ABSOLUTE_PATH
   mithril-agent index query --dir ABSOLUTE_PATH [--owner ADDRESS] [--account ADDRESS]
   mithril-agent index transactions --dir ABSOLUTE_PATH [--signature SIGNATURE] [--mention ADDRESS]
-  mithril-agent shadow policy --out PATH --observe ADDR --sell-at-usd N [--buy-at-usd N]
+  mithril-agent shadow policy --out PATH --observe ADDR (--adaptive | --sell-at-usd N [--buy-at-usd N])
   mithril-agent shadow run --policy PATH --dir PATH
   mithril-agent shadow report --policy PATH --dir PATH
   mithril-agent shadow review --policy PATH --dir PATH --days N
   mithril-agent shadow search --policy PATH --dir PATH --train-day DATE --validation-day DATE
   mithril-agent shadow select --policy PATH --candidate PATH --pointer PATH --lifecycle-lock PATH
   mithril-agent shadow challenge --policy PATH --champion-pointer PATH --challenger PATH --champion-dir PATH --challenger-dir PATH --days N
+  mithril-agent shadow auto-select --policy PATH --champion-pointer PATH --challenger-pointer PATH --champion-dir PATH --challenger-dir PATH --days N --rollback-pointer PATH --lifecycle-lock PATH
+  mithril-agent shadow restore --policy PATH --champion-pointer PATH --rollback-pointer PATH --challenger-pointer PATH --challenger-candidate-dir PATH --lifecycle-lock PATH
   mithril-agent shadow research-mcp --policy PATH --journal-dir PATH ...
   mithril-agent proposal evidence-check --primary-trust-domain NAME --secondary-trust-domain NAME --archive-probe-signature SIGNATURE
   mithril-agent proposal check --taker ADDR --input-mint ADDR --output-mint ADDR --amount N
@@ -340,6 +342,12 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		}
 		if len(args) > 1 && args[1] == "challenge" {
 			return runShadowChallenge(args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "auto-select" {
+			return runShadowAutoSelect(args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "restore" {
+			return runShadowRestore(args[2:], output)
 		}
 		if len(args) > 1 && args[1] == "research-mcp" {
 			return runShadowResearchMCP(ctx, args[2:], os.Stdin, output)
@@ -1776,8 +1784,8 @@ func runShadow(args []string, output io.Writer) error {
 			// Listing only the flag form meant `shadow --help` never mentioned
 			// the commands that do the work, so they could not be found at all.
 			_, writeErr := fmt.Fprintln(output, `Usage:
-  mithril-agent shadow policy --out PATH --observe ADDR --sell-at-usd N [--buy-at-usd N]
-                                       write a one-way or round-trip shadow policy
+  mithril-agent shadow policy --out PATH --observe ADDR (--adaptive | --sell-at-usd N [--buy-at-usd N])
+                                       write an adaptive, one-way, or round-trip shadow policy
   mithril-agent shadow run --policy PATH --dir PATH
                                        watch a live market, record what the rule
                                        would have done. Holds no key.
@@ -1791,19 +1799,32 @@ func runShadow(args []string, output io.Writer) error {
                                  --challenger-dir PATH --days N
                                        compare paired forward paper evidence;
                                        read-only and never selects
-  mithril-agent shadow backtest --policy PATH --dir PATH --buy-at-usd N
+  mithril-agent shadow backtest --policy PATH --dir PATH [--buy-at-usd N]
                                 [--spread-bps N] [--day DATE] [--json]
                                        score a sell-then-buy-back ROUND TRIP over
-                                       recorded prices, on one set of books
+                                       recorded prices; fixed policies require
+                                       the buy price
   mithril-agent shadow search --policy PATH --dir PATH
                               --train-day DATE --validation-day DATE
                               [--spread-bps N] [--candidate-out PATH]
-                                       choose thresholds on one recorded day and
-                                       score them on a later untouched day;
+                                       choose bounded parameters on one recorded
+                                       day and score the exact candidate on a
+                                       later untouched day;
                                        research only, never authorizes
   mithril-agent shadow select --policy PATH --candidate PATH --pointer PATH --lifecycle-lock PATH
                                        atomically select an immutable paper
                                        candidate for startup/next UTC day
+  mithril-agent shadow auto-select --policy PATH --champion-pointer PATH
+                                   --challenger-pointer PATH --champion-dir PATH
+                                   --challenger-dir PATH --days N --rollback-pointer PATH
+                                   --lifecycle-lock PATH
+                                       select only a forward-qualified paper
+                                       challenger and preserve rollback
+  mithril-agent shadow restore --policy PATH --champion-pointer PATH
+                               --rollback-pointer PATH --challenger-pointer PATH
+                               --challenger-candidate-dir PATH --lifecycle-lock PATH
+                                       restore the paper champion and retire
+                                       the rolled-back challenger
   mithril-agent shadow research-mcp --policy PATH --journal-dir PATH ...
                                        serve bounded local paper-research tools;
                                        cannot authorize, sign, or submit

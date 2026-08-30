@@ -268,6 +268,18 @@ func attemptFeeReserve(policy Policy, sell bool) uint64 {
 	return policy.FeeLamports
 }
 
+func paperAttempt(
+	policy Policy, ledger Ledger, sell bool, normalAmount uint64, decision *AdaptiveDecision,
+) (uint64, uint64) {
+	if decision != nil && decision.Strategy == StrategyRiskExit && sell {
+		if ledger.BaseUnits <= policy.FeeLamports {
+			return 0, policy.FeeLamports
+		}
+		return ledger.BaseUnits - policy.FeeLamports, policy.FeeLamports
+	}
+	return normalAmount, attemptFeeReserve(policy, sell)
+}
+
 // mark revalues the book at the current price and updates the high-water mark
 // and the worst peak-to-trough fall seen so far.
 func (l Ledger) mark(priceMicros uint64) (Ledger, error) {

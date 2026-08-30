@@ -25,7 +25,7 @@ import (
 // be modelled from a spread the operator supplies — and the report says so on
 // its own face. A backtest that hides its assumptions is worse than no backtest.
 const shadowBacktestUsage = `Usage: mithril-agent shadow backtest --policy PATH --dir PATH
-                              --buy-at-usd PRICE [--spread-bps N] [--day YYYY-MM-DD] [--json]
+                              [--buy-at-usd PRICE] [--spread-bps N] [--day YYYY-MM-DD] [--json]
 
 Scores a sell-then-buy-back round trip against the prices a shadow run already
 recorded, on ONE set of books, with the same ledger and report the live observer
@@ -33,8 +33,8 @@ uses.
 
   --policy PATH     the shadow policy whose sell rule and sizing to reuse
   --dir PATH        the directory holding recorded shadow journals
-  --buy-at-usd P    buy back at or below this price; must be BELOW the policy's
-                    sell price, or one reading could satisfy both legs
+  --buy-at-usd P    fixed policies only: buy back at or below this price;
+                    adaptive policies derive both directions from the market
   --spread-bps N    how much worse than the oracle the pool is assumed to fill,
                     each way (default 100 = 1%). This is a MODEL, not a quote.
   --day DATE        which recorded UTC day to score (default: the latest)
@@ -59,34 +59,39 @@ func runShadowBacktest(args []string, output io.Writer) error {
 		}
 		return err
 	}
-	if flags.NArg() != 0 || *policyPath == "" || *directory == "" || *buyAtUSD == "" {
-		return errors.New("shadow backtest requires --policy, --dir and --buy-at-usd")
+	if flags.NArg() != 0 || *policyPath == "" || *directory == "" {
+		return errors.New("shadow backtest requires --policy and --dir")
 	}
 	// A pool that costs nothing is the single easiest way to make a paper
 	// result flatter itself, and 100% would consume every trade.
 	if *spreadBPS == 0 || *spreadBPS >= 10_000 {
 		return errors.New("--spread-bps must be between 1 and 9999")
 	}
-	buyAtMicros, err := parseUSDThreshold(*buyAtUSD, "buy price")
-	if err != nil {
-		return err
-	}
-
 	policy, err := loadShadowPolicy(*policyPath)
 	if err != nil {
 		return err
 	}
 	journalPolicy := policy
-	// The return leg is the policy's own rule with the direction flipped, so a
-	// round trip cannot silently read a different feed or a different source
-	// pair than the sell it is paired with.
-	returnLeg := policy.Trigger
-	returnLeg.Direction = pricetrigger.BuyAtOrBelow
-	returnLeg.ThresholdMicros = buyAtMicros
-	if !policy.IsSell() {
-		returnLeg.Direction = pricetrigger.SellAtOrAbove
+	if policy.Adaptive == nil {
+		if *buyAtUSD == "" {
+			return errors.New("a fixed shadow policy requires --buy-at-usd")
+		}
+		buyAtMicros, parseErr := parseUSDThreshold(*buyAtUSD, "buy price")
+		if parseErr != nil {
+			return parseErr
+		}
+		// The return leg is the policy's own rule with the direction flipped, so a
+		// round trip cannot silently read a different feed or source pair.
+		returnLeg := policy.Trigger
+		returnLeg.Direction = pricetrigger.BuyAtOrBelow
+		returnLeg.ThresholdMicros = buyAtMicros
+		if !policy.IsSell() {
+			returnLeg.Direction = pricetrigger.SellAtOrAbove
+		}
+		policy.ReturnTrigger = &returnLeg
+	} else if *buyAtUSD != "" {
+		return errors.New("an adaptive shadow policy does not accept --buy-at-usd")
 	}
-	policy.ReturnTrigger = &returnLeg
 
 	chosen, err := chooseShadowDay(*directory, *day)
 	if err != nil {
@@ -230,8 +235,8 @@ func writeBacktest(
 	}
 	w := func(format string, args ...any) { fmt.Fprintf(output, format, args...) }
 	w("\nRound trip over recorded prices — %s\n", day)
-	w("  legs       %d sell(s), %d buy(s), %d refused\n",
-		result.Counts.Sells, result.Counts.Buys, result.Counts.Refused)
+	w("  legs       %d sell(s), %d buy(s), %d refused, %d filtered\n",
+		result.Counts.Sells, result.Counts.Buys, result.Counts.Refused, result.Counts.Filtered)
 	w("  signals    %d sell, %d buy\n",
 		result.Counts.SellSignals, result.Counts.BuySignals)
 	w("  realized   $%s\n", formatSignedMicros(report.RealizedMicros))

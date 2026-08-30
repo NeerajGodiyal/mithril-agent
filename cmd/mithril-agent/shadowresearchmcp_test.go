@@ -148,7 +148,7 @@ func TestShadowResearchMCPWritesOnlyAnImmutablePaperChallenger(t *testing.T) {
 		t.Fatal(err)
 	}
 	if receipt.Status != "paper_challenger_ready" || receipt.Authorized ||
-		receipt.Promotable || !receipt.PaperOnly || !receipt.RequiresOperatorDecision ||
+		receipt.Promotable || !receipt.PaperOnly || !receipt.ForwardEvidenceRequired ||
 		!receipt.ChallengerPointerUpdated || receipt.ChampionPointerUpdated ||
 		receipt.ArtifactSHA256 == "" ||
 		filepath.Base(receipt.Artifact) != receipt.Artifact || strings.Contains(receipt.Artifact, "..") {
@@ -644,9 +644,9 @@ func TestShadowResearchRotatesOnlyAfterACompleteRejectedChallenge(t *testing.T) 
 	}
 }
 
-func TestShadowResearchRetainsQualifiedChallengerForOperator(t *testing.T) {
+func TestShadowResearchRetainsQualifiedChallengerUntilPaperSelection(t *testing.T) {
 	if err := validateShadowResearchRotationStatus(
-		"challenger_qualified_for_operator_paper_selection",
+		"challenger_qualified_for_paper_selection",
 	); err == nil || !strings.Contains(err.Error(), "retained") {
 		t.Fatalf("qualified challenger retention error = %v", err)
 	}
@@ -656,12 +656,12 @@ func TestShadowResearchRetainsQualifiedChallengerForOperator(t *testing.T) {
 	if err := validateShadowResearchRotationStatus("challenger_not_qualified"); err != nil {
 		t.Fatalf("rejected challenger could not rotate: %v", err)
 	}
-	if err := validateShadowResearchRotationStatus("challenger_promoted_by_operator"); err != nil {
-		t.Fatalf("operator-promoted challenger could not rotate: %v", err)
+	if err := validateShadowResearchRotationStatus("challenger_selected_as_paper_champion"); err != nil {
+		t.Fatalf("paper-selected challenger could not rotate: %v", err)
 	}
 }
 
-func TestShadowResearchRecognizesOperatorPromotionBeforeRotation(t *testing.T) {
+func TestShadowResearchRecognizesPaperSelectionBeforeRotation(t *testing.T) {
 	policy := validShadowPolicy()
 	policyPath := writeShadowPolicy(t, policy)
 	root := privateTestDirectory(t)
@@ -698,7 +698,7 @@ func TestShadowResearchRecognizesOperatorPromotionBeforeRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	differentPath := filepath.Join(root, "same-policy-different-artifact.json")
-	activeCandidate.Hypothesis.Thesis = "Same thresholds do not make this a byte-identical promoted research artifact."
+	activeCandidate.Hypothesis.Thesis = "Same thresholds do not make this a byte-identical selected research artifact."
 	if err := writeShadowPaperCandidate(differentPath, activeCandidate); err != nil {
 		t.Fatal(err)
 	}
@@ -709,36 +709,36 @@ func TestShadowResearchRecognizesOperatorPromotionBeforeRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if status, err := controller.challengeStatus(now); err == nil ||
-		status.Status == "challenger_promoted_by_operator" ||
+		status.Status == "challenger_selected_as_paper_champion" ||
 		!strings.Contains(err.Error(), "artifact digest differs") {
-		t.Fatalf("different artifact was mistaken for promotion: %+v, %v", status, err)
+		t.Fatalf("different artifact was mistaken for paper selection: %+v, %v", status, err)
 	}
 
-	promotedPath := filepath.Join(root, "promoted.json")
+	selectedPath := filepath.Join(root, "selected.json")
 	contents, err := os.ReadFile(firstPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(promotedPath, contents, 0o600); err != nil {
+	if err := os.WriteFile(selectedPath, contents, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := runShadowSelect([]string{
-		"--policy", policyPath, "--candidate", promotedPath, "--pointer", championPointer,
+		"--policy", policyPath, "--candidate", selectedPath, "--pointer", championPointer,
 		"--lifecycle-lock", filepath.Join(root, "lifecycle.lock"),
 	}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	status, err := controller.challengeStatus(now)
-	if err != nil || status.Status != "challenger_promoted_by_operator" ||
+	if err != nil || status.Status != "challenger_selected_as_paper_champion" ||
 		status.ActiveArtifact != first.Artifact || status.ChampionPointerUpdated {
-		t.Fatalf("operator promotion status = %+v, %v", status, err)
+		t.Fatalf("paper selection status = %+v, %v", status, err)
 	}
 	retry, err := controller.createCandidate(validShadowResearchInput(), now)
 	if err != nil || retry.Artifact != first.Artifact || retry.ChallengerPointerUpdated {
-		t.Fatalf("post-promotion exact retry = %+v, %v", retry, err)
+		t.Fatalf("post-selection exact retry = %+v, %v", retry, err)
 	}
 	next := validShadowResearchInput()
-	next.Hypothesis.Thesis = "Prepare a new challenger only after the operator promoted the prior artifact."
+	next.Hypothesis.Thesis = "Prepare a new challenger only after the prior artifact became paper champion."
 	pointerBefore, err := os.ReadFile(challengerPointer)
 	if err != nil {
 		t.Fatal(err)
@@ -763,7 +763,7 @@ func TestShadowResearchRecognizesOperatorPromotionBeforeRotation(t *testing.T) {
 		next, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
 	)
 	if err != nil || second.Artifact == first.Artifact || !second.ChallengerPointerUpdated {
-		t.Fatalf("post-promotion rotation = %+v, %v", second, err)
+		t.Fatalf("post-selection rotation = %+v, %v", second, err)
 	}
 }
 

@@ -33,9 +33,9 @@ func TestShadowChallengeQualifiesPairedForwardPaperEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "challenger_qualified_for_operator_paper_selection" ||
+	if result.Status != "challenger_qualified_for_paper_selection" ||
 		result.Authorized || result.Promotable || !result.PaperOnly ||
-		!result.RequiresOperatorDecision || result.PointerUpdated ||
+		!result.EligibleForPaperSelection || result.PointerUpdated ||
 		result.ChallengerFullRoundTrips != 7 || result.ChallengerDailyWins != 7 ||
 		result.AggregateAdvantageMicros != 14_000 ||
 		result.RequiredAggregateAdvantageMicros != 7_000 || len(result.Reasons) != 0 {
@@ -45,7 +45,8 @@ func TestShadowChallengeQualifiesPairedForwardPaperEvidence(t *testing.T) {
 
 func TestRetrospectiveChallengeCannotEmitAForwardQualification(t *testing.T) {
 	qualified := shadowChallengeResult{
-		Status: "challenger_qualified_for_operator_paper_selection", PaperOnly: true,
+		Status: "challenger_qualified_for_paper_selection", PaperOnly: true,
+		EligibleForPaperSelection: true,
 	}
 	retrospective := constrainRetrospectiveChallenge(qualified, time.Time{})
 	if retrospective.Status != "retrospective_comparison_not_forward_qualified" ||

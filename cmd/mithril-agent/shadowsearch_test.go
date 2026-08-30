@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -35,6 +37,236 @@ func TestShadowSearchUsesTrainingOnlyAndCannotAuthorize(t *testing.T) {
 		result.Training.FullRoundTrips == 0 || result.Validation.FullRoundTrips == 0 {
 		t.Fatalf("result = %+v", result)
 	}
+}
+
+func TestAdaptiveShadowSearchKeepsRiskLimitsFixedAndBuildsAReplayableCandidate(t *testing.T) {
+	policy := adaptiveShadowSearchPolicy()
+	if err := policy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	prices := []uint64{
+		100_000_000, 98_000_000, 96_000_000, 94_000_000, 94_000_000,
+		96_000_000, 98_000_000, 100_000_000, 102_000_000, 102_000_000,
+		100_000_000, 98_000_000, 96_000_000, 94_000_000, 94_000_000,
+		96_000_000, 98_000_000, 100_000_000, 102_000_000, 102_000_000,
+	}
+	result, err := searchShadowCandidate(policy, prices, prices, 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Candidate.Adaptive == nil || result.CandidatesEvaluated < 2 ||
+		result.Training.FullRoundTrips == 0 || result.Validation.FullRoundTrips == 0 {
+		t.Fatalf("adaptive search did not produce a usable candidate: %+v", result)
+	}
+	wantRisk := *policy.Adaptive
+	gotRisk := *result.Candidate.Adaptive
+	wantRisk.FastWindow, wantRisk.SlowWindow, wantRisk.MinimumSignalBPS =
+		gotRisk.FastWindow, gotRisk.SlowWindow, gotRisk.MinimumSignalBPS
+	if gotRisk != wantRisk {
+		t.Fatalf("adaptive search changed a risk boundary: got %+v want %+v", gotRisk, wantRisk)
+	}
+	result.TrainDay, result.ValidationDay = "2026-08-17", "2026-08-18"
+	provenance := func(day string) shadowJournalProvenance {
+		return shadowJournalProvenance{Day: day, Records: 2, ChainHeadSHA256: strings.Repeat("a", 64)}
+	}
+	candidate, err := newShadowPaperCandidate(
+		policy, result, provenance(result.TrainDay), provenance(result.ValidationDay),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := candidate.validateAgainst(policy); err != nil {
+		t.Fatalf("adaptive candidate does not replay against its base: %v", err)
+	}
+	tampered := result
+	changed := *tampered.Candidate.Adaptive
+	changed.MaxDrawdownBPS++
+	tampered.Candidate.Adaptive = &changed
+	if _, err := newShadowPaperCandidate(
+		policy, tampered, provenance(result.TrainDay), provenance(result.ValidationDay),
+	); err == nil {
+		t.Fatal("adaptive search accepted a changed drawdown boundary")
+	}
+}
+
+func TestAdaptiveShadowSearchConsumesARealReplayableRunnerJournal(t *testing.T) {
+	root := privateTestDirectory(t)
+	policy := adaptiveShadowSearchPolicy()
+	day := "2026-08-17"
+	start, _ := time.Parse("2006-01-02", day)
+	primary := &shadowSearchReader{identity: policy.Trigger.PrimarySourceSHA256}
+	secondary := &shadowSearchReader{identity: policy.Trigger.SecondarySourceSHA256}
+	quotePrimary := &shadowSearchReader{
+		identity: policy.QuotePeg.PrimarySourceSHA256, price: 1_000_000,
+	}
+	quoteSecondary := &shadowSearchReader{
+		identity: policy.QuotePeg.SecondarySourceSHA256, price: 1_000_000,
+	}
+	roll, err := newDailyJournal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := shadow.NewRunner(
+		policy, primary, secondary, shadowSearchUnavailableQuoter{}, roll,
+		quotePrimary, quoteSecondary,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prices := []uint64{
+		100_000_000, 98_000_000, 96_000_000, 94_000_000, 94_000_000,
+		96_000_000, 98_000_000, 100_000_000, 102_000_000, 102_000_000,
+		100_000_000, 98_000_000, 96_000_000, 94_000_000, 94_000_000,
+		96_000_000, 98_000_000, 100_000_000, 102_000_000, 102_000_000,
+	}
+	for index, price := range prices {
+		at := start.Add(time.Duration(index+1) * time.Minute)
+		primary.price, primary.at = price, at
+		secondary.price, secondary.at = price, at
+		quotePrimary.at, quoteSecondary.at = at, at
+		if _, err := runner.Step(t.Context(), at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := runner.ClosePeriod(
+		start.Add(24*time.Hour-time.Nanosecond), prices[len(prices)-1],
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := roll.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ticks, _, err := readShadowSearchJournal(
+		filepath.Join(root, "shadow-"+day+".jsonl"), day, policy,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := searchShadowCandidateTicks(policy, ticks, ticks, 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Candidate.Adaptive == nil || result.Training.FullRoundTrips == 0 ||
+		result.Validation.FullRoundTrips == 0 {
+		t.Fatalf("real adaptive journal did not reach the learner: %+v", result)
+	}
+}
+
+func TestAdaptiveSearchAcceptsAPendingDecisionPeriodClose(t *testing.T) {
+	root := privateTestDirectory(t)
+	policy := adaptiveShadowSearchPolicy()
+	day := "2026-08-17"
+	start, _ := time.Parse("2006-01-02", day)
+	primary := &shadowSearchReader{identity: policy.Trigger.PrimarySourceSHA256}
+	secondary := &shadowSearchReader{identity: policy.Trigger.SecondarySourceSHA256}
+	quotePrimary := &shadowSearchReader{
+		identity: policy.QuotePeg.PrimarySourceSHA256, price: 1_000_000,
+	}
+	quoteSecondary := &shadowSearchReader{
+		identity: policy.QuotePeg.SecondarySourceSHA256, price: 1_000_000,
+	}
+	roll, err := newDailyJournal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quoter := shadowSearchQuoter(func(sell bool, amount uint64) shadow.Quote {
+		price := primary.price
+		output := amount * price / 1_000_000_000
+		if !sell {
+			output = amount * 1_000_000_000 / price
+		}
+		minimum := (output*uint64(10_000-policy.SlippageBPS) + 9_999) / 10_000
+		return shadow.Quote{InputAmount: amount, EstimatedOutput: output, MinimumOutput: minimum}
+	})
+	runner, err := shadow.NewRunner(
+		policy, primary, secondary, quoter, roll, quotePrimary, quoteSecondary,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prices := []uint64{100_000_000, 98_000_000, 96_000_000, 94_000_000}
+	for index, price := range prices {
+		at := start.Add(time.Duration(index+1) * time.Minute)
+		primary.price, primary.at = price, at
+		secondary.price, secondary.at = price, at
+		quotePrimary.at, quoteSecondary.at = at, at
+		if _, err := runner.Step(t.Context(), at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := runner.ClosePeriod(
+		start.Add(24*time.Hour-time.Nanosecond), prices[len(prices)-1],
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := roll.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ticks, _, err := readShadowSearchJournal(
+		filepath.Join(root, "shadow-"+day+".jsonl"), day, policy,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := ticks[len(ticks)-1]
+	if last.Event != shadow.EventMissed || !last.PeriodClose ||
+		last.PrimaryPrice != nil || last.SecondaryPrice != nil {
+		t.Fatalf("adaptive terminal close = %+v", last)
+	}
+}
+
+func adaptiveShadowSearchPolicy() shadow.Policy {
+	policy := validShadowPolicy()
+	policy.Trigger.ThresholdMicros = pricetrigger.MaxPriceMicros
+	policy.SlippageBPS = 10
+	policy.FeeLamports = 1
+	buy := policy.Trigger
+	buy.Direction = pricetrigger.BuyAtOrBelow
+	buy.ThresholdMicros = 1
+	policy.ReturnTrigger = &buy
+	policy.Adaptive = &shadow.AdaptivePolicy{
+		Version:    shadow.AdaptiveVersion,
+		FastWindow: 2, SlowWindow: 4,
+		MinimumSignalBPS:         150,
+		MaxVolatilityBPS:         2_000,
+		MaxQuoteImpactBPS:        300,
+		MaxDrawdownBPS:           5_000,
+		MaxObservationGapSeconds: 120,
+	}
+	return policy
+}
+
+type shadowSearchReader struct {
+	identity string
+	price    uint64
+	at       time.Time
+}
+
+func (reader *shadowSearchReader) IdentitySHA256() string { return reader.identity }
+
+func (reader *shadowSearchReader) Latest(
+	_ context.Context, feed string,
+) (pricetrigger.Sample, error) {
+	return pricetrigger.Sample{
+		SourceSHA256: reader.identity, Feed: feed,
+		PriceMicros: reader.price, PublishedAt: reader.at,
+	}, nil
+}
+
+type shadowSearchUnavailableQuoter struct{}
+
+func (shadowSearchUnavailableQuoter) Quote(
+	context.Context, string, bool, uint64, uint16,
+) (shadow.Quote, error) {
+	return shadow.Quote{}, errors.New("modelled venue unavailable")
+}
+
+type shadowSearchQuoter func(sell bool, amount uint64) shadow.Quote
+
+func (quote shadowSearchQuoter) Quote(
+	_ context.Context, _ string, sell bool, amount uint64, _ uint16,
+) (shadow.Quote, error) {
+	return quote(sell, amount), nil
 }
 
 func TestShadowSearchCLIReadsSeparateHashChainedDays(t *testing.T) {
@@ -305,10 +537,12 @@ func TestShadowSearchRejectsTicksTheRunnerCouldNotEmit(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := start.Add(time.Minute)
+	primary, secondary := shadowSearchSamples(policy, policy.Trigger.ThresholdMicros, at)
 	if _, err := store.Append(at, shadow.EventWaiting, "", shadow.Tick{
 		At: at, Event: shadow.EventWaiting, PriceMicros: policy.Trigger.ThresholdMicros,
 		EquityMicros: equity, QuoteLowerMicros: policy.QuotePeg.MinimumMicros,
 		QuoteUpperMicros: policy.QuotePeg.MaximumMicros,
+		PrimaryPrice:     &primary, SecondaryPrice: &secondary,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -448,10 +682,12 @@ func TestShadowSearchRequiresACompletedUTCJournal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	primary, secondary := shadowSearchSamples(policy, 150_000_000, at)
 	if _, err := store.Append(at, shadow.EventWaiting, "", shadow.Tick{
 		At: at, Event: shadow.EventWaiting, PriceMicros: 150_000_000, EquityMicros: equity,
 		QuoteLowerMicros: policy.QuotePeg.MinimumMicros,
 		QuoteUpperMicros: policy.QuotePeg.MaximumMicros,
+		PrimaryPrice:     &primary, SecondaryPrice: &secondary,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -527,6 +763,8 @@ func writeShadowSearchJournal(
 		tick := shadow.Tick{
 			At: at, Event: event, PriceMicros: price, Triggered: triggered, EquityMicros: equity,
 		}
+		primary, secondary := shadowSearchSamples(policy, price, at)
+		tick.PrimaryPrice, tick.SecondaryPrice = &primary, &secondary
 		if policy.QuotePeg != nil {
 			tick.QuoteLowerMicros = policy.QuotePeg.MinimumMicros
 			tick.QuoteUpperMicros = policy.QuotePeg.MaximumMicros
@@ -543,4 +781,18 @@ func writeShadowSearchJournal(
 			t.Fatal(err)
 		}
 	}
+}
+
+func shadowSearchSamples(
+	policy shadow.Policy, price uint64, at time.Time,
+) (pricetrigger.Sample, pricetrigger.Sample) {
+	primary := pricetrigger.Sample{
+		SourceSHA256: policy.Trigger.PrimarySourceSHA256,
+		Feed:         policy.Trigger.Feed,
+		PriceMicros:  price,
+		PublishedAt:  at,
+	}
+	secondary := primary
+	secondary.SourceSHA256 = policy.Trigger.SecondarySourceSHA256
+	return primary, secondary
 }

@@ -33,6 +33,7 @@ const (
 	KindOrderFilled     = "order_filled"
 	KindOrderRefused    = "order_refused"
 	KindOrderMissed     = "order_missed"
+	KindRiskHalted      = "risk_halted"
 	KindPeriodClosed    = "period_closed"
 )
 
@@ -177,7 +178,7 @@ func eventID(kind, key string) string {
 func validKind(kind string) bool {
 	switch kind {
 	case KindStrategyActive, KindStrategyChanged, KindOrderOpened, KindOrderFilled,
-		KindOrderRefused, KindOrderMissed, KindPeriodClosed:
+		KindOrderRefused, KindOrderMissed, KindRiskHalted, KindPeriodClosed:
 		return true
 	default:
 		return false

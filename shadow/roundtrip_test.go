@@ -23,6 +23,79 @@ func roundTripPolicy(t *testing.T, spreadBPS uint16) Policy {
 	return policy
 }
 
+func TestRoundTripRecomputesDirectionSpecificPricesFromSourceEvidence(t *testing.T) {
+	policy := sellPolicy()
+	policy.Trigger.ThresholdMicros = 99_000_000
+	buy := policy.Trigger
+	buy.Direction = pricetrigger.BuyAtOrBelow
+	buy.ThresholdMicros = 98_000_000
+	policy.ReturnTrigger = &buy
+	now := time.Unix(1_700_000_000, 0).UTC()
+	makeTick := func(at time.Time, sourcePrice uint64) Tick {
+		primary := pricetrigger.Sample{
+			SourceSHA256: policy.Trigger.PrimarySourceSHA256, Feed: policy.Trigger.Feed,
+			PriceMicros: sourcePrice, ConfidenceMicros: 1_000_000, PublishedAt: at,
+		}
+		secondary := primary
+		secondary.SourceSHA256 = policy.Trigger.SecondarySourceSHA256
+		return Tick{
+			At: at, Event: EventWaiting, PriceMicros: sourcePrice - 1_000_000,
+			PrimaryPrice: &primary, SecondaryPrice: &secondary,
+		}
+	}
+	ticks := []Tick{
+		makeTick(now, 100_000_000),
+		makeTick(now.Add(policy.Settle()), 100_000_000),
+		makeTick(now.Add(2*policy.Settle()), 97_000_000),
+		makeTick(now.Add(3*policy.Settle()), 97_000_000),
+	}
+	pool := tightQuote()
+	var buyPrices []uint64
+	_, err := ReplayRoundTripTicks(policy, ticks, func(price uint64, sell bool, amount uint64) (Quote, error) {
+		if !sell {
+			buyPrices = append(buyPrices, price)
+		}
+		return pool(price, sell, amount)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buyPrices) == 0 || buyPrices[0] != 98_000_000 {
+		t.Fatalf("buy candidate reused the recorded sell price: buy prices=%v", buyPrices)
+	}
+}
+
+func TestRoundTripClosingMarkUsesTheCandidateFinalDirection(t *testing.T) {
+	policy := sellPolicy()
+	policy.Trigger.ThresholdMicros = 99_000_000
+	buy := policy.Trigger
+	buy.Direction = pricetrigger.BuyAtOrBelow
+	buy.ThresholdMicros = 1
+	policy.ReturnTrigger = &buy
+	now := time.Unix(1_700_000_000, 0).UTC()
+	makeTick := func(at time.Time) Tick {
+		primary := pricetrigger.Sample{
+			SourceSHA256: policy.Trigger.PrimarySourceSHA256, Feed: policy.Trigger.Feed,
+			PriceMicros: 100_000_000, ConfidenceMicros: 1_000_000, PublishedAt: at,
+		}
+		secondary := primary
+		secondary.SourceSHA256 = policy.Trigger.SecondarySourceSHA256
+		return Tick{
+			At: at, Event: EventWaiting, PriceMicros: 99_000_000,
+			PrimaryPrice: &primary, SecondaryPrice: &secondary,
+		}
+	}
+	result, err := ReplayRoundTripTicks(policy, []Tick{
+		makeTick(now), makeTick(now.Add(policy.Settle())),
+	}, tightQuote())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Counts.Sells != 1 || result.ClosingPrice != 101_000_000 {
+		t.Fatalf("final buy-side mark was not recomputed: %+v", result)
+	}
+}
+
 // A round trip is not the sum of two independent decisions: the second leg
 // spends exactly what the first produced, and the spread plus two fees comes
 // out of one book. Running the legs separately cannot show that, which is why

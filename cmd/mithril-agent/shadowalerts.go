@@ -37,13 +37,12 @@ func (s *shadowRun) alertTick(tick shadow.Tick, nextSell bool) error {
 	key := s.policySHA256 + "/" + tick.At.Format(time.RFC3339Nano) + "/" + tick.Event
 	switch {
 	case tick.Event == shadow.EventSignal && tick.DecisionQuote != nil:
-		input, output := shadowAssets(s.policy, nextSell)
+		input, _ := shadowAssets(s.policy, nextSell)
 		message := fmt.Sprintf(
-			"PAPER SIMULATION — 🟡 ORDER PLACED\n%s SOL · reference $%s\n%s %s → about %s %s\n%s",
-			shadowSide(nextSell), formatShadowAmount(tick.PriceMicros, 6),
+			"PAPER SIMULATION — 🟡 %s ORDER\n%s %s · ref $%s%s\n%s",
+			shadowSide(nextSell),
 			formatShadowAmount(tick.DecisionQuote.InputAmount, input.decimals), input.name,
-			formatShadowAmount(tick.DecisionQuote.EstimatedOutput, output.decimals), output.name,
-			paperDisclaimer,
+			formatShadowAmount(tick.PriceMicros, 6), adaptiveDecisionLine(tick.Decision), paperDisclaimer,
 		)
 		return s.appendAlert(tick.At, paperstatus.KindOrderOpened, key, message)
 	case tick.Event == shadow.EventFilled && tick.Fill != nil && tick.Fill.Filled:
@@ -53,7 +52,7 @@ func (s *shadowRun) alertTick(tick shadow.Tick, nextSell bool) error {
 			price = tick.PriceMicros
 		}
 		message := fmt.Sprintf(
-			"PAPER SIMULATION — 🟢 %s\n%s %s → %s %s · reference $%s\nDaily paper equity $%s\n%s",
+			"PAPER SIMULATION — 🟢 %s\n%s %s → %s %s · ref $%s\nEquity $%s\n%s",
 			shadowFillVerb(tick.Fill.Sell),
 			formatShadowAmount(tick.Fill.SpentUnits, input.decimals), input.name,
 			formatShadowAmount(tick.Fill.ReceivedUnits, output.decimals), output.name,
@@ -62,11 +61,20 @@ func (s *shadowRun) alertTick(tick shadow.Tick, nextSell bool) error {
 		return s.appendAlert(tick.At, paperstatus.KindOrderFilled, key, message)
 	case tick.Event == shadow.EventRefused && tick.Fill != nil:
 		message := fmt.Sprintf(
-			"PAPER SIMULATION — ⚪ ORDER REFUSED\n%s · %s\n%s",
+			"PAPER SIMULATION — ⚪ %s REFUSED\n%s\n%s",
 			shadowSide(tick.Fill.Sell), tick.Fill.Refusal, paperDisclaimer,
 		)
 		return s.appendAlert(tick.At, paperstatus.KindOrderRefused, key, message)
-	case tick.Event == shadow.EventMissed || tick.Event == shadow.EventUnobservable && tick.DecisionMissed:
+	case tick.Event == shadow.EventWaiting && tick.Decision != nil &&
+		(tick.Decision.Reason == "drawdown_halt" || tick.Decision.Reason == "risk_halt"):
+		message := fmt.Sprintf(
+			"PAPER SIMULATION — 🔴 RISK PAUSED\nDrawdown limit reached. No new paper orders today.\n%s",
+			paperDisclaimer,
+		)
+		riskKey := s.policySHA256 + "/" + dayKey(tick.At) + "/risk-halt"
+		return s.appendAlert(tick.At, paperstatus.KindRiskHalted, riskKey, message)
+	case tick.Event == shadow.EventMissed && tick.DecisionQuote == nil ||
+		tick.Event == shadow.EventUnobservable && tick.DecisionMissed:
 		reason := "the decision could not be priced or settled with valid current evidence"
 		if tick.Reason != "" {
 			reason = strings.ReplaceAll(string(tick.Reason), "_", " ")
@@ -108,8 +116,9 @@ func (s *shadowRun) alertReport(report shadow.Report) error {
 		period = "UTC DAY CLOSED"
 	}
 	message := fmt.Sprintf(
-		"PAPER SIMULATION — 📊 %s\n%d filled · %d refused · %d missed · %d unavailable\nVs hold %s USD · Policy %s\n%s",
-		period, report.Counts.Fills, report.Counts.Refused, report.Counts.Missed, report.Counts.Unobservable,
+		"PAPER SIMULATION — 📊 %s\n%d filled · %d filtered · %d refused · %d missed · %d unavailable\nVs hold %s USD · Policy %s\n%s",
+		period, report.Counts.Fills, report.Counts.Filtered, report.Counts.Refused,
+		report.Counts.Missed, report.Counts.Unobservable,
 		formatSignedMicros(report.VersusHoldMicros), s.alertPolicyID(), paperDisclaimer,
 	)
 	key := s.policySHA256 + "/" + report.From.Format("2006-01-02") + "/" + report.To.Format(time.RFC3339Nano)
@@ -178,6 +187,9 @@ func shadowMarket(policy shadow.Policy) string {
 }
 
 func shadowThresholds(policy shadow.Policy) string {
+	if policy.Adaptive != nil {
+		return "adaptive trend + range reversion"
+	}
 	if policy.ReturnTrigger == nil {
 		return fmt.Sprintf("trigger %s $%s", triggerComparator(policy.Trigger.Direction),
 			formatShadowAmount(policy.Trigger.ThresholdMicros, 6))
@@ -188,6 +200,17 @@ func shadowThresholds(policy shadow.Policy) string {
 	}
 	return fmt.Sprintf("sell at or above $%s and buy at or below $%s",
 		formatShadowAmount(sell.ThresholdMicros, 6), formatShadowAmount(buy.ThresholdMicros, 6))
+}
+
+func adaptiveDecisionLine(decision *shadow.AdaptiveDecision) string {
+	if decision == nil {
+		return ""
+	}
+	line := strings.ReplaceAll(decision.Reason, "_", " ")
+	if decision.SignalBPS == 0 {
+		return "\n" + line
+	}
+	return fmt.Sprintf("\n%s · signal %d bps", line, decision.SignalBPS)
 }
 
 func triggerComparator(direction pricetrigger.Direction) string {

@@ -58,7 +58,8 @@ type Report struct {
 	// runner was down, so downtime cannot look like perfect market coverage.
 	ExpectedTicks uint64 `json:"expected_ticks"`
 	ObservableBPS int32  `json:"observable_bps"`
-	// ActedBPS is the share of signals that reached a settled decision.
+	// ActedBPS is the share of executable signals that reached settlement after
+	// excluding deferred and deliberately filtered observations.
 	ActedBPS int32 `json:"acted_bps"`
 }
 
@@ -221,8 +222,9 @@ func (r Report) Render(out io.Writer) error {
 	if err := write("What this UTC-period simulation modeled"); err != nil {
 		return err
 	}
-	if err := write("  %d observations out of %d expected, %d signals, %d trades, %d refused by the slippage floor",
-		r.Counts.Ticks, r.ExpectedTicks, r.Counts.Signals, r.Counts.Fills, r.Counts.Refused); err != nil {
+	if err := write("  %d observations out of %d expected, %d signals, %d trades, %d refused, %d filtered by the quote gate",
+		r.Counts.Ticks, r.ExpectedTicks, r.Counts.Signals, r.Counts.Fills,
+		r.Counts.Refused, r.Counts.Filtered); err != nil {
 		return err
 	}
 	if err := write("  %d signals could not be acted on, %d ticks could not be read",
@@ -285,14 +287,18 @@ func observed(counts Counts) uint64 {
 	return counts.Ticks - counts.Unobservable
 }
 
-// actionable is the number of signals that were free to be acted on, guarding
-// the subtraction: an unsigned underflow here would turn a counting mistake
-// into a report that claims perfect execution.
+// actionable is the number of signals that were free to be acted on after
+// deferred and deliberately filtered no-trades. Each subtraction is guarded:
+// an unsigned underflow would turn a counting mistake into a plausible report.
 func actionable(counts Counts) uint64 {
 	if counts.Deferred >= counts.Signals {
 		return 0
 	}
-	return counts.Signals - counts.Deferred
+	remaining := counts.Signals - counts.Deferred
+	if counts.Filtered >= remaining {
+		return 0
+	}
+	return remaining - counts.Filtered
 }
 
 // share returns a proportion in basis points, and reports an empty denominator

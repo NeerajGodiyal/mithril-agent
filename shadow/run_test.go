@@ -553,7 +553,7 @@ func TestRepeatedSubmittedRefusalsStopChargingWhenTheAttemptIsUnfunded(t *testin
 	}
 }
 
-func TestResumeRecordsAnUnsettledDecisionAsMissedBeforeContinuing(t *testing.T) {
+func TestResumeKeepsAnUnsettledDecisionUntilItsDeadline(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	first, primary, secondary, _, firstRecord := newTestRunner(t, 23_000_000, now)
 	if tick, err := first.Step(t.Context(), now); err != nil {
@@ -576,23 +576,99 @@ func TestResumeRecordsAnUnsettledDecisionAsMissedBeforeContinuing(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tick.Event != EventMissed || !tick.Triggered || !tick.Deferred {
-		t.Fatalf("unsettled recovery = %+v, want a deferred missed decision", tick)
+	if tick.Event != EventSignal || !tick.Triggered || !tick.Deferred {
+		t.Fatalf("unsettled recovery = %+v, want the restored decision to remain pending", tick)
 	}
 	if quoter.calls != 0 {
 		t.Fatalf("recovery invented a replacement quote (%d calls)", quoter.calls)
 	}
 	counts := resumed.Counts()
-	if counts.Signals != 2 || counts.Deferred != 1 || counts.Missed != 1 {
+	if counts.Signals != 2 || counts.Deferred != 1 || counts.Missed != 0 {
 		t.Fatalf("recovered counts = %+v", counts)
 	}
 
-	next := restartedAt.Add(time.Second)
+	next := now.Add(first.policy.Settle())
 	primary.at, secondary.at = next, next
 	if tick, err = resumed.Step(t.Context(), next); err != nil {
 		t.Fatal(err)
-	} else if tick.Event != EventSignal || quoter.calls != 1 {
-		t.Fatalf("runner did not continue after recovery: tick=%+v calls=%d", tick, quoter.calls)
+	} else if tick.Event != EventFilled || quoter.calls != 1 {
+		t.Fatalf("runner did not settle the restored decision: tick=%+v calls=%d", tick, quoter.calls)
+	}
+}
+
+func TestResumeSettlesOnItsFirstObservationAtTheDeadline(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	first, primary, secondary, _, firstRecord := newTestRunner(t, 23_000_000, now)
+	if tick, err := first.Step(t.Context(), now); err != nil || tick.Event != EventSignal {
+		t.Fatalf("first tick = %+v, %v", tick, err)
+	}
+	deadline := now.Add(first.policy.Settle())
+	primary.at, secondary.at = deadline, deadline
+	quoter, record := &stubQuoter{estimated: 21_525}, &stubRecorder{}
+	resumed, err := ResumeRunner(
+		first.policy, primary, secondary, quoter, record, firstRecord.ticks,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tick, err := resumed.Step(t.Context(), deadline)
+	if err != nil || tick.Event != EventFilled || resumed.Counts().Missed != 0 ||
+		quoter.calls != 1 {
+		t.Fatalf("deadline recovery = %+v counts=%+v calls=%d err=%v",
+			tick, resumed.Counts(), quoter.calls, err)
+	}
+}
+
+func TestResumeKeepsAnUnsettledDecisionThroughAnOutageBeforeItsDeadline(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	first, primary, secondary, _, firstRecord := newTestRunner(t, 23_000_000, now)
+	if tick, err := first.Step(t.Context(), now); err != nil || tick.Event != EventSignal {
+		t.Fatalf("first tick = %+v, %v", tick, err)
+	}
+
+	restartedAt := now.Add(time.Second)
+	primary.err = errors.New("price source unavailable")
+	secondary.at = restartedAt
+	quoter, record := &stubQuoter{estimated: 21_525}, &stubRecorder{}
+	resumed, err := ResumeRunner(first.policy, primary, secondary, quoter, record, firstRecord.ticks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tick, err := resumed.Step(t.Context(), restartedAt); err != nil ||
+		tick.Event != EventUnobservable || tick.DecisionMissed {
+		t.Fatalf("pre-deadline outage = %+v, %v", tick, err)
+	}
+
+	settleAt := now.Add(first.policy.Settle())
+	primary.err = nil
+	primary.at, secondary.at = settleAt, settleAt
+	if tick, err := resumed.Step(t.Context(), settleAt); err != nil || tick.Event != EventFilled {
+		t.Fatalf("restored decision did not settle after outage: %+v, %v", tick, err)
+	}
+	if resumed.Counts().Missed != 0 || quoter.calls != 1 {
+		t.Fatalf("restored decision state = counts=%+v quotes=%d", resumed.Counts(), quoter.calls)
+	}
+}
+
+func TestResumeMarksAnUnsettledDecisionMissedAfterItsDeadline(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	first, primary, secondary, _, firstRecord := newTestRunner(t, 23_000_000, now)
+	if _, err := first.Step(t.Context(), now); err != nil {
+		t.Fatal(err)
+	}
+	late := now.Add(first.policy.Settle() + time.Second)
+	primary.at, secondary.at = late, late
+	quoter, record := &stubQuoter{estimated: 21_525}, &stubRecorder{}
+	resumed, err := ResumeRunner(first.policy, primary, secondary, quoter, record, firstRecord.ticks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tick, err := resumed.Step(t.Context(), late)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tick.Event != EventMissed || !tick.Triggered || !tick.Deferred || quoter.calls != 0 {
+		t.Fatalf("late recovery did not miss the expired decision: tick=%+v calls=%d", tick, quoter.calls)
 	}
 }
 

@@ -330,6 +330,12 @@ func TestCoverageNeverClaimsEverythingOnBadCounts(t *testing.T) {
 	if got := actionable(Counts{Signals: 2, Deferred: 9}); got != 0 {
 		t.Errorf("actionable = %d with more deferred than signals, want 0", got)
 	}
+	if got := actionable(Counts{Signals: 2, Filtered: 9}); got != 0 {
+		t.Errorf("actionable = %d with more filtered than signals, want 0", got)
+	}
+	if got := actionable(Counts{Signals: 10, Deferred: 2, Filtered: 3}); got != 5 {
+		t.Errorf("actionable = %d, want 5 after deferred and filtered signals", got)
+	}
 	policy := sellPolicy()
 	policy.StartingInputUnits = 1_000_000_000
 	ledger, err := NewLedger(policy, 20_000_000)

@@ -22,9 +22,11 @@ const shadowSearchUsage = `Usage: mithril-agent shadow search --policy PATH --di
                                    [--base-policy PATH]
                                    [--spread-bps N] [--candidate-out PATH]
 
-Chooses a sell/buy threshold pair from one completed UTC day's recorded prices,
-then scores that exact pair on a later completed, untouched UTC day using a
-fresh reset book on each day. The pool is modelled at the
+Chooses bounded strategy parameters from one completed UTC day's recorded
+prices, then scores that exact candidate on a later completed, untouched UTC
+day using a fresh reset book on each day. Fixed policies search sell/buy
+thresholds; adaptive policies search only windows and tighter signal hurdles.
+The pool is modelled at the
 named spread. The result is research_only and can never authorize a trade.
 When --candidate-out is set, it also writes one immutable, paper-only policy
 bound to the base policy and both journals' verified chain heads.`
@@ -36,10 +38,11 @@ type shadowSearchScore struct {
 }
 
 type shadowSearchCandidate struct {
-	SellAtMicros uint64 `json:"sell_at_micros"`
-	SellAtUSD    string `json:"sell_at_usd"`
-	BuyAtMicros  uint64 `json:"buy_at_micros"`
-	BuyAtUSD     string `json:"buy_at_usd"`
+	SellAtMicros uint64                 `json:"sell_at_micros,omitempty"`
+	SellAtUSD    string                 `json:"sell_at_usd,omitempty"`
+	BuyAtMicros  uint64                 `json:"buy_at_micros,omitempty"`
+	BuyAtUSD     string                 `json:"buy_at_usd,omitempty"`
+	Adaptive     *shadow.AdaptivePolicy `json:"adaptive,omitempty"`
 }
 
 type shadowSearchResult struct {
@@ -166,6 +169,20 @@ func validateShadowSearchLineage(base, observed shadow.Policy) error {
 	if observedFingerprint == baseFingerprint {
 		return nil
 	}
+	if base.Adaptive != nil || observed.Adaptive != nil {
+		if base.Adaptive == nil || observed.Adaptive == nil ||
+			validateAdaptiveCandidateDelta(*base.Adaptive, *observed.Adaptive) != nil {
+			return errors.New("shadow adaptive search policy changed fields outside the candidate parameters")
+		}
+		expected := base
+		adaptive := *observed.Adaptive
+		expected.Adaptive = &adaptive
+		expectedFingerprint, err := expected.Fingerprint()
+		if err != nil || expectedFingerprint != observedFingerprint {
+			return errors.New("shadow adaptive search policy changed fields outside the candidate parameters")
+		}
+		return nil
+	}
 	if !base.IsSell() || observed.ReturnTrigger == nil {
 		return errors.New("shadow search policy is not derived from the immutable base policy")
 	}
@@ -196,6 +213,12 @@ func readShadowSearchJournal(
 	if len(records) == 0 {
 		return nil, shadowJournalProvenance{}, errors.New("the journal contains no records")
 	}
+	for _, tick := range ticks {
+		if !tick.PeriodClose && tick.PriceMicros != 0 &&
+			(tick.PrimaryPrice == nil || tick.SecondaryPrice == nil) {
+			return nil, shadowJournalProvenance{}, errors.New("the shadow search journal predates replayable market source evidence")
+		}
+	}
 	if filepath.Base(path) != "shadow-"+day+".jsonl" {
 		return nil, shadowJournalProvenance{}, errors.New("the shadow search journal does not match the requested UTC day")
 	}
@@ -220,6 +243,7 @@ func readShadowSearchJournal(
 func validShadowSearchClose(tick shadow.Tick, expectedAt time.Time) bool {
 	if !tick.PeriodClose || tick.Triggered || tick.Deferred || tick.Fill != nil ||
 		tick.DecisionQuote != nil || tick.DecisionMissed || tick.Reason != "" ||
+		tick.PrimaryPrice != nil || tick.SecondaryPrice != nil ||
 		tick.QuoteLowerMicros != 0 || tick.QuoteUpperMicros != 0 ||
 		!tick.At.Equal(expectedAt) {
 		return false
@@ -274,6 +298,9 @@ func searchShadowCandidateScored(
 	if spreadBPS == 0 || spreadBPS >= 10_000 {
 		return shadowSearchResult{}, errors.New("shadow search spread must be between 1 and 9999 basis points")
 	}
+	if policy.Adaptive != nil {
+		return searchAdaptiveCandidateScored(policy, spreadBPS, trainingScore, validationScore)
+	}
 	levels := shadowResearchLevels(trainPrices)
 	if len(levels) < 2 {
 		return shadowSearchResult{}, errors.New("training prices need at least two distinct levels")
@@ -324,6 +351,134 @@ func searchShadowCandidateScored(
 	best.Validation = validation
 	best.NextStep = "run this exact candidate in live shadow mode and require independent operator review"
 	return best, nil
+}
+
+func searchAdaptiveCandidateScored(
+	policy shadow.Policy,
+	spreadBPS uint64,
+	trainingScore, validationScore func(shadow.Policy) (shadowSearchScore, error),
+) (shadowSearchResult, error) {
+	var best shadowSearchResult
+	bestSet := false
+	for _, candidate := range adaptiveSearchPolicies(policy) {
+		training, err := trainingScore(candidate)
+		if err != nil {
+			return shadowSearchResult{}, err
+		}
+		best.CandidatesEvaluated++
+		if training.FullRoundTrips == 0 {
+			continue
+		}
+		if bestSet && (training.VersusHoldMicros < best.Training.VersusHoldMicros ||
+			(training.VersusHoldMicros == best.Training.VersusHoldMicros &&
+				training.MaxDrawdownMicros >= best.Training.MaxDrawdownMicros)) {
+			continue
+		}
+		adaptive := *candidate.Adaptive
+		bestSet = true
+		best.Candidate = shadowSearchCandidate{Adaptive: &adaptive}
+		best.Training = training
+	}
+	if !bestSet {
+		return shadowSearchResult{}, errors.New("no adaptive candidate completed a training round trip")
+	}
+	candidate, err := shadowSearchCandidatePolicy(policy, best.Candidate)
+	if err != nil {
+		return shadowSearchResult{}, err
+	}
+	validation, err := validationScore(candidate)
+	if err != nil {
+		return shadowSearchResult{}, err
+	}
+	best.Status = "research_only"
+	best.EvaluationMode = shadow.EvaluationResetDaily
+	best.PoolModelled = true
+	best.AssumedSpreadBPS = spreadBPS
+	best.Validation = validation
+	best.NextStep = "run this exact adaptive candidate as a forward paper challenger"
+	return best, nil
+}
+
+func adaptiveSearchPolicies(policy shadow.Policy) []shadow.Policy {
+	base := *policy.Adaptive
+	dayWindow := min(uint64(1_440), (86_399-policy.SettleSeconds)/policy.TickSeconds+1)
+	fastValues := []uint16{
+		max(uint16(2), base.FastWindow/2), base.FastWindow,
+		min(uint16(dayWindow-1), base.FastWindow*2),
+	}
+	slowValues := []uint16{
+		max(uint16(3), base.SlowWindow/2), base.SlowWindow,
+		min(uint16(dayWindow), base.SlowWindow*2),
+	}
+	signalValues := []uint16{base.MinimumSignalBPS}
+	for _, extra := range []uint16{100, 250} {
+		if uint32(base.MinimumSignalBPS)+uint32(extra) < uint32(base.MaxVolatilityBPS) &&
+			uint32(base.MinimumSignalBPS)+uint32(extra) <= 2_000 {
+			signalValues = append(signalValues, base.MinimumSignalBPS+extra)
+		}
+	}
+	seen := make(map[shadow.AdaptivePolicy]struct{})
+	var candidates []shadow.Policy
+	for _, fast := range fastValues {
+		for _, slow := range slowValues {
+			for _, signal := range signalValues {
+				adaptive := base
+				adaptive.FastWindow, adaptive.SlowWindow = fast, slow
+				adaptive.MinimumSignalBPS = signal
+				if _, duplicate := seen[adaptive]; duplicate ||
+					validateAdaptiveCandidateDelta(base, adaptive) != nil {
+					continue
+				}
+				candidate := policy
+				candidate.Adaptive = &adaptive
+				if candidate.Validate() != nil {
+					continue
+				}
+				seen[adaptive] = struct{}{}
+				candidates = append(candidates, candidate)
+			}
+		}
+	}
+	return candidates
+}
+
+func validateAdaptiveCandidateDelta(base, candidate shadow.AdaptivePolicy) error {
+	if err := candidate.Validate(); err != nil {
+		return err
+	}
+	if candidate.Version != base.Version ||
+		candidate.MinimumSignalBPS < base.MinimumSignalBPS ||
+		candidate.MaxVolatilityBPS != base.MaxVolatilityBPS ||
+		candidate.MaxQuoteImpactBPS != base.MaxQuoteImpactBPS ||
+		candidate.MaxDrawdownBPS != base.MaxDrawdownBPS ||
+		candidate.CooldownSeconds != base.CooldownSeconds ||
+		candidate.MaxObservationGapSeconds != base.MaxObservationGapSeconds {
+		return errors.New("adaptive candidate may change only windows or tighten its signal hurdle")
+	}
+	return nil
+}
+
+func shadowSearchCandidatePolicy(
+	base shadow.Policy, candidate shadowSearchCandidate,
+) (shadow.Policy, error) {
+	if candidate.Adaptive != nil {
+		if base.Adaptive == nil || candidate.SellAtMicros != 0 || candidate.BuyAtMicros != 0 ||
+			candidate.SellAtUSD != "" || candidate.BuyAtUSD != "" ||
+			validateAdaptiveCandidateDelta(*base.Adaptive, *candidate.Adaptive) != nil {
+			return shadow.Policy{}, errors.New("adaptive search candidate is invalid")
+		}
+		policy := base
+		adaptive := *candidate.Adaptive
+		policy.Adaptive = &adaptive
+		return policy, policy.Validate()
+	}
+	if base.Adaptive != nil || candidate.SellAtMicros == 0 || candidate.BuyAtMicros == 0 ||
+		candidate.SellAtUSD != formatUnits(candidate.SellAtMicros, 6) ||
+		candidate.BuyAtUSD != formatUnits(candidate.BuyAtMicros, 6) {
+		return shadow.Policy{}, errors.New("fixed-threshold search candidate is invalid")
+	}
+	policy := shadowSearchPolicy(base, candidate.SellAtMicros, candidate.BuyAtMicros)
+	return policy, policy.Validate()
 }
 
 func shadowSearchPolicy(policy shadow.Policy, sellAt, buyAt uint64) shadow.Policy {

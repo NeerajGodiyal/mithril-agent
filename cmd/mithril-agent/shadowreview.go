@@ -37,6 +37,7 @@ type shadowReviewResult struct {
 	MinimumObservableBPS     int32     `json:"minimum_observable_bps"`
 	Signals                  uint64    `json:"signals"`
 	Fills                    uint64    `json:"fills"`
+	Filtered                 uint64    `json:"filtered"`
 	Refused                  uint64    `json:"refused"`
 	Missed                   uint64    `json:"missed"`
 	Unobservable             uint64    `json:"unobservable"`
@@ -188,6 +189,7 @@ func summarizeShadowReview(
 		}
 		if !addShadowReviewCounter(&result.Signals, report.Counts.Signals) ||
 			!addShadowReviewCounter(&result.Fills, report.Counts.Fills) ||
+			!addShadowReviewCounter(&result.Filtered, report.Counts.Filtered) ||
 			!addShadowReviewCounter(&result.Refused, report.Counts.Refused) ||
 			!addShadowReviewCounter(&result.Missed, report.Counts.Missed) ||
 			!addShadowReviewCounter(&result.Unobservable, report.Counts.Unobservable) {
@@ -216,14 +218,14 @@ func renderShadowReview(output io.Writer, result shadowReviewResult) error {
 		"Strategy evidence is complete for %d consecutive UTC day(s).\n"+
 			"  period       %s to %s\n"+
 			"  observability at least %d.%02d%% each day\n"+
-			"  signals      %d; hypothetical fills %d; refused %d; missed %d\n"+
+			"  signals      %d; hypothetical fills %d; filtered %d; refused %d; missed %d\n"+
 			"  summed daily-reset vs holding $%s; maximum single-day drawdown $%s\n\n"+
 			"These reset-daily results are an operational canary and cannot be compounded.\n"+
 			"This is evidence for an operator to review, not strategy approval.\n"+
 			"Nothing was signed, submitted, or enabled.\n",
 		result.CompleteDays, result.From.Format(time.RFC3339), result.To.Format(time.RFC3339),
 		result.MinimumObservableBPS/100, result.MinimumObservableBPS%100,
-		result.Signals, result.Fills, result.Refused, result.Missed,
+		result.Signals, result.Fills, result.Filtered, result.Refused, result.Missed,
 		formatSignedMicros(result.VersusHoldMicros),
 		formatUnits(result.MaximumDrawdownMicros, 6),
 	)

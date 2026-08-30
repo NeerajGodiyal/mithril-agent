@@ -71,7 +71,7 @@ type shadowResearchCandidateReceipt struct {
 	Authorized               bool                    `json:"authorized"`
 	Promotable               bool                    `json:"promotable"`
 	PaperOnly                bool                    `json:"paper_only"`
-	RequiresOperatorDecision bool                    `json:"requires_operator_decision"`
+	ForwardEvidenceRequired  bool                    `json:"forward_evidence_required"`
 	ChallengerPointerUpdated bool                    `json:"challenger_pointer_updated"`
 	ChampionPointerUpdated   bool                    `json:"champion_pointer_updated"`
 	Artifact                 string                  `json:"artifact"`
@@ -87,7 +87,7 @@ type shadowResearchChallengeStatus struct {
 	Authorized                       bool     `json:"authorized"`
 	Promotable                       bool     `json:"promotable"`
 	PaperOnly                        bool     `json:"paper_only"`
-	RequiresOperatorDecision         bool     `json:"requires_operator_decision"`
+	EligibleForPaperSelection        bool     `json:"eligible_for_paper_selection"`
 	ChallengerPointerUpdated         bool     `json:"challenger_pointer_updated"`
 	ChampionPointerUpdated           bool     `json:"champion_pointer_updated"`
 	ActiveArtifact                   string   `json:"active_artifact,omitempty"`
@@ -280,7 +280,7 @@ func serveShadowResearchMCP(
 	}
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name: "mithril_paper_create_challenger", Title: "Create Paper Challenger",
-		Description: "Validate a cited paper-only hypothesis, search thresholds on one completed journal, score the result on a later completed journal, write one immutable challenger artifact, and atomically update only the dedicated paper challenger pointer. Never selects a champion or promotes to live trading.",
+		Description: "Schema-validate and attach a cited paper-only hypothesis, search bounded strategy parameters on one completed journal, score the exact result on a later completed journal, write one immutable challenger artifact, and atomically update only the dedicated paper challenger pointer. Never selects a champion or promotes to live trading.",
 		Annotations: createAnnotations,
 	}, func(_ context.Context, _ *mcpsdk.CallToolRequest, input shadowResearchCandidateInput) (*mcpsdk.CallToolResult, shadowResearchCandidateReceipt, error) {
 		result, err := controller.createCandidate(input, time.Now().UTC())
@@ -384,7 +384,7 @@ func (controller *shadowResearchController) createCandidate(
 	}
 	return shadowResearchCandidateReceipt{
 		Status: "paper_challenger_ready", PaperOnly: true,
-		RequiresOperatorDecision: true,
+		ForwardEvidenceRequired:  true,
 		ChallengerPointerUpdated: !pointerState.sameArtifact,
 		ChampionPointerUpdated:   false,
 		Artifact:                 artifact, ArtifactSHA256: artifactSHA256,
@@ -451,7 +451,7 @@ func (controller *shadowResearchController) candidateRotationState(
 }
 
 func validateShadowResearchRotationStatus(status string) error {
-	if status == "challenger_not_qualified" || status == "challenger_promoted_by_operator" {
+	if status == "challenger_not_qualified" || status == "challenger_selected_as_paper_champion" {
 		return nil
 	}
 	return fmt.Errorf("active paper challenger retained: %s", status)
@@ -501,7 +501,7 @@ func (controller *shadowResearchController) challengeStatus(
 	}
 	if championSHA256 == activeSHA256 {
 		return shadowResearchChallengeStatus{
-			Status: "challenger_promoted_by_operator", PaperOnly: true,
+			Status: "challenger_selected_as_paper_champion", PaperOnly: true,
 			ActiveArtifact: filepath.Base(activePath), ActiveArtifactSHA256: activeSHA256,
 			ActivePolicySHA256: active.CandidatePolicySHA256,
 		}, nil
@@ -529,7 +529,7 @@ func (controller *shadowResearchController) challengeStatus(
 		return shadowResearchChallengeStatus{}, err
 	}
 	status.Status = result.Status
-	status.RequiresOperatorDecision = result.RequiresOperatorDecision
+	status.EligibleForPaperSelection = result.EligibleForPaperSelection
 	status.CompleteDays = result.CompleteDays
 	status.ChallengerFullRoundTrips = result.ChallengerFullRoundTrips
 	status.RequiredFullRoundTrips = result.RequiredFullRoundTrips

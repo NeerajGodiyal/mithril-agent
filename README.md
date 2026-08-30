@@ -99,8 +99,9 @@ account's permissions; it does not gain transaction authority by speaking MCP.
 ## Mainnet paper evaluation
 
 Paper mode answers a narrower question before real execution is considered:
-“What would this fixed rule have done on current market evidence after spread,
-slippage, fees, stale data, downtime, and a settlement-time re-quote?”
+“What would this fixed or adaptive strategy have done on current market
+evidence after spread, slippage, fees, stale data, downtime, and a
+settlement-time re-quote?”
 
 For example, a policy can hypothetically sell 1 SOL at or above a threshold,
 wait, re-quote the same venue, and later buy back using only the simulated USDC
@@ -112,19 +113,40 @@ is signed, submitted, or placed on an exchange.
 Each UTC day is a reset-daily operational canary with its own opening mark.
 Separate days are not a continuous portfolio or independent statistical trials,
 and their values must not be compounded. Backtests validate the original
-journal with strict replay before applying a hypothetical threshold pair.
+journal with strict replay before applying a hypothetical candidate.
+
+An adaptive policy has no absolute entry prices. Its deterministic, regime-aware
+controller maintains rolling fast and slow market baselines, measures return
+volatility and drawdown, and chooses momentum, range-reversion, risk-exit, or
+no-trade. It rewarms after a data gap, recomputes the fee hurdle as paper sizing
+changes, and latches risk-off after a drawdown exit for the rest of the run.
+Every decision and raw signal is journaled and recomputed during replay. This is
+a paper heuristic, not a profitability claim. `InputAmount` is the initial lot;
+later legs spend only the preceding simulated proceeds, so paper profits or
+losses change the next lot within that UTC day. The learner cannot inject funds,
+add leverage, short, or change fees, sources, quote limits, cooldown,
+volatility, or drawdown boundaries. A risk exit may sell the full simulated SOL
+inventory because that reduces exposure rather than increasing it.
 
 Candidate changes are deliberate and bounded. `shadow search` can write an
 immutable candidate, `shadow select` can stage it, and a running observer adopts
 it only at a UTC boundary. `shadow challenge` compares preselected champion and
-challenger runs. None of those commands authorizes real trading.
+challenger runs. For adaptive policies the chronological train/validation search
+may change only the fast/slow windows or raise the minimum signal hurdle. A
+separate deterministic timer may select an exact challenger only after its fixed
+seven-day forward paper gate passes; it preserves the previous champion for
+rollback and still cannot authorize real trading. This is controlled parameter
+learning, not unrestricted model-weight self-training.
 
 The pinned Nous Hermes profile in [`deploy/hermes-research`](deploy/hermes-research)
-can search official sources every six hours and prepare only the next paper
-challenger after its evidence gates open. Its three explicit MCP servers expose
-7 allowlisted tools; terminal, files, code execution, delegation, browser
-control, wallets, signing, and submission are absent. Research prose is input
-to a deterministic search, not a trading command.
+can search official sources every six hours, submit a cited typed hypothesis,
+and prepare only the next paper challenger after its evidence gates open. Its
+three explicit MCP servers expose 7 allowlisted tools; terminal, files, code execution, delegation, browser
+control, wallets, signing, and submission are absent. Research prose is
+untrusted provenance attached after the deterministic parameter search; it
+cannot change the selected parameters or act as a trading command. Hermes' own memory/skill
+self-improvement is procedural assistance; it is not treated as market-return
+learning and never receives champion-selection authority.
 
 ## Optional Devnet execution
 
@@ -217,7 +239,7 @@ branch is comparison material, not an installation or merge target.
 - Solana v1 is indexed, not signed or executed.
 - The live execution pilot supports one reviewed Devnet route, not arbitrary
   assets, venues, leverage, or perpetuals.
-- Paper results are evidence about a fixed rule and data path, not proof of a
+- Paper results are evidence about a strategy and data path, not proof of a
   profitable strategy.
 - Dynamic paper candidate selection applies at UTC boundaries. Protected live
   execution configuration is not arbitrary hot-reload state.

@@ -291,8 +291,9 @@ path instead requires an API key, wallet authentication, a signed upfront
 deposit, and a provider-managed vault, so it remains a separate unqualified
 Mainnet custody boundary. An agent may propose parameters and use `shadow
 backtest`, `shadow search`, `shadow run`, and `shadow review`, but it cannot turn
-a result into authority. `shadow search` chooses thresholds on one hash-chained
-day and reports the exact result on a later untouched day; pool fills remain
+a result into authority. `shadow search` chooses bounded parameters on one
+hash-chained day—fixed thresholds or adaptive windows and a signal hurdle—and
+reports the exact result on a later untouched day; pool fills remain
 explicitly modelled. Unlimited “trade the wallet” behavior remains unsupported: future
 execution still needs a dedicated limited-balance account, venue and asset
 allowlists, hard action, daily, total and loss caps, an expiring operator grant,
@@ -3256,6 +3257,28 @@ mithril-agent shadow policy --out POLICY --observe WATCH_ONLY_ADDRESS \
   --sell-at-usd 240 --buy-at-usd 200 --amount 1000000
 ```
 
+Or create an adaptive paper policy with no absolute buy or sell price:
+
+```bash
+mithril-agent shadow policy --out POLICY --observe WATCH_ONLY_ADDRESS \
+  --adaptive --amount 1000000
+```
+
+The adaptive runner uses the same independently validated price evidence,
+Jupiter quotes, settlement delay, ledger, fees, and replay checks. Its fixed,
+deterministic regime controller selects momentum in a trend, range reversion in
+a range, a bounded drawdown exit, or no action during warm-up, cooldown,
+excessive volatility, or when the raw signal does not clear the current cost
+hurdle. It rewarms after a data gap and remains risk-off after a filled drawdown
+exit. `shadow backtest` uses the policy directly; do not pass `--buy-at-usd` for
+an adaptive policy. Search and Hermes candidate generation may tune only the
+fast/slow windows or raise the minimum signal hurdle; starting inventory and all
+risk, quote, source, timing, and fee boundaries stay unchanged. `InputAmount`
+is the first lot. Each later leg spends only the previous simulated proceeds,
+so gains and losses resize the paper lot within one reset-daily UTC run; no
+outside funds, leverage, or shorts are introduced. A drawdown risk exit sells
+the full simulated SOL inventory to reduce exposure.
+
 `shadow run` starts with the sell leg, switches to the buy-back leg only after
 a filled sell, and sizes that return leg from what the sell actually received.
 After a filled buy it switches back, never spending more than that leg returned
@@ -3331,15 +3354,14 @@ chain, so recomputation never guesses that a partial current day ran until a
 future midnight. The day's report covers the whole journal rather than one
 process's counters, so a runner that restarts mid-day still reports the whole
 recorded period. The first journal record binds the exact policy to that day.
-On restart the runner restores its books, completed
-round-trip direction, and next amount from the verified record. The decision
-quote remains recorded, but a settlement-time venue quote missed during downtime
-cannot be reconstructed; the decision is marked missed on the first fresh
-observation, then the rule continues. A different policy or the older
+On restart the runner restores its books, completed round-trip direction, next
+amount, and any unsettled decision from the verified record. A restart before
+the settlement deadline keeps that decision pending; a restart after the
+deadline records it as missed on the first fresh observation. A different policy or the older
 non-resumable journal format is refused instead of being mixed into the day.
 
-To test a researched threshold pair without restarting the observer, write and
-select an immutable paper candidate:
+To test researched strategy parameters without restarting the observer, write
+and select an immutable paper candidate:
 
 ```bash
 mithril-agent shadow search --policy PATH --dir PATH \
@@ -3354,11 +3376,13 @@ mithril-agent shadow run --policy PATH --dir /absolute/private/runs \
   --candidate-pointer /absolute/private/selected-candidate
 ```
 
-Selection changes only the searched sell and buy thresholds. A process with no
+For a fixed policy, selection changes only the searched sell and buy thresholds.
+For an adaptive policy, it may change only the fast/slow windows or raise the
+minimum signal hurdle; starting inventory and every risk/evidence boundary stay fixed. A process with no
 journal for the current UTC day loads it at startup; a mid-day restart resumes
 the one policy already pinned by today's journal. A running process checks the
 pointer after closing the UTC day and before its next observation. The lifecycle lock serializes automated
-challenger publication and operator selection. The pointer binds both the candidate file
+challenger publication and paper selection. The pointer binds both the candidate file
 and policy SHA-256, so replacing the selected artifact is refused. Each policy writes beneath its own SHA-256
 directory, so evidence from two candidates cannot be mixed. Missing, malformed,
 permissive, or base-policy-mismatched files stop the observer. The candidate is
@@ -3388,7 +3412,9 @@ trips, positive aggregate performance versus holding, a strict majority of
 daily wins, at least ten basis points of capital-days advantage, and no worse
 maximum daily drawdown. A qualified result still has `authorized: false`,
 `promotable: false`, `paper_only: true`, and `pointer_updated: false`. An
-operator may then use `shadow select` to change the champion. Seven days is an
+operator may use `shadow select`, or the separately confined `shadow auto-select`
+timer may preserve the old pointer and select the exact qualified artifact for
+the next UTC day. Seven days is an
 operational canary, not statistical proof of a profitable strategy; use a much
 longer precommitted window before drawing a performance conclusion.
 
@@ -3406,19 +3432,20 @@ mithril-agent shadow research-mcp --policy /var/lib/mithril-agent-research/polic
 ```
 
 Its input contains cited prose and the immediately preceding two completed UTC
-day names, never paths,
-thresholds, policies, keys, or grants. It deterministically searches the fixed
+day names, never paths, policy parameters, keys, or grants. It deterministically searches the fixed
 journals, writes a content-addressed paper candidate, and updates only the
 dedicated challenger pointer. The pointer binds `selected_at`, the next UTC day
 as `eligible_from`, the fixed challenge duration, and the evaluator version, so
 reports created before selection or a changed gate cannot qualify it.
 Automated status always evaluates the first configured number of complete UTC
 days beginning at `eligible_from`; later days cannot rewrite that decision. A
-pending or qualified challenger is retained; only a complete rejected challenge
-may rotate. If the operator copies the exact qualified artifact into
-the champion tree and selects that copy, the matching digest is recognized as
-promotion and the next challenger may be prepared without deleting a pointer.
-The operator-selected champion tree and both run trees remain read-only to
+pending or qualified challenger is retained. After the fixed cutoff, missing or
+invalid paired evidence becomes a terminal non-qualification rather than
+remaining pending forever, so a later research cycle may rotate safely. If the
+operator or paper-only auto-selector copies the exact
+qualified artifact into the champion tree and selects that copy, the matching
+digest is recognized as paper selection and the next challenger may be prepared without deleting a pointer.
+The paper champion tree and both run trees remain read-only to
 Hermes, and the Telegram platform does not receive this paper write tool.
 
 Once the observer has run for the period the operator chose in advance, verify

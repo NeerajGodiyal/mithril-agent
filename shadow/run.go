@@ -15,6 +15,7 @@ const (
 	EventOpened       = "shadow.opened"
 	EventWaiting      = "shadow.waiting"
 	EventSignal       = "shadow.signal"
+	EventFiltered     = "shadow.filtered"
 	EventFilled       = "shadow.filled"
 	EventRefused      = "shadow.refused"
 	EventMissed       = "shadow.missed"
@@ -29,6 +30,7 @@ type UnobservableReason string
 const (
 	ReasonMarketPriceUnavailable     UnobservableReason = "market_price_unavailable"
 	ReasonMarketPriceInvalid         UnobservableReason = "market_price_invalid"
+	ReasonMarketPriceNotAdvanced     UnobservableReason = "market_price_not_advanced"
 	ReasonQuoteCurrencyUnavailable   UnobservableReason = "quote_currency_price_unavailable"
 	ReasonQuoteCurrencyInvalid       UnobservableReason = "quote_currency_price_invalid"
 	ReasonQuoteCurrencyOutsidePolicy UnobservableReason = "quote_currency_outside_policy"
@@ -38,6 +40,7 @@ func validUnobservableReason(reason UnobservableReason) bool {
 	switch reason {
 	case ReasonMarketPriceUnavailable,
 		ReasonMarketPriceInvalid,
+		ReasonMarketPriceNotAdvanced,
 		ReasonQuoteCurrencyUnavailable,
 		ReasonQuoteCurrencyInvalid,
 		ReasonQuoteCurrencyOutsidePolicy:
@@ -75,6 +78,7 @@ type Recorder interface {
 type Counts struct {
 	Ticks        uint64 `json:"ticks"`
 	Signals      uint64 `json:"signals"`
+	Filtered     uint64 `json:"filtered"`
 	Fills        uint64 `json:"fills"`
 	Refused      uint64 `json:"refused"`
 	Missed       uint64 `json:"missed"`
@@ -114,6 +118,7 @@ type pending struct {
 	priceMicros uint64
 	quote       Quote
 	sell        bool
+	riskExit    bool
 	settleAfter time.Time
 }
 
@@ -128,21 +133,26 @@ type Runner struct {
 	quoter         Quoter
 	recorder       Recorder
 
-	ledger  Ledger
-	started bool
-	opened  bool
-	counts  Counts
-	stats   Stats
-	waiting *pending
+	ledger   Ledger
+	started  bool
+	opened   bool
+	counts   Counts
+	stats    Stats
+	waiting  *pending
+	strategy *adaptiveStrategy
+	decision *AdaptiveDecision
 	// resumePending means the prior process recorded a decision but not its
-	// settlement. The quote is persisted for audit, but the stopped process did
-	// not obtain executable evidence at the scheduled settlement time, so the
-	// first fresh observation records that decision as missed.
-	resumePending    bool
-	nextSell         bool
-	nextAmount       uint64
-	quoteLowerMicros uint64
-	quoteUpperMicros uint64
+	// settlement. The recorded deadline decides whether it can still settle or
+	// must become missed on the first fresh observation.
+	resumePending        bool
+	nextSell             bool
+	nextAmount           uint64
+	quoteLowerMicros     uint64
+	quoteUpperMicros     uint64
+	primaryPublishedAt   time.Time
+	secondaryPublishedAt time.Time
+	primarySample        pricetrigger.Sample
+	secondarySample      pricetrigger.Sample
 }
 
 // Tick is the outcome of one observation, for a caller that wants to print
@@ -152,6 +162,14 @@ type Tick struct {
 	Event       string    `json:"event"`
 	PriceMicros uint64    `json:"price_micros,omitempty"`
 	Triggered   bool      `json:"triggered"`
+	// Decision explains an adaptive observation and is absent for fixed price
+	// policies. Replay recomputes it from prior prices rather than trusting it.
+	Decision *AdaptiveDecision `json:"decision,omitempty"`
+	// Source publication times make a rolling adaptive observation distinct and
+	// replayable. Repeated polls of one still-fresh sample must not manufacture
+	// a full strategy window.
+	PrimaryPrice   *pricetrigger.Sample `json:"primary_price,omitempty"`
+	SecondaryPrice *pricetrigger.Sample `json:"secondary_price,omitempty"`
 	// Deferred marks a signal that arrived while a decision was already in
 	// flight. Without it the journal cannot distinguish a deferred signal from
 	// an acted one, and the report is no longer re-derivable from the record.
@@ -214,18 +232,22 @@ func NewRunner(
 	} else if len(quoteReaders) != 0 {
 		return nil, errors.New("devnet shadow runner does not accept a USDC/USD guard")
 	}
+	strategy, err := newAdaptiveStrategy(policy.Adaptive)
+	if err != nil {
+		return nil, err
+	}
 	return &Runner{
 		policy: policy, primary: primary, secondary: secondary,
 		quotePrimary: quotePrimary, quoteSecondary: quoteSecondary,
 		quoter: quoter, recorder: recorder,
 		nextSell: policy.IsSell(), nextAmount: policy.InputAmount,
+		strategy: strategy,
 	}, nil
 }
 
 // ResumeRunner restores the decision state that can be proven from a verified
-// journal. An in-flight decision becomes missed on the first fresh observation:
-// although its quote is stored for audit, the stopped process could not obtain
-// executable evidence at the scheduled settlement time.
+// journal. An in-flight decision remains pending until its recorded deadline;
+// after that deadline the first fresh observation records it as missed.
 func ResumeRunner(
 	policy Policy,
 	primary, secondary PriceReader,
@@ -260,7 +282,7 @@ func ResumeRunner(
 			if tick.Event == EventClosed {
 				if !tick.PeriodClose || tick.PriceMicros != 0 || tick.EquityMicros != 0 ||
 					tick.Triggered || tick.Deferred || tick.DecisionQuote != nil ||
-					tick.Fill != nil || tick.DecisionMissed || tick.Reason != "" ||
+					tick.Decision != nil || tick.Fill != nil || tick.DecisionMissed || tick.Reason != "" ||
 					tick.QuoteLowerMicros != 0 || tick.QuoteUpperMicros != 0 {
 					return nil, errors.New("a period-close record is malformed")
 				}
@@ -289,24 +311,23 @@ func ResumeRunner(
 	runner.opened = true
 	runner.counts = replayed.Counts
 	runner.stats = replayed.Stats
+	runner.strategy = replayed.strategy
+	runner.primaryPublishedAt = replayed.primaryPublishedAt
+	runner.secondaryPublishedAt = replayed.secondaryPublishedAt
 
 	if policy.RoundTrip() {
 		runner.nextSell, runner.nextAmount = replayed.nextSell, replayed.nextAmount
 	}
 
-	for _, tick := range ticks {
-		switch tick.Event {
-		case EventSignal:
-			if tick.Triggered && !tick.Deferred {
-				runner.resumePending = true
-			}
-		case EventFilled, EventRefused, EventMissed:
-			runner.resumePending = false
-		case EventUnobservable:
-			if tick.DecisionMissed {
-				runner.resumePending = false
-			}
+	if replayed.pending != nil {
+		restored := replayed.pending
+		runner.waiting = &pending{
+			decidedAt:   restored.settleAfter.Add(-policy.Settle()),
+			priceMicros: restored.price, quote: restored.quote,
+			sell: restored.sell, riskExit: restored.riskExit,
+			settleAfter: restored.settleAfter,
 		}
+		runner.resumePending = true
 	}
 	return runner, nil
 }
@@ -385,6 +406,7 @@ func (r *Runner) StepObservation(
 	}
 	r.counts.Ticks++
 	r.quoteLowerMicros, r.quoteUpperMicros = 0, 0
+	r.decision = nil
 
 	if observation.unavailable != "" {
 		return r.emitUnobservable(now, observation.unavailable)
@@ -408,6 +430,17 @@ func (r *Runner) StepObservation(
 	if err != nil {
 		return r.emitUnobservable(now, ReasonMarketPriceInvalid)
 	}
+	if r.strategy != nil {
+		primaryAt := observation.primary.PublishedAt.UTC()
+		secondaryAt := observation.secondary.PublishedAt.UTC()
+		if !adaptiveSampleAdvances(
+			r.primaryPublishedAt, r.secondaryPublishedAt, primaryAt, secondaryAt,
+		) {
+			return r.emitUnobservable(now, ReasonMarketPriceNotAdvanced)
+		}
+		r.primaryPublishedAt, r.secondaryPublishedAt = primaryAt, secondaryAt
+	}
+	r.primarySample, r.secondarySample = observation.primary, observation.secondary
 	price := evidence.ConservativePrice
 
 	if !r.opened {
@@ -424,27 +457,41 @@ func (r *Runner) StepObservation(
 	if r.ledger, err = r.ledger.Mark(price); err != nil {
 		return Tick{}, err
 	}
+	triggered := evidence.Triggered
+	if r.strategy != nil {
+		decision, adaptiveTriggered, decisionErr := r.strategy.decide(
+			now, price, r.nextSell, r.ledger,
+		)
+		if decisionErr != nil {
+			return Tick{}, decisionErr
+		}
+		r.decision = &decision
+		triggered = adaptiveTriggered
+	}
 
-	if r.resumePending {
+	if r.resumePending && r.waiting != nil && !now.After(r.waiting.settleAfter) {
 		r.resumePending = false
+	} else if r.resumePending {
+		r.resumePending = false
+		r.waiting = nil
 		r.counts.Missed++
-		if evidence.Triggered {
+		if triggered {
 			r.counts.Signals++
 			r.counts.Deferred++
 		}
 		return r.emit(now, Tick{
 			At: now, Event: EventMissed, PriceMicros: price,
-			Triggered: evidence.Triggered, Deferred: evidence.Triggered,
+			Triggered: triggered, Deferred: triggered,
 		}, nil)
 	}
 
-	if settled, done, err := r.settle(ctx, now, price, evidence.Triggered); err != nil {
+	if settled, done, err := r.settle(ctx, now, price, triggered); err != nil {
 		return Tick{}, err
 	} else if done {
 		return settled, nil
 	}
 
-	if !evidence.Triggered {
+	if !triggered {
 		return r.emit(now, Tick{At: now, Event: EventWaiting, PriceMicros: price}, nil)
 	}
 
@@ -458,9 +505,10 @@ func (r *Runner) StepObservation(
 			Triggered: true, Deferred: true,
 		}, nil)
 	}
-	if !canFundAttempt(
-		r.ledger, r.nextSell, r.nextAmount, attemptFeeReserve(r.policy, r.nextSell),
-	) {
+	attemptAmount, feeReserve := paperAttempt(
+		r.policy, r.ledger, r.nextSell, r.nextAmount, r.decision,
+	)
+	if !canFundAttempt(r.ledger, r.nextSell, attemptAmount, feeReserve) {
 		r.counts.Missed++
 		return r.emit(now, Tick{
 			At: now, Event: EventMissed, PriceMicros: price, Triggered: true,
@@ -468,7 +516,7 @@ func (r *Runner) StepObservation(
 	}
 
 	quote, err := r.quoter.Quote(
-		ctx, r.policy.Observe, r.nextSell, r.nextAmount, r.policy.SlippageBPS,
+		ctx, r.policy.Observe, r.nextSell, attemptAmount, r.policy.SlippageBPS,
 	)
 	if err != nil {
 		// The rule fired and the trade could not be priced. A real run would
@@ -476,15 +524,33 @@ func (r *Runner) StepObservation(
 		r.counts.Missed++
 		return r.emit(now, Tick{At: now, Event: EventMissed, PriceMicros: price, Triggered: true}, nil)
 	}
-	if validateQuote(quote) != nil || quote.InputAmount != r.nextAmount {
+	if validateQuote(quote) != nil || quote.InputAmount != attemptAmount {
 		// A quote for a larger amount silently changes the strategy's size; one
 		// for a smaller amount silently flatters its fill quality. Either is not
 		// the decision this run was asked to measure.
 		r.counts.Missed++
 		return r.emit(now, Tick{At: now, Event: EventMissed, PriceMicros: price, Triggered: true}, nil)
 	}
+	passes, guardErr := adaptiveQuotePasses(
+		r.policy, r.decision, quote, price, r.nextSell,
+	)
+	if guardErr != nil {
+		r.counts.Missed++
+		return r.emit(now, Tick{
+			At: now, Event: EventMissed, PriceMicros: price, Triggered: true,
+		}, nil)
+	}
+	if !passes {
+		r.counts.Filtered++
+		decisionQuote := quote
+		return r.emit(now, Tick{
+			At: now, Event: EventFiltered, PriceMicros: price, Triggered: true,
+			DecisionQuote: &decisionQuote,
+		}, nil)
+	}
 	r.waiting = &pending{
 		decidedAt: now, priceMicros: price, quote: quote, sell: r.nextSell,
+		riskExit:    r.decision != nil && r.decision.Strategy == StrategyRiskExit,
 		settleAfter: now.Add(r.policy.Settle()),
 	}
 	decisionQuote := quote
@@ -496,11 +562,15 @@ func (r *Runner) StepObservation(
 
 func (r *Runner) emitUnobservable(now time.Time, reason UnobservableReason) (Tick, error) {
 	r.counts.Unobservable++
-	missed := r.resumePending || r.waiting != nil && !now.Before(r.waiting.settleAfter)
+	missed := r.waiting != nil && !now.Before(r.waiting.settleAfter)
 	if missed {
 		r.resumePending = false
 		r.waiting = nil
 		r.counts.Missed++
+	} else if r.resumePending {
+		// Reaching the runner before the deadline proves the restored decision
+		// is live again, even if this particular market poll is unavailable.
+		r.resumePending = false
 	}
 	return r.emit(now, Tick{
 		At: now, Event: EventUnobservable, DecisionMissed: missed, Reason: reason,
@@ -558,6 +628,17 @@ func (r *Runner) settle(
 	if err == nil && settlementQuote.InputAmount != decision.quote.InputAmount {
 		err = errors.New("settlement quote changed the requested input amount")
 	}
+	if err == nil && r.policy.Adaptive != nil {
+		if validateQuote(settlementQuote) != nil {
+			err = errors.New("settlement quote is invalid")
+		} else if _, bounded, guardErr := adaptiveQuoteImpact(
+			r.policy, settlementQuote, price, decision.sell,
+		); guardErr != nil {
+			err = guardErr
+		} else if !bounded {
+			err = errors.New("settlement quote is outside the adaptive market bound")
+		}
+	}
 	if err != nil {
 		r.counts.Missed++
 		tick, emitErr := r.emit(now, Tick{
@@ -600,6 +681,9 @@ func (r *Runner) settle(
 			r.nextAmount = capSellAmount(
 				r.nextAmount, r.ledger.BaseUnits, roundTripFeeReserve(r.policy.FeeLamports),
 			)
+		}
+		if r.strategy != nil {
+			r.strategy.filled(now, decision.riskExit)
 		}
 	}
 
@@ -659,6 +743,15 @@ func (r *Runner) readQuotePeg(ctx context.Context) (pricetrigger.Sample, pricetr
 // exactly one path.
 func (r *Runner) emit(now time.Time, tick Tick, fill *Fill) (Tick, error) {
 	tick.Fill = fill
+	if r.strategy != nil && tick.PriceMicros != 0 && !tick.PeriodClose {
+		tick.Decision = r.decision
+	}
+	if tick.PriceMicros != 0 && !tick.PeriodClose {
+		primary, secondary := r.primarySample, r.secondarySample
+		if !primary.PublishedAt.IsZero() && !secondary.PublishedAt.IsZero() {
+			tick.PrimaryPrice, tick.SecondaryPrice = &primary, &secondary
+		}
+	}
 	if r.policy.QuotePeg != nil && !tick.PeriodClose && tick.Event != EventUnobservable {
 		tick.QuoteLowerMicros = r.quoteLowerMicros
 		tick.QuoteUpperMicros = r.quoteUpperMicros
@@ -674,4 +767,14 @@ func (r *Runner) emit(now time.Time, tick Tick, fill *Fill) (Tick, error) {
 		return Tick{}, err
 	}
 	return tick, nil
+}
+
+func adaptiveSampleAdvances(previousPrimary, previousSecondary, primary, secondary time.Time) bool {
+	if primary.IsZero() || secondary.IsZero() ||
+		!previousPrimary.IsZero() && primary.Before(previousPrimary) ||
+		!previousSecondary.IsZero() && secondary.Before(previousSecondary) {
+		return false
+	}
+	return previousPrimary.IsZero() || previousSecondary.IsZero() ||
+		primary.After(previousPrimary) || secondary.After(previousSecondary)
 }

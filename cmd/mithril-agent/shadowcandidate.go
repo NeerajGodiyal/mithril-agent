@@ -64,6 +64,7 @@ type shadowCandidatePointer struct {
 	CandidatePath         string     `json:"candidate_path"`
 	CandidateSHA256       string     `json:"candidate_sha256"`
 	CandidatePolicySHA256 string     `json:"candidate_policy_sha256"`
+	RestoredFromSHA256    string     `json:"restored_from_candidate_sha256,omitempty"`
 	SelectedAt            *time.Time `json:"selected_at,omitempty"`
 	EligibleFrom          *time.Time `json:"eligible_from,omitempty"`
 	ChallengeDays         uint32     `json:"challenge_days,omitempty"`
@@ -79,9 +80,10 @@ func newShadowPaperCandidate(
 	if err != nil {
 		return shadowPaperCandidate{}, err
 	}
-	policy := shadowSearchPolicy(
-		base, result.Candidate.SellAtMicros, result.Candidate.BuyAtMicros,
-	)
+	policy, err := shadowSearchCandidatePolicy(base, result.Candidate)
+	if err != nil {
+		return shadowPaperCandidate{}, err
+	}
 	candidateFingerprint, err := policy.Fingerprint()
 	if err != nil {
 		return shadowPaperCandidate{}, err
@@ -123,10 +125,10 @@ func (candidate shadowPaperCandidate) validateAgainst(base shadow.Policy) error 
 	if !base.IsSell() || candidate.Policy.ReturnTrigger == nil {
 		return errors.New("shadow paper candidate is not a sell-first round trip")
 	}
-	expected := shadowSearchPolicy(
-		base, candidate.Policy.Trigger.ThresholdMicros,
-		candidate.Policy.ReturnTrigger.ThresholdMicros,
-	)
+	expected, err := shadowSearchCandidatePolicy(base, candidate.Research.Candidate)
+	if err != nil {
+		return err
+	}
 	expectedFingerprint, err := expected.Fingerprint()
 	if err != nil {
 		return err
@@ -158,8 +160,6 @@ func (candidate shadowPaperCandidate) validateAgainst(base shadow.Policy) error 
 		!result.PoolModelled || result.AssumedSpreadBPS == 0 ||
 		result.AssumedSpreadBPS >= 10_000 || result.CandidatesEvaluated == 0 ||
 		result.Training.FullRoundTrips == 0 ||
-		result.Candidate.SellAtMicros != candidate.Policy.Trigger.ThresholdMicros ||
-		result.Candidate.BuyAtMicros != candidate.Policy.ReturnTrigger.ThresholdMicros ||
 		result.CandidatePolicySHA256 != candidate.CandidatePolicySHA256 {
 		return errors.New("shadow paper candidate research result is invalid")
 	}
@@ -232,15 +232,7 @@ func loadBoundShadowCandidateSelection(
 	}
 	var selected shadowCandidatePointer
 	if err := strictjson.Decode(raw, &selected); err != nil ||
-		selected.Version != shadowPaperCandidateVersion ||
-		selected.CandidatePath == "" || !filepath.IsAbs(selected.CandidatePath) ||
-		filepath.Clean(selected.CandidatePath) != selected.CandidatePath ||
-		selected.CandidatePath == pointer || !validLowerSHA256(selected.CandidateSHA256) ||
-		!validLowerSHA256(selected.CandidatePolicySHA256) ||
-		!validShadowCandidateSelection(
-			selected.SelectedAt, selected.EligibleFrom,
-			selected.ChallengeDays, selected.ChallengeGateVersion,
-		) {
+		!validShadowCandidatePointer(selected, pointer) {
 		return shadowPaperCandidate{}, "", "", shadowCandidatePointer{}, errors.New("shadow candidate pointer is invalid")
 	}
 	candidate, digest, err := loadBoundShadowPaperCandidate(selected.CandidatePath, base)
@@ -252,6 +244,19 @@ func loadBoundShadowCandidateSelection(
 		return shadowPaperCandidate{}, "", "", shadowCandidatePointer{}, errors.New("shadow candidate pointer no longer matches its selected artifact")
 	}
 	return candidate, selected.CandidatePath, digest, selected, nil
+}
+
+func validShadowCandidatePointer(selected shadowCandidatePointer, pointer string) bool {
+	return selected.Version == shadowPaperCandidateVersion &&
+		selected.CandidatePath != "" && filepath.IsAbs(selected.CandidatePath) &&
+		filepath.Clean(selected.CandidatePath) == selected.CandidatePath &&
+		selected.CandidatePath != pointer && validLowerSHA256(selected.CandidateSHA256) &&
+		validLowerSHA256(selected.CandidatePolicySHA256) &&
+		(selected.RestoredFromSHA256 == "" || validLowerSHA256(selected.RestoredFromSHA256)) &&
+		validShadowCandidateSelection(
+			selected.SelectedAt, selected.EligibleFrom,
+			selected.ChallengeDays, selected.ChallengeGateVersion,
+		)
 }
 
 func validShadowCandidateSelection(
@@ -289,12 +294,15 @@ func runShadowSelect(args []string, output io.Writer) error {
 		}
 		return err
 	}
-	if flags.NArg() != 0 || *candidatePath == "" || *pointerPath == "" || *lifecycleLock == "" ||
+	if flags.NArg() != 0 || !absoluteClean(*policyPath) ||
+		*candidatePath == "" || *pointerPath == "" || *lifecycleLock == "" ||
 		!filepath.IsAbs(*candidatePath) || filepath.Clean(*candidatePath) != *candidatePath ||
 		!filepath.IsAbs(*pointerPath) || filepath.Clean(*pointerPath) != *pointerPath ||
 		!absoluteClean(*lifecycleLock) || *candidatePath == *pointerPath ||
-		*lifecycleLock == *candidatePath || *lifecycleLock == *pointerPath {
-		return errors.New("shadow select requires distinct absolute candidate, pointer, and lifecycle lock paths")
+		*policyPath == *candidatePath || *policyPath == *pointerPath ||
+		*policyPath == *lifecycleLock || *lifecycleLock == *candidatePath ||
+		*lifecycleLock == *pointerPath {
+		return errors.New("shadow select requires distinct absolute policy, candidate, pointer, and lifecycle lock paths")
 	}
 	base, err := loadActiveShadowPolicy(*policyPath)
 	if err != nil {
@@ -341,6 +349,17 @@ func replaceShadowCandidatePointerSelected(
 ) error {
 	var selectedAtField, eligibleFromField *time.Time
 	var gateVersion uint32
+	var restoredFromSHA256 string
+	current, readErr := securefile.ReadPrivate(pointerPath, shadowCandidatePointerBytes)
+	if readErr == nil {
+		var selected shadowCandidatePointer
+		if strictjson.Decode(current, &selected) == nil &&
+			validShadowCandidatePointer(selected, pointerPath) &&
+			selected.CandidateSHA256 == candidateSHA256 &&
+			selected.CandidatePolicySHA256 == candidatePolicySHA256 {
+			restoredFromSHA256 = selected.RestoredFromSHA256
+		}
+	}
 	if !selectedAt.IsZero() {
 		selected := selectedAt.UTC()
 		eligible := time.Date(
@@ -355,6 +374,7 @@ func replaceShadowCandidatePointerSelected(
 		Version: shadowPaperCandidateVersion, CandidatePath: candidatePath,
 		CandidateSHA256:       candidateSHA256,
 		CandidatePolicySHA256: candidatePolicySHA256,
+		RestoredFromSHA256:    restoredFromSHA256,
 		SelectedAt:            selectedAtField,
 		EligibleFrom:          eligibleFromField,
 		ChallengeDays:         challengeDays,
@@ -364,8 +384,7 @@ func replaceShadowCandidatePointerSelected(
 		return err
 	}
 	encoded := append(pointer, '\n')
-	if current, readErr := securefile.ReadPrivate(pointerPath, shadowCandidatePointerBytes); readErr == nil &&
-		string(current) == string(encoded) {
+	if readErr == nil && string(current) == string(encoded) {
 		return nil
 	}
 	return securefile.ReplacePrivate(pointerPath, encoded, shadowCandidatePointerBytes)

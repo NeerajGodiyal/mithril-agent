@@ -157,6 +157,8 @@ sudo install -o root -g root -m 0644 \
   deploy/systemd/mithril-agent-paper-champion.service \
   deploy/systemd/mithril-agent-paper-challenger.service \
   deploy/systemd/mithril-agent-paper-challenger.path \
+  deploy/systemd/mithril-agent-paper-auto-select.service \
+  deploy/systemd/mithril-agent-paper-auto-select.timer \
   deploy/systemd/mithril-hermes-research-egress.service \
   deploy/systemd/mithril-hermes-research.service \
   deploy/systemd/mithril-hermes-research.timer \
@@ -285,7 +287,8 @@ sudo install -o mithril-agent-research -g mithril-agent-research -m 0600 \
 
 The tracked `mithril-agent-paper-base.service`,
 `mithril-agent-paper-champion.service`, and
-`mithril-agent-paper-challenger.path` supervise those observers. Install them
+`mithril-agent-paper-challenger.path` supervise those observers. The separate
+paper auto-selector checks the fixed forward gate without network access. Install them
 only after creating `/etc/mithril-agent/paper.env` as root-owned mode `0600`
 with `MITHRIL_AGENT_SHADOW_RPC_URL` and, when used,
 `MITHRIL_AGENT_JUPITER_API_KEY`. Review the fixed paths, owners, sandbox, and
@@ -299,10 +302,13 @@ sudo install -o root -g root -m 0644 \
   systemd/mithril-agent-paper-champion.service \
   systemd/mithril-agent-paper-challenger.service \
   systemd/mithril-agent-paper-challenger.path \
+  systemd/mithril-agent-paper-auto-select.service \
+  systemd/mithril-agent-paper-auto-select.timer \
   /etc/systemd/system/
 sudo systemd-analyze verify \
   /etc/systemd/system/mithril-agent-paper-{base,champion,challenger}.service \
-  /etc/systemd/system/mithril-agent-paper-challenger.path
+  /etc/systemd/system/mithril-agent-paper-auto-select.service \
+  /etc/systemd/system/mithril-agent-paper-{challenger.path,auto-select.timer}
 sudo systemctl enable --now systemd-time-wait-sync.service
 test "$(timedatectl show -p NTPSynchronized --value)" = yes
 sudo systemctl daemon-reload
@@ -329,38 +335,43 @@ sudo -u mithril-agent-research env HOME=/var/lib/mithril-agent-research \
   --lifecycle-lock /var/lib/mithril-agent-research/challenger/lifecycle.lock
 sudo systemctl enable --now mithril-agent-paper-champion.service \
   mithril-agent-paper-challenger.service \
-  mithril-agent-paper-challenger.path
+  mithril-agent-paper-challenger.path \
+  mithril-agent-paper-auto-select.timer
 ```
 
 Start Hermes only after the champion pointer exists and both base and champion
 services are healthy. The enabled challenger service starts at boot when its
 pointer exists; the `.path` unit watches `challenger/active.json` for later
-creation or replacement. Future rejected or
-operator-promoted
+creation or replacement. Future rejected or paper-selected
 challengers replace the same pointer and the running observer loads the new
 policy only after closing its UTC day. This is hot configuration without mixing
 two policies in one daily journal. Challenge status is fixed to the first
 configured number of complete UTC days beginning at the pointer's
 `eligible_from`; later market days cannot reverse a completed decision.
 
-Promotion remains manual. Install the exact qualified immutable artifact with
-owner `mithril-agent-research`, then run `shadow select` as that identity with
-the same `challenger/lifecycle.lock`. The next status
-call recognizes the identical artifact digest as operator-promoted, after which
-Hermes may prepare a new challenger. Nothing in this lifecycle grants live
-execution authority.
+The hourly auto-selector does nothing while evidence is pending or a challenger
+fails any gate. When the exact forward challenger qualifies, it copies the
+content-addressed artifact outside Hermes' writable tree, preserves the old
+champion in `champion/previous.json`, and selects the copy for the next UTC day.
+The next status call recognizes the identical digest, after which Hermes may
+prepare a new challenger. Nothing in this lifecycle grants live execution authority.
+Manual `shadow select` remains available when the auto-selector timer is disabled.
 
 ```sh
-sudo install -o mithril-agent-research -g mithril-agent-research -m 0600 \
-  /var/lib/mithril-agent-research/challenger/candidates/CANDIDATE.json \
-  /var/lib/mithril-agent-research/champion/CANDIDATE.json
 sudo -u mithril-agent-research env HOME=/var/lib/mithril-agent-research \
-  /usr/local/libexec/mithril-agent/mithril-agent shadow select \
+  /usr/local/libexec/mithril-agent/mithril-agent shadow restore \
   --policy /var/lib/mithril-agent-research/policy/policy.json \
-  --candidate /var/lib/mithril-agent-research/champion/CANDIDATE.json \
-  --pointer /var/lib/mithril-agent-research/champion/active.json \
+  --champion-pointer /var/lib/mithril-agent-research/champion/active.json \
+  --rollback-pointer /var/lib/mithril-agent-research/champion/previous.json \
+  --challenger-pointer /var/lib/mithril-agent-research/challenger/active.json \
+  --challenger-candidate-dir /var/lib/mithril-agent-research/challenger/candidates \
   --lifecycle-lock /var/lib/mithril-agent-research/challenger/lifecycle.lock
 ```
+
+Restore also rebinds the challenger observer to the restored champion under the
+same lifecycle lock. The hourly selector therefore sees matching paper digests
+and cannot immediately select the rolled-back challenger again; the next
+research cycle may prepare a different challenger.
 
 After the champion has produced its first bounded alert file, regenerate the
 normal deterministic Telegram service with the explicit opt-in below. Review
@@ -566,9 +577,9 @@ The timer starts at 00:15, 06:15, 12:15, and 18:15 UTC with up to 15 minutes of
 jitter, and catches up after downtime. Research output is retained in the
 systemd journal rather than sent to Telegram. Once the paper tool becomes
 available, a successful research call may change only the dedicated paper
-challenger pointer; an operator still decides whether a qualified challenger
-becomes the next champion. An identical digest in the champion pointer is the
-durable promotion acknowledgement and permits the next research cycle without
+challenger pointer. The separately confined auto-selector decides only the
+paper champion after the fixed forward gate; Hermes cannot call it. An identical
+digest in the champion pointer is the durable paper-selection acknowledgement and permits the next research cycle without
 deleting or resetting either observer.
 
 Six-hour scans stay within the intended research cadence. Monitor the pinned

@@ -77,6 +77,37 @@ func TestShadowSelectWritesPrivatePointerAndLoadsExactCandidate(t *testing.T) {
 	}
 }
 
+func TestShadowSelectRefusesAPointerThatAliasesTheBasePolicy(t *testing.T) {
+	root := privateTestDirectory(t)
+	base := candidateTestPolicy()
+	originalPolicy := writeShadowPolicy(t, base)
+	policyRaw, err := os.ReadFile(originalPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policyPath := filepath.Join(root, "policy.json")
+	if err := os.WriteFile(policyPath, policyRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	candidate := candidateForPrices(t, base, 220_000_000, 110_000_000)
+	candidatePath := filepath.Join(root, "candidate.json")
+	if err := writeShadowPaperCandidate(candidatePath, candidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := runShadowSelect([]string{
+		"--policy", policyPath,
+		"--candidate", candidatePath,
+		"--pointer", policyPath,
+		"--lifecycle-lock", filepath.Join(root, "lifecycle.lock"),
+	}, &bytes.Buffer{}); err == nil {
+		t.Fatal("shadow select accepted the base policy as its pointer output")
+	}
+	after, err := os.ReadFile(policyPath)
+	if err != nil || !bytes.Equal(policyRaw, after) {
+		t.Fatalf("pointer alias changed the base policy: %v", err)
+	}
+}
+
 func TestShadowRunChangesPaperPolicyOnlyAtBoundary(t *testing.T) {
 	root := privateTestDirectory(t)
 	base := candidateTestPolicy()
