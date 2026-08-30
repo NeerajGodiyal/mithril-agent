@@ -1,6 +1,7 @@
 package shadow
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -30,6 +31,66 @@ func sellPolicy() Policy {
 	}
 }
 
+func jupBuyPolicy(t *testing.T) Policy {
+	t.Helper()
+	policy := sellPolicy()
+	policy.Cluster = Mainnet
+	policy.Market = MarketJUPUSDC
+	policy.Trigger.Version = pricetrigger.MultiFeedVersion
+	policy.Trigger.Feed = pricetrigger.FeedJUPUSD
+	policy.Trigger.Direction = pricetrigger.BuyAtOrBelow
+	policy.Trigger.ThresholdMicros = 2_000_000
+	policy.QuoteRoute = MainnetMarketQuoteRoute(MarketJUPUSDC, false)
+	policy.InputAmount = 100_000_000
+	policy.InputDecimals, policy.OutputDecimals = 6, 6
+	policy.StartingInputUnits = policy.InputAmount
+	policy.StartingOutputUnits = 0
+	policy.OneTimeSetupRentLamports = 3_000_000
+	policy.StartingFeeReserveLamports = policy.OneTimeSetupRentLamports + 2*policy.FeeLamports
+	policy.QuotePeg = &pricetrigger.BandPolicy{
+		Version: pricetrigger.Version, Feed: pricetrigger.FeedUSDCUSD,
+		MinimumMicros: pricetrigger.USDCBandMinimumMicros,
+		MaximumMicros: pricetrigger.USDCBandMaximumMicros,
+		MaxAgeSeconds: 120, MaxSourceSkewSeconds: 90,
+		MaxDeviationBPS: 100, MaxConfidenceBPS: 100,
+		PrimarySourceSHA256:   strings.Repeat("c", 64),
+		SecondarySourceSHA256: strings.Repeat("d", 64),
+	}
+	policy.NativeFeePrice = &pricetrigger.Policy{
+		Version: pricetrigger.MultiFeedVersion, Feed: pricetrigger.FeedSOLUSD,
+		Direction: pricetrigger.BuyAtOrBelow, ThresholdMicros: 1,
+		MaxAgeSeconds: 120, MaxSourceSkewSeconds: 90,
+		MaxDeviationBPS: 200, MaxConfidenceBPS: 200,
+		PrimarySourceSHA256:   strings.Repeat("e", 64),
+		SecondarySourceSHA256: strings.Repeat("f", 64),
+	}
+	policy.NativeFeePriceCeilingMicros = 1_000_000_000
+	if err := policy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	return policy
+}
+
+func TestJUPPolicyBoundsSetupRentAndKeepsV5Readable(t *testing.T) {
+	policy := jupBuyPolicy(t)
+	policy.StartingFeeReserveLamports = policy.OneTimeSetupRentLamports + 2*policy.FeeLamports - 1
+	if err := policy.Validate(); err == nil {
+		t.Fatal("JUP policy accepted a reserve that cannot fund setup and two attempts")
+	}
+	policy = jupBuyPolicy(t)
+	policy.OneTimeSetupRentLamports = ^uint64(0)
+	if err := policy.Validate(); err == nil {
+		t.Fatal("JUP policy accepted overflowing setup rent")
+	}
+	policy = jupBuyPolicy(t)
+	policy.Version = NativeFeeVersion
+	policy.OneTimeSetupRentLamports = 0
+	policy.StartingFeeReserveLamports = 2 * policy.FeeLamports
+	if err := policy.Validate(); err != nil || JournalVersionFor(policy) != NativeFeeJournalVersion {
+		t.Fatalf("v5 JUP policy is no longer readable: journal=%d err=%v", JournalVersionFor(policy), err)
+	}
+}
+
 // The quoted route is evidence, not launch configuration. If it is outside
 // the policy fingerprint, a process can restart against a different pool or
 // token pair and append incomparable observations to the same journal.
@@ -50,11 +111,57 @@ func TestPolicyFingerprintBindsTheQuotedRoute(t *testing.T) {
 	}
 }
 
+func TestPolicyFingerprintBindsTheSeparateFeeReserve(t *testing.T) {
+	policy := separateFeePolicy(t)
+	want, err := policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.StartingFeeReserveLamports++
+	changed, err := policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed == want {
+		t.Fatal("changing the native fee reserve did not change the policy fingerprint")
+	}
+}
+
+func TestLegacyPolicyEncodingOmitsTheSeparateFeeReserve(t *testing.T) {
+	encoded, err := json.Marshal(sellPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "starting_fee_reserve_lamports") {
+		t.Fatalf("legacy policy encoding changed: %s", encoded)
+	}
+}
+
 func TestPolicyRejectsTheLegacySettlementAccountingVersion(t *testing.T) {
 	policy := sellPolicy()
 	policy.Version = 3
 	if err := policy.Validate(); err == nil {
 		t.Fatal("a v3 policy could resume under v4 settlement accounting")
+	}
+}
+
+func TestLegacyV4PolicyAndJournalContractRemainReadable(t *testing.T) {
+	policy := sellPolicy()
+	policy.Version = LegacyVersion
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("legacy v4 policy no longer validates: %v", err)
+	}
+	if got := JournalVersionFor(policy); got != LegacyJournalVersion {
+		t.Fatalf("legacy journal version = %d, want %d", got, LegacyJournalVersion)
+	}
+	policy.Version = Version
+	if got := JournalVersionFor(policy); got != JournalVersion {
+		t.Fatalf("current journal version = %d, want %d", got, JournalVersion)
+	}
+	policy.Version = LegacyVersion
+	policy.Market = MarketSOLUSDC
+	if err := policy.Validate(); err == nil {
+		t.Fatal("legacy policy accepted a v5 market field")
 	}
 }
 

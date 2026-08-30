@@ -688,7 +688,7 @@ func TestAdaptiveRiskExitLatchesThroughReplayAndResume(t *testing.T) {
 		}
 	}
 	if last.Event != EventWaiting || last.Triggered || last.Decision == nil ||
-		last.Decision.Reason != "risk_halt" {
+		last.Decision.Reason != "risk_halt" || !runner.RiskHalted() {
 		t.Fatalf("filled drawdown exit did not latch risk-off: %+v", last)
 	}
 	replayed, err := Replay(policy, recorder.ticks)
@@ -711,6 +711,12 @@ func TestAdaptiveRiskExitLatchesThroughReplayAndResume(t *testing.T) {
 	}
 	if resumedTick.Triggered || resumedTick.Decision == nil || resumedTick.Decision.Reason != "risk_halt" {
 		t.Fatalf("restart cleared the risk-off latch: %+v", resumedTick)
+	}
+	primary.err = errors.New("source offline")
+	unobservable, err := resumed.Step(t.Context(), resumedAt.Add(time.Minute))
+	if err != nil || unobservable.Event != EventUnobservable || !resumed.RiskHalted() {
+		t.Fatalf("unobservable tick cleared the risk-off latch: tick=%+v halted=%v err=%v",
+			unobservable, resumed.RiskHalted(), err)
 	}
 }
 

@@ -12,12 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestShadowResearchMCPWritesOnlyAnImmutablePaperChallenger(t *testing.T) {
-	policy := validShadowPolicy()
+	policy := validShadowResearchPolicy()
 	policyPath := writeShadowPolicy(t, policy)
 	root := privateTestDirectory(t)
 	journalDir := filepath.Join(root, "journals")
@@ -31,8 +32,7 @@ func TestShadowResearchMCPWritesOnlyAnImmutablePaperChallenger(t *testing.T) {
 		220_000_000, 220_000_000, 110_000_000, 110_000_000,
 		220_000_000, 220_000_000, 110_000_000, 110_000_000,
 	}
-	writeShadowSearchDay(t, journalDir, policy, "2026-08-28", prices)
-	writeShadowSearchDay(t, journalDir, policy, "2026-08-29", prices)
+	writeShadowResearchWindow(t, journalDir, policy, "2026-08-29", prices)
 	challengerPointer := filepath.Join(root, "challenger-pointer")
 	championPointer, championRoot, challengerRoot := shadowResearchLifecycle(t, root, policyPath, policy)
 	controller, err := newShadowResearchController(
@@ -150,7 +150,8 @@ func TestShadowResearchMCPWritesOnlyAnImmutablePaperChallenger(t *testing.T) {
 	if receipt.Status != "paper_challenger_ready" || receipt.Authorized ||
 		receipt.Promotable || !receipt.PaperOnly || !receipt.ForwardEvidenceRequired ||
 		!receipt.ChallengerPointerUpdated || receipt.ChampionPointerUpdated ||
-		receipt.ArtifactSHA256 == "" ||
+		receipt.ArtifactSHA256 == "" || receipt.Research.WalkForward == nil ||
+		len(receipt.Research.WalkForward.Folds) != shadowWalkForwardWindows ||
 		filepath.Base(receipt.Artifact) != receipt.Artifact || strings.Contains(receipt.Artifact, "..") {
 		t.Fatalf("paper receipt = %+v", receipt)
 	}
@@ -163,6 +164,22 @@ func TestShadowResearchMCPWritesOnlyAnImmutablePaperChallenger(t *testing.T) {
 		!candidate.PaperOnly || candidate.Hypothesis == nil ||
 		candidate.Hypothesis.Thesis != validShadowResearchInput().Hypothesis.Thesis {
 		t.Fatalf("paper candidate = %+v digest=%s", candidate, digest)
+	}
+	boundDays := make(map[string]struct{})
+	for _, fold := range candidate.Research.WalkForward.Folds {
+		boundDays[fold.TrainingJournal.ChainHeadSHA256] = struct{}{}
+		boundDays[fold.ValidationJournal.ChainHeadSHA256] = struct{}{}
+	}
+	if len(boundDays) != shadowWalkForwardWindows+1 {
+		t.Fatalf("walk-forward candidate bound %d distinct daily chain heads", len(boundDays))
+	}
+	tampered := candidate
+	admission := *candidate.Research.WalkForward
+	admission.Folds = append([]shadowWalkForwardFold(nil), admission.Folds...)
+	admission.Folds[0].CandidatePolicySHA256 = strings.Repeat("0", 64)
+	tampered.Research.WalkForward = &admission
+	if err := tampered.validateAgainst(policy); err == nil {
+		t.Fatal("walk-forward candidate accepted a tampered fold fingerprint")
 	}
 	selected, selectedPath, err := loadSelectedShadowCandidate(challengerPointer, policy)
 	if err != nil || selectedPath != candidatePath ||
@@ -214,7 +231,7 @@ func TestShadowResearchMCPWritesOnlyAnImmutablePaperChallenger(t *testing.T) {
 }
 
 func TestShadowResearchControllerRejectsTraversalSymlinksAndUntrustedResearch(t *testing.T) {
-	policy := validShadowPolicy()
+	policy := validShadowResearchPolicy()
 	policyPath := writeShadowPolicy(t, policy)
 	root := privateTestDirectory(t)
 	journalDir := filepath.Join(root, "journals")
@@ -228,7 +245,7 @@ func TestShadowResearchControllerRejectsTraversalSymlinksAndUntrustedResearch(t 
 		220_000_000, 220_000_000, 110_000_000, 110_000_000,
 		220_000_000, 220_000_000, 110_000_000, 110_000_000,
 	}
-	writeShadowSearchDay(t, journalDir, policy, "2026-08-29", prices)
+	writeShadowResearchDay(t, journalDir, policy, "2026-08-29", prices)
 	challengerPointer := filepath.Join(root, "challenger-pointer")
 	championPointer, championRoot, challengerRoot := shadowResearchLifecycle(t, root, policyPath, policy)
 	controller, err := newShadowResearchController(
@@ -237,6 +254,11 @@ func TestShadowResearchControllerRejectsTraversalSymlinksAndUntrustedResearch(t 
 	)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := controller.createCandidate(
+		validShadowResearchInput(), time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC),
+	); err == nil || !strings.Contains(err.Error(), "2026-08-22") {
+		t.Fatalf("missing first walk-forward day error = %v", err)
 	}
 
 	input := validShadowResearchInput()
@@ -253,6 +275,16 @@ func TestShadowResearchControllerRejectsTraversalSymlinksAndUntrustedResearch(t 
 	input.Hypothesis.Sources[0].URL = "file:///private/key"
 	if _, err := controller.createCandidate(input, time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)); err == nil {
 		t.Fatal("non-HTTPS research source was accepted")
+	}
+	input = validShadowResearchInput()
+	input.Hypothesis.Sources[0].URL = "https://example.com/looks-official"
+	if _, err := controller.createCandidate(input, time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)); err == nil {
+		t.Fatal("unapproved research source was accepted")
+	}
+	input = validShadowResearchInput()
+	input.Hypothesis.Sources[0].URL = "https://github.com/random-owner/market-claim"
+	if _, err := controller.createCandidate(input, time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)); err == nil {
+		t.Fatal("unapproved GitHub owner was accepted as a primary source")
 	}
 	input = validShadowResearchInput()
 	now := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
@@ -311,7 +343,10 @@ func TestShadowResearchControllerRejectsTraversalSymlinksAndUntrustedResearch(t 
 	if err := os.Mkdir(sourceDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeShadowSearchDay(t, sourceDir, policy, "2026-08-28", prices)
+	for day := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC); day.Before(time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)); day = day.AddDate(0, 0, 1) {
+		writeShadowResearchDay(t, journalDir, policy, day.Format("2006-01-02"), prices)
+	}
+	writeShadowResearchDay(t, sourceDir, policy, "2026-08-28", prices)
 	if err := os.Symlink(
 		filepath.Join(sourceDir, "shadow-2026-08-28.jsonl"),
 		filepath.Join(journalDir, "shadow-2026-08-28.jsonl"),
@@ -329,7 +364,7 @@ func TestShadowResearchControllerRejectsTraversalSymlinksAndUntrustedResearch(t 
 }
 
 func TestShadowResearchControllerIsIdempotentAndEnforcesCandidateQuota(t *testing.T) {
-	policy := validShadowPolicy()
+	policy := validShadowResearchPolicy()
 	policyPath := writeShadowPolicy(t, policy)
 	root := privateTestDirectory(t)
 	journalDir := filepath.Join(root, "journals")
@@ -343,8 +378,7 @@ func TestShadowResearchControllerIsIdempotentAndEnforcesCandidateQuota(t *testin
 		220_000_000, 220_000_000, 110_000_000, 110_000_000,
 		220_000_000, 220_000_000, 110_000_000, 110_000_000,
 	}
-	writeShadowSearchDay(t, journalDir, policy, "2026-08-28", prices)
-	writeShadowSearchDay(t, journalDir, policy, "2026-08-29", prices)
+	writeShadowResearchWindow(t, journalDir, policy, "2026-08-29", prices)
 	challengerPointer := filepath.Join(root, "challenger-pointer")
 	championPointer, championRoot, challengerRoot := shadowResearchLifecycle(t, root, policyPath, policy)
 	controller, err := newShadowResearchController(
@@ -418,7 +452,7 @@ func TestShadowResearchRejectsWrappedDaysAndDuplicatePointerRace(t *testing.T) {
 		t.Fatal("wrapped challenge day count was accepted")
 	}
 
-	policy := validShadowPolicy()
+	policy := validShadowResearchPolicy()
 	policyPath := writeShadowPolicy(t, policy)
 	root := privateTestDirectory(t)
 	journalDir := filepath.Join(root, "journals")
@@ -432,8 +466,7 @@ func TestShadowResearchRejectsWrappedDaysAndDuplicatePointerRace(t *testing.T) {
 		220_000_000, 220_000_000, 110_000_000, 110_000_000,
 		220_000_000, 220_000_000, 110_000_000, 110_000_000,
 	}
-	writeShadowSearchDay(t, journalDir, policy, "2026-08-28", prices)
-	writeShadowSearchDay(t, journalDir, policy, "2026-08-29", prices)
+	writeShadowResearchWindow(t, journalDir, policy, "2026-08-29", prices)
 	challengerPointer := filepath.Join(root, "challenger-pointer")
 	championPointer, championRoot, challengerRoot := shadowResearchLifecycle(t, root, policyPath, policy)
 	controller, err := newShadowResearchController(
@@ -461,7 +494,7 @@ func TestShadowResearchRejectsWrappedDaysAndDuplicatePointerRace(t *testing.T) {
 }
 
 func TestShadowResearchPointerPublicationFailsClosedAndCanRetry(t *testing.T) {
-	policy := validShadowPolicy()
+	policy := validShadowResearchPolicy()
 	policyPath := writeShadowPolicy(t, policy)
 	root := privateTestDirectory(t)
 	journalDir := filepath.Join(root, "journals")
@@ -475,8 +508,7 @@ func TestShadowResearchPointerPublicationFailsClosedAndCanRetry(t *testing.T) {
 		220_000_000, 220_000_000, 110_000_000, 110_000_000,
 		220_000_000, 220_000_000, 110_000_000, 110_000_000,
 	}
-	writeShadowSearchDay(t, journalDir, policy, "2026-08-28", prices)
-	writeShadowSearchDay(t, journalDir, policy, "2026-08-29", prices)
+	writeShadowResearchWindow(t, journalDir, policy, "2026-08-29", prices)
 	challengerPointer := filepath.Join(root, "challenger-pointer")
 	championPointer, championRoot, challengerRoot := shadowResearchLifecycle(t, root, policyPath, policy)
 	controller, err := newShadowResearchController(
@@ -521,7 +553,7 @@ func TestShadowResearchPointerPublicationFailsClosedAndCanRetry(t *testing.T) {
 }
 
 func TestShadowResearchRotatesOnlyAfterACompleteRejectedChallenge(t *testing.T) {
-	policy := validShadowPolicy()
+	policy := validShadowResearchPolicy()
 	policy.TickSeconds = 3_600
 	policyPath := writeShadowPolicy(t, policy)
 	root := privateTestDirectory(t)
@@ -536,8 +568,7 @@ func TestShadowResearchRotatesOnlyAfterACompleteRejectedChallenge(t *testing.T) 
 		220_000_000, 220_000_000, 110_000_000, 110_000_000,
 		220_000_000, 220_000_000, 110_000_000, 110_000_000,
 	}
-	writeShadowSearchDay(t, journalDir, policy, "2026-08-28", prices)
-	writeShadowSearchDay(t, journalDir, policy, "2026-08-29", prices)
+	writeShadowResearchWindow(t, journalDir, policy, "2026-08-29", prices)
 	challengerPointer := filepath.Join(root, "challenger-pointer")
 	championPointer, championRoot, challengerRoot := shadowResearchLifecycle(t, root, policyPath, policy)
 	controller, err := newShadowResearchController(
@@ -627,8 +658,7 @@ func TestShadowResearchRotatesOnlyAfterACompleteRejectedChallenge(t *testing.T) 
 	}
 	next := validShadowResearchInput()
 	next.Hypothesis.Thesis = "Rotate only after the preceding challenger completed and failed its fixed gate."
-	writeShadowSearchDay(t, journalDir, policy, "2026-09-05", prices)
-	writeShadowSearchDay(t, journalDir, policy, "2026-09-06", prices)
+	writeShadowResearchWindow(t, journalDir, policy, "2026-09-06", prices)
 	next.TrainDay, next.ValidationDay = "2026-09-05", "2026-09-06"
 	second, err := controller.createCandidate(next, reviewAt)
 	if err != nil || second.Artifact == first.Artifact {
@@ -662,7 +692,7 @@ func TestShadowResearchRetainsQualifiedChallengerUntilPaperSelection(t *testing.
 }
 
 func TestShadowResearchRecognizesPaperSelectionBeforeRotation(t *testing.T) {
-	policy := validShadowPolicy()
+	policy := validShadowResearchPolicy()
 	policyPath := writeShadowPolicy(t, policy)
 	root := privateTestDirectory(t)
 	journalDir := filepath.Join(root, "journals")
@@ -676,8 +706,7 @@ func TestShadowResearchRecognizesPaperSelectionBeforeRotation(t *testing.T) {
 		220_000_000, 220_000_000, 110_000_000, 110_000_000,
 		220_000_000, 220_000_000, 110_000_000, 110_000_000,
 	}
-	writeShadowSearchDay(t, journalDir, policy, "2026-08-28", prices)
-	writeShadowSearchDay(t, journalDir, policy, "2026-08-29", prices)
+	writeShadowResearchWindow(t, journalDir, policy, "2026-08-29", prices)
 	challengerPointer := filepath.Join(root, "challenger-pointer")
 	championPointer, championRoot, challengerRoot := shadowResearchLifecycle(t, root, policyPath, policy)
 	controller, err := newShadowResearchController(
@@ -756,8 +785,8 @@ func TestShadowResearchRecognizesPaperSelectionBeforeRotation(t *testing.T) {
 		230_000_000, 230_000_000, 105_000_000, 105_000_000,
 		230_000_000, 230_000_000, 105_000_000, 105_000_000,
 	}
-	writeShadowSearchDay(t, journalDir, policy, "2026-08-30", newPrices)
-	writeShadowSearchDay(t, journalDir, policy, "2026-08-31", newPrices)
+	writeShadowResearchDay(t, journalDir, policy, "2026-08-30", newPrices)
+	writeShadowResearchDay(t, journalDir, policy, "2026-08-31", newPrices)
 	next.TrainDay, next.ValidationDay = "2026-08-30", "2026-08-31"
 	second, err := controller.createCandidate(
 		next, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
@@ -765,6 +794,137 @@ func TestShadowResearchRecognizesPaperSelectionBeforeRotation(t *testing.T) {
 	if err != nil || second.Artifact == first.Artifact || !second.ChallengerPointerUpdated {
 		t.Fatalf("post-selection rotation = %+v, %v", second, err)
 	}
+}
+
+func validShadowResearchPolicy() shadow.Policy {
+	policy := validShadowPolicy()
+	policy.TickSeconds = 3_600
+	return policy
+}
+
+func writeShadowResearchWindow(
+	t *testing.T, directory string, policy shadow.Policy, finalDay string, prices []uint64,
+) {
+	t.Helper()
+	end, err := time.Parse("2006-01-02", finalDay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for offset := -shadowWalkForwardWindows; offset <= 0; offset++ {
+		writeShadowResearchDay(
+			t, directory, policy, end.AddDate(0, 0, offset).Format("2006-01-02"), prices,
+		)
+	}
+}
+
+func TestShadowResearchRequiresCoverageAcrossTheWholeUTCDay(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		first   time.Duration
+		spacing time.Duration
+		count   int
+	}{
+		{name: "late start", first: 12 * time.Hour, spacing: time.Hour, count: 12},
+		{name: "clustered start", first: time.Minute, spacing: time.Minute, count: 23},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			policy := validShadowResearchPolicy()
+			root := privateTestDirectory(t)
+			end, err := time.Parse("2006-01-02", "2026-08-29")
+			if err != nil {
+				t.Fatal(err)
+			}
+			prices := []uint64{220_000_000, 110_000_000}
+			for offset := -shadowWalkForwardWindows; offset <= 0; offset++ {
+				day := end.AddDate(0, 0, offset).Format("2006-01-02")
+				if offset == -shadowWalkForwardWindows {
+					writeShadowResearchSparseDay(
+						t, root, policy, day, test.first, test.spacing, test.count,
+					)
+				} else {
+					writeShadowResearchDay(t, root, policy, day, prices)
+				}
+			}
+			if _, err := readShadowWalkForwardDays(root, "2026-08-29", policy); err == nil ||
+				!strings.Contains(err.Error(), "2026-08-22 lacks 95% observable coverage") {
+				t.Fatalf("sparse closed day error = %v", err)
+			}
+		})
+	}
+}
+
+func writeShadowResearchSparseDay(
+	t *testing.T, directory string, policy shadow.Policy, day string,
+	first, spacing time.Duration, count int,
+) {
+	t.Helper()
+	start, err := time.Parse("2006-01-02", day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := journal.Open(filepath.Join(directory, "shadow-"+day+".jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	fingerprint, err := policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstAt := start.Add(first)
+	if _, err := store.Append(firstAt, shadow.EventOpened, "", shadow.Opening{
+		Version: shadow.JournalVersionFor(policy), PolicySHA256: fingerprint,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var book shadow.Ledger
+	for index := 0; index < count; index++ {
+		at := firstAt.Add(time.Duration(index) * spacing)
+		price := uint64(110_000_000)
+		if index == 0 {
+			book, err = shadow.NewLedger(policy, price)
+		} else {
+			book, err = book.Mark(price)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		equity, err := book.EquityMicros(price)
+		if err != nil {
+			t.Fatal(err)
+		}
+		primary, secondary := shadowSearchSamples(policy, price, at)
+		tick := shadow.Tick{
+			At: at, Event: shadow.EventWaiting, PriceMicros: price, EquityMicros: equity,
+			QuoteLowerMicros: policy.QuotePeg.MinimumMicros,
+			QuoteUpperMicros: policy.QuotePeg.MaximumMicros,
+			PrimaryPrice:     &primary, SecondaryPrice: &secondary,
+		}
+		if _, err := store.Append(at, tick.Event, "", tick); err != nil {
+			t.Fatal(err)
+		}
+	}
+	closeAt := start.Add(24*time.Hour - time.Nanosecond)
+	if _, err := store.Append(closeAt, shadow.EventClosed, "", shadow.Tick{
+		At: closeAt, Event: shadow.EventClosed, PeriodClose: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeShadowResearchDay(
+	t *testing.T, directory string, policy shadow.Policy, day string, prices []uint64,
+) {
+	t.Helper()
+	if len(prices) == 0 {
+		t.Fatal("research day needs prices")
+	}
+	count := int(uint64(24*time.Hour/time.Second)/policy.TickSeconds) - 1
+	fullDay := make([]uint64, count)
+	for index := range fullDay {
+		fullDay[index] = prices[index%len(prices)]
+	}
+	writeShadowSearchDay(t, directory, policy, day, fullDay)
 }
 
 func validShadowResearchInput() shadowResearchCandidateInput {

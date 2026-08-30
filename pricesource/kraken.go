@@ -18,8 +18,10 @@ const (
 	KrakenOrigin                  = "https://api.kraken.com"
 	krakenUSDCProduct             = "USDC/USD"
 	krakenSOLProduct              = "SOL/USD"
+	krakenJUPProduct              = "JUP/USD"
 	krakenUSDCIdentityDescription = "mithril-agent/price-source-v1|kraken-spot|api.kraken.com|USDC/USD|pre-trade|best-bid-ask|http-date"
 	krakenSOLIdentityDescription  = "mithril-agent/price-source-v1|kraken-spot|api.kraken.com|SOL/USD|pre-trade|best-bid-ask|http-date"
+	krakenJUPIdentityDescription  = "mithril-agent/price-source-v1|kraken-spot|api.kraken.com|JUP/USD|pre-trade|best-bid-ask|http-date"
 	KrakenRateStateEnvironment    = "MITHRIL_AGENT_KRAKEN_RATE_STATE"
 )
 
@@ -41,6 +43,11 @@ func KrakenSOLIdentitySHA256() string {
 	return hex.EncodeToString(hash[:])
 }
 
+func KrakenJUPIdentitySHA256() string {
+	hash := sha256.Sum256([]byte(krakenJUPIdentityDescription))
+	return hex.EncodeToString(hash[:])
+}
+
 func NewKraken(client *http.Client) *Kraken {
 	return &Kraken{
 		client: boundedClient(client), feed: pricetrigger.FeedUSDCUSD,
@@ -53,6 +60,14 @@ func NewKrakenSOL(client *http.Client) *Kraken {
 	return &Kraken{
 		client: boundedClient(client), feed: pricetrigger.FeedSOLUSD,
 		product: krakenSOLProduct, identity: KrakenSOLIdentitySHA256(),
+		gate: newKrakenRequestGate(os.Getenv(KrakenRateStateEnvironment)),
+	}
+}
+
+func NewKrakenJUP(client *http.Client) *Kraken {
+	return &Kraken{
+		client: boundedClient(client), feed: pricetrigger.FeedJUPUSD,
+		product: krakenJUPProduct, identity: KrakenJUPIdentitySHA256(),
 		gate: newKrakenRequestGate(os.Getenv(KrakenRateStateEnvironment)),
 	}
 }

@@ -3,8 +3,35 @@ package shadow
 import (
 	"errors"
 	"math"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 )
+
+func separateFeePolicy(t *testing.T) Policy {
+	t.Helper()
+	policy := sellPolicy()
+	policy.Cluster = Mainnet
+	policy.Market = MarketSOLUSDC
+	policy.QuoteRoute = MainnetQuoteRoute(true)
+	policy.QuotePeg = &pricetrigger.BandPolicy{
+		Version: pricetrigger.Version, Feed: pricetrigger.FeedUSDCUSD,
+		MinimumMicros: pricetrigger.USDCBandMinimumMicros,
+		MaximumMicros: pricetrigger.USDCBandMaximumMicros,
+		MaxAgeSeconds: 120, MaxSourceSkewSeconds: 90,
+		MaxDeviationBPS: 100, MaxConfidenceBPS: 100,
+		PrimarySourceSHA256:   strings.Repeat("c", 64),
+		SecondarySourceSHA256: strings.Repeat("d", 64),
+	}
+	policy.StartingInputUnits = 1_000_000_000
+	policy.StartingFeeReserveLamports = 2 * policy.FeeLamports
+	if err := policy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	return policy
+}
 
 func TestLedgerArithmeticRefusesEveryIntegerBoundaryWrap(t *testing.T) {
 	if _, err := addUnits(math.MaxUint64, 1); err == nil {
@@ -157,6 +184,272 @@ func TestSubmittedRefusalChargesOnlyTheFee(t *testing.T) {
 		after.QuoteUnits != ledger.QuoteUnits || after.TurnoverMicros != 0 ||
 		after.Fills != 0 || after.FeesMicros <= 0 || after.RealizedMicros >= 0 {
 		t.Fatalf("submitted refusal accounting = %+v", after)
+	}
+}
+
+func TestSeparateFeeReserveNeverDebitsTradedInventory(t *testing.T) {
+	policy := separateFeePolicy(t)
+	ledger, err := NewLedger(policy, 20_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	openingEquity := ledger.OpeningEquityMicros
+	after, err := ledger.Apply(Fill{
+		Sell: true, Refusal: "slippage", FeeLamports: policy.FeeLamports,
+	}, 21_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.BaseUnits != ledger.BaseUnits ||
+		after.FeeReserveLamports != policy.FeeLamports ||
+		after.FeeReserveCostBasisMicros >= ledger.FeeReserveCostBasisMicros ||
+		after.FeesMicros <= 0 || after.RealizedMicros >= 0 {
+		t.Fatalf("separate fee accounting = %+v", after)
+	}
+	if openingEquity != 20_000_200 {
+		t.Fatalf("opening equity = %d, want 20000200", openingEquity)
+	}
+}
+
+func TestJUPBookValuesLamportFeesAndHoldReserveAtSOLPrice(t *testing.T) {
+	policy := jupBuyPolicy(t)
+	policy.Version = NativeFeeVersion
+	policy.OneTimeSetupRentLamports = 0
+	policy.StartingFeeReserveLamports = 2 * policy.FeeLamports
+	ledger, err := NewLedger(policy, 1_000_000, 200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ledger.OpeningEquityMicros != 100_002_000 {
+		t.Fatalf("opening equity = %d, want 100002000", ledger.OpeningEquityMicros)
+	}
+	after, err := ledger.Apply(Fill{
+		Refusal: "slippage", FeeLamports: policy.FeeLamports,
+	}, 2_000_000, 400_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.BaseUnits != 0 || after.QuoteUnits != policy.StartingInputUnits ||
+		after.FeeReserveLamports != policy.FeeLamports || after.FeesMicros != 2_000 ||
+		after.RealizedMicros != -1_000 {
+		t.Fatalf("JUP fee accounting = %+v", after)
+	}
+	benchmark, err := after.HoldBenchmarkMicros(2_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if benchmark != 100_004_000 {
+		t.Fatalf("hold benchmark = %d, want 100004000", benchmark)
+	}
+	if _, err := NewLedger(policy, 1_000_000); err == nil {
+		t.Fatal("JUP books opened without an independent SOL price")
+	}
+	if _, err := NewLedger(policy, 1_000_000, policy.NativeFeePriceCeilingMicros+1); err == nil {
+		t.Fatal("JUP books opened above the native price ceiling")
+	}
+	policy.NativeFeePrice.Direction = pricetrigger.SellAtOrAbove
+	if err := policy.Validate(); err == nil {
+		t.Fatal("JUP policy accepted a lower-bound native fee valuation")
+	}
+	policy = jupBuyPolicy(t)
+	policy.StartingFeeReserveLamports = 0
+	policy.StartingOutputUnits = policy.FeeLamports
+	if err := policy.Validate(); err == nil {
+		t.Fatal("JUP policy treated token inventory as lamport fee funding")
+	}
+}
+
+func TestJUPSetupRentLocksCapitalOnlyAfterTheFirstSuccessfulBuy(t *testing.T) {
+	policy := jupBuyPolicy(t)
+	policy.StartingFeeReserveLamports = policy.OneTimeSetupRentLamports + 4*policy.FeeLamports
+	ledger, err := NewLedger(policy, 1_000_000, 200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opening := ledger.OpeningEquityMicros
+	if amount, reserve := paperAttempt(policy, ledger, false, policy.InputAmount, nil); amount != policy.InputAmount || reserve != policy.OneTimeSetupRentLamports+policy.FeeLamports {
+		t.Fatalf("initial JUP attempt reserve = amount %d reserve %d", amount, reserve)
+	}
+	buy := Fill{
+		Filled: true, Sell: false, SpentUnits: 100_000_000,
+		ReceivedUnits: 100_000_000, FeeLamports: policy.FeeLamports,
+	}
+	afterBuy, err := ledger.Apply(buy, 1_000_000, 200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterBuy.LockedRentLamports != policy.OneTimeSetupRentLamports ||
+		afterBuy.FeeReserveLamports != 3*policy.FeeLamports ||
+		afterBuy.FeesMicros != 1_000 {
+		t.Fatalf("first JUP buy setup accounting = %+v", afterBuy)
+	}
+	if _, reserve := paperAttempt(policy, afterBuy, true, afterBuy.BaseUnits, nil); reserve != policy.FeeLamports {
+		t.Fatalf("separate JUP fee reserve stranded the sell: reserve=%d", reserve)
+	}
+	if reserve := nextSellFeeReserve(policy); reserve != policy.FeeLamports ||
+		capSellAmount(afterBuy.BaseUnits, afterBuy, reserve) != afterBuy.BaseUnits {
+		t.Fatalf("post-buy JUP sell was incorrectly capped: reserve=%d", reserve)
+	}
+	equity, err := afterBuy.EquityMicros(1_000_000)
+	if err != nil || equity != opening-1_000 {
+		t.Fatalf("setup rent was treated as an expense: equity=%d opening=%d err=%v", equity, opening, err)
+	}
+	afterSell, err := afterBuy.Apply(Fill{
+		Filled: true, Sell: true, SpentUnits: 100_000_000,
+		ReceivedUnits: 100_000_000, FeeLamports: policy.FeeLamports,
+	}, 1_000_000, 200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterSecondBuy, err := afterSell.Apply(buy, 1_000_000, 200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterSecondBuy.LockedRentLamports != policy.OneTimeSetupRentLamports ||
+		afterSecondBuy.FeeReserveLamports != policy.FeeLamports {
+		t.Fatalf("later JUP buy locked setup rent again: %+v", afterSecondBuy)
+	}
+
+	refused, err := ledger.Apply(Fill{
+		Sell: false, Refusal: "slippage", FeeLamports: policy.FeeLamports,
+	}, 1_000_000, 200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refused.LockedRentLamports != 0 ||
+		refused.FeeReserveLamports != policy.StartingFeeReserveLamports-policy.FeeLamports {
+		t.Fatalf("refused JUP buy locked setup rent: %+v", refused)
+	}
+	report, err := BuildReport(
+		policy, afterBuy, Counts{Ticks: 1, Signals: 1, Fills: 1}, Stats{Settled: 1},
+		1_000_000, time.Unix(1, 0).UTC(), time.Unix(61, 0).UTC(),
+	)
+	if err != nil || report.LockedRentLamports != policy.OneTimeSetupRentLamports {
+		t.Fatalf("JUP report omitted locked setup rent: %+v err=%v", report, err)
+	}
+}
+
+func TestSOLSetupRentLocksOnTheFirstSuccessfulJupiterSell(t *testing.T) {
+	policy := mainnetPolicy()
+	policy.OneTimeSetupRentLamports = 3_000_000
+	policy.StartingFeeReserveLamports = policy.OneTimeSetupRentLamports + 2*policy.FeeLamports
+	if err := policy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := NewLedger(policy, 200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fill := Fill{
+		Filled: true, Sell: true, SpentUnits: policy.InputAmount,
+		ReceivedUnits: 200_000, FeeLamports: policy.FeeLamports,
+	}
+	after, err := ledger.Apply(fill, 200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.LockedRentLamports != policy.OneTimeSetupRentLamports ||
+		after.FeeReserveLamports != policy.FeeLamports {
+		t.Fatalf("SOL/USDC setup accounting = %+v", after)
+	}
+	equity, err := after.EquityMicros(200_000_000)
+	feeValue, feeErr := valueAt(policy.FeeLamports, 200_000_000, 9)
+	if err != nil || feeErr != nil || equity != ledger.OpeningEquityMicros-feeValue {
+		t.Fatalf("SOL setup rent changed equity: equity=%d opening=%d fee=%d errors=%v/%v",
+			equity, ledger.OpeningEquityMicros, feeValue, err, feeErr)
+	}
+}
+
+func TestSOLRoundTripReplenishesBothFeesAcrossCycles(t *testing.T) {
+	policy := mainnetPolicy()
+	buy := policy.Trigger
+	buy.Direction = pricetrigger.BuyAtOrBelow
+	buy.ThresholdMicros = 10_000_000
+	policy.ReturnTrigger = &buy
+	policy.StartingFeeReserveLamports = 2 * policy.FeeLamports
+	if err := policy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := NewLedger(policy, 200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for cycle := 0; cycle < 2; cycle++ {
+		sellAmount, sellReserve := paperAttempt(policy, ledger, true, policy.InputAmount, nil)
+		if !canFundAttempt(ledger, true, sellAmount, sellReserve) {
+			t.Fatalf("cycle %d sell was not funded: %+v", cycle, ledger)
+		}
+		ledger, err = ledger.Apply(Fill{
+			Filled: true, Sell: true, SpentUnits: sellAmount,
+			ReceivedUnits: 200_000, FeeLamports: policy.FeeLamports,
+		}, 200_000_000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buyAmount, buyReserve := paperAttempt(policy, ledger, false, 200_000, nil)
+		if !canFundAttempt(ledger, false, buyAmount, buyReserve) {
+			t.Fatalf("cycle %d buy was not funded: %+v", cycle, ledger)
+		}
+		ledger, err = ledger.Apply(Fill{
+			Filled: true, Sell: false, SpentUnits: buyAmount,
+			ReceivedUnits: policy.InputAmount, FeeLamports: policy.FeeLamports,
+		}, 200_000_000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reserve := nextSellFeeReserve(policy)
+		ledger, err = ledger.replenishFeeReserve(reserve)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ledger.FeeReserveLamports != 2*policy.FeeLamports {
+			t.Fatalf("cycle %d replenished %d lamports", cycle, ledger.FeeReserveLamports)
+		}
+	}
+}
+
+func TestSeparateFeeReserveCannotBeFundedByBoughtSOL(t *testing.T) {
+	policy := separateFeePolicy(t)
+	policy.Trigger.Direction = pricetrigger.BuyAtOrBelow
+	policy.QuoteRoute = MainnetQuoteRoute(false)
+	policy.InputDecimals, policy.OutputDecimals = 6, 9
+	policy.StartingInputUnits = 1_000_000
+	policy.StartingOutputUnits = 0
+	policy.InputAmount = 1_000_000
+	policy.StartingFeeReserveLamports = policy.FeeLamports
+	ledger, err := NewLedger(policy, 20_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger.FeeReserveLamports = 0
+	if _, err := ledger.Apply(Fill{
+		Filled: true, SpentUnits: 1_000_000, ReceivedUnits: 50_000_000,
+		FeeLamports: policy.FeeLamports,
+	}, 20_000_000); !errors.Is(err, errInsufficientInventory) {
+		t.Fatalf("buy funded its native fee from output: %v", err)
+	}
+}
+
+func TestReplenishingSeparateFeeReservePreservesUnitsAndBasis(t *testing.T) {
+	policy := separateFeePolicy(t)
+	ledger, err := NewLedger(policy, 20_000_003)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeUnits := ledger.BaseUnits + ledger.FeeReserveLamports
+	beforeBasis := ledger.CostBasisMicros + ledger.FeeReserveCostBasisMicros
+	ledger.BaseUnits += ledger.FeeReserveLamports
+	ledger.CostBasisMicros += ledger.FeeReserveCostBasisMicros
+	ledger.FeeReserveLamports = 0
+	ledger.FeeReserveCostBasisMicros = 0
+	ledger, err = ledger.replenishFeeReserve(2 * policy.FeeLamports)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ledger.FeeReserveLamports != 2*policy.FeeLamports ||
+		ledger.BaseUnits+ledger.FeeReserveLamports != beforeUnits ||
+		ledger.CostBasisMicros+ledger.FeeReserveCostBasisMicros != beforeBasis {
+		t.Fatalf("reserve replenishment changed the aggregate book: %+v", ledger)
 	}
 }
 

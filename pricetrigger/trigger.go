@@ -11,7 +11,9 @@ import (
 
 const (
 	Version               = uint32(1)
+	MultiFeedVersion      = uint32(2)
 	FeedSOLUSD            = "SOL/USD"
+	FeedJUPUSD            = "JUP/USD"
 	FeedUSDCUSD           = "USDC/USD"
 	MaxPriceMicros        = uint64(1_000_000_000_000)
 	USDCBandMinimumMicros = uint64(990_000)
@@ -39,8 +41,14 @@ type Policy struct {
 }
 
 func (p Policy) Validate() error {
-	if p.Version != Version || p.Feed != FeedSOLUSD {
-		return errors.New("price trigger must use the SOL/USD v1 contract")
+	if p.Version == Version && p.Feed != FeedSOLUSD {
+		return errors.New("price trigger v1 must use SOL/USD")
+	}
+	if p.Version == MultiFeedVersion && p.Feed != FeedSOLUSD && p.Feed != FeedJUPUSD {
+		return errors.New("price trigger v2 feed is unsupported")
+	}
+	if p.Version != Version && p.Version != MultiFeedVersion {
+		return errors.New("price trigger version is unsupported")
 	}
 	if p.Direction != SellAtOrAbove && p.Direction != BuyAtOrBelow {
 		return errors.New("price trigger direction is invalid")

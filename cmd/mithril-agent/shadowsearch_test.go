@@ -120,7 +120,7 @@ func TestAdaptiveShadowSearchConsumesARealReplayableRunnerJournal(t *testing.T) 
 		96_000_000, 98_000_000, 100_000_000, 102_000_000, 102_000_000,
 	}
 	for index, price := range prices {
-		at := start.Add(time.Duration(index+1) * time.Minute)
+		at := start.Add(time.Duration(index+1) * policy.Tick())
 		primary.price, primary.at = price, at
 		secondary.price, secondary.at = price, at
 		quotePrimary.at, quoteSecondary.at = at, at
@@ -738,7 +738,7 @@ func writeShadowSearchJournal(
 	var book shadow.Ledger
 	opened := false
 	for index, price := range prices {
-		at := start.Add(time.Duration(index+1) * time.Minute)
+		at := start.Add(time.Duration(index+1) * policy.Tick())
 		if !opened {
 			book, err = shadow.NewLedger(policy, price)
 			opened = true

@@ -8,8 +8,8 @@ import (
 )
 
 // The ledger is kept in two assets, named for their role rather than their
-// ticker: base is the thing whose price moves (SOL), quote is what that price
-// is denominated in (a dollar stable). A sell spends base and receives quote; a
+// ticker: base is the thing whose price moves, quote is what that price is
+// denominated in (normally a dollar stable). A sell spends base and receives quote; a
 // buy does the reverse. Naming them this way means the accounting does not have
 // to branch on direction in more than one place.
 //
@@ -24,6 +24,14 @@ type Ledger struct {
 
 	BaseUnits  uint64 `json:"base_units"`
 	QuoteUnits uint64 `json:"quote_units"`
+	// FeeReserveLamports is the liquid native SOL for modeled transaction fees
+	// and setup rent that has not yet been locked. It is separate from BaseUnits
+	// so another base asset cannot pay native costs out of its token inventory.
+	FeeReserveLamports   uint64 `json:"fee_reserve_lamports,omitempty"`
+	NativeFeePriceMicros uint64 `json:"native_fee_price_micros,omitempty"`
+	// LockedRentLamports is native capital retained in user-owned token setup
+	// accounts. It remains equity and is never reported as a trading fee.
+	LockedRentLamports uint64 `json:"locked_rent_lamports,omitempty"`
 
 	// CostBasisMicros is the exact total cost of the base currently held.
 	// Carrying the total rather than a per-unit average matters: re-deriving a
@@ -31,6 +39,11 @@ type Ledger struct {
 	// and because the bias only ever goes one way it compounds — understating
 	// cost, and so overstating profit, a little more with every trade.
 	CostBasisMicros uint64 `json:"cost_basis_micros"`
+	// FeeReserveCostBasisMicros tracks the basis of the remaining native SOL
+	// reserve. Together with CostBasisMicros it preserves exact total basis when
+	// SOL moves between traded inventory and the fee reserve.
+	FeeReserveCostBasisMicros uint64 `json:"fee_reserve_cost_basis_micros,omitempty"`
+	LockedRentCostBasisMicros uint64 `json:"locked_rent_cost_basis_micros,omitempty"`
 	// AverageCostMicros is that basis per whole unit, derived for display.
 	// Opening inventory is marked at the first observed price so realized profit
 	// measures what the strategy did, not what the market did before it began.
@@ -46,6 +59,7 @@ type Ledger struct {
 	OpeningEquityMicros uint64 `json:"opening_equity_micros"`
 	openingBaseUnits    uint64
 	openingQuoteUnits   uint64
+	openingFeeReserve   uint64
 }
 
 var (
@@ -65,24 +79,60 @@ func signed(value uint64) (int64, error) {
 
 // NewLedger opens the books, marking the starting inventory at the first price
 // actually observed.
-func NewLedger(policy Policy, openingPriceMicros uint64) (Ledger, error) {
+func NewLedger(policy Policy, openingPriceMicros uint64, nativePrice ...uint64) (Ledger, error) {
 	if err := policy.Validate(); err != nil {
 		return Ledger{}, err
 	}
 	if openingPriceMicros == 0 {
 		return Ledger{}, errZeroReference
 	}
+	nativePriceMicros, err := nativeFeePrice(policy, openingPriceMicros, nativePrice)
+	if err != nil {
+		return Ledger{}, err
+	}
 	base, quote := policy.StartingInputUnits, policy.StartingOutputUnits
 	if !policy.IsSell() {
 		base, quote = policy.StartingOutputUnits, policy.StartingInputUnits
 	}
-	opening, err := valueAt(base, openingPriceMicros, baseDecimalsFor(policy))
+	reserve := policy.StartingFeeReserveLamports
+	baseBasis, reserveBasis := uint64(0), uint64(0)
+	if usesSeparateNativePrice(policy) {
+		baseBasis, err = valueAt(base, openingPriceMicros, baseDecimalsFor(policy))
+		if err != nil {
+			return Ledger{}, err
+		}
+		reserveBasis, err = valueAt(reserve, nativePriceMicros, 9)
+		if err != nil {
+			return Ledger{}, err
+		}
+	} else {
+		baseWithReserve, addErr := addUnits(base, reserve)
+		if addErr != nil {
+			return Ledger{}, addErr
+		}
+		opening, valueErr := valueAt(baseWithReserve, openingPriceMicros, baseDecimalsFor(policy))
+		if valueErr != nil {
+			return Ledger{}, valueErr
+		}
+		baseBasis = opening
+		if reserve != 0 {
+			baseBasis = shareOf(opening, base, baseWithReserve)
+			reserveBasis = opening - baseBasis
+		}
+	}
+	average, err := averageCost(baseBasis, base, baseDecimalsFor(policy))
 	if err != nil {
 		return Ledger{}, err
 	}
+	storedNativePrice := uint64(0)
+	if usesSeparateNativePrice(policy) {
+		storedNativePrice = nativePriceMicros
+	}
 	ledger := Ledger{
 		Policy: policy, BaseUnits: base, QuoteUnits: quote,
-		CostBasisMicros: opening, AverageCostMicros: openingPriceMicros,
+		FeeReserveLamports: reserve, NativeFeePriceMicros: storedNativePrice,
+		CostBasisMicros: baseBasis, FeeReserveCostBasisMicros: reserveBasis,
+		AverageCostMicros: average,
 	}
 	equity, err := ledger.EquityMicros(openingPriceMicros)
 	if err != nil {
@@ -90,31 +140,51 @@ func NewLedger(policy Policy, openingPriceMicros uint64) (Ledger, error) {
 	}
 	ledger.OpeningEquityMicros, ledger.PeakEquityMicros = equity, equity
 	ledger.openingBaseUnits, ledger.openingQuoteUnits = base, quote
+	ledger.openingFeeReserve = reserve
 	return ledger, nil
 }
 
 // Apply books a settled attempt and returns the resulting ledger. A refused
 // submitted attempt moves no traded inventory but still pays its network fee.
-func (l Ledger) Apply(fill Fill, markPriceMicros uint64) (Ledger, error) {
+func (l Ledger) Apply(fill Fill, markPriceMicros uint64, nativePrice ...uint64) (Ledger, error) {
 	if markPriceMicros == 0 {
 		return Ledger{}, errZeroReference
 	}
+	nativePriceMicros, err := nativeFeePrice(l.Policy, markPriceMicros, nativePrice)
+	if err != nil {
+		return Ledger{}, err
+	}
 	// A transaction fee is withdrawn before its instructions execute. Bought
 	// SOL therefore cannot fund its own fee, and a sell must leave the fee.
-	if fill.FeeLamports > l.BaseUnits ||
+	setupRent := l.setupRentFor(fill)
+	nativeDebit, debitErr := addUnits(fill.FeeLamports, setupRent)
+	if debitErr != nil {
+		return Ledger{}, debitErr
+	}
+	if l.separateFeeReserve() {
+		if nativeDebit > l.FeeReserveLamports ||
+			fill.Filled && fill.Sell && fill.SpentUnits > l.BaseUnits {
+			return Ledger{}, errInsufficientInventory
+		}
+	} else if fill.FeeLamports > l.BaseUnits ||
 		(fill.Filled && fill.Sell && fill.SpentUnits > l.BaseUnits-fill.FeeLamports) {
 		return Ledger{}, errInsufficientInventory
 	}
 	next := l
+	if usesSeparateNativePrice(l.Policy) {
+		next.NativeFeePriceMicros = nativePriceMicros
+	}
 	if !fill.Filled {
-		if next, err := next.chargeFee(fill.FeeLamports, markPriceMicros); err != nil {
+		if next, err := next.chargeFee(fill.FeeLamports, nativePriceMicros); err != nil {
 			return Ledger{}, err
 		} else {
-			return next.mark(markPriceMicros)
+			return next.mark(markPriceMicros, nativePriceMicros)
 		}
 	}
-	var err error
-	if next, err = next.chargeFee(fill.FeeLamports, markPriceMicros); err != nil {
+	if next, err = next.chargeFee(fill.FeeLamports, nativePriceMicros); err != nil {
+		return Ledger{}, err
+	}
+	if next, err = next.lockSetupRent(setupRent); err != nil {
 		return Ledger{}, err
 	}
 	quoteDecimals := next.quoteDecimals()
@@ -192,7 +262,7 @@ func (l Ledger) Apply(fill Fill, markPriceMicros uint64) (Ledger, error) {
 		return Ledger{}, err
 	}
 	next.Fills = fills
-	return next.mark(markPriceMicros)
+	return next.mark(markPriceMicros, nativePriceMicros)
 }
 
 // chargeFee removes the native fee and its proportional cost basis. It is
@@ -202,14 +272,24 @@ func (l Ledger) chargeFee(feeLamports, markPriceMicros uint64) (Ledger, error) {
 	if feeLamports == 0 {
 		return l, nil
 	}
-	if feeLamports > l.BaseUnits {
+	available := l.BaseUnits
+	basisTotal := l.CostBasisMicros
+	if l.separateFeeReserve() {
+		available = l.FeeReserveLamports
+		basisTotal = l.FeeReserveCostBasisMicros
+	}
+	if feeLamports > available {
 		return Ledger{}, errInsufficientInventory
 	}
-	feeMicros, err := valueAt(feeLamports, markPriceMicros, l.baseDecimals())
+	feeDecimals := l.baseDecimals()
+	if l.separateFeeReserve() {
+		feeDecimals = 9
+	}
+	feeMicros, err := valueAt(feeLamports, markPriceMicros, feeDecimals)
 	if err != nil {
 		return Ledger{}, err
 	}
-	basis := shareOf(l.CostBasisMicros, feeLamports, l.BaseUnits)
+	basis := shareOf(basisTotal, feeLamports, available)
 	signedBasis, err := signed(basis)
 	if err != nil {
 		return Ledger{}, err
@@ -230,20 +310,63 @@ func (l Ledger) chargeFee(feeLamports, markPriceMicros uint64) (Ledger, error) {
 	// expense. The mark terms cancel, so the net realized change is the removed
 	// basis. FeesMicros still records the fee's current value for reporting.
 	next := l
-	next.CostBasisMicros -= basis
-	next.BaseUnits -= feeLamports
+	if l.separateFeeReserve() {
+		next.FeeReserveCostBasisMicros -= basis
+		next.FeeReserveLamports -= feeLamports
+	} else {
+		next.CostBasisMicros -= basis
+		next.BaseUnits -= feeLamports
+	}
 	next.FeesMicros = fees
 	next.RealizedMicros = realized
-	if next.AverageCostMicros, err = averageCost(
-		next.CostBasisMicros, next.BaseUnits, l.baseDecimals(),
-	); err != nil {
-		return Ledger{}, err
+	if !l.separateFeeReserve() {
+		if next.AverageCostMicros, err = averageCost(
+			next.CostBasisMicros, next.BaseUnits, l.baseDecimals(),
+		); err != nil {
+			return Ledger{}, err
+		}
 	}
 	return next, nil
 }
 
+func (l Ledger) setupRentFor(fill Fill) uint64 {
+	if fill.Filled && l.Policy.OneTimeSetupRentLamports != 0 && l.LockedRentLamports == 0 {
+		return l.Policy.OneTimeSetupRentLamports
+	}
+	return 0
+}
+
+func (l Ledger) lockSetupRent(rentLamports uint64) (Ledger, error) {
+	if rentLamports == 0 {
+		return l, nil
+	}
+	if !l.separateFeeReserve() || rentLamports > l.FeeReserveLamports ||
+		l.LockedRentLamports != 0 {
+		return Ledger{}, errInsufficientInventory
+	}
+	basis := shareOf(l.FeeReserveCostBasisMicros, rentLamports, l.FeeReserveLamports)
+	next := l
+	next.FeeReserveLamports -= rentLamports
+	next.FeeReserveCostBasisMicros -= basis
+	next.LockedRentLamports = rentLamports
+	next.LockedRentCostBasisMicros = basis
+	return next, nil
+}
+
 func canFundAttempt(ledger Ledger, sell bool, amount, reserveLamports uint64) bool {
-	if amount == 0 || reserveLamports > ledger.BaseUnits {
+	if amount == 0 {
+		return false
+	}
+	if ledger.separateFeeReserve() {
+		if reserveLamports > ledger.FeeReserveLamports {
+			return false
+		}
+		if sell {
+			return amount <= ledger.BaseUnits
+		}
+		return amount <= ledger.QuoteUnits
+	}
+	if reserveLamports > ledger.BaseUnits {
 		return false
 	}
 	if sell {
@@ -252,14 +375,58 @@ func canFundAttempt(ledger Ledger, sell bool, amount, reserveLamports uint64) bo
 	return amount <= ledger.QuoteUnits
 }
 
-func capSellAmount(amount, baseUnits, reserveLamports uint64) uint64 {
-	if reserveLamports >= baseUnits {
+func capSellAmount(amount uint64, ledger Ledger, reserveLamports uint64) uint64 {
+	if ledger.separateFeeReserve() {
+		if reserveLamports > ledger.FeeReserveLamports {
+			return 0
+		}
+		return min(amount, ledger.BaseUnits)
+	}
+	if reserveLamports >= ledger.BaseUnits {
 		return 0
 	}
-	return min(amount, baseUnits-reserveLamports)
+	return min(amount, ledger.BaseUnits-reserveLamports)
+}
+
+// replenishFeeReserve moves newly bought SOL into the native fee bucket. The
+// total units and total basis do not change; only their role in the paper book
+// does. A small fill tops up as far as it can and the next funding check then
+// refuses another leg honestly.
+func (l Ledger) replenishFeeReserve(targetLamports uint64) (Ledger, error) {
+	if !l.separateFeeReserve() || usesSeparateNativePrice(l.Policy) ||
+		l.FeeReserveLamports >= targetLamports {
+		return l, nil
+	}
+	move := min(targetLamports-l.FeeReserveLamports, l.BaseUnits)
+	if move == 0 {
+		return l, nil
+	}
+	basis := shareOf(l.CostBasisMicros, move, l.BaseUnits)
+	next := l
+	next.BaseUnits -= move
+	next.FeeReserveLamports += move
+	next.CostBasisMicros -= basis
+	reserveBasis, err := addMagnitude(next.FeeReserveCostBasisMicros, basis)
+	if err != nil {
+		return Ledger{}, err
+	}
+	next.FeeReserveCostBasisMicros = reserveBasis
+	if next.AverageCostMicros, err = averageCost(
+		next.CostBasisMicros, next.BaseUnits, next.baseDecimals(),
+	); err != nil {
+		return Ledger{}, err
+	}
+	return next, nil
 }
 
 func roundTripFeeReserve(feeLamports uint64) uint64 { return 2 * feeLamports }
+
+func nextSellFeeReserve(policy Policy) uint64 {
+	if usesSeparateNativePrice(policy) {
+		return policy.FeeLamports
+	}
+	return roundTripFeeReserve(policy.FeeLamports)
+}
 
 func attemptFeeReserve(policy Policy, sell bool) uint64 {
 	if sell && policy.RoundTrip() {
@@ -272,25 +439,55 @@ func paperAttempt(
 	policy Policy, ledger Ledger, sell bool, normalAmount uint64, decision *AdaptiveDecision,
 ) (uint64, uint64) {
 	if decision != nil && decision.Strategy == StrategyRiskExit && sell {
+		if ledger.separateFeeReserve() {
+			reserve := policy.FeeLamports
+			if ledger.LockedRentLamports == 0 {
+				if policy.OneTimeSetupRentLamports > math.MaxUint64-reserve {
+					return 0, math.MaxUint64
+				}
+				reserve += policy.OneTimeSetupRentLamports
+			}
+			if ledger.FeeReserveLamports < reserve {
+				return 0, reserve
+			}
+			return ledger.BaseUnits, reserve
+		}
 		if ledger.BaseUnits <= policy.FeeLamports {
 			return 0, policy.FeeLamports
 		}
 		return ledger.BaseUnits - policy.FeeLamports, policy.FeeLamports
 	}
-	return normalAmount, attemptFeeReserve(policy, sell)
+	reserve := attemptFeeReserve(policy, sell)
+	if ledger.separateFeeReserve() {
+		reserve = policy.FeeLamports
+	}
+	if policy.OneTimeSetupRentLamports != 0 && ledger.LockedRentLamports == 0 {
+		if policy.OneTimeSetupRentLamports > math.MaxUint64-reserve {
+			return 0, math.MaxUint64
+		}
+		reserve += policy.OneTimeSetupRentLamports
+	}
+	return normalAmount, reserve
 }
 
 // mark revalues the book at the current price and updates the high-water mark
 // and the worst peak-to-trough fall seen so far.
-func (l Ledger) mark(priceMicros uint64) (Ledger, error) {
+func (l Ledger) mark(priceMicros uint64, nativePrice ...uint64) (Ledger, error) {
 	if priceMicros == 0 {
 		return Ledger{}, errZeroReference
 	}
-	equity, err := l.EquityMicros(priceMicros)
+	nativePriceMicros, err := nativeFeePrice(l.Policy, priceMicros, nativePrice)
 	if err != nil {
 		return Ledger{}, err
 	}
 	next := l
+	if usesSeparateNativePrice(l.Policy) {
+		next.NativeFeePriceMicros = nativePriceMicros
+	}
+	equity, err := next.EquityMicros(priceMicros)
+	if err != nil {
+		return Ledger{}, err
+	}
 	if equity > next.PeakEquityMicros {
 		next.PeakEquityMicros = equity
 	}
@@ -301,11 +498,37 @@ func (l Ledger) mark(priceMicros uint64) (Ledger, error) {
 }
 
 // Mark revalues without trading, so a flat day still records its drawdown.
-func (l Ledger) Mark(priceMicros uint64) (Ledger, error) { return l.mark(priceMicros) }
+func (l Ledger) Mark(priceMicros uint64, nativePrice ...uint64) (Ledger, error) {
+	return l.mark(priceMicros, nativePrice...)
+}
 
 // EquityMicros is everything held, valued in USD micros at the given price.
 func (l Ledger) EquityMicros(priceMicros uint64) (uint64, error) {
-	base, err := valueAt(l.BaseUnits, priceMicros, l.baseDecimals())
+	var base uint64
+	var err error
+	if usesSeparateNativePrice(l.Policy) {
+		base, err = valueAt(l.BaseUnits, priceMicros, l.baseDecimals())
+		if err == nil {
+			var reserve uint64
+			var nativeUnits uint64
+			nativeUnits, err = addUnits(l.FeeReserveLamports, l.LockedRentLamports)
+			if err == nil {
+				reserve, err = valueAt(nativeUnits, l.NativeFeePriceMicros, 9)
+			}
+			if err == nil {
+				base, err = addMagnitude(base, reserve)
+			}
+		}
+	} else {
+		var baseUnits uint64
+		baseUnits, err = addUnits(l.BaseUnits, l.FeeReserveLamports)
+		if err == nil {
+			baseUnits, err = addUnits(baseUnits, l.LockedRentLamports)
+		}
+		if err == nil {
+			base, err = valueAt(baseUnits, priceMicros, l.baseDecimals())
+		}
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -318,7 +541,31 @@ func (l Ledger) EquityMicros(priceMicros uint64) (uint64, error) {
 
 // UnrealizedMicros is the profit sitting in inventory that has not been sold.
 func (l Ledger) UnrealizedMicros(priceMicros uint64) (int64, error) {
-	current, err := valueAt(l.BaseUnits, priceMicros, l.baseDecimals())
+	var current uint64
+	var err error
+	if usesSeparateNativePrice(l.Policy) {
+		current, err = valueAt(l.BaseUnits, priceMicros, l.baseDecimals())
+		if err == nil {
+			var reserve uint64
+			var nativeUnits uint64
+			nativeUnits, err = addUnits(l.FeeReserveLamports, l.LockedRentLamports)
+			if err == nil {
+				reserve, err = valueAt(nativeUnits, l.NativeFeePriceMicros, 9)
+			}
+			if err == nil {
+				current, err = addMagnitude(current, reserve)
+			}
+		}
+	} else {
+		var baseUnits uint64
+		baseUnits, err = addUnits(l.BaseUnits, l.FeeReserveLamports)
+		if err == nil {
+			baseUnits, err = addUnits(baseUnits, l.LockedRentLamports)
+		}
+		if err == nil {
+			current, err = valueAt(baseUnits, priceMicros, l.baseDecimals())
+		}
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -326,7 +573,14 @@ func (l Ledger) UnrealizedMicros(priceMicros uint64) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	signedCost, err := signed(l.CostBasisMicros)
+	totalBasis, err := addMagnitude(l.CostBasisMicros, l.FeeReserveCostBasisMicros)
+	if err == nil {
+		totalBasis, err = addMagnitude(totalBasis, l.LockedRentCostBasisMicros)
+	}
+	if err != nil {
+		return 0, err
+	}
+	signedCost, err := signed(totalBasis)
 	if err != nil {
 		return 0, err
 	}
@@ -336,7 +590,24 @@ func (l Ledger) UnrealizedMicros(priceMicros uint64) (int64, error) {
 // HoldBenchmarkMicros is what doing nothing at all would have been worth. A
 // strategy that does not beat it has not earned the risk it took.
 func (l Ledger) HoldBenchmarkMicros(priceMicros uint64) (uint64, error) {
-	base, err := valueAt(l.openingBaseUnits, priceMicros, l.baseDecimals())
+	var base uint64
+	var err error
+	if usesSeparateNativePrice(l.Policy) {
+		base, err = valueAt(l.openingBaseUnits, priceMicros, l.baseDecimals())
+		if err == nil {
+			var reserve uint64
+			reserve, err = valueAt(l.openingFeeReserve, l.NativeFeePriceMicros, 9)
+			if err == nil {
+				base, err = addMagnitude(base, reserve)
+			}
+		}
+	} else {
+		var baseUnits uint64
+		baseUnits, err = addUnits(l.openingBaseUnits, l.openingFeeReserve)
+		if err == nil {
+			base, err = valueAt(baseUnits, priceMicros, l.baseDecimals())
+		}
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -374,6 +645,26 @@ func addSigned(left, right int64) (int64, error) {
 }
 
 func (l Ledger) baseDecimals() uint8 { return baseDecimalsFor(l.Policy) }
+
+func (l Ledger) separateFeeReserve() bool {
+	return l.Policy.StartingFeeReserveLamports != 0
+}
+
+func usesSeparateNativePrice(policy Policy) bool { return policy.Market == MarketJUPUSDC }
+
+func nativeFeePrice(policy Policy, marketPrice uint64, provided []uint64) (uint64, error) {
+	if !usesSeparateNativePrice(policy) {
+		if len(provided) > 1 || len(provided) == 1 && provided[0] != marketPrice {
+			return 0, errors.New("SOL paper fee price must match its market price")
+		}
+		return marketPrice, nil
+	}
+	if len(provided) != 1 || provided[0] == 0 ||
+		provided[0] > policy.NativeFeePriceCeilingMicros {
+		return 0, errors.New("non-SOL paper accounting needs a bounded native fee price")
+	}
+	return provided[0], nil
+}
 
 func baseDecimalsFor(policy Policy) uint8 {
 	if policy.IsSell() {

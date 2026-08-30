@@ -179,7 +179,8 @@ func summarizeShadowReview(
 		RequiresOperatorDecision: true,
 	}
 	for index, report := range reports {
-		if report.Version != shadow.Version || report.Cluster != shadow.Mainnet ||
+		if report.Version != policy.Version || report.Cluster != policy.Cluster ||
+			report.Cluster != shadow.Mainnet || report.Market != policy.Market ||
 			!report.Trustworthy() || !report.To.Equal(report.From.Add(24*time.Hour)) ||
 			(index > 0 && !report.From.Equal(reports[index-1].To)) {
 			return shadowReviewResult{}, errors.New("shadow review reports are not consecutive complete trustworthy Mainnet days")

@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -24,7 +25,7 @@ const (
 
 const shadowSelectUsage = `Usage: mithril-agent shadow select --policy PATH
                                            --candidate PATH --pointer PATH
-                                           --lifecycle-lock PATH
+                                           --lifecycle-lock PATH [--initial]
 
 Validates one immutable paper candidate against its base policy, then atomically
 records it for a shadow runner. A running observer applies the selection only at
@@ -122,8 +123,8 @@ func (candidate shadowPaperCandidate) validateAgainst(base shadow.Policy) error 
 	if candidate.CandidatePolicySHA256 != candidateFingerprint {
 		return errors.New("shadow paper candidate policy fingerprint does not match")
 	}
-	if !base.IsSell() || candidate.Policy.ReturnTrigger == nil {
-		return errors.New("shadow paper candidate is not a sell-first round trip")
+	if candidate.Policy.ReturnTrigger == nil || base.Adaptive == nil && !base.IsSell() {
+		return errors.New("shadow paper candidate is not a supported round trip")
 	}
 	expected, err := shadowSearchCandidatePolicy(base, candidate.Research.Candidate)
 	if err != nil {
@@ -162,6 +163,16 @@ func (candidate shadowPaperCandidate) validateAgainst(base shadow.Policy) error 
 		result.Training.FullRoundTrips == 0 ||
 		result.CandidatePolicySHA256 != candidate.CandidatePolicySHA256 {
 		return errors.New("shadow paper candidate research result is invalid")
+	}
+	if result.WalkForward != nil {
+		if err := validateShadowWalkForwardAdmission(base, result); err != nil {
+			return err
+		}
+		last := result.WalkForward.Folds[len(result.WalkForward.Folds)-1]
+		if candidate.TrainingJournal != last.TrainingJournal ||
+			candidate.ValidationJournal != last.ValidationJournal {
+			return errors.New("shadow paper candidate does not bind the final walk-forward journals")
+		}
 	}
 	return nil
 }
@@ -287,6 +298,7 @@ func runShadowSelect(args []string, output io.Writer) error {
 	candidatePath := flags.String("candidate", "", "immutable paper candidate JSON")
 	pointerPath := flags.String("pointer", "", "paper candidate pointer")
 	lifecycleLock := flags.String("lifecycle-lock", "", "shared paper lifecycle lock")
+	initial := flags.Bool("initial", false, "refuse to replace an existing paper selection")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, shadowSelectUsage)
@@ -316,6 +328,13 @@ func runShadowSelect(args []string, output io.Writer) error {
 		return err
 	}
 	if err := withShadowLifecycleLock(*lifecycleLock, func() error {
+		if *initial {
+			if _, err := os.Lstat(*pointerPath); err == nil {
+				return errors.New("an initial shadow candidate is already selected")
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return errors.New("could not inspect the initial shadow candidate pointer")
+			}
+		}
 		return replaceShadowCandidatePointer(
 			*pointerPath, *candidatePath, candidateSHA256, candidate.CandidatePolicySHA256,
 		)

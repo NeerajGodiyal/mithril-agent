@@ -75,6 +75,9 @@ func ReplayRoundTrip(
 	if err := policy.Validate(); err != nil {
 		return RoundTripResult{}, err
 	}
+	if policy.NativeFeePrice != nil {
+		return RoundTripResult{}, errors.New("non-SOL round-trip replay needs journaled native fee-price evidence")
+	}
 	observations := make([]roundTripObservation, len(prices))
 	at := time.Unix(0, 0).UTC()
 	for index, price := range prices {
@@ -115,18 +118,23 @@ func ReplayRoundTripTicks(
 		observations = append(observations, roundTripObservation{
 			at: tick.At, priceMicros: tick.PriceMicros, observable: tick.PriceMicros != 0,
 			primary: tick.PrimaryPrice, secondary: tick.SecondaryPrice,
+			nativePriceMicros: tick.NativeFeePriceMicros,
+			nativePrimary:     tick.NativeFeePrimary, nativeSecondary: tick.NativeFeeSecondary,
 		})
 	}
 	return replayRoundTrip(policy, observations, quoteFor)
 }
 
 type roundTripObservation struct {
-	at          time.Time
-	priceMicros uint64
-	observable  bool
-	periodClose bool
-	primary     *pricetrigger.Sample
-	secondary   *pricetrigger.Sample
+	at                time.Time
+	priceMicros       uint64
+	observable        bool
+	periodClose       bool
+	primary           *pricetrigger.Sample
+	secondary         *pricetrigger.Sample
+	nativePriceMicros uint64
+	nativePrimary     *pricetrigger.Sample
+	nativeSecondary   *pricetrigger.Sample
 }
 
 type roundTripPending struct {
@@ -158,10 +166,15 @@ func replayRoundTrip(
 	}
 
 	openingPrice := uint64(0)
+	var openingNativePrice []uint64
 	for _, observation := range observations {
 		if observation.observable {
 			var priceErr error
 			openingPrice, priceErr = roundTripObservationPrice(policy, policy.IsSell(), observation)
+			if priceErr != nil {
+				return RoundTripResult{}, priceErr
+			}
+			openingNativePrice, priceErr = roundTripNativePrice(policy, observation)
 			if priceErr != nil {
 				return RoundTripResult{}, priceErr
 			}
@@ -171,7 +184,7 @@ func replayRoundTrip(
 	if openingPrice == 0 {
 		return RoundTripResult{}, errors.New("a round trip needs an observable opening price")
 	}
-	ledger, err := NewLedger(policy, openingPrice)
+	ledger, err := NewLedger(policy, openingPrice, openingNativePrice...)
 	if err != nil {
 		return RoundTripResult{}, err
 	}
@@ -216,7 +229,11 @@ func replayRoundTrip(
 		if price == 0 {
 			return RoundTripResult{}, errZeroReference
 		}
-		marked, err := result.Ledger.Mark(price)
+		nativePrice, err := roundTripNativePrice(policy, observation)
+		if err != nil {
+			return RoundTripResult{}, err
+		}
+		marked, err := result.Ledger.Mark(price, nativePrice...)
 		if err != nil {
 			return RoundTripResult{}, err
 		}
@@ -291,7 +308,7 @@ func replayRoundTrip(
 				}
 				return RoundTripResult{}, err
 			}
-			applied, err := result.Ledger.Apply(fill, price)
+			applied, err := result.Ledger.Apply(fill, price, nativePrice...)
 			if err != nil {
 				if errors.Is(err, errInsufficientInventory) {
 					result.Counts.Missed++
@@ -315,9 +332,13 @@ func replayRoundTrip(
 			}
 			sell = !sell
 			if sell {
-				nextAmount = capSellAmount(
-					nextAmount, result.Ledger.BaseUnits, roundTripFeeReserve(policy.FeeLamports),
-				)
+				reserve := nextSellFeeReserve(policy)
+				if result.Ledger, err = result.Ledger.replenishFeeReserve(
+					reserve,
+				); err != nil {
+					return RoundTripResult{}, err
+				}
+				nextAmount = capSellAmount(nextAmount, result.Ledger, reserve)
 			}
 			// A live observation that settles a decision cannot also open the
 			// next leg. Reusing it would give the model information twice.
@@ -405,6 +426,24 @@ func roundTripObservationPrice(
 		return 0, err
 	}
 	return evidence.ConservativePrice, nil
+}
+
+func roundTripNativePrice(policy Policy, observation roundTripObservation) ([]uint64, error) {
+	if policy.NativeFeePrice == nil {
+		return nil, nil
+	}
+	if observation.nativePrimary == nil || observation.nativeSecondary == nil ||
+		observation.nativePriceMicros == 0 {
+		return nil, errors.New("round-trip observation has incomplete native fee-price evidence")
+	}
+	evidence, err := pricetrigger.Evaluate(
+		*policy.NativeFeePrice, *observation.nativePrimary, *observation.nativeSecondary, observation.at,
+	)
+	if err != nil || evidence.ConservativePrice != observation.nativePriceMicros ||
+		observation.nativePriceMicros > policy.NativeFeePriceCeilingMicros {
+		return nil, errors.New("round-trip observation has invalid native fee-price evidence")
+	}
+	return []uint64{observation.nativePriceMicros}, nil
 }
 
 // thresholdMet applies the rule's own comparison, in the same direction the

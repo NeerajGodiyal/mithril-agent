@@ -87,7 +87,8 @@ func TestBacktestShowsTheSignOnEveryResult(t *testing.T) {
 // quotes better than the oracle invents money.
 func TestModelledPoolIsAlwaysWorseThanTheOracle(t *testing.T) {
 	const price = uint64(21_000_000) // $21.00
-	quote := modelledPool(100, 100)  // 1% spread and 1% slippage
+	policy := validShadowPolicy()
+	quote := modelledPool(policy, 100, 100) // 1% spread and 1% slippage
 
 	sell, err := quote(price, true, 1_000_000_000)
 	if err != nil {
@@ -106,7 +107,7 @@ func TestModelledPoolIsAlwaysWorseThanTheOracle(t *testing.T) {
 		t.Errorf("the modelled buy is not worse than the oracle: %d", buy.EstimatedOutput)
 	}
 	// A wider spread must always fill worse than a narrow one.
-	wide, err := modelledPool(2_500, 100)(price, true, 1_000_000_000)
+	wide, err := modelledPool(policy, 2_500, 100)(price, true, 1_000_000_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +130,7 @@ func TestModelledPoolIsAlwaysWorseThanTheOracle(t *testing.T) {
 
 func TestModelledPoolUsesThePolicySlippageFloor(t *testing.T) {
 	policy := validShadowPolicy()
-	quote := modelledPool(100, policy.SlippageBPS)
+	quote := modelledPool(policy, 100, policy.SlippageBPS)
 	decision, err := quote(21_000_000, true, policy.InputAmount)
 	if err != nil {
 		t.Fatal(err)
@@ -153,6 +154,26 @@ func TestModelledPoolUsesThePolicySlippageFloor(t *testing.T) {
 	)
 	if err != nil || fill.Filled {
 		t.Fatalf("a move beyond policy slippage was not refused: fill=%+v err=%v", fill, err)
+	}
+}
+
+func TestModelledPoolUsesJUPSixDecimalUnitsInBothDirections(t *testing.T) {
+	policy, err := buildAdaptiveJUPPolicy(
+		100_000_000, defaultJUPFeeReserveLamports, defaultJUPSetupRentLamports, 100, 5_000,
+		"So11111111111111111111111111111111111111112", 60,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quote := modelledPool(policy, 0, policy.SlippageBPS)
+	for _, sell := range []bool{true, false} {
+		got, quoteErr := quote(1_000_000, sell, 100_000_000)
+		if quoteErr != nil {
+			t.Fatal(quoteErr)
+		}
+		if got.EstimatedOutput != 100_000_000 {
+			t.Fatalf("JUP sell=%v output=%d, want 100000000", sell, got.EstimatedOutput)
+		}
 	}
 }
 

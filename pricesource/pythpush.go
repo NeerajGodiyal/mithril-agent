@@ -35,6 +35,10 @@ const (
 	pythPushUSDCUpgradedAccount = "6HAuqASbHEh4w4REJEUUUCginTLfj1kwCh215ZLtMkrT"
 	USDCUSDFeedID               = "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"
 
+	pythPushJUPAccount         = "7dbob1psH1iZBS7qPsm3Kwbf5DzSXK8Jyg31CTgTnxH5"
+	pythPushJUPUpgradedAccount = "EitcZS5LtbR4EyNhCSy56vvUHPhsifSfWFG5gwSkjNpV"
+	JUPUSDFeedID               = "0a0408d619e9380abad35060f9192039ed5042fa6f82301d0e48bb52be830996"
+
 	// PriceUpdateV2 is a fixed-size Anchor account: an 8-byte discriminator,
 	// a 32-byte write authority, a 1-byte verification level, the 32-byte feed
 	// id, then the price record. Full verification consumes 133 bytes and the
@@ -59,6 +63,7 @@ const (
 
 	pythPushIdentityDescription     = "mithril-agent/price-source-v2|pyth-push-onchain|mithril-getaccountinfo|stable:SOL/USD|aggregate-confidence"
 	pythPushUSDCIdentityDescription = "mithril-agent/price-source-v2|pyth-push-onchain|mithril-getaccountinfo|stable:USDC/USD|aggregate-confidence"
+	pythPushJUPIdentityDescription  = "mithril-agent/price-source-v2|pyth-push-onchain|mithril-getaccountinfo|stable:JUP/USD|aggregate-confidence"
 )
 
 var pythPushDiscriminator = [8]byte{0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd}
@@ -81,6 +86,11 @@ var pythPushUSDCFeeds = []pythPushFeed{
 	{account: pythPushUSDCUpgradedAccount, owner: pythPushUpgradedOwner},
 }
 
+var pythPushJUPFeeds = []pythPushFeed{
+	{account: pythPushJUPAccount, owner: pythPushLegacyOwner},
+	{account: pythPushJUPUpgradedAccount, owner: pythPushUpgradedOwner},
+}
+
 type pythPushDefinition struct {
 	feed     string
 	feedID   string
@@ -97,6 +107,10 @@ var (
 		feed: pricetrigger.FeedUSDCUSD, feedID: USDCUSDFeedID,
 		identity: pythPushUSDCIdentityDescription, accounts: pythPushUSDCFeeds,
 	}
+	pythPushJUPDefinition = pythPushDefinition{
+		feed: pricetrigger.FeedJUPUSD, feedID: JUPUSDFeedID,
+		identity: pythPushJUPIdentityDescription, accounts: pythPushJUPFeeds,
+	}
 )
 
 func PythPushIdentitySHA256() string {
@@ -106,6 +120,11 @@ func PythPushIdentitySHA256() string {
 
 func PythPushUSDCIdentitySHA256() string {
 	hash := sha256.Sum256([]byte(pythPushUSDCIdentityDescription))
+	return hex.EncodeToString(hash[:])
+}
+
+func PythPushJUPIdentitySHA256() string {
+	hash := sha256.Sum256([]byte(pythPushJUPIdentityDescription))
 	return hex.EncodeToString(hash[:])
 }
 
@@ -137,6 +156,10 @@ func NewPythPush(reader AccountReader, now func() time.Time) (*PythPush, error) 
 
 func NewPythPushUSDC(reader AccountReader, now func() time.Time) (*PythPush, error) {
 	return newPythPush(reader, now, pythPushUSDCDefinition)
+}
+
+func NewPythPushJUP(reader AccountReader, now func() time.Time) (*PythPush, error) {
+	return newPythPush(reader, now, pythPushJUPDefinition)
 }
 
 func newPythPush(

@@ -28,6 +28,7 @@ const EvaluationResetDaily = "reset_daily_operational_canary"
 type Report struct {
 	Version        uint32    `json:"version"`
 	Cluster        string    `json:"cluster"`
+	Market         string    `json:"market,omitempty"`
 	EvaluationMode string    `json:"evaluation_mode,omitempty"`
 	From           time.Time `json:"from"`
 	To             time.Time `json:"to"`
@@ -38,6 +39,9 @@ type Report struct {
 	ClosingPriceMicros    uint64 `json:"closing_price_micros"`
 	BaseUnits             uint64 `json:"base_units"`
 	QuoteUnits            uint64 `json:"quote_units"`
+	FeeReserveLamports    uint64 `json:"fee_reserve_lamports,omitempty"`
+	LockedRentLamports    uint64 `json:"locked_rent_lamports,omitempty"`
+	NativeFeePriceMicros  uint64 `json:"native_fee_price_micros,omitempty"`
 	QuotePegMinimumMicros uint64 `json:"quote_peg_minimum_micros,omitempty"`
 	QuotePegMaximumMicros uint64 `json:"quote_peg_maximum_micros,omitempty"`
 
@@ -54,8 +58,8 @@ type Report struct {
 	VersusHoldMicros int64 `json:"versus_hold_micros"`
 
 	// ObservableBPS is the share of expected ticks in which the market could be
-	// read. ExpectedTicks includes scheduled observations missed while the
-	// runner was down, so downtime cannot look like perfect market coverage.
+	// read. ExpectedTicks is duration-based; admission gates that need to detect
+	// clustered restart observations additionally verify distinct time buckets.
 	ExpectedTicks uint64 `json:"expected_ticks"`
 	ObservableBPS int32  `json:"observable_bps"`
 	// ActedBPS is the share of executable signals that reached settlement after
@@ -109,22 +113,26 @@ func BuildReport(
 		return Report{}, err
 	}
 	report := Report{
-		Version: Version, Cluster: policy.Cluster, EvaluationMode: EvaluationResetDaily,
-		From: from, To: to,
+		Version: policy.Version, Cluster: policy.Cluster, Market: policy.Market,
+		EvaluationMode: EvaluationResetDaily,
+		From:           from, To: to,
 		Counts: counts, Stats: stats,
 		ClosingPriceMicros: closingPriceMicros,
 		BaseUnits:          ledger.BaseUnits, QuoteUnits: ledger.QuoteUnits,
-		OpeningEquityMicros: ledger.OpeningEquityMicros,
-		ClosingEquityMicros: closing,
-		RealizedMicros:      ledger.RealizedMicros,
-		UnrealizedMicros:    unrealized,
-		FeesMicros:          ledger.FeesMicros,
-		TurnoverMicros:      ledger.TurnoverMicros,
-		MaxDrawdownMicros:   ledger.MaxDrawdownMicros,
-		HoldBenchmarkMicros: benchmark,
-		VersusHoldMicros:    signedClosing - signedBenchmark,
-		ExpectedTicks:       expectedTicks(policy, counts, from, to),
-		ActedBPS:            share(stats.Settled, actionable(counts)),
+		FeeReserveLamports:   ledger.FeeReserveLamports,
+		LockedRentLamports:   ledger.LockedRentLamports,
+		NativeFeePriceMicros: ledger.NativeFeePriceMicros,
+		OpeningEquityMicros:  ledger.OpeningEquityMicros,
+		ClosingEquityMicros:  closing,
+		RealizedMicros:       ledger.RealizedMicros,
+		UnrealizedMicros:     unrealized,
+		FeesMicros:           ledger.FeesMicros,
+		TurnoverMicros:       ledger.TurnoverMicros,
+		MaxDrawdownMicros:    ledger.MaxDrawdownMicros,
+		HoldBenchmarkMicros:  benchmark,
+		VersusHoldMicros:     signedClosing - signedBenchmark,
+		ExpectedTicks:        expectedTicks(policy, counts, from, to),
+		ActedBPS:             share(stats.Settled, actionable(counts)),
 	}
 	report.ObservableBPS = share(observed(counts), report.ExpectedTicks)
 	if policy.QuotePeg != nil {

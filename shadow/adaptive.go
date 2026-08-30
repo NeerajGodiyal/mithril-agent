@@ -66,6 +66,35 @@ func DefaultAdaptivePolicy(
 	return policy, policy.Validate()
 }
 
+// DefaultAdaptiveQuotePolicy builds the same controller for a stable-quote
+// opening budget while valuing native SOL fees at a conservative USD ceiling.
+// It is used by non-SOL paper markets; the ceiling is policy-bound and keeps a
+// future SOL rally from making the configured edge smaller than its costs.
+func DefaultAdaptiveQuotePolicy(
+	slippageBPS uint16,
+	feeLamports, nativeFeePriceCeilingMicros, quoteAmount uint64,
+	quoteDecimals uint8,
+	tickSeconds uint64,
+) (AdaptivePolicy, error) {
+	if tickSeconds == 0 || tickSeconds > 43_200 {
+		return AdaptivePolicy{}, errors.New("adaptive observation interval is out of range")
+	}
+	minimumSignal, err := adaptiveQuoteCostFloorBPS(
+		slippageBPS, feeLamports, nativeFeePriceCeilingMicros, quoteAmount, quoteDecimals,
+	)
+	if err != nil {
+		return AdaptivePolicy{}, err
+	}
+	maxVolatility := max(uint32(500), minimumSignal+100)
+	policy := AdaptivePolicy{
+		Version: AdaptiveVersion, FastWindow: 5, SlowWindow: 20,
+		MinimumSignalBPS: uint16(minimumSignal), MaxVolatilityBPS: uint16(maxVolatility),
+		MaxQuoteImpactBPS: 500, MaxDrawdownBPS: 300, CooldownSeconds: 300,
+		MaxObservationGapSeconds: tickSeconds * 2,
+	}
+	return policy, policy.Validate()
+}
+
 // Validate rejects adaptive settings that cannot produce bounded, cost-aware
 // and replayable paper decisions.
 func (p AdaptivePolicy) Validate() error {
@@ -312,6 +341,40 @@ func adaptiveCostFloorBPS(
 	return uint32(cost), nil
 }
 
+func adaptiveQuoteCostFloorBPS(
+	slippageBPS uint16,
+	feeLamports, nativeFeePriceMicros, quoteAmount uint64,
+	quoteDecimals uint8,
+) (uint32, error) {
+	feeMicros, err := valueAt(feeLamports, nativeFeePriceMicros, 9)
+	if err != nil || feeMicros == 0 {
+		return 0, errors.New("adaptive native fee value is outside the supported range")
+	}
+	inputMicros, err := scaleToMicros(quoteAmount, quoteDecimals)
+	if err != nil || inputMicros == 0 {
+		return 0, errors.New("adaptive quote budget is outside the supported range")
+	}
+	return adaptiveValueCostFloorBPS(slippageBPS, feeMicros, inputMicros)
+}
+
+func adaptiveValueCostFloorBPS(
+	slippageBPS uint16, feeMicros, inputMicros uint64,
+) (uint32, error) {
+	high, low := bits.Mul64(feeMicros, 10_000)
+	if high >= inputMicros {
+		return 0, errors.New("adaptive fee cost is outside the supported range")
+	}
+	feeBPS, remainder := bits.Div64(high, low, inputMicros)
+	if remainder != 0 {
+		feeBPS++
+	}
+	base := uint64(slippageBPS)*2 + 10
+	if base > 2_000 || feeBPS > (2_000-base)/2 {
+		return 0, errors.New("adaptive round-trip cost exceeds the supported signal limit")
+	}
+	return uint32(base + feeBPS*2), nil
+}
+
 func adaptiveQuotePasses(
 	policy Policy, decision *AdaptiveDecision, quote Quote, price uint64, sell bool,
 ) (bool, error) {
@@ -334,13 +397,7 @@ func adaptiveQuotePasses(
 	if decision.Strategy == StrategyRiskExit {
 		return true, nil
 	}
-	baseAmount := quote.InputAmount
-	if !sell {
-		baseAmount = quote.MinimumOutput
-	}
-	dynamicFloor, floorErr := adaptiveCostFloorBPS(
-		policy.SlippageBPS, policy.FeeLamports, baseAmount,
-	)
+	dynamicFloor, floorErr := adaptiveTradeCostFloorBPS(policy, quote, price, sell)
 	if floorErr != nil {
 		return false, nil
 	}
@@ -349,6 +406,34 @@ func adaptiveQuotePasses(
 		required += uint64(-(int64(impact)))
 	}
 	return uint64(magnitude32(decision.SignalBPS)) >= required, nil
+}
+
+func adaptiveTradeCostFloorBPS(
+	policy Policy, quote Quote, marketPrice uint64, sell bool,
+) (uint32, error) {
+	if policy.Market != MarketJUPUSDC {
+		baseAmount := quote.InputAmount
+		if !sell {
+			baseAmount = quote.MinimumOutput
+		}
+		return adaptiveCostFloorBPS(policy.SlippageBPS, policy.FeeLamports, baseAmount)
+	}
+	feeMicros, err := valueAt(
+		policy.FeeLamports, policy.NativeFeePriceCeilingMicros, 9,
+	)
+	if err != nil {
+		return 0, err
+	}
+	var inputMicros uint64
+	if sell {
+		inputMicros, err = valueAt(quote.InputAmount, marketPrice, policy.InputDecimals)
+	} else {
+		inputMicros, err = scaleToMicros(quote.InputAmount, policy.InputDecimals)
+	}
+	if err != nil || inputMicros == 0 {
+		return 0, errors.New("adaptive trade value is outside the supported range")
+	}
+	return adaptiveValueCostFloorBPS(policy.SlippageBPS, feeMicros, inputMicros)
 }
 
 // adaptiveQuoteImpact checks both sides of the independently observed market.

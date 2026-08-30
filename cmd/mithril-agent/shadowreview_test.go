@@ -17,7 +17,7 @@ import (
 
 func completeShadowReport(from time.Time) shadow.Report {
 	return shadow.Report{
-		Version: shadow.Version, Cluster: shadow.Mainnet,
+		Version: shadow.Version, Cluster: shadow.Mainnet, Market: shadow.MarketSOLUSDC,
 		From: from, To: from.Add(24 * time.Hour),
 		Counts:        shadow.Counts{Ticks: 24, Signals: 2, Fills: 1},
 		ExpectedTicks: 24, ObservableBPS: 10_000,
@@ -55,6 +55,19 @@ func TestShadowReviewSummarizesEvidenceWithoutApprovingIt(t *testing.T) {
 		if !strings.Contains(output.String(), text) {
 			t.Fatalf("review output omitted %q:\n%s", text, output.String())
 		}
+	}
+}
+
+func TestShadowReviewKeepsLegacyV4ReportsReviewable(t *testing.T) {
+	policy := validShadowPolicy()
+	policy.Version = shadow.LegacyVersion
+	policy.Market = ""
+	from := time.Date(2026, 8, 10, 0, 0, 0, 0, time.UTC)
+	report := completeShadowReport(from)
+	report.Version = shadow.LegacyVersion
+	report.Market = ""
+	if _, err := summarizeShadowReview(policy, []shadow.Report{report}); err != nil {
+		t.Fatalf("legacy v4 report was rejected: %v", err)
 	}
 }
 

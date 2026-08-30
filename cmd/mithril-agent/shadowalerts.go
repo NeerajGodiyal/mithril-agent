@@ -38,52 +38,145 @@ func (s *shadowRun) alertTick(tick shadow.Tick, nextSell bool) error {
 	}
 	key := s.policySHA256 + "/" + tick.At.Format(time.RFC3339Nano) + "/" + tick.Event
 	switch {
-	case tick.Event == shadow.EventSignal && tick.DecisionQuote != nil:
-		input, _ := shadowAssets(s.policy, nextSell)
-		message := fmt.Sprintf(
-			"PAPER · 🟡 %s signal\n%s %s · ref $%s%s",
-			shadowSide(nextSell),
-			formatShadowAmount(tick.DecisionQuote.InputAmount, input.decimals), input.name,
-			formatShadowAmount(tick.PriceMicros, 6), adaptiveDecisionLine(tick.Decision),
-		)
-		return s.appendAlert(tick.At, paperstatus.KindOrderOpened, key, message)
 	case tick.Event == shadow.EventFilled && tick.Fill != nil && tick.Fill.Filled:
 		input, output := shadowAssets(s.policy, tick.Fill.Sell)
-		price := tick.Fill.SettlePriceMicros
-		if price == 0 {
-			price = tick.PriceMicros
-		}
 		message := fmt.Sprintf(
-			"PAPER · 🟢 %s filled\n%s %s → %s %s · ref $%s\n%s",
-			shadowSide(tick.Fill.Sell),
+			"PAPER · 🟢 %s\n%s %s → %s %s\n%s",
+			shadowFilledSide(tick.Fill.Sell),
 			formatShadowAmount(tick.Fill.SpentUnits, input.decimals), input.name,
 			formatShadowAmount(tick.Fill.ReceivedUnits, output.decimals), output.name,
-			formatShadowAmount(price, 6), shadowEquityLine(s.policy, tick.EquityMicros),
+			shadowEquityLine(s.policy, tick.EquityMicros),
 		)
 		return s.appendAlert(tick.At, paperstatus.KindOrderFilled, key, message)
-	case tick.Event == shadow.EventRefused && tick.Fill != nil:
-		message := fmt.Sprintf(
-			"PAPER · ⚪ %s refused\n%s",
-			shadowSide(tick.Fill.Sell), tick.Fill.Refusal,
-		)
-		return s.appendAlert(tick.At, paperstatus.KindOrderRefused, key, message)
 	case tick.Event == shadow.EventWaiting && tick.Decision != nil &&
 		(tick.Decision.Reason == "drawdown_halt" || tick.Decision.Reason == "risk_halt"):
 		message := "PAPER · 🔴 Trading paused\nDaily drawdown limit reached"
 		riskKey := s.policySHA256 + "/" + dayKey(tick.At) + "/risk-halt"
 		return s.appendAlert(tick.At, paperstatus.KindRiskHalted, riskKey, message)
-	case tick.Event == shadow.EventMissed && tick.DecisionQuote == nil ||
-		tick.Event == shadow.EventUnobservable && tick.DecisionMissed:
-		reason := "Signal was not settled"
-		if tick.Reason != "" {
-			reason = strings.ReplaceAll(string(tick.Reason), "_", " ")
-		}
-		message := fmt.Sprintf(
-			"PAPER · ⚠️ Order missed\n%s", reason,
-		)
-		return s.appendAlert(tick.At, paperstatus.KindOrderMissed, key, message)
 	default:
 		return nil
+	}
+}
+
+func (s *shadowRun) updatePaperCurrent(tick shadow.Tick, nextSell bool) error {
+	if s.alerts == nil {
+		return nil
+	}
+	message := paperCurrentMessage(s.policy, tick, nextSell)
+	var summary *paperstatus.CurrentSummary
+	var counts shadow.Counts
+	if s.runner != nil {
+		counts = s.runner.Counts()
+		message = addPaperPerformance(message, fmt.Sprintf(
+			"Checks %d · signals %d · trades %d", counts.Ticks, counts.Signals, counts.Fills,
+		))
+	}
+	if s.runner != nil && s.lastPrice != 0 {
+		ledger := s.runner.Ledger()
+		equity, equityErr := ledger.EquityMicros(s.lastPrice)
+		hold, holdErr := ledger.HoldBenchmarkMicros(s.lastPrice)
+		if equityErr == nil && holdErr == nil && ledger.OpeningEquityMicros != 0 {
+			message = addPaperPerformance(message, paperPerformanceLine(
+				ledger.OpeningEquityMicros, equity, hold,
+			))
+			summary = &paperstatus.CurrentSummary{
+				Market: shadowMarketPair(s.policy), Day: dayKey(tick.At),
+				TickSeconds:         s.policy.TickSeconds,
+				OpeningEquityMicros: ledger.OpeningEquityMicros,
+				EquityMicros:        equity, HoldBenchmarkMicros: hold,
+				Checks: counts.Ticks, Signals: counts.Signals, Trades: counts.Fills,
+				RiskHalted: s.runner.RiskHalted(),
+			}
+		}
+	}
+	return s.alerts.UpdateCurrentSummary(tick.At, message, summary)
+}
+
+func addPaperPerformance(message, performance string) string {
+	before, after, found := strings.Cut(message, "\n")
+	if !found {
+		return message + "\n" + performance
+	}
+	return before + "\n" + performance + "\n" + after
+}
+
+func paperPerformanceLine(opening, current, hold uint64) string {
+	return "Today " + formatEquityChange(opening, current) +
+		" · vs hold " + formatEquityChange(hold, current)
+}
+
+func paperCurrentMessage(policy shadow.Policy, tick shadow.Tick, nextSell bool) string {
+	price := formatShadowAmount(tick.PriceMicros, 6)
+	if tick.Decision != nil && tick.Decision.Regime == shadow.RegimeRisk {
+		switch tick.Event {
+		case shadow.EventSignal:
+			if tick.Decision.Strategy == shadow.StrategyRiskExit && tick.DecisionQuote != nil {
+				return "PAPER · ⏳ Risk exit pending\nDaily drawdown limit reached"
+			}
+			return "PAPER · ⏸ Trading paused\nRisk exit waiting for pending order"
+		case shadow.EventFilled:
+			label := "Order"
+			if tick.Fill != nil {
+				label = shadowSide(tick.Fill.Sell)
+			}
+			return "PAPER · ⏸ Trading paused\n" + label + " filled · " +
+				shadowEquityLine(policy, tick.EquityMicros)
+		case shadow.EventRefused, shadow.EventMissed:
+			return "PAPER · ⏸ Trading paused\nLast order not filled"
+		default:
+			return "PAPER · ⏸ Trading paused\nDaily drawdown limit reached"
+		}
+	}
+	switch tick.Event {
+	case shadow.EventUnobservable:
+		return "PAPER · ⚠️ Waiting for data\nVerified market data unavailable"
+	case shadow.EventSignal:
+		if tick.DecisionQuote == nil {
+			return "PAPER · ⏳ Order pending\nWaiting for settlement"
+		}
+		input, _ := shadowAssets(policy, nextSell)
+		return fmt.Sprintf("PAPER · ⏳ Order pending\n%s %s %s · ref $%s",
+			shadowSide(nextSell), formatShadowAmount(tick.DecisionQuote.InputAmount, input.decimals),
+			input.name, price)
+	case shadow.EventFilled:
+		if tick.Fill == nil {
+			return "PAPER · 👀 Watching\nLast order filled"
+		}
+		return fmt.Sprintf("PAPER · 👀 Watching\n%s filled · %s",
+			shadowSide(tick.Fill.Sell), shadowEquityLine(policy, tick.EquityMicros))
+	case shadow.EventRefused:
+		return "PAPER · 👀 Watching\nLast order refused · waiting for a new signal"
+	case shadow.EventMissed:
+		return "PAPER · 👀 Watching\nLast order missed · waiting for a new signal"
+	}
+	if tick.Decision != nil {
+		if policy.Adaptive == nil {
+			return fmt.Sprintf("PAPER · 👀 Watching\n%s · now $%s", shadowThresholds(policy), price)
+		}
+		base, _ := shadowAssets(policy, true)
+		if tick.Decision.Regime == shadow.RegimeWarming {
+			return fmt.Sprintf("PAPER · 👀 Watching\nWarming up · %s $%s", base.name, price)
+		}
+		if tick.Decision.Regime == shadow.RegimeVolatile {
+			return fmt.Sprintf("PAPER · 👀 Watching\nVolatile · waiting for calmer market · %s $%s", base.name, price)
+		}
+		return fmt.Sprintf("PAPER · 👀 Watching\n%s · %s · %s $%s",
+			adaptiveAlertLabel(tick.Decision.Regime), adaptiveWaitingLabel(tick.Decision.Reason),
+			base.name, price)
+	}
+	return fmt.Sprintf("PAPER · 👀 Watching\n%s · now $%s", shadowThresholds(policy), price)
+}
+
+func adaptiveWaitingLabel(reason string) string {
+	switch reason {
+	case "signal_below_cost_hurdle":
+		return "no edge after costs"
+	case "cooldown":
+		return "cooling down"
+	case "sell_leg_waiting", "buy_leg_waiting":
+		return "position held"
+	default:
+		return "no trade"
 	}
 }
 
@@ -111,11 +204,9 @@ func (s *shadowRun) alertReport(report shadow.Report) error {
 		return nil
 	}
 	period := shadowPeriodTitle(report.From, report.To)
-	message := fmt.Sprintf(
-		"PAPER · %s %s\n%s\n%s\n%s",
-		shadowReportIcon(report), period, shadowReportCounts(report.Counts),
-		shadowPerformanceLine(report), shadowCoverageLine(report),
-	)
+	message := fmt.Sprintf("PAPER · %s %s\n%s · %s\n%s",
+		shadowReportIcon(report), period, shadowPerformanceLine(report),
+		shadowReportTrades(report.Counts), shadowCoverageLine(report))
 	key := s.policySHA256 + "/" + report.From.Format("2006-01-02") + "/" + report.To.Format(time.RFC3339Nano)
 	return s.appendAlert(report.To, paperstatus.KindPeriodClosed, key, message)
 }
@@ -158,7 +249,11 @@ func shadowAssets(policy shadow.Policy, sell bool) (shadowAsset, shadowAsset) {
 	if policy.Cluster == shadow.Mainnet {
 		quote = "USDC"
 	}
-	base, counter := shadowAsset{"SOL", baseDecimals}, shadowAsset{quote, quoteDecimals}
+	baseName := "SOL"
+	if policy.Market == shadow.MarketJUPUSDC {
+		baseName = "JUP"
+	}
+	base, counter := shadowAsset{baseName, baseDecimals}, shadowAsset{quote, quoteDecimals}
 	if sell {
 		return base, counter
 	}
@@ -172,9 +267,19 @@ func shadowSide(sell bool) string {
 	return "BUY"
 }
 
+func shadowFilledSide(sell bool) string {
+	if sell {
+		return "SOLD"
+	}
+	return "BOUGHT"
+}
+
 func shadowMarketPair(policy shadow.Policy) string {
 	if policy.Cluster == shadow.Mainnet {
-		return "SOL/USDC"
+		if policy.Market != "" {
+			return policy.Market
+		}
+		return shadow.MarketSOLUSDC
 	}
 	return "SOL/devUSDC"
 }
@@ -238,24 +343,23 @@ func triggerComparator(direction pricetrigger.Direction) string {
 
 func shadowSize(policy shadow.Policy) string {
 	input, _ := shadowAssets(policy, policy.IsSell())
+	if policy.Adaptive != nil {
+		budget := policy.StartingInputUnits
+		if policy.IsSell() && policy.StartingFeeReserveLamports != 0 {
+			budget += policy.StartingFeeReserveLamports
+		}
+		return fmt.Sprintf("budget %s %s · stop %s%% drawdown",
+			formatShadowAmount(budget, input.decimals), input.name,
+			formatShadowAmount(uint64(policy.Adaptive.MaxDrawdownBPS), 2))
+	}
 	return fmt.Sprintf("%s %s", formatShadowAmount(policy.InputAmount, input.decimals), input.name)
 }
 
-func shadowReportCounts(counts shadow.Counts) string {
-	parts := []string{fmt.Sprintf("%d fills", counts.Fills)}
-	if counts.Filtered > 0 {
-		parts = append(parts, fmt.Sprintf("%d filtered", counts.Filtered))
+func shadowReportTrades(counts shadow.Counts) string {
+	if counts.Fills == 1 {
+		return "1 trade"
 	}
-	if counts.Refused > 0 {
-		parts = append(parts, fmt.Sprintf("%d refused", counts.Refused))
-	}
-	if counts.Missed > 0 {
-		parts = append(parts, fmt.Sprintf("%d missed", counts.Missed))
-	}
-	if counts.Unobservable > 0 {
-		parts = append(parts, fmt.Sprintf("%d data gaps", counts.Unobservable))
-	}
-	return strings.Join(parts, " · ")
+	return fmt.Sprintf("%d trades", counts.Fills)
 }
 
 func formatSignedDollars(value int64) string {

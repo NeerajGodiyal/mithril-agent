@@ -125,13 +125,15 @@ type pending struct {
 // Runner is the shadow loop. It holds no key, no signer, and no submitter,
 // because this package defines no such thing.
 type Runner struct {
-	policy         Policy
-	primary        PriceReader
-	secondary      PriceReader
-	quotePrimary   PriceReader
-	quoteSecondary PriceReader
-	quoter         Quoter
-	recorder       Recorder
+	policy          Policy
+	primary         PriceReader
+	secondary       PriceReader
+	quotePrimary    PriceReader
+	quoteSecondary  PriceReader
+	nativePrimary   PriceReader
+	nativeSecondary PriceReader
+	quoter          Quoter
+	recorder        Recorder
 
 	ledger   Ledger
 	started  bool
@@ -144,15 +146,17 @@ type Runner struct {
 	// resumePending means the prior process recorded a decision but not its
 	// settlement. The recorded deadline decides whether it can still settle or
 	// must become missed on the first fresh observation.
-	resumePending        bool
-	nextSell             bool
-	nextAmount           uint64
-	quoteLowerMicros     uint64
-	quoteUpperMicros     uint64
-	primaryPublishedAt   time.Time
-	secondaryPublishedAt time.Time
-	primarySample        pricetrigger.Sample
-	secondarySample      pricetrigger.Sample
+	resumePending         bool
+	nextSell              bool
+	nextAmount            uint64
+	quoteLowerMicros      uint64
+	quoteUpperMicros      uint64
+	primaryPublishedAt    time.Time
+	secondaryPublishedAt  time.Time
+	primarySample         pricetrigger.Sample
+	secondarySample       pricetrigger.Sample
+	nativePrimarySample   pricetrigger.Sample
+	nativeSecondarySample pricetrigger.Sample
 }
 
 // Tick is the outcome of one observation, for a caller that wants to print
@@ -168,8 +172,11 @@ type Tick struct {
 	// Source publication times make a rolling adaptive observation distinct and
 	// replayable. Repeated polls of one still-fresh sample must not manufacture
 	// a full strategy window.
-	PrimaryPrice   *pricetrigger.Sample `json:"primary_price,omitempty"`
-	SecondaryPrice *pricetrigger.Sample `json:"secondary_price,omitempty"`
+	PrimaryPrice         *pricetrigger.Sample `json:"primary_price,omitempty"`
+	SecondaryPrice       *pricetrigger.Sample `json:"secondary_price,omitempty"`
+	NativeFeePriceMicros uint64               `json:"native_fee_price_micros,omitempty"`
+	NativeFeePrimary     *pricetrigger.Sample `json:"native_fee_primary,omitempty"`
+	NativeFeeSecondary   *pricetrigger.Sample `json:"native_fee_secondary,omitempty"`
 	// Deferred marks a signal that arrived while a decision was already in
 	// flight. Without it the journal cannot distinguish a deferred signal from
 	// an acted one, and the report is no longer re-derivable from the record.
@@ -216,12 +223,14 @@ func NewRunner(
 		secondary.IdentitySHA256() != policy.Trigger.SecondarySourceSHA256 {
 		return nil, errors.New("shadow price sources do not match the policy")
 	}
-	var quotePrimary, quoteSecondary PriceReader
+	var quotePrimary, quoteSecondary, nativePrimary, nativeSecondary PriceReader
+	nextReader := 0
 	if policy.QuotePeg != nil {
-		if len(quoteReaders) != 2 || quoteReaders[0] == nil || quoteReaders[1] == nil {
+		if len(quoteReaders) < 2 || quoteReaders[0] == nil || quoteReaders[1] == nil {
 			return nil, errors.New("mainnet shadow runner needs two USDC/USD sources")
 		}
 		quotePrimary, quoteSecondary = quoteReaders[0], quoteReaders[1]
+		nextReader = 2
 		if quotePrimary.IdentitySHA256() == quoteSecondary.IdentitySHA256() {
 			return nil, errors.New("shadow USDC/USD sources must be independent")
 		}
@@ -229,7 +238,21 @@ func NewRunner(
 			quoteSecondary.IdentitySHA256() != policy.QuotePeg.SecondarySourceSHA256 {
 			return nil, errors.New("shadow USDC/USD sources do not match the policy")
 		}
-	} else if len(quoteReaders) != 0 {
+	}
+	if policy.NativeFeePrice != nil {
+		if len(quoteReaders) != nextReader+2 || quoteReaders[nextReader] == nil ||
+			quoteReaders[nextReader+1] == nil {
+			return nil, errors.New("non-SOL shadow runner needs two native SOL/USD sources")
+		}
+		nativePrimary, nativeSecondary = quoteReaders[nextReader], quoteReaders[nextReader+1]
+		if nativePrimary.IdentitySHA256() == nativeSecondary.IdentitySHA256() ||
+			nativePrimary.IdentitySHA256() != policy.NativeFeePrice.PrimarySourceSHA256 ||
+			nativeSecondary.IdentitySHA256() != policy.NativeFeePrice.SecondarySourceSHA256 {
+			return nil, errors.New("shadow native SOL/USD sources do not match the policy")
+		}
+		nextReader += 2
+	}
+	if len(quoteReaders) != nextReader {
 		return nil, errors.New("devnet shadow runner does not accept a USDC/USD guard")
 	}
 	strategy, err := newAdaptiveStrategy(policy.Adaptive)
@@ -239,6 +262,7 @@ func NewRunner(
 	return &Runner{
 		policy: policy, primary: primary, secondary: secondary,
 		quotePrimary: quotePrimary, quoteSecondary: quoteSecondary,
+		nativePrimary: nativePrimary, nativeSecondary: nativeSecondary,
 		quoter: quoter, recorder: recorder,
 		nextSell: policy.IsSell(), nextAmount: policy.InputAmount,
 		strategy: strategy,
@@ -283,6 +307,7 @@ func ResumeRunner(
 				if !tick.PeriodClose || tick.PriceMicros != 0 || tick.EquityMicros != 0 ||
 					tick.Triggered || tick.Deferred || tick.DecisionQuote != nil ||
 					tick.Decision != nil || tick.Fill != nil || tick.DecisionMissed || tick.Reason != "" ||
+					tick.NativeFeePriceMicros != 0 || tick.NativeFeePrimary != nil || tick.NativeFeeSecondary != nil ||
 					tick.QuoteLowerMicros != 0 || tick.QuoteUpperMicros != 0 {
 					return nil, errors.New("a period-close record is malformed")
 				}
@@ -341,6 +366,12 @@ func (r *Runner) Ledger() Ledger { return r.ledger }
 // Stats reports the per-decision measurements gathered so far.
 func (r *Runner) Stats() Stats { return r.stats }
 
+// RiskHalted reports the adaptive strategy's latched daily risk stop. It stays
+// true across unobservable ticks, whose Tick intentionally carries no decision.
+func (r *Runner) RiskHalted() bool {
+	return r.strategy != nil && r.strategy.riskHalted
+}
+
 // NextSell reports the direction the next accepted signal would paper-trade.
 // It exposes no action surface; callers use it only to label an alert emitted
 // after Step has already committed the decision to the journal.
@@ -351,9 +382,10 @@ func (r *Runner) NextSell() bool { return r.nextSell }
 // every source returns, while still checking a UTC rollover before mutating or
 // journaling the old day's runner.
 type Observation struct {
-	primary, secondary           pricetrigger.Sample
-	quotePrimary, quoteSecondary pricetrigger.Sample
-	unavailable                  UnobservableReason
+	primary, secondary             pricetrigger.Sample
+	quotePrimary, quoteSecondary   pricetrigger.Sample
+	nativePrimary, nativeSecondary pricetrigger.Sample
+	unavailable                    UnobservableReason
 }
 
 // Observe reads every source needed for one Step without changing runner
@@ -373,6 +405,14 @@ func (r *Runner) Observe(ctx context.Context) Observation {
 		return observation
 	}
 	observation.quotePrimary, observation.quoteSecondary = quotePrimary, quoteSecondary
+	if r.policy.NativeFeePrice != nil {
+		nativePrimary, nativeSecondary, err := r.readNativeFeePrice(ctx)
+		if err != nil {
+			observation.unavailable = ReasonMarketPriceUnavailable
+			return observation
+		}
+		observation.nativePrimary, observation.nativeSecondary = nativePrimary, nativeSecondary
+	}
 	return observation
 }
 
@@ -398,7 +438,7 @@ func (r *Runner) StepObservation(
 			return Tick{}, err
 		}
 		if err := r.recorder.Record(now, EventOpened, Opening{
-			Version: JournalVersion, PolicySHA256: fingerprint,
+			Version: JournalVersionFor(r.policy), PolicySHA256: fingerprint,
 		}); err != nil {
 			return Tick{}, err
 		}
@@ -442,9 +482,20 @@ func (r *Runner) StepObservation(
 	}
 	r.primarySample, r.secondarySample = observation.primary, observation.secondary
 	price := evidence.ConservativePrice
+	nativePrice := price
+	if r.policy.NativeFeePrice != nil {
+		nativeEvidence, nativeErr := pricetrigger.Evaluate(
+			*r.policy.NativeFeePrice, observation.nativePrimary, observation.nativeSecondary, now,
+		)
+		if nativeErr != nil || nativeEvidence.ConservativePrice > r.policy.NativeFeePriceCeilingMicros {
+			return r.emitUnobservable(now, ReasonMarketPriceInvalid)
+		}
+		nativePrice = nativeEvidence.ConservativePrice
+		r.nativePrimarySample, r.nativeSecondarySample = observation.nativePrimary, observation.nativeSecondary
+	}
 
 	if !r.opened {
-		if r.ledger, err = NewLedger(r.policy, price); err != nil {
+		if r.ledger, err = NewLedger(r.policy, price, nativePrice); err != nil {
 			return Tick{}, err
 		}
 		r.opened = true
@@ -454,7 +505,7 @@ func (r *Runner) StepObservation(
 	// trough that happened while a decision was pending — or on a tick whose
 	// quote failed — never reached the high-water mark, so the reported worst
 	// fall could only ever understate the real one.
-	if r.ledger, err = r.ledger.Mark(price); err != nil {
+	if r.ledger, err = r.ledger.Mark(price, nativePrice); err != nil {
 		return Tick{}, err
 	}
 	triggered := evidence.Triggered
@@ -531,6 +582,14 @@ func (r *Runner) StepObservation(
 		r.counts.Missed++
 		return r.emit(now, Tick{At: now, Event: EventMissed, PriceMicros: price, Triggered: true}, nil)
 	}
+	receivedAt := quote.ReceivedAt
+	if receivedAt.IsZero() {
+		receivedAt = now
+	} else if receivedAt.Before(now) {
+		r.counts.Missed++
+		return r.emit(now, Tick{At: now, Event: EventMissed, PriceMicros: price, Triggered: true}, nil)
+	}
+	quote.ReceivedAt = receivedAt
 	passes, guardErr := adaptiveQuotePasses(
 		r.policy, r.decision, quote, price, r.nextSell,
 	)
@@ -551,7 +610,7 @@ func (r *Runner) StepObservation(
 	r.waiting = &pending{
 		decidedAt: now, priceMicros: price, quote: quote, sell: r.nextSell,
 		riskExit:    r.decision != nil && r.decision.Strategy == StrategyRiskExit,
-		settleAfter: now.Add(r.policy.Settle()),
+		settleAfter: receivedAt.Add(r.policy.Settle()),
 	}
 	decisionQuote := quote
 	return r.emit(now, Tick{
@@ -628,6 +687,15 @@ func (r *Runner) settle(
 	if err == nil && settlementQuote.InputAmount != decision.quote.InputAmount {
 		err = errors.New("settlement quote changed the requested input amount")
 	}
+	settlementReceivedAt := settlementQuote.ReceivedAt
+	if settlementReceivedAt.IsZero() {
+		settlementReceivedAt = now
+	}
+	settlementQuote.ReceivedAt = settlementReceivedAt
+	if err == nil && (settlementReceivedAt.Before(now) ||
+		settlementReceivedAt.Before(decision.settleAfter)) {
+		err = errors.New("settlement quote predates the settlement observation or deadline")
+	}
 	if err == nil && r.policy.Adaptive != nil {
 		if validateQuote(settlementQuote) != nil {
 			err = errors.New("settlement quote is invalid")
@@ -660,7 +728,11 @@ func (r *Runner) settle(
 		}, nil)
 		return tick, true, emitErr
 	}
-	updated, err := r.ledger.Apply(fill, price)
+	var nativePrice []uint64
+	if r.policy.NativeFeePrice != nil {
+		nativePrice = []uint64{r.ledger.NativeFeePriceMicros}
+	}
+	updated, err := r.ledger.Apply(fill, price, nativePrice...)
 	if err != nil {
 		// The books refused the trade — most often because the inventory ran
 		// out. That is a real constraint a live run would also have hit.
@@ -678,9 +750,13 @@ func (r *Runner) settle(
 		// A sell following a buy leaves native fees for itself and the next buy,
 		// so the repeating round trip cannot strand its return leg.
 		if r.nextSell {
-			r.nextAmount = capSellAmount(
-				r.nextAmount, r.ledger.BaseUnits, roundTripFeeReserve(r.policy.FeeLamports),
-			)
+			reserve := nextSellFeeReserve(r.policy)
+			if r.ledger, err = r.ledger.replenishFeeReserve(
+				reserve,
+			); err != nil {
+				return Tick{}, false, err
+			}
+			r.nextAmount = capSellAmount(r.nextAmount, r.ledger, reserve)
 		}
 		if r.strategy != nil {
 			r.strategy.filled(now, decision.riskExit)
@@ -739,6 +815,18 @@ func (r *Runner) readQuotePeg(ctx context.Context) (pricetrigger.Sample, pricetr
 	return primary, secondary, nil
 }
 
+func (r *Runner) readNativeFeePrice(ctx context.Context) (pricetrigger.Sample, pricetrigger.Sample, error) {
+	primary, err := r.nativePrimary.Latest(ctx, r.policy.NativeFeePrice.Feed)
+	if err != nil {
+		return pricetrigger.Sample{}, pricetrigger.Sample{}, err
+	}
+	secondary, err := r.nativeSecondary.Latest(ctx, r.policy.NativeFeePrice.Feed)
+	if err != nil {
+		return pricetrigger.Sample{}, pricetrigger.Sample{}, err
+	}
+	return primary, secondary, nil
+}
+
 // emit records the tick and returns it, so every outcome reaches the journal by
 // exactly one path.
 func (r *Runner) emit(now time.Time, tick Tick, fill *Fill) (Tick, error) {
@@ -750,6 +838,13 @@ func (r *Runner) emit(now time.Time, tick Tick, fill *Fill) (Tick, error) {
 		primary, secondary := r.primarySample, r.secondarySample
 		if !primary.PublishedAt.IsZero() && !secondary.PublishedAt.IsZero() {
 			tick.PrimaryPrice, tick.SecondaryPrice = &primary, &secondary
+		}
+	}
+	if r.policy.NativeFeePrice != nil && tick.PriceMicros != 0 && !tick.PeriodClose {
+		primary, secondary := r.nativePrimarySample, r.nativeSecondarySample
+		if !primary.PublishedAt.IsZero() && !secondary.PublishedAt.IsZero() {
+			tick.NativeFeePriceMicros = r.ledger.NativeFeePriceMicros
+			tick.NativeFeePrimary, tick.NativeFeeSecondary = &primary, &secondary
 		}
 	}
 	if r.policy.QuotePeg != nil && !tick.PeriodClose && tick.Event != EventUnobservable {

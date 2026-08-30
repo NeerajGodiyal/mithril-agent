@@ -32,6 +32,22 @@ func TestEvaluateUsesConservativePrice(t *testing.T) {
 	}
 }
 
+func TestMultiFeedPolicyAddsJUPWithoutChangingTheV1Contract(t *testing.T) {
+	policy := testPolicy()
+	policy.Feed = FeedJUPUSD
+	if err := policy.Validate(); err == nil {
+		t.Fatal("the SOL-only v1 contract accepted JUP/USD")
+	}
+	policy.Version = MultiFeedVersion
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("the multi-feed contract rejected JUP/USD: %v", err)
+	}
+	policy.Feed = FeedUSDCUSD
+	if err := policy.Validate(); err == nil {
+		t.Fatal("the trigger contract accepted the stablecoin guard feed")
+	}
+}
+
 func TestEvaluateRequiresConfidenceAdjustedThreshold(t *testing.T) {
 	now := time.Now().UTC()
 	policy := testPolicy()

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/big"
 	"math/bits"
 	"path/filepath"
 
@@ -112,7 +113,7 @@ func runShadowBacktest(args []string, output io.Writer) error {
 	}
 
 	result, err := shadow.ReplayRoundTripTicks(
-		policy, ticks, modelledPool(uint64(*spreadBPS), policy.SlippageBPS),
+		policy, ticks, modelledPool(policy, uint64(*spreadBPS), policy.SlippageBPS),
 	)
 	if err != nil {
 		return err
@@ -142,30 +143,40 @@ func observedPrices(ticks []shadow.Tick) []uint64 {
 
 // modelledPool turns an oracle price into the quote a pool is ASSUMED to give,
 // worse than the oracle by spreadBPS in whichever direction the trade goes.
-//
-// SOL carries 9 decimals and devUSDC 6, and a price is USD micros per whole
-// SOL, so one lot of lamports yields lot*price/1e9 devUSDC units, and spending
-// u devUSDC units yields u*1e9/price lamports.
 func modelledPool(
-	spreadBPS uint64, slippageBPS uint16,
+	policy shadow.Policy, spreadBPS uint64, slippageBPS uint16,
 ) func(uint64, bool, uint64) (shadow.Quote, error) {
+	baseDecimals, quoteDecimals := policy.InputDecimals, policy.OutputDecimals
+	if !policy.IsSell() {
+		baseDecimals, quoteDecimals = quoteDecimals, baseDecimals
+	}
 	return func(price uint64, sell bool, input uint64) (shadow.Quote, error) {
 		if price == 0 || input == 0 {
 			return shadow.Quote{}, errors.New("cannot model a fill at a zero price")
 		}
-		if slippageBPS == 0 || slippageBPS >= 10_000 {
+		if spreadBPS >= 10_000 || slippageBPS == 0 || slippageBPS >= 10_000 ||
+			baseDecimals > 18 || quoteDecimals > 18 {
 			return shadow.Quote{}, errors.New("cannot model a fill with invalid slippage")
 		}
-		multiplier, divisor := price, uint64(lamportsPerSOL)
+		numerator := new(big.Int).SetUint64(input)
+		denominator := new(big.Int)
+		baseScale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(baseDecimals)), nil)
+		quoteScale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(quoteDecimals)), nil)
 		if sell {
-			multiplier, divisor = price, lamportsPerSOL
+			numerator.Mul(numerator, new(big.Int).SetUint64(price))
+			numerator.Mul(numerator, quoteScale)
+			denominator.Mul(baseScale, big.NewInt(1_000_000))
 		} else {
-			multiplier, divisor = lamportsPerSOL, price
+			numerator.Mul(numerator, baseScale)
+			numerator.Mul(numerator, big.NewInt(1_000_000))
+			denominator.Mul(new(big.Int).SetUint64(price), quoteScale)
 		}
-		out, ok := boundedMulDiv(input, multiplier, divisor)
-		if !ok {
+		numerator.Div(numerator, denominator)
+		if !numerator.IsUint64() {
 			return shadow.Quote{}, errors.New("the modelled fill is out of range")
 		}
+		out := numerator.Uint64()
+		var ok bool
 		out, ok = boundedMulDiv(out, 10_000-spreadBPS, 10_000)
 		if !ok || out == 0 {
 			return shadow.Quote{}, errors.New("the modelled fill rounds to nothing at this price")

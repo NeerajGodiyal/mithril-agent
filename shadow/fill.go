@@ -3,6 +3,7 @@ package shadow
 import (
 	"errors"
 	"math/big"
+	"time"
 )
 
 // Everything here is integer arithmetic on base units. Floating point would be
@@ -14,6 +15,9 @@ type Quote struct {
 	InputAmount     uint64 `json:"input_amount"`
 	EstimatedOutput uint64 `json:"estimated_output"`
 	MinimumOutput   uint64 `json:"minimum_output"`
+	// ReceivedAt is local receipt time, not a provider claim or quote TTL.
+	// Zero is retained for legacy journals and deterministic offline models.
+	ReceivedAt time.Time `json:"received_at,omitempty"`
 }
 
 // Fill is what would have happened. A refused fill is a first-class outcome:
@@ -23,8 +27,8 @@ type Fill struct {
 	Filled bool `json:"filled"`
 	// Sell records which way THIS fill moved inventory. Direction used to be a
 	// property of the policy, which is true for a one-directional run and false
-	// for a round trip: holding SOL the only possible action is a sell, holding
-	// devUSDC it is a buy, and both happen against one set of books.
+	// for a round trip: holding base the only possible action is a sell, holding
+	// quote it is a buy, and both happen against one set of books.
 	//
 	// It does NOT decide which asset is "base". That stays policy-level and is
 	// already right either way: base is the asset whose price moves.
@@ -170,8 +174,8 @@ func SettleFill(policy Policy, quote Quote, decisionPrice, settlePrice uint64) (
 }
 
 // SettleFillDirected is SettleFill with the direction named explicitly, which a
-// round trip needs: the same books take a sell while holding SOL and a buy
-// while holding devUSDC, so direction cannot come from the policy.
+// round trip needs: the same books take a sell while holding base and a buy
+// while holding quote, so direction cannot come from the policy.
 func SettleFillDirected(
 	policy Policy, quote Quote, decisionPrice, settlePrice uint64, sell bool,
 ) (Fill, error) {
@@ -299,6 +303,9 @@ func validateQuote(quote Quote) error {
 	}
 	if quote.MinimumOutput > quote.EstimatedOutput {
 		return errors.New("quote minimum exceeds its own estimate")
+	}
+	if !quote.ReceivedAt.IsZero() && !quote.ReceivedAt.Equal(quote.ReceivedAt.UTC()) {
+		return errors.New("quote receipt time is not UTC")
 	}
 	return nil
 }

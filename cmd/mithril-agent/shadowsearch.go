@@ -16,6 +16,11 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
 
+const (
+	shadowWalkForwardVersion = uint32(1)
+	shadowWalkForwardWindows = 7
+)
+
 const shadowSearchUsage = `Usage: mithril-agent shadow search --policy PATH --dir PATH
                                    --train-day YYYY-MM-DD
                                    --validation-day YYYY-MM-DD
@@ -46,20 +51,52 @@ type shadowSearchCandidate struct {
 }
 
 type shadowSearchResult struct {
-	Status                string                `json:"status"`
-	EvaluationMode        string                `json:"evaluation_mode"`
-	Authorized            bool                  `json:"authorized"`
-	Promotable            bool                  `json:"promotable"`
-	PoolModelled          bool                  `json:"pool_modelled"`
-	AssumedSpreadBPS      uint64                `json:"assumed_spread_bps"`
-	TrainDay              string                `json:"train_day"`
-	ValidationDay         string                `json:"validation_day"`
-	CandidatesEvaluated   uint64                `json:"candidates_evaluated"`
-	CandidatePolicySHA256 string                `json:"candidate_policy_sha256,omitempty"`
-	Candidate             shadowSearchCandidate `json:"candidate"`
-	Training              shadowSearchScore     `json:"training"`
-	Validation            shadowSearchScore     `json:"validation"`
-	NextStep              string                `json:"next_step"`
+	Status                string                      `json:"status"`
+	EvaluationMode        string                      `json:"evaluation_mode"`
+	Authorized            bool                        `json:"authorized"`
+	Promotable            bool                        `json:"promotable"`
+	PoolModelled          bool                        `json:"pool_modelled"`
+	AssumedSpreadBPS      uint64                      `json:"assumed_spread_bps"`
+	TrainDay              string                      `json:"train_day"`
+	ValidationDay         string                      `json:"validation_day"`
+	CandidatesEvaluated   uint64                      `json:"candidates_evaluated"`
+	CandidatePolicySHA256 string                      `json:"candidate_policy_sha256,omitempty"`
+	Candidate             shadowSearchCandidate       `json:"candidate"`
+	Training              shadowSearchScore           `json:"training"`
+	Validation            shadowSearchScore           `json:"validation"`
+	WalkForward           *shadowWalkForwardAdmission `json:"walk_forward,omitempty"`
+	NextStep              string                      `json:"next_step"`
+}
+
+type shadowWalkForwardDay struct {
+	Ticks         []shadow.Tick
+	Provenance    shadowJournalProvenance
+	ObservableBPS int32
+}
+
+type shadowWalkForwardFold struct {
+	TrainingJournal         shadowJournalProvenance `json:"training_journal"`
+	ValidationJournal       shadowJournalProvenance `json:"validation_journal"`
+	TrainingObservableBPS   int32                   `json:"training_observable_bps"`
+	ValidationObservableBPS int32                   `json:"validation_observable_bps"`
+	Candidate               shadowSearchCandidate   `json:"candidate"`
+	CandidatePolicySHA256   string                  `json:"candidate_policy_sha256"`
+	CandidatesEvaluated     uint64                  `json:"candidates_evaluated"`
+	Training                shadowSearchScore       `json:"training"`
+	Validation              shadowSearchScore       `json:"validation"`
+}
+
+type shadowWalkForwardAdmission struct {
+	Version                   uint32                  `json:"version"`
+	Status                    string                  `json:"status"`
+	Windows                   uint32                  `json:"windows"`
+	PositiveWindows           uint32                  `json:"positive_windows"`
+	RequiredPositiveWindows   uint32                  `json:"required_positive_windows"`
+	ValidationFullRoundTrips  uint64                  `json:"validation_full_round_trips"`
+	RequiredFullRoundTrips    uint64                  `json:"required_full_round_trips"`
+	AggregateVersusHoldMicros int64                   `json:"aggregate_versus_hold_micros"`
+	TotalCandidatesEvaluated  uint64                  `json:"total_candidates_evaluated"`
+	Folds                     []shadowWalkForwardFold `json:"folds"`
 }
 
 func runShadowSearch(args []string, output io.Writer) error {
@@ -122,8 +159,8 @@ func runShadowSearch(args []string, output io.Writer) error {
 			return err
 		}
 	}
-	if !policy.IsSell() {
-		return errors.New("shadow search currently requires a sell-first SOL/USDC policy")
+	if policy.Adaptive == nil && !policy.IsSell() {
+		return errors.New("fixed shadow search currently requires a sell-first policy")
 	}
 	trainTicks, trainingProvenance, err := readShadowSearchJournal(
 		filepath.Join(*directory, "shadow-"+*trainDay+".jsonl"), *trainDay, policy,
@@ -244,6 +281,7 @@ func validShadowSearchClose(tick shadow.Tick, expectedAt time.Time) bool {
 	if !tick.PeriodClose || tick.Triggered || tick.Deferred || tick.Fill != nil ||
 		tick.DecisionQuote != nil || tick.DecisionMissed || tick.Reason != "" ||
 		tick.PrimaryPrice != nil || tick.SecondaryPrice != nil ||
+		tick.NativeFeePriceMicros != 0 || tick.NativeFeePrimary != nil || tick.NativeFeeSecondary != nil ||
 		tick.QuoteLowerMicros != 0 || tick.QuoteUpperMicros != 0 ||
 		!tick.At.Equal(expectedAt) {
 		return false
@@ -283,13 +321,155 @@ func searchShadowCandidateTicks(
 	)
 }
 
+func searchShadowWalkForward(
+	policy shadow.Policy, days []shadowWalkForwardDay, spreadBPS uint64,
+) (shadowSearchResult, error) {
+	if len(days) != shadowWalkForwardWindows+1 {
+		return shadowSearchResult{}, errors.New("walk-forward admission needs eight consecutive completed days")
+	}
+	admission := shadowWalkForwardAdmission{
+		Version: shadowWalkForwardVersion, Status: "admitted",
+		Windows: shadowWalkForwardWindows, RequiredPositiveWindows: 4,
+		RequiredFullRoundTrips: 4,
+		Folds:                  make([]shadowWalkForwardFold, 0, shadowWalkForwardWindows),
+	}
+	var final shadowSearchResult
+	for index := 0; index < shadowWalkForwardWindows; index++ {
+		training, validation := days[index], days[index+1]
+		result, err := searchShadowCandidateTicks(
+			policy, training.Ticks, validation.Ticks, spreadBPS,
+		)
+		if err != nil {
+			return shadowSearchResult{}, fmt.Errorf("walk-forward fold %d: %w", index+1, err)
+		}
+		result.TrainDay = training.Provenance.Day
+		result.ValidationDay = validation.Provenance.Day
+		candidate, err := shadowSearchCandidatePolicy(policy, result.Candidate)
+		if err != nil {
+			return shadowSearchResult{}, err
+		}
+		fingerprint, err := candidate.Fingerprint()
+		if err != nil {
+			return shadowSearchResult{}, err
+		}
+		result.CandidatePolicySHA256 = fingerprint
+		fold := shadowWalkForwardFold{
+			TrainingJournal: training.Provenance, ValidationJournal: validation.Provenance,
+			TrainingObservableBPS:   training.ObservableBPS,
+			ValidationObservableBPS: validation.ObservableBPS,
+			Candidate:               result.Candidate, CandidatePolicySHA256: fingerprint,
+			CandidatesEvaluated: result.CandidatesEvaluated,
+			Training:            result.Training, Validation: result.Validation,
+		}
+		admission.Folds = append(admission.Folds, fold)
+		if result.Validation.VersusHoldMicros > 0 {
+			admission.PositiveWindows++
+		}
+		if !addShadowReviewCounter(
+			&admission.ValidationFullRoundTrips, result.Validation.FullRoundTrips,
+		) || !addShadowReviewCounter(
+			&admission.TotalCandidatesEvaluated, result.CandidatesEvaluated,
+		) {
+			return shadowSearchResult{}, errors.New("walk-forward counters overflow")
+		}
+		admission.AggregateVersusHoldMicros, err = addShadowSearchSigned(
+			admission.AggregateVersusHoldMicros, result.Validation.VersusHoldMicros,
+		)
+		if err != nil {
+			return shadowSearchResult{}, err
+		}
+		final = result
+	}
+	final.WalkForward = &admission
+	final.NextStep = "run this walk-forward-admitted candidate as a forward paper challenger"
+	if err := validateShadowWalkForwardAdmission(policy, final); err != nil {
+		return shadowSearchResult{}, err
+	}
+	return final, nil
+}
+
+func validateShadowWalkForwardAdmission(base shadow.Policy, result shadowSearchResult) error {
+	admission := result.WalkForward
+	if admission == nil || admission.Version != shadowWalkForwardVersion ||
+		admission.Status != "admitted" || admission.Windows != shadowWalkForwardWindows ||
+		len(admission.Folds) != shadowWalkForwardWindows ||
+		admission.RequiredPositiveWindows != 4 || admission.RequiredFullRoundTrips != 4 {
+		return errors.New("shadow walk-forward admission is invalid")
+	}
+	var positive uint32
+	var trips, candidates uint64
+	var advantage int64
+	for index, fold := range admission.Folds {
+		if fold.TrainingJournal.validate() != nil || fold.ValidationJournal.validate() != nil ||
+			fold.TrainingObservableBPS < 9_500 || fold.ValidationObservableBPS < 9_500 ||
+			fold.CandidatesEvaluated == 0 || fold.Training.FullRoundTrips == 0 {
+			return errors.New("shadow walk-forward fold is invalid")
+		}
+		trainAt, trainErr := time.Parse("2006-01-02", fold.TrainingJournal.Day)
+		validationAt, validationErr := time.Parse("2006-01-02", fold.ValidationJournal.Day)
+		if trainErr != nil || validationErr != nil || !validationAt.Equal(trainAt.AddDate(0, 0, 1)) {
+			return errors.New("shadow walk-forward days are not consecutive")
+		}
+		if index > 0 && admission.Folds[index-1].ValidationJournal != fold.TrainingJournal {
+			return errors.New("shadow walk-forward journal provenance is discontinuous")
+		}
+		candidate, err := shadowSearchCandidatePolicy(base, fold.Candidate)
+		if err != nil {
+			return errors.New("shadow walk-forward candidate is invalid")
+		}
+		fingerprint, err := candidate.Fingerprint()
+		if err != nil || fingerprint != fold.CandidatePolicySHA256 {
+			return errors.New("shadow walk-forward candidate fingerprint is invalid")
+		}
+		if fold.Validation.VersusHoldMicros > 0 {
+			positive++
+		}
+		if !addShadowReviewCounter(&trips, fold.Validation.FullRoundTrips) ||
+			!addShadowReviewCounter(&candidates, fold.CandidatesEvaluated) {
+			return errors.New("shadow walk-forward counters overflow")
+		}
+		advantage, err = addShadowSearchSigned(advantage, fold.Validation.VersusHoldMicros)
+		if err != nil {
+			return err
+		}
+	}
+	last := admission.Folds[len(admission.Folds)-1]
+	outerCandidate, err := shadowSearchCandidatePolicy(base, result.Candidate)
+	if err != nil {
+		return errors.New("shadow walk-forward final candidate is invalid")
+	}
+	outerFingerprint, err := outerCandidate.Fingerprint()
+	if err != nil || outerFingerprint != last.CandidatePolicySHA256 ||
+		result.CandidatePolicySHA256 != last.CandidatePolicySHA256 ||
+		result.TrainDay != last.TrainingJournal.Day ||
+		result.ValidationDay != last.ValidationJournal.Day ||
+		result.Training != last.Training || result.Validation != last.Validation ||
+		result.CandidatesEvaluated != last.CandidatesEvaluated {
+		return errors.New("shadow walk-forward final fold does not match the staged candidate")
+	}
+	if positive != admission.PositiveWindows || trips != admission.ValidationFullRoundTrips ||
+		candidates != admission.TotalCandidatesEvaluated || advantage != admission.AggregateVersusHoldMicros ||
+		positive < admission.RequiredPositiveWindows || trips < admission.RequiredFullRoundTrips ||
+		advantage <= 0 || last.Validation.VersusHoldMicros < 0 {
+		return errors.New("shadow walk-forward evidence did not pass admission")
+	}
+	return nil
+}
+
+func addShadowSearchSigned(left, right int64) (int64, error) {
+	if right > 0 && left > math.MaxInt64-right || right < 0 && left < math.MinInt64-right {
+		return 0, errors.New("walk-forward advantage overflows")
+	}
+	return left + right, nil
+}
+
 func searchShadowCandidateScored(
 	policy shadow.Policy,
 	trainPrices, validationPrices []uint64,
 	spreadBPS uint64,
 	trainingScore, validationScore func(shadow.Policy) (shadowSearchScore, error),
 ) (shadowSearchResult, error) {
-	if !policy.IsSell() {
+	if policy.Adaptive == nil && !policy.IsSell() {
 		return shadowSearchResult{}, errors.New("shadow search requires a sell-first policy")
 	}
 	if len(trainPrices) < 2 || len(validationPrices) < 2 {
@@ -497,7 +677,7 @@ func scoreShadowCandidate(
 	policy shadow.Policy, prices []uint64, spreadBPS uint64,
 ) (shadowSearchScore, error) {
 	result, err := shadow.ReplayRoundTrip(
-		policy, prices, modelledPool(spreadBPS, policy.SlippageBPS),
+		policy, prices, modelledPool(policy, spreadBPS, policy.SlippageBPS),
 	)
 	if err != nil {
 		return shadowSearchScore{}, err
@@ -509,7 +689,7 @@ func scoreShadowCandidateTicks(
 	policy shadow.Policy, ticks []shadow.Tick, spreadBPS uint64,
 ) (shadowSearchScore, error) {
 	result, err := shadow.ReplayRoundTripTicks(
-		policy, ticks, modelledPool(spreadBPS, policy.SlippageBPS),
+		policy, ticks, modelledPool(policy, spreadBPS, policy.SlippageBPS),
 	)
 	if err != nil {
 		return shadowSearchScore{}, err

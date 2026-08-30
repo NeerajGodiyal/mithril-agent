@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -301,6 +302,29 @@ func TestShadowAutoSelectLeavesPendingOrRejectedChallengersUntouched(t *testing.
 	}
 }
 
+func TestShadowAutoSelectRejectsAPreWalkForwardChallenger(t *testing.T) {
+	fixture := newShadowAutoSelectFixtureWithWalkForward(t, false)
+	before, err := os.ReadFile(fixture.championPointer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalEvaluate := shadowAutoSelectEvaluate
+	defer func() { shadowAutoSelectEvaluate = originalEvaluate }()
+	shadowAutoSelectEvaluate = func(
+		shadow.Policy, string, string, string, string, uint32, time.Time, time.Time,
+	) (shadowChallengeResult, error) {
+		return shadowChallengeResult{
+			Status: "challenger_qualified_for_paper_selection", PaperOnly: true,
+			EligibleForPaperSelection: true,
+		}, nil
+	}
+	result, err := fixture.autoSelect()
+	after, readErr := os.ReadFile(fixture.championPointer)
+	if err == nil || result.ChampionPointerUpdated || readErr != nil || !bytes.Equal(before, after) {
+		t.Fatalf("legacy challenger crossed auto-selection: result=%+v err=%v read=%v", result, err, readErr)
+	}
+}
+
 func TestFixedForwardEvidenceWindowEndsAsNotQualifiedWhenReportsAreMissing(t *testing.T) {
 	fixture := newShadowAutoSelectFixture(t)
 	_, challengerPath, _, selection, err := loadBoundShadowCandidateSelection(
@@ -343,6 +367,12 @@ type shadowAutoSelectFixture struct {
 }
 
 func newShadowAutoSelectFixture(t *testing.T) shadowAutoSelectFixture {
+	return newShadowAutoSelectFixtureWithWalkForward(t, true)
+}
+
+func newShadowAutoSelectFixtureWithWalkForward(
+	t *testing.T, walkForward bool,
+) shadowAutoSelectFixture {
 	t.Helper()
 	root := privateTestDirectory(t)
 	championControl := filepath.Join(root, "champion")
@@ -361,6 +391,9 @@ func newShadowAutoSelectFixture(t *testing.T) shadowAutoSelectFixture {
 	policyPath := writeShadowPolicy(t, base)
 	champion := candidateForPrices(t, base, 200_000_000, 100_000_000)
 	challenger := candidateForPrices(t, base, 220_000_000, 110_000_000)
+	if walkForward {
+		challenger = admittedShadowAutoSelectCandidate(t, base, challenger)
+	}
 	championPath := filepath.Join(championControl, "champion.json")
 	challengerPath := filepath.Join(challengerCandidateDir, "challenger.json")
 	if err := writeShadowPaperCandidate(championPath, champion); err != nil {
@@ -401,6 +434,53 @@ func newShadowAutoSelectFixture(t *testing.T) shadowAutoSelectFixture {
 		lifecycleLock:    filepath.Join(challengerControl, "lifecycle.lock"),
 		challengerSHA256: challengerSHA256,
 	}
+}
+
+func admittedShadowAutoSelectCandidate(
+	t *testing.T, base shadow.Policy, candidate shadowPaperCandidate,
+) shadowPaperCandidate {
+	t.Helper()
+	if candidate.Research.Validation.VersusHoldMicros <= 0 ||
+		candidate.Research.Validation.FullRoundTrips == 0 {
+		t.Fatalf("auto-select fixture candidate is not profitable: %+v", candidate.Research.Validation)
+	}
+	provenance := make([]shadowJournalProvenance, shadowWalkForwardWindows+1)
+	start := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
+	for index := range provenance {
+		provenance[index] = shadowJournalProvenance{
+			Day: start.AddDate(0, 0, index).Format("2006-01-02"), Records: 9,
+			ChainHeadSHA256: strings.Repeat(string("12345678"[index]), 64),
+		}
+	}
+	admission := shadowWalkForwardAdmission{
+		Version: shadowWalkForwardVersion, Status: "admitted",
+		Windows: shadowWalkForwardWindows, PositiveWindows: shadowWalkForwardWindows,
+		RequiredPositiveWindows:   4,
+		ValidationFullRoundTrips:  candidate.Research.Validation.FullRoundTrips * shadowWalkForwardWindows,
+		RequiredFullRoundTrips:    4,
+		AggregateVersusHoldMicros: candidate.Research.Validation.VersusHoldMicros * shadowWalkForwardWindows,
+		TotalCandidatesEvaluated:  candidate.Research.CandidatesEvaluated * shadowWalkForwardWindows,
+		Folds:                     make([]shadowWalkForwardFold, 0, shadowWalkForwardWindows),
+	}
+	for index := 0; index < shadowWalkForwardWindows; index++ {
+		admission.Folds = append(admission.Folds, shadowWalkForwardFold{
+			TrainingJournal: provenance[index], ValidationJournal: provenance[index+1],
+			TrainingObservableBPS: 10_000, ValidationObservableBPS: 10_000,
+			Candidate:             candidate.Research.Candidate,
+			CandidatePolicySHA256: candidate.CandidatePolicySHA256,
+			CandidatesEvaluated:   candidate.Research.CandidatesEvaluated,
+			Training:              candidate.Research.Training, Validation: candidate.Research.Validation,
+		})
+	}
+	candidate.Research.TrainDay = provenance[len(provenance)-2].Day
+	candidate.Research.ValidationDay = provenance[len(provenance)-1].Day
+	candidate.Research.WalkForward = &admission
+	candidate.TrainingJournal = provenance[len(provenance)-2]
+	candidate.ValidationJournal = provenance[len(provenance)-1]
+	if err := candidate.validateAgainst(base); err != nil {
+		t.Fatal(err)
+	}
+	return candidate
 }
 
 func (fixture shadowAutoSelectFixture) autoSelect() (shadowAutoSelectResult, error) {

@@ -68,6 +68,40 @@ func TestPythPushReadsSponsoredUSDCFeed(t *testing.T) {
 	}
 }
 
+func TestPythPushReadsPinnedJUPMigrationFeeds(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	data := validPushAccountFor(
+		JUPUSDFeedID, 48_500_000, 20_000, -8, now.Add(-20*time.Second).Unix(),
+	)
+	reader := &fakeReader{byAccount: map[string]AccountData{
+		pythPushJUPAccount: {
+			ContextSlot: 100, Owner: pythPushLegacyOwner,
+			DataLength: pythPushAccountBytes, Data: data,
+		},
+		pythPushJUPUpgradedAccount: {
+			ContextSlot: 100, Owner: pythPushUpgradedOwner,
+			DataLength: pythPushAccountBytes, Data: data,
+		},
+	}}
+	source, err := NewPythPushJUP(reader, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	sample, err := source.LatestAtSlot(t.Context(), pricetrigger.FeedJUPUSD, 99)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sample.SourceSHA256 != PythPushJUPIdentitySHA256() ||
+		sample.Feed != pricetrigger.FeedJUPUSD || sample.PriceMicros != 485_000 ||
+		sample.ConfidenceMicros != 200 {
+		t.Fatalf("JUP sample = %+v", sample)
+	}
+	if PythPushJUPIdentitySHA256() == PythPushIdentitySHA256() ||
+		PythPushJUPIdentitySHA256() == PythPushUSDCIdentitySHA256() {
+		t.Fatal("JUP source identity collided with another feed")
+	}
+}
+
 func TestPythPushUSDCSurvivesLegacyFeedRetirement(t *testing.T) {
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	data := validPushAccountFor(USDCUSDFeedID, 99_999_800, 1_000, -8,

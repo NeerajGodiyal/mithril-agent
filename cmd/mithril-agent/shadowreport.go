@@ -222,7 +222,7 @@ func shadowTicksFrom(
 			}
 			var opening shadow.Opening
 			if err := strictjson.Decode(record.Payload, &opening); err != nil ||
-				opening.Version != shadow.JournalVersion {
+				opening.Version != shadow.JournalVersionFor(policy) {
 				return nil, errors.New("the shadow journal uses an unsupported opening format")
 			}
 			if opening.PolicySHA256 != fingerprint {

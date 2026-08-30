@@ -175,6 +175,8 @@ type shadowRun struct {
 	secondary         shadow.PriceReader
 	quotePrimary      shadow.PriceReader
 	quoteSecondary    shadow.PriceReader
+	nativePrimary     shadow.PriceReader
+	nativeSecondary   shadow.PriceReader
 	quoter            shadow.Quoter
 	roll              *dailyJournal
 	runner            *shadow.Runner
@@ -216,18 +218,36 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 	if err := validateShadowEndpoint(endpoint); err != nil {
 		return nil, err
 	}
-	primary, err := pricesource.NewPythPush(publicAccountReader(endpoint), time.Now)
+	reader := publicAccountReader(endpoint)
+	var primary shadow.PriceReader
+	var secondary shadow.PriceReader
+	if policy.Market == shadow.MarketJUPUSDC {
+		primary, err = pricesource.NewPythPushJUP(reader, time.Now)
+		secondary = pricesource.NewKrakenJUP(nil)
+	} else {
+		primary, err = pricesource.NewPythPush(reader, time.Now)
+		secondary = pricesource.NewKrakenSOL(nil)
+	}
 	if err != nil {
 		return nil, err
 	}
 	var quotePrimary shadow.PriceReader
 	var quoteSecondary shadow.PriceReader
 	if policy.QuotePeg != nil {
-		quotePrimary, err = pricesource.NewPythPushUSDC(publicAccountReader(endpoint), time.Now)
+		quotePrimary, err = pricesource.NewPythPushUSDC(reader, time.Now)
 		if err != nil {
 			return nil, err
 		}
 		quoteSecondary = pricesource.NewKraken(nil)
+	}
+	var nativePrimary shadow.PriceReader
+	var nativeSecondary shadow.PriceReader
+	if policy.NativeFeePrice != nil {
+		nativePrimary, err = pricesource.NewPythPush(reader, time.Now)
+		if err != nil {
+			return nil, err
+		}
+		nativeSecondary = pricesource.NewKrakenSOL(nil)
 	}
 	quoter, err := newShadowQuoter(policy, options)
 	if err != nil {
@@ -258,8 +278,9 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 		basePolicy: basePolicy, policy: policy, journalRoot: options.directory,
 		candidatePointer: options.candidatePointer,
 		policySHA256:     policyFingerprint,
-		primary:          primary, secondary: pricesource.NewKrakenSOL(nil),
+		primary:          primary, secondary: secondary,
 		quotePrimary: quotePrimary, quoteSecondary: quoteSecondary,
+		nativePrimary: nativePrimary, nativeSecondary: nativeSecondary,
 		quoter: quoter, roll: roll, alerts: alerts,
 	}
 	if err := run.reconcileMissingShadowReports(); err != nil {
@@ -395,10 +416,14 @@ func (s *shadowRun) newRunnerFor(policy shadow.Policy, roll *dailyJournal) (*sha
 }
 
 func (s *shadowRun) quoteReadersFor(policy shadow.Policy) []shadow.PriceReader {
-	if policy.QuotePeg == nil {
-		return nil
+	var readers []shadow.PriceReader
+	if policy.QuotePeg != nil {
+		readers = append(readers, s.quotePrimary, s.quoteSecondary)
 	}
-	return []shadow.PriceReader{s.quotePrimary, s.quoteSecondary}
+	if policy.NativeFeePrice != nil {
+		readers = append(readers, s.nativePrimary, s.nativeSecondary)
+	}
+	return readers
 }
 
 func (s *shadowRun) resumeRunner(
@@ -587,6 +612,9 @@ func (s *shadowRun) drive(ctx context.Context, once bool, output io.Writer) erro
 			return err
 		}
 		if err := s.alertTick(tick, nextSell); err != nil {
+			return err
+		}
+		if err := s.updatePaperCurrent(tick, nextSell); err != nil {
 			return err
 		}
 		if once {
@@ -943,6 +971,7 @@ func (q *shadowQuoter) Quote(
 		InputAmount:     result.TokenIn,
 		EstimatedOutput: result.TokenEstOut,
 		MinimumOutput:   result.TokenMinOut,
+		ReceivedAt:      time.Now().UTC(),
 	}, nil
 }
 
@@ -977,5 +1006,6 @@ func (q *jupiterShadowQuoter) Quote(
 		InputAmount:     result.InputAmount,
 		EstimatedOutput: result.EstimatedOutput,
 		MinimumOutput:   result.MinimumOutput,
+		ReceivedAt:      time.Now().UTC(),
 	}, nil
 }

@@ -59,7 +59,7 @@ func TestShadowAlertsAreBoundedExplicitAndContainNoLiveAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	var snapshot paperstatus.Snapshot
-	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 3 {
+	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 2 {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 	for _, event := range snapshot.Events {
@@ -74,11 +74,7 @@ func TestShadowAlertsAreBoundedExplicitAndContainNoLiveAuthority(t *testing.T) {
 		t.Fatalf("unreadable strategy alert: %q", message)
 	}
 	if message := snapshot.Events[1].Message; message !=
-		"PAPER · 🟡 SELL signal\n0.001 SOL · ref $200" {
-		t.Fatalf("unreadable opened-order alert: %q", message)
-	}
-	if message := snapshot.Events[2].Message; message !=
-		"PAPER · 🟢 SELL filled\n0.001 SOL → 0.2 USDC · ref $200\nEquity $1.25" {
+		"PAPER · 🟢 SOLD\n0.001 SOL → 0.2 USDC\nEquity $1.25" {
 		t.Fatalf("unreadable filled-order alert: %q", message)
 	}
 }
@@ -90,6 +86,83 @@ func TestShadowAlertsIgnoreRoutineWaitingTicks(t *testing.T) {
 		At: time.Now().UTC(), Event: shadow.EventWaiting,
 	}, policy.IsSell()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPaperCurrentMakesAQuietAdaptiveLoopVisible(t *testing.T) {
+	policy := validShadowPolicy()
+	adaptive, err := shadow.DefaultAdaptivePolicy(
+		policy.SlippageBPS, policy.FeeLamports, policy.InputAmount, policy.TickSeconds,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Adaptive = &adaptive
+	tick := shadow.Tick{
+		At: time.Now().UTC(), Event: shadow.EventWaiting, PriceMicros: 106_550_000,
+		Decision: &shadow.AdaptiveDecision{
+			Regime: shadow.RegimeRange, Strategy: shadow.StrategyRangeReversion,
+			Reason: "signal_below_cost_hurdle", SignalBPS: -2,
+		},
+	}
+	want := "PAPER · 👀 Watching\nRange · no edge after costs · SOL $106.55"
+	if got := paperCurrentMessage(policy, tick, true); got != want {
+		t.Fatalf("current status = %q, want %q", got, want)
+	}
+	policy.Market = shadow.MarketJUPUSDC
+	if got := paperCurrentMessage(policy, tick, true); got !=
+		"PAPER · 👀 Watching\nRange · no edge after costs · JUP $106.55" {
+		t.Fatalf("JUP current status = %q", got)
+	}
+	policy.Market = shadow.MarketSOLUSDC
+	if got := paperCurrentMessage(policy, shadow.Tick{
+		At: tick.At, Event: shadow.EventUnobservable,
+	}, true); got != "PAPER · ⚠️ Waiting for data\nVerified market data unavailable" {
+		t.Fatalf("unobservable status = %q", got)
+	}
+	buy := policy.Trigger
+	buy.Direction = pricetrigger.BuyAtOrBelow
+	policy.ReturnTrigger = &buy
+	if got := paperCurrentMessage(policy, shadow.Tick{
+		At: tick.At, Event: shadow.EventSignal, PriceMicros: 106_550_000,
+		DecisionQuote: &shadow.Quote{InputAmount: 25_000_000},
+	}, false); got != "PAPER · ⏳ Order pending\nBUY 25 USDC · ref $106.55" {
+		t.Fatalf("buy pending status = %q", got)
+	}
+	risk := &shadow.AdaptiveDecision{Regime: shadow.RegimeRisk, Strategy: shadow.StrategyRiskExit}
+	if got := paperCurrentMessage(policy, shadow.Tick{
+		At: tick.At, Event: shadow.EventFilled, EquityMicros: 900_000,
+		Decision: risk, Fill: &shadow.Fill{Filled: true, Sell: true},
+	}, true); got != "PAPER · ⏸ Trading paused\nSELL filled · Equity $0.9" {
+		t.Fatalf("risk-exit fill status = %q", got)
+	}
+	if got := paperCurrentMessage(policy, shadow.Tick{
+		At: tick.At, Event: shadow.EventRefused, Decision: risk,
+	}, true); got != "PAPER · ⏸ Trading paused\nLast order not filled" {
+		t.Fatalf("risk-exit refusal status = %q", got)
+	}
+	if got := paperCurrentMessage(policy, shadow.Tick{
+		At: tick.At, Event: shadow.EventSignal, Decision: risk,
+	}, true); got != "PAPER · ⏸ Trading paused\nRisk exit waiting for pending order" {
+		t.Fatalf("deferred risk-exit status = %q", got)
+	}
+	if got := paperCurrentMessage(policy, shadow.Tick{
+		At: tick.At, Event: shadow.EventSignal, Decision: risk,
+		DecisionQuote: &shadow.Quote{InputAmount: 1},
+	}, true); got != "PAPER · ⏳ Risk exit pending\nDaily drawdown limit reached" {
+		t.Fatalf("pending risk-exit status = %q", got)
+	}
+}
+
+func TestPaperCurrentPutsTodayResultBeforeStrategyDetail(t *testing.T) {
+	status := "PAPER · 👀 Watching\nRange · no edge after costs · SOL $106.55"
+	status = addPaperPerformance(status, "Checks 123 · signals 4 · trades 1")
+	performance := paperPerformanceLine(100_000_000, 101_250_000, 101_000_000)
+	want := "PAPER · 👀 Watching\nToday +$1.25 · vs hold +$0.25\n" +
+		"Checks 123 · signals 4 · trades 1\n" +
+		"Range · no edge after costs · SOL $106.55"
+	if got := addPaperPerformance(status, performance); got != want {
+		t.Fatalf("current performance = %q, want %q", got, want)
 	}
 }
 
@@ -165,6 +238,9 @@ func TestAdaptiveShadowAlertExplainsTheSelectedActionBriefly(t *testing.T) {
 		t.Fatal(err)
 	}
 	policy.Adaptive = &adaptive
+	if got := shadowSize(policy); got != "budget 1 SOL · stop 3% drawdown" {
+		t.Fatalf("adaptive mandate summary = %q", got)
+	}
 	decision := &shadow.AdaptiveDecision{
 		Regime: shadow.RegimeDowntrend, Strategy: shadow.StrategyMomentum,
 		Reason: "trend_aligned_sell", SignalBPS: -825,
@@ -242,7 +318,7 @@ func TestAdaptiveShadowAlertReportsTheRiskPauseOnce(t *testing.T) {
 	}
 }
 
-func TestShadowAlertsFormatBuyRefusalAndMissedEvidence(t *testing.T) {
+func TestShadowAlertsKeepRoutineFailuresQuiet(t *testing.T) {
 	directory, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -266,6 +342,9 @@ func TestShadowAlertsFormatBuyRefusalAndMissedEvidence(t *testing.T) {
 	}
 	run := shadowRun{policy: policy, policySHA256: fingerprint, alerts: writer}
 	now := time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC)
+	if err := run.alertStrategy(now, paperstatus.KindStrategyActive); err != nil {
+		t.Fatal(err)
+	}
 	if err := run.alertTick(shadow.Tick{
 		At: now, Event: shadow.EventRefused,
 		Fill: &shadow.Fill{
@@ -286,22 +365,15 @@ func TestShadowAlertsFormatBuyRefusalAndMissedEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	var snapshot paperstatus.Snapshot
-	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 2 {
+	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 1 {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
-	refused := snapshot.Events[0].Message
-	if !strings.Contains(refused, "PAPER · ⚪ BUY refused\n") ||
-		!strings.Contains(refused, "settlement crossed the slippage floor") {
-		t.Fatalf("unreadable buy refusal: %q", refused)
-	}
-	missed := snapshot.Events[1].Message
-	if !strings.Contains(missed, "PAPER · ⚠️ Order missed\n") ||
-		!strings.Contains(missed, "market price unavailable") {
-		t.Fatalf("unreadable missed order: %q", missed)
+	if snapshot.Events[0].Kind != paperstatus.KindStrategyActive {
+		t.Fatalf("routine failure interrupted the operator: %+v", snapshot.Events)
 	}
 }
 
-func TestShadowAlertReconciliationRecoversACommittedDecisionOnce(t *testing.T) {
+func TestShadowAlertReconciliationRecoversACommittedFillOnce(t *testing.T) {
 	directory, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -325,9 +397,9 @@ func TestShadowAlertReconciliationRecoversACommittedDecisionOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	ticks := []shadow.Tick{{
-		At: now.Add(time.Second), Event: shadow.EventSignal, PriceMicros: 200_000_000,
-		DecisionQuote: &shadow.Quote{
-			InputAmount: 1_000_000, EstimatedOutput: 200_000, MinimumOutput: 199_000,
+		At: now.Add(time.Second), Event: shadow.EventFilled, EquityMicros: 1_250_000,
+		Fill: &shadow.Fill{
+			Filled: true, Sell: true, SpentUnits: 1_000_000, ReceivedUnits: 200_000,
 		},
 	}}
 	for range 2 {
@@ -343,7 +415,7 @@ func TestShadowAlertReconciliationRecoversACommittedDecisionOnce(t *testing.T) {
 	if err := json.Unmarshal(raw, &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Events) != 2 || snapshot.Events[1].Kind != paperstatus.KindOrderOpened {
+	if len(snapshot.Events) != 2 || snapshot.Events[1].Kind != paperstatus.KindOrderFilled {
 		t.Fatalf("reconciled snapshot = %+v", snapshot)
 	}
 }
@@ -425,9 +497,8 @@ func TestShadowAlertReconciliationKeepsOneWayDirectionAfterFill(t *testing.T) {
 	if err := json.Unmarshal(raw, &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	last := snapshot.Events[len(snapshot.Events)-1].Message
-	if !strings.Contains(last, "🟡 SELL signal\n") || strings.Contains(last, "🟡 BUY signal\n") {
-		t.Fatalf("one-way restart changed direction: %q", last)
+	if len(snapshot.Events) != 1 || !strings.Contains(snapshot.Events[0].Message, "🟢 SOLD\n") {
+		t.Fatalf("reconciliation emitted noisy or wrong-direction alerts: %+v", snapshot.Events)
 	}
 }
 
@@ -467,8 +538,8 @@ func TestPartialAndCompletePeriodReportsHaveDistinctAlerts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(snapshot.Events) != 2 ||
-		snapshot.Events[0].Message != "PAPER · ⚠️ Period stopped\n0 fills · 3 data gaps\nTest P&L +0 · vs hold +0 devUSDC\nCoverage 0.00% · incomplete · daily reset" ||
-		snapshot.Events[1].Message != "PAPER · ⚠️ Day closed\n0 fills\nTest P&L +0 · vs hold +0 devUSDC\nCoverage 0.00% · incomplete · daily reset" {
+		snapshot.Events[0].Message != "PAPER · ⚠️ Period stopped\nTest P&L +0 · vs hold +0 devUSDC · 0 trades\nCoverage 0.00% · incomplete · daily reset" ||
+		snapshot.Events[1].Message != "PAPER · ⚠️ Day closed\nTest P&L +0 · vs hold +0 devUSDC · 0 trades\nCoverage 0.00% · incomplete · daily reset" {
 		t.Fatalf("period alerts = %+v", snapshot.Events)
 	}
 }
@@ -507,8 +578,8 @@ func TestMainnetDayAlertShowsTrustworthyPnLAndCoverage(t *testing.T) {
 	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 1 {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
-	want := "PAPER · 📊 Day closed\n3 fills · 2 filtered · 1 missed\n" +
-		"P&L +$0.8 · vs hold +$0.2\nCoverage 100.00% · daily reset"
+	want := "PAPER · 📊 Day closed\nP&L +$0.8 · vs hold +$0.2 · 3 trades\n" +
+		"Coverage 100.00% · daily reset"
 	if snapshot.Events[0].Message != want {
 		t.Fatalf("day alert = %q, want %q", snapshot.Events[0].Message, want)
 	}

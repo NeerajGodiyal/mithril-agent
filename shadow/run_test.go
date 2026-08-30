@@ -3,6 +3,7 @@ package shadow
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/parser"
 	"go/token"
 	"math"
@@ -56,6 +57,7 @@ func (s *stubSource) Latest(_ context.Context, feed string) (pricetrigger.Sample
 func mainnetPolicy() Policy {
 	policy := sellPolicy()
 	policy.Cluster = Mainnet
+	policy.Market = MarketSOLUSDC
 	policy.QuoteRoute = QuoteRoute{
 		Provider: QuoteJupiter, InputMint: wrappedSOLMint, OutputMint: mainnetUSDCMint,
 	}
@@ -863,6 +865,49 @@ func TestASignalSettlesFromAFreshVenueQuote(t *testing.T) {
 	}
 }
 
+func TestSettlementDelayStartsWhenTheDecisionQuoteArrives(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	runner, primary, secondary, quoter, recorder := newTestRunner(t, 23_000_000, now)
+	quoter.quote = func(_ bool, amount uint64) Quote {
+		receivedAt := now.Add(20 * time.Second)
+		output := uint64(21_525)
+		if quoter.calls == 2 {
+			receivedAt = now.Add(50 * time.Second)
+			output = 21_400
+		}
+		return Quote{
+			InputAmount: amount, EstimatedOutput: output, MinimumOutput: 21_300,
+			ReceivedAt: receivedAt,
+		}
+	}
+
+	if tick, err := runner.Step(t.Context(), now); err != nil || tick.Event != EventSignal {
+		t.Fatalf("decision tick = %+v, %v", tick, err)
+	}
+	early := now.Add(31 * time.Second)
+	primary.at, secondary.at = early, early
+	if tick, err := runner.Step(t.Context(), early); err != nil || tick.Event == EventFilled {
+		t.Fatalf("quote latency was counted as settlement time: %+v, %v", tick, err)
+	}
+	settledAt := now.Add(50 * time.Second)
+	primary.at, secondary.at = settledAt, settledAt
+	if tick, err := runner.Step(t.Context(), settledAt); err != nil ||
+		tick.Event != EventFilled || tick.Fill == nil {
+		t.Fatalf("mature quote did not settle: %+v, %v", tick, err)
+	}
+	if _, err := Replay(runner.policy, recorder.ticks); err != nil {
+		t.Fatalf("receipt-timed journal did not replay: %v", err)
+	}
+
+	tampered := append([]Tick(nil), recorder.ticks...)
+	altered := *tampered[0].DecisionQuote
+	altered.ReceivedAt = altered.ReceivedAt.Add(time.Second)
+	tampered[0].DecisionQuote = &altered
+	if _, err := Replay(runner.policy, tampered); err == nil {
+		t.Fatal("a fill before the rewritten quote deadline replayed")
+	}
+}
+
 func TestAnUnavailableSettlementQuoteIsMissedNotInvented(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	runner, primary, secondary, quoter, recorder := newTestRunner(t, 23_000_000, now)
@@ -1101,6 +1146,70 @@ func TestMainnetRunnerRequiresAndBindsUSDCUSDSources(t *testing.T) {
 	}
 }
 
+func TestJUPRunnerJournalsAndReplaysIndependentSOLFeeEvidence(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	policy := jupBuyPolicy(t)
+	primary := &stubSource{
+		identity: policy.Trigger.PrimarySourceSHA256, price: 1_000_000, at: now,
+	}
+	secondary := &stubSource{
+		identity: policy.Trigger.SecondarySourceSHA256, price: 1_000_000, at: now,
+	}
+	quotePrimary := &stubSource{
+		identity: policy.QuotePeg.PrimarySourceSHA256, price: 1_000_000, at: now,
+	}
+	quoteSecondary := &stubSource{
+		identity: policy.QuotePeg.SecondarySourceSHA256, price: 1_000_000, at: now,
+	}
+	nativePrimary := &stubSource{
+		identity: policy.NativeFeePrice.PrimarySourceSHA256, price: 200_000_000, at: now,
+	}
+	nativeSecondary := &stubSource{
+		identity: policy.NativeFeePrice.SecondarySourceSHA256, price: 200_000_000, at: now,
+	}
+	recorder := &stubRecorder{}
+	runner, err := NewRunner(
+		policy, primary, secondary, &stubQuoter{estimated: 100_000_000}, recorder,
+		quotePrimary, quoteSecondary, nativePrimary, nativeSecondary,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tick, stepErr := runner.Step(t.Context(), now); stepErr != nil {
+		t.Fatal(stepErr)
+	} else if tick.Event != EventSignal || tick.NativeFeePriceMicros == 0 ||
+		tick.NativeFeePrimary == nil || tick.NativeFeeSecondary == nil {
+		t.Fatalf("JUP decision tick = %+v", tick)
+	}
+	settledAt := now.Add(policy.Settle())
+	for _, source := range []*stubSource{
+		primary, secondary, quotePrimary, quoteSecondary, nativePrimary, nativeSecondary,
+	} {
+		source.at = settledAt
+	}
+	if tick, stepErr := runner.Step(t.Context(), settledAt); stepErr != nil {
+		t.Fatal(stepErr)
+	} else if tick.Event != EventFilled || tick.Fill == nil || !tick.Fill.Filled ||
+		tick.Fill.Sell || runner.Ledger().FeeReserveLamports != policy.FeeLamports {
+		t.Fatalf("JUP settlement tick = %+v, ledger=%+v", tick, runner.Ledger())
+	}
+	replayed, err := Replay(policy, recorder.ticks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Ledger.BaseUnits != runner.Ledger().BaseUnits ||
+		replayed.Ledger.QuoteUnits != runner.Ledger().QuoteUnits ||
+		replayed.Ledger.FeeReserveLamports != runner.Ledger().FeeReserveLamports ||
+		replayed.Ledger.FeesMicros != runner.Ledger().FeesMicros {
+		t.Fatalf("JUP replay ledger=%+v live=%+v", replayed.Ledger, runner.Ledger())
+	}
+	tampered := append([]Tick(nil), recorder.ticks...)
+	tampered[0].NativeFeePriceMicros++
+	if _, err := Replay(policy, tampered); err == nil {
+		t.Fatal("tampered native fee evidence replayed")
+	}
+}
+
 func TestMainnetRunnerFailsClosedOnUSDCDepegAndRecordsItsBound(t *testing.T) {
 	now := time.Now().UTC()
 	policy := mainnetPolicy()
@@ -1295,6 +1404,24 @@ func TestReplayRejectsUnsupportedFillEvidence(t *testing.T) {
 			t.Fatal("a fill whose decision-time quote was rewritten replayed")
 		}
 	})
+	t.Run("signal quote received before observation", func(t *testing.T) {
+		tampered := append([]Tick(nil), recorder.ticks...)
+		altered := *tampered[0].DecisionQuote
+		altered.ReceivedAt = tampered[0].At.Add(-time.Nanosecond)
+		tampered[0].DecisionQuote = &altered
+		if _, err := Replay(runner.policy, tampered); err == nil {
+			t.Fatal("a decision quote received before its observation replayed")
+		}
+	})
+	t.Run("current decision quote without receipt time", func(t *testing.T) {
+		tampered := append([]Tick(nil), recorder.ticks...)
+		altered := *tampered[0].DecisionQuote
+		altered.ReceivedAt = time.Time{}
+		tampered[0].DecisionQuote = &altered
+		if _, err := Replay(runner.policy, tampered); err == nil {
+			t.Fatal("a v6 decision quote without receipt evidence replayed")
+		}
+	})
 	t.Run("rewritten settlement quote", func(t *testing.T) {
 		tampered := append([]Tick(nil), recorder.ticks...)
 		altered := *tampered[1].Fill
@@ -1306,6 +1433,24 @@ func TestReplayRejectsUnsupportedFillEvidence(t *testing.T) {
 			t.Fatal("a fill derived from a rewritten settlement quote replayed")
 		}
 	})
+	t.Run("current settlement quote without receipt time", func(t *testing.T) {
+		tampered := append([]Tick(nil), recorder.ticks...)
+		altered := *tampered[1].Fill
+		altered.SettlementQuote.ReceivedAt = time.Time{}
+		tampered[1].Fill = &altered
+		if _, err := Replay(runner.policy, tampered); err == nil {
+			t.Fatal("a v6 settlement quote without receipt evidence replayed")
+		}
+	})
+	t.Run("settlement quote received before observation", func(t *testing.T) {
+		tampered := append([]Tick(nil), recorder.ticks...)
+		altered := *tampered[1].Fill
+		altered.SettlementQuote.ReceivedAt = tampered[1].At.Add(-time.Nanosecond)
+		tampered[1].Fill = &altered
+		if _, err := Replay(runner.policy, tampered); err == nil {
+			t.Fatal("a settlement quote received before its observation replayed")
+		}
+	})
 	t.Run("reversed time", func(t *testing.T) {
 		tampered := append([]Tick(nil), recorder.ticks...)
 		tampered[1].At = tampered[0].At.Add(-time.Nanosecond)
@@ -1313,6 +1458,43 @@ func TestReplayRejectsUnsupportedFillEvidence(t *testing.T) {
 			t.Fatal("out-of-order shadow evidence replayed")
 		}
 	})
+}
+
+func TestReplayKeepsZeroQuoteReceiptCompatibilityForV4AndV5(t *testing.T) {
+	for _, version := range []uint32{LegacyVersion, NativeFeeVersion} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			now := time.Unix(1_700_000_000, 0).UTC()
+			policy := sellPolicy()
+			policy.Version = version
+			policy.Trigger.ThresholdMicros = 22_000_000
+			primary := &stubSource{identity: policy.Trigger.PrimarySourceSHA256, price: 23_000_000, at: now}
+			secondary := &stubSource{identity: policy.Trigger.SecondarySourceSHA256, price: 23_000_000, at: now}
+			recorder := &stubRecorder{}
+			runner, err := NewRunner(policy, primary, secondary, &stubQuoter{estimated: 21_525}, recorder)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := runner.Step(t.Context(), now); err != nil {
+				t.Fatal(err)
+			}
+			settleAt := now.Add(policy.Settle())
+			primary.at, secondary.at = settleAt, settleAt
+			if _, err := runner.Step(t.Context(), settleAt); err != nil {
+				t.Fatal(err)
+			}
+			legacy := append([]Tick(nil), recorder.ticks...)
+			decision := *legacy[0].DecisionQuote
+			decision.ReceivedAt = time.Time{}
+			legacy[0].DecisionQuote = &decision
+			fill := *legacy[1].Fill
+			fill.DecisionQuote.ReceivedAt = time.Time{}
+			fill.SettlementQuote.ReceivedAt = time.Time{}
+			legacy[1].Fill = &fill
+			if _, err := Replay(policy, legacy); err != nil {
+				t.Fatalf("legacy zero receipt times did not replay: %v", err)
+			}
+		})
+	}
 }
 
 func TestResumeDoesNotRestoreAnUnobservablyMissedDecision(t *testing.T) {

@@ -40,7 +40,7 @@ func writeShadowPolicy(t *testing.T, policy shadow.Policy) string {
 
 func validShadowPolicy() shadow.Policy {
 	return shadow.Policy{
-		Version: shadow.Version, Cluster: shadow.Mainnet,
+		Version: shadow.Version, Cluster: shadow.Mainnet, Market: shadow.MarketSOLUSDC,
 		QuoteRoute: shadow.QuoteRoute{
 			Provider:   shadow.QuoteJupiter,
 			InputMint:  "So11111111111111111111111111111111111111112",

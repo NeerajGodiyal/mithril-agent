@@ -31,20 +31,42 @@ const (
 
 // Version is written into every record so a report can refuse to mix results
 // produced by different accounting rules.
-const Version = uint32(4)
+const (
+	LegacyVersion    = uint32(4)
+	NativeFeeVersion = uint32(5)
+	Version          = uint32(6)
+)
 
 const (
 	QuoteJupiter = "jupiter"
 	QuoteOrca    = "orca"
 
+	MarketSOLUSDC = "SOL/USDC"
+	MarketJUPUSDC = "JUP/USDC"
+
 	wrappedSOLMint  = "So11111111111111111111111111111111111111112"
 	mainnetUSDCMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+	mainnetJUPMint  = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
 )
 
 // JournalVersion identifies the run header written before the first tick. The
 // original journal format wrote a ledger as shadow.opened and could not safely
 // resume, so it is deliberately incompatible with this restart-safe format.
-const JournalVersion = uint32(2)
+const (
+	LegacyJournalVersion    = uint32(2)
+	NativeFeeJournalVersion = uint32(3)
+	JournalVersion          = uint32(4)
+)
+
+func JournalVersionFor(policy Policy) uint32 {
+	if policy.Version == LegacyVersion {
+		return LegacyJournalVersion
+	}
+	if policy.Version == NativeFeeVersion {
+		return NativeFeeJournalVersion
+	}
+	return JournalVersion
+}
 
 // Opening binds one daily journal to the exact policy that produced it.
 // Without this header a restart could silently continue the same evidence file
@@ -67,9 +89,25 @@ type QuoteRoute struct {
 
 // MainnetQuoteRoute returns the fixed Jupiter SOL/USDC route for one direction.
 func MainnetQuoteRoute(sell bool) QuoteRoute {
+	return MainnetMarketQuoteRoute(MarketSOLUSDC, sell)
+}
+
+// MainnetMarketQuoteRoute returns a pinned Jupiter route for a supported paper
+// market. An empty route is never valid and makes an unknown market fail closed.
+func MainnetMarketQuoteRoute(market string, sell bool) QuoteRoute {
+	baseMint := ""
+	switch market {
+	case MarketSOLUSDC:
+		baseMint = wrappedSOLMint
+	case MarketJUPUSDC:
+		baseMint = mainnetJUPMint
+	default:
+		return QuoteRoute{}
+	}
 	input, output := mainnetUSDCMint, wrappedSOLMint
+	output = baseMint
 	if sell {
-		input, output = wrappedSOLMint, mainnetUSDCMint
+		input, output = baseMint, mainnetUSDCMint
 	}
 	return QuoteRoute{Provider: QuoteJupiter, InputMint: input, OutputMint: output}
 }
@@ -79,6 +117,7 @@ func MainnetQuoteRoute(sell bool) QuoteRoute {
 type Policy struct {
 	Version uint32 `json:"version"`
 	Cluster string `json:"cluster"`
+	Market  string `json:"market,omitempty"`
 
 	// Adaptive replaces absolute entry prices with a rolling, price-relative
 	// decision model. Trigger and ReturnTrigger still bind the independently
@@ -136,6 +175,20 @@ type Policy struct {
 	// measured against.
 	StartingInputUnits  uint64 `json:"starting_input_units"`
 	StartingOutputUnits uint64 `json:"starting_output_units"`
+	// StartingFeeReserveLamports keeps liquid native transaction costs separate
+	// from traded inventory, including setup rent until it becomes locked. Zero
+	// retains the original SOL/USDC accounting for old policies and journals.
+	StartingFeeReserveLamports uint64 `json:"starting_fee_reserve_lamports,omitempty"`
+	// OneTimeSetupRentLamports is conservative native capital locked by the
+	// first successful Mainnet Jupiter route setup. It remains part of equity,
+	// not a fee.
+	OneTimeSetupRentLamports uint64 `json:"one_time_setup_rent_lamports,omitempty"`
+
+	// NativeFeePrice binds independent SOL/USD evidence when the traded base is
+	// not SOL. The ceiling keeps the adaptive cost hurdle conservative before a
+	// live native price exists.
+	NativeFeePrice              *pricetrigger.Policy `json:"native_fee_price,omitempty"`
+	NativeFeePriceCeilingMicros uint64               `json:"native_fee_price_ceiling_micros,omitempty"`
 
 	// ReturnTrigger makes the run a ROUND TRIP. With it set, Trigger is the
 	// rule for the leg that spends the starting inventory and ReturnTrigger is
@@ -179,8 +232,16 @@ const (
 // no slippage bound, or no settlement delay is worse than no shadow run at all,
 // because it produces a number somebody will believe.
 func (p Policy) Validate() error {
-	if p.Version != Version {
+	if p.Version != Version && p.Version != NativeFeeVersion && p.Version != LegacyVersion {
 		return errors.New("shadow policy version is not supported")
+	}
+	if p.Version == LegacyVersion &&
+		(p.Market != "" || p.StartingFeeReserveLamports != 0 || p.OneTimeSetupRentLamports != 0 ||
+			p.NativeFeePrice != nil || p.NativeFeePriceCeilingMicros != 0) {
+		return errors.New("legacy shadow policy cannot use v5 market accounting")
+	}
+	if p.Version == NativeFeeVersion && p.OneTimeSetupRentLamports != 0 {
+		return errors.New("v5 shadow policy cannot use v6 setup-rent accounting")
 	}
 	if p.Cluster != Mainnet && p.Cluster != Devnet {
 		return errors.New("shadow policy cluster must be mainnet-beta or devnet")
@@ -188,11 +249,59 @@ func (p Policy) Validate() error {
 	if err := p.Trigger.Validate(); err != nil {
 		return err
 	}
+	market := p.Market
+	if p.Version == LegacyVersion && market == "" {
+		market = MarketSOLUSDC
+	}
+	if p.Cluster == Mainnet && market != MarketSOLUSDC && market != MarketJUPUSDC {
+		return errors.New("mainnet shadow policy market is unsupported")
+	}
+	if market == MarketJUPUSDC {
+		if p.Trigger.Version != pricetrigger.MultiFeedVersion ||
+			p.Trigger.Feed != pricetrigger.FeedJUPUSD || p.NativeFeePrice == nil ||
+			p.StartingFeeReserveLamports == 0 {
+			return errors.New("JUP/USDC paper policy needs JUP/USD and native SOL/USD evidence")
+		}
+		if err := p.NativeFeePrice.Validate(); err != nil ||
+			p.NativeFeePrice.Feed != pricetrigger.FeedSOLUSD ||
+			p.NativeFeePrice.Direction != pricetrigger.BuyAtOrBelow ||
+			p.NativeFeePrice.PrimarySourceSHA256 == p.Trigger.PrimarySourceSHA256 ||
+			p.NativeFeePrice.PrimarySourceSHA256 == p.Trigger.SecondarySourceSHA256 ||
+			p.NativeFeePrice.SecondarySourceSHA256 == p.Trigger.PrimarySourceSHA256 ||
+			p.NativeFeePrice.SecondarySourceSHA256 == p.Trigger.SecondarySourceSHA256 {
+			return errors.New("JUP/USDC native fee price policy is invalid")
+		}
+		if p.NativeFeePriceCeilingMicros < 100_000_000 ||
+			p.NativeFeePriceCeilingMicros > pricetrigger.MaxPriceMicros {
+			return errors.New("JUP/USDC native fee price ceiling is invalid")
+		}
+		if p.Version == Version && p.OneTimeSetupRentLamports == 0 {
+			return errors.New("JUP/USDC paper policy needs a conservative setup-rent reserve")
+		}
+	} else if p.NativeFeePrice != nil || p.NativeFeePriceCeilingMicros != 0 {
+		return errors.New("SOL/USDC paper policy does not need separate native price evidence")
+	} else if p.OneTimeSetupRentLamports != 0 &&
+		(p.Version != Version || p.Cluster != Mainnet || market != MarketSOLUSDC ||
+			p.StartingFeeReserveLamports == 0) {
+		return errors.New("token setup rent is supported only by current Mainnet paper policies")
+	}
 	if p.Adaptive != nil {
 		if err := p.Adaptive.Validate(); err != nil {
 			return err
 		}
-		costFloor, err := adaptiveCostFloorBPS(p.SlippageBPS, p.FeeLamports, p.InputAmount)
+		var costFloor uint32
+		var err error
+		if market == MarketJUPUSDC {
+			if p.IsSell() {
+				return errors.New("JUP/USDC adaptive paper policy must start from its USDC buy leg")
+			}
+			costFloor, err = adaptiveQuoteCostFloorBPS(
+				p.SlippageBPS, p.FeeLamports, p.NativeFeePriceCeilingMicros,
+				p.InputAmount, p.InputDecimals,
+			)
+		} else {
+			costFloor, err = adaptiveCostFloorBPS(p.SlippageBPS, p.FeeLamports, p.InputAmount)
+		}
 		if err != nil {
 			return err
 		}
@@ -201,9 +310,6 @@ func (p Policy) Validate() error {
 		}
 		if p.Adaptive.MaxObservationGapSeconds < p.TickSeconds {
 			return errors.New("adaptive observation gap must allow at least one policy tick")
-		}
-		if !p.IsSell() {
-			return errors.New("adaptive shadow policy must start from its SOL sell leg")
 		}
 		if p.ReturnTrigger == nil {
 			return errors.New("adaptive shadow policy needs both inventory directions")
@@ -282,11 +388,34 @@ func (p Policy) Validate() error {
 		return errors.New("shadow policy opening input inventory is smaller than one trade")
 	}
 	feeReserve := p.FeeLamports
-	if p.RoundTrip() {
+	if p.RoundTrip() || p.Version == Version && market == MarketJUPUSDC {
 		if p.FeeLamports > math.MaxUint64/2 {
-			return errors.New("shadow policy round-trip fees are too large")
+			return errors.New("shadow policy required fees are too large")
 		}
 		feeReserve *= 2
+	}
+	if p.StartingFeeReserveLamports != 0 {
+		if p.Cluster != Mainnet ||
+			p.QuoteRoute != MainnetMarketQuoteRoute(market, p.IsSell()) {
+			return errors.New("separate paper fee reserve does not match its Mainnet market")
+		}
+		if p.StartingFeeReserveLamports < feeReserve {
+			return errors.New("shadow policy native fee reserve does not fund its transaction fees")
+		}
+		if p.OneTimeSetupRentLamports > math.MaxUint64-feeReserve ||
+			p.StartingFeeReserveLamports < p.OneTimeSetupRentLamports+feeReserve {
+			return errors.New("shadow policy native reserve does not fund setup rent and transaction fees")
+		}
+		if market == MarketSOLUSDC {
+			baseUnits := p.StartingOutputUnits
+			if p.IsSell() {
+				baseUnits = p.StartingInputUnits
+			}
+			if baseUnits > math.MaxUint64-p.StartingFeeReserveLamports {
+				return errors.New("shadow policy native inventory and fee reserve are too large")
+			}
+		}
+		return nil
 	}
 	if p.IsSell() && p.StartingInputUnits-p.InputAmount < feeReserve {
 		return errors.New("shadow policy opening SOL inventory does not leave its transaction fee")
@@ -324,14 +453,21 @@ func (p Policy) validateQuoteRoute() error {
 	if p.Cluster != Mainnet {
 		return nil
 	}
-	want := MainnetQuoteRoute(p.IsSell())
-	wantInputDecimals, wantOutputDecimals := uint8(6), uint8(9)
-	if p.IsSell() {
-		wantInputDecimals, wantOutputDecimals = 9, 6
+	market := p.Market
+	if p.Version == LegacyVersion && market == "" {
+		market = MarketSOLUSDC
+	}
+	want := MainnetMarketQuoteRoute(market, p.IsSell())
+	wantInputDecimals, wantOutputDecimals := uint8(6), uint8(6)
+	if market == MarketSOLUSDC {
+		wantOutputDecimals = 9
+		if p.IsSell() {
+			wantInputDecimals, wantOutputDecimals = 9, 6
+		}
 	}
 	if p.QuoteRoute != want ||
 		p.InputDecimals != wantInputDecimals || p.OutputDecimals != wantOutputDecimals {
-		return errors.New("Mainnet shadow quote route must match the SOL/USDC rule direction")
+		return errors.New("Mainnet shadow quote route must match its market and rule direction")
 	}
 	return nil
 }

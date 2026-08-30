@@ -304,6 +304,30 @@ func TestBuildReportRefusesADifferentPolicyThanTheLedger(t *testing.T) {
 	}
 }
 
+func TestReportBindsTheRemainingNativeFeeReserve(t *testing.T) {
+	policy := separateFeePolicy(t)
+	ledger, err := NewLedger(policy, 20_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := time.Unix(1_700_000_000, 0).UTC()
+	report, err := BuildReport(
+		policy, ledger, Counts{Ticks: 1}, Stats{}, 20_000_000, from, from.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.FeeReserveLamports != policy.StartingFeeReserveLamports {
+		t.Fatalf("report fee reserve = %d", report.FeeReserveLamports)
+	}
+	tampered := report
+	tampered.FeeReserveLamports--
+	if differences := Compare(tampered, report); len(differences) != 1 ||
+		differences[0].Field != "fee_reserve_lamports" {
+		t.Fatalf("fee reserve tamper differences = %+v", differences)
+	}
+}
+
 // The averages must divide by the number of decisions actually reached, and an
 // empty period must not divide by zero.
 func TestStatsAveragesAreSafeAndCorrect(t *testing.T) {

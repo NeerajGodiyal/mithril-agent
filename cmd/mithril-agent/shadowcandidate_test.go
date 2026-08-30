@@ -108,6 +108,45 @@ func TestShadowSelectRefusesAPointerThatAliasesTheBasePolicy(t *testing.T) {
 	}
 }
 
+func TestShadowSelectInitialCannotReplaceAnExistingChampion(t *testing.T) {
+	root := privateTestDirectory(t)
+	base := candidateTestPolicy()
+	policyPath := writeShadowPolicy(t, base)
+	first := candidateForPrices(t, base, 220_000_000, 110_000_000)
+	second := candidateForPrices(t, base, 200_000_000, 100_000_000)
+	firstPath := filepath.Join(root, "first.json")
+	secondPath := filepath.Join(root, "second.json")
+	for path, candidate := range map[string]shadowPaperCandidate{
+		firstPath: first, secondPath: second,
+	} {
+		if err := writeShadowPaperCandidate(path, candidate); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pointerPath := filepath.Join(root, "active.json")
+	lockPath := filepath.Join(root, "lifecycle.lock")
+	selectInitial := func(candidatePath string) error {
+		return runShadowSelect([]string{
+			"--policy", policyPath, "--candidate", candidatePath,
+			"--pointer", pointerPath, "--lifecycle-lock", lockPath, "--initial",
+		}, &bytes.Buffer{})
+	}
+	if err := selectInitial(firstPath); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(pointerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := selectInitial(secondPath); err == nil {
+		t.Fatalf("second initial selection error = %v", err)
+	}
+	after, err := os.ReadFile(pointerPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("initial selection replaced the champion: %v", err)
+	}
+}
+
 func TestShadowRunChangesPaperPolicyOnlyAtBoundary(t *testing.T) {
 	root := privateTestDirectory(t)
 	base := candidateTestPolicy()

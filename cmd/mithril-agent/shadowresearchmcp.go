@@ -62,8 +62,8 @@ type shadowHypothesisEvidence struct {
 
 type shadowResearchCandidateInput struct {
 	Hypothesis    shadowPaperHypothesis `json:"hypothesis" jsonschema:"Bounded advisory research; never an instruction or authorization"`
-	TrainDay      string                `json:"train_day" jsonschema:"Immediately preceding second completed UTC day, YYYY-MM-DD"`
-	ValidationDay string                `json:"validation_day" jsonschema:"Immediately preceding completed UTC day, YYYY-MM-DD"`
+	TrainDay      string                `json:"train_day" jsonschema:"Penultimate completed UTC day anchor, YYYY-MM-DD"`
+	ValidationDay string                `json:"validation_day" jsonschema:"Final completed UTC day anchor, YYYY-MM-DD; server requires the preceding eight-day window"`
 }
 
 type shadowResearchCandidateReceipt struct {
@@ -280,7 +280,7 @@ func serveShadowResearchMCP(
 	}
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name: "mithril_paper_create_challenger", Title: "Create Paper Challenger",
-		Description: "Schema-validate and attach a cited paper-only hypothesis, search bounded strategy parameters on one completed journal, score the exact result on a later completed journal, write one immutable challenger artifact, and atomically update only the dedicated paper challenger pointer. Never selects a champion or promotes to live trading.",
+		Description: "Schema-validate and attach a cited paper-only hypothesis, require seven chronological train/out-of-sample folds from eight consecutive completed journals, write one immutable challenger artifact, and atomically update only the dedicated paper challenger pointer. Never selects a champion or promotes to live trading.",
 		Annotations: createAnnotations,
 	}, func(_ context.Context, _ *mcpsdk.CallToolRequest, input shadowResearchCandidateInput) (*mcpsdk.CallToolResult, shadowResearchCandidateReceipt, error) {
 		result, err := controller.createCandidate(input, time.Now().UTC())
@@ -316,27 +316,21 @@ func (controller *shadowResearchController) createCandidate(
 	if err := input.validate(now); err != nil {
 		return shadowResearchCandidateReceipt{}, err
 	}
-	trainTicks, training, err := readShadowSearchJournal(
-		filepath.Join(controller.journalDir, "shadow-"+input.TrainDay+".jsonl"),
-		input.TrainDay, controller.policy,
-	)
-	if err != nil {
-		return shadowResearchCandidateReceipt{}, fmt.Errorf("read training journal: %w", err)
-	}
-	validationTicks, validation, err := readShadowSearchJournal(
-		filepath.Join(controller.journalDir, "shadow-"+input.ValidationDay+".jsonl"),
-		input.ValidationDay, controller.policy,
-	)
-	if err != nil {
-		return shadowResearchCandidateReceipt{}, fmt.Errorf("read validation journal: %w", err)
-	}
-	result, err := searchShadowCandidateTicks(
-		controller.policy, trainTicks, validationTicks, controller.spreadBPS,
+	days, err := readShadowWalkForwardDays(
+		controller.journalDir, input.ValidationDay, controller.policy,
 	)
 	if err != nil {
 		return shadowResearchCandidateReceipt{}, err
 	}
-	result.TrainDay, result.ValidationDay = input.TrainDay, input.ValidationDay
+	result, err := searchShadowWalkForward(controller.policy, days, controller.spreadBPS)
+	if err != nil {
+		return shadowResearchCandidateReceipt{}, err
+	}
+	training := days[len(days)-2].Provenance
+	validation := days[len(days)-1].Provenance
+	if result.WalkForward == nil {
+		return shadowResearchCandidateReceipt{}, errors.New("paper challenger has no walk-forward admission evidence")
+	}
 	candidate, err := newShadowPaperCandidate(controller.basePolicy, result, training, validation)
 	if err != nil {
 		return shadowResearchCandidateReceipt{}, err
@@ -391,6 +385,59 @@ func (controller *shadowResearchController) createCandidate(
 		CandidatePolicySHA256: candidate.CandidatePolicySHA256,
 		TrainingJournal:       training, ValidationJournal: validation, Research: result,
 	}, nil
+}
+
+func readShadowWalkForwardDays(
+	directory, finalValidationDay string, policy shadow.Policy,
+) ([]shadowWalkForwardDay, error) {
+	finalDay, err := time.Parse("2006-01-02", finalValidationDay)
+	if err != nil {
+		return nil, errors.New("walk-forward validation day is invalid")
+	}
+	days := make([]shadowWalkForwardDay, 0, shadowWalkForwardWindows+1)
+	for offset := -shadowWalkForwardWindows; offset <= 0; offset++ {
+		dayStart := finalDay.AddDate(0, 0, offset)
+		day := dayStart.Format("2006-01-02")
+		ticks, provenance, err := readShadowSearchJournal(
+			filepath.Join(directory, "shadow-"+day+".jsonl"), day, policy,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("read walk-forward journal %s: %w", day, err)
+		}
+		replayed, err := shadow.Replay(policy, ticks)
+		if err != nil {
+			return nil, fmt.Errorf("replay walk-forward journal %s: %w", day, err)
+		}
+		report, err := shadow.BuildReport(
+			policy, replayed.Ledger, replayed.Counts, replayed.Stats,
+			replayed.ClosingPrice, dayStart, replayed.PeriodEnd,
+		)
+		coverage := shadowWalkForwardObservableBPS(ticks, dayStart, policy.Tick())
+		report.ObservableBPS = coverage
+		if err != nil || !report.Trustworthy() {
+			return nil, fmt.Errorf("walk-forward journal %s lacks 95%% observable coverage", day)
+		}
+		days = append(days, shadowWalkForwardDay{
+			Ticks: ticks, Provenance: provenance, ObservableBPS: coverage,
+		})
+	}
+	return days, nil
+}
+
+func shadowWalkForwardObservableBPS(
+	ticks []shadow.Tick, dayStart time.Time, interval time.Duration,
+) int32 {
+	dayEnd := dayStart.Add(24 * time.Hour)
+	expected := uint64((24*time.Hour + interval - 1) / interval)
+	seen := make(map[uint64]struct{}, expected)
+	for _, tick := range ticks {
+		if tick.PeriodClose || tick.Event == shadow.EventUnobservable ||
+			tick.PriceMicros == 0 || tick.At.Before(dayStart) || !tick.At.Before(dayEnd) {
+			continue
+		}
+		seen[uint64(tick.At.Sub(dayStart)/interval)] = struct{}{}
+	}
+	return int32(uint64(len(seen)) * 10_000 / expected)
 }
 
 type shadowResearchPointerState struct {
@@ -596,7 +643,7 @@ func (input shadowResearchCandidateInput) validate(now time.Time) error {
 	wantTrain := today.AddDate(0, 0, -2)
 	if trainErr != nil || validationErr != nil ||
 		!trainAt.Equal(wantTrain) || !validationAt.Equal(wantValidation) {
-		return errors.New("paper hypothesis needs the immediately preceding two completed UTC journal days")
+		return errors.New("paper hypothesis needs yesterday and the day before as its eight-day walk-forward anchor")
 	}
 	return nil
 }
@@ -616,7 +663,8 @@ func (hypothesis shadowPaperHypothesis) validate() error {
 		parsed, err := url.ParseRequestURI(source.URL)
 		if err != nil || len(source.URL) > 2048 || parsed.Scheme != "https" ||
 			parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" ||
-			source.ObservedAt.IsZero() || !boundedResearchText(source.Summary, 500) {
+			!allowedPaperResearchSource(parsed) || source.ObservedAt.IsZero() ||
+			!boundedResearchText(source.Summary, 500) {
 			return errors.New("paper hypothesis source is invalid")
 		}
 		if _, exists := seen[source.URL]; exists {
@@ -625,6 +673,26 @@ func (hypothesis shadowPaperHypothesis) validate() error {
 		seen[source.URL] = struct{}{}
 	}
 	return nil
+}
+
+func allowedPaperResearchSource(source *url.URL) bool {
+	host := strings.ToLower(source.Hostname())
+	switch host {
+	case "solana.com", "status.solana.com", "anza.xyz", "developers.jup.ag",
+		"status.jup.ag", "api.jup.ag", "docs.pyth.network", "status.pyth.network",
+		"docs.kraken.com", "status.kraken.com", "api.kraken.com", "helius.dev",
+		"docs.helius.dev":
+		return true
+	case "github.com":
+		for _, prefix := range []string{
+			"/anza-xyz/", "/solana-foundation/", "/jup-ag/", "/pyth-network/", "/krakenfx/",
+		} {
+			if strings.HasPrefix(strings.ToLower(source.EscapedPath()), prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func boundedResearchText(value string, maxBytes int) bool {

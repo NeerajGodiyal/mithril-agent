@@ -9,6 +9,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril-agent/pricesource"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
+	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
 
 func generatedPolicyPath(t *testing.T, args ...string) string {
@@ -80,6 +81,97 @@ func TestGeneratedAdaptivePolicyUsesRelativeMarketDecisions(t *testing.T) {
 	}
 }
 
+func TestGeneratedAdaptiveMandateMapsToExistingPolicy(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "policy.json")
+	var output bytes.Buffer
+	if err := runShadowPolicy([]string{
+		"--out", path,
+		"--observe", "So11111111111111111111111111111111111111112",
+		"--adaptive", "--market", "SOL/USDC", "--budget-sol", "0.25",
+		"--drawdown-stop-bps", "250",
+	}, &output); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := loadShadowPolicy(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Adaptive == nil || policy.Adaptive.MaxDrawdownBPS != 250 ||
+		policy.StartingInputUnits != 250_000_000-defaultPaperMandateReserve ||
+		policy.InputAmount != 250_000_000-defaultPaperMandateReserve ||
+		policy.StartingFeeReserveLamports != defaultPaperMandateReserve ||
+		policy.OneTimeSetupRentLamports != defaultJUPSetupRentLamports ||
+		policy.QuoteRoute != shadow.MainnetQuoteRoute(true) {
+		t.Fatalf("paper mandate policy = %+v", policy)
+	}
+	text := output.String()
+	for _, want := range []string{
+		"Paper mandate: SOL/USDC · budget 0.25 SOL · setup locks 0.003 SOL · daily drawdown stop 2.5%",
+		"resets at 00:00 UTC", "not a guaranteed maximum loss", "cannot sign",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("mandate output omits %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestGeneratedJUPMandateBindsMarketAndIndependentSOLFees(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "jup-policy.json")
+	var output bytes.Buffer
+	if err := runShadowPolicy([]string{
+		"--out", path,
+		"--observe", "So11111111111111111111111111111111111111112",
+		"--adaptive", "--market", "JUP/USDC", "--budget-usdc", "250",
+		"--fee-reserve-sol", "0.004", "--drawdown-stop-bps", "300",
+	}, &output); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := loadShadowPolicy(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Market != shadow.MarketJUPUSDC || policy.Adaptive == nil ||
+		policy.Adaptive.MaxDrawdownBPS != 300 || policy.InputAmount != 250_000_000 ||
+		policy.StartingInputUnits != 250_000_000 || policy.StartingOutputUnits != 0 ||
+		policy.StartingFeeReserveLamports != 4_000_000 ||
+		policy.OneTimeSetupRentLamports != 3_000_000 ||
+		policy.InputDecimals != 6 || policy.OutputDecimals != 6 ||
+		policy.QuoteRoute != shadow.MainnetMarketQuoteRoute(shadow.MarketJUPUSDC, false) {
+		t.Fatalf("JUP mandate policy = %+v", policy)
+	}
+	if policy.Trigger.Version != pricetrigger.MultiFeedVersion ||
+		policy.Trigger.Feed != pricetrigger.FeedJUPUSD ||
+		policy.Trigger.PrimarySourceSHA256 != pricesource.PythPushJUPIdentitySHA256() ||
+		policy.Trigger.SecondarySourceSHA256 != pricesource.KrakenJUPIdentitySHA256() ||
+		policy.NativeFeePrice == nil || policy.NativeFeePrice.Feed != pricetrigger.FeedSOLUSD ||
+		policy.NativeFeePrice.PrimarySourceSHA256 != pricesource.PythPushIdentitySHA256() ||
+		policy.NativeFeePrice.SecondarySourceSHA256 != pricesource.KrakenSOLIdentitySHA256() {
+		t.Fatalf("JUP evidence bindings = %+v / %+v", policy.Trigger, policy.NativeFeePrice)
+	}
+	for _, want := range []string{
+		"Paper mandate: JUP/USDC", "budget 250 USDC", "native reserve 0.004 SOL",
+		"setup locks 0.003 SOL", "cannot sign",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("JUP mandate output omits %q:\n%s", want, output.String())
+		}
+	}
+}
+
 // Buying is the mirror image and the decimals have to swap with it, or every
 // price the report computes is out by a factor of a thousand.
 func TestABuyPolicySwapsTheDecimals(t *testing.T) {
@@ -95,7 +187,7 @@ func TestABuyPolicySwapsTheDecimals(t *testing.T) {
 			policy.InputDecimals, policy.OutputDecimals)
 	}
 	if policy.StartingInputUnits < policy.InputAmount ||
-		policy.StartingOutputUnits < policy.FeeLamports {
+		policy.StartingFeeReserveLamports < policy.FeeLamports {
 		t.Fatalf("buy policy cannot fund its notional trade and fee: %+v", policy)
 	}
 }
@@ -107,7 +199,8 @@ func TestGeneratedSellPolicyFundsTheConfiguredNotional(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if policy.StartingInputUnits-policy.InputAmount < policy.FeeLamports {
+	if policy.StartingInputUnits < policy.InputAmount ||
+		policy.StartingFeeReserveLamports < policy.FeeLamports {
 		t.Fatalf("generated sell policy cannot fund its trade and fee: %+v", policy)
 	}
 }
@@ -119,9 +212,22 @@ func TestGeneratedRoundTripPreservesBothNativeFees(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reserve := policy.StartingInputUnits - policy.InputAmount; reserve < 2*policy.FeeLamports {
+	if reserve := policy.StartingFeeReserveLamports; reserve < 2*policy.FeeLamports {
 		t.Fatalf("generated round trip reserved %d lamports, want at least %d",
 			reserve, 2*policy.FeeLamports)
+	}
+	ledger, err := shadow.NewLedger(policy, 80_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := ledger.Apply(shadow.Fill{
+		Sell: true, Refusal: "slippage", FeeLamports: policy.FeeLamports,
+	}, 80_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.FeeReserveLamports < 2*policy.FeeLamports {
+		t.Fatalf("one refusal stranded the unchanged round trip: %+v", after)
 	}
 }
 
@@ -174,6 +280,29 @@ func TestPolicyGeneratorRefusesAmbiguousInstructions(t *testing.T) {
 			"--input-mint", observe, "--output-mint", mainnetUSDCMint},
 		"adaptive fixed price": {"--out", out, "--observe", observe,
 			"--adaptive", "--sell-at-usd", "80"},
+		"unsupported mandate market": {"--out", out, "--observe", observe,
+			"--adaptive", "--market", "BTC/USDC", "--budget-sol", "1",
+			"--drawdown-stop-bps", "300"},
+		"mandate plus raw amount": {"--out", out, "--observe", observe,
+			"--adaptive", "--market", "SOL/USDC", "--budget-sol", "1",
+			"--drawdown-stop-bps", "300", "--amount", "1"},
+		"invalid mandate budget": {"--out", out, "--observe", observe,
+			"--adaptive", "--market", "SOL/USDC", "--budget-sol", "nope",
+			"--drawdown-stop-bps", "300"},
+		"fixed mandate": {"--out", out, "--observe", observe,
+			"--sell-at-usd", "80", "--market", "SOL/USDC", "--budget-sol", "1",
+			"--drawdown-stop-bps", "300"},
+		"unbounded mandate drawdown": {"--out", out, "--observe", observe,
+			"--adaptive", "--market", "SOL/USDC", "--budget-sol", "1",
+			"--drawdown-stop-bps", "5001"},
+		"incomplete mandate": {"--out", out, "--observe", observe,
+			"--adaptive", "--market", "SOL/USDC"},
+		"JUP with SOL budget": {"--out", out, "--observe", observe,
+			"--adaptive", "--market", "JUP/USDC", "--budget-sol", "1",
+			"--drawdown-stop-bps", "300"},
+		"JUP fee reserve too small": {"--out", out, "--observe", observe,
+			"--adaptive", "--market", "JUP/USDC", "--budget-usdc", "100",
+			"--fee-reserve-sol", "0.000001", "--drawdown-stop-bps", "300"},
 	} {
 		if err := runShadowPolicy(args, &bytes.Buffer{}); err == nil {
 			t.Errorf("%s was accepted", name)

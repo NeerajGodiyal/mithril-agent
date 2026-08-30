@@ -80,6 +80,7 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 			if tick.Triggered || tick.Deferred || tick.Fill != nil || tick.DecisionMissed ||
 				tick.DecisionQuote != nil || tick.Decision != nil || tick.Reason != "" ||
 				tick.PrimaryPrice != nil || tick.SecondaryPrice != nil ||
+				tick.NativeFeePriceMicros != 0 || tick.NativeFeePrimary != nil || tick.NativeFeeSecondary != nil ||
 				tick.QuoteLowerMicros != 0 || tick.QuoteUpperMicros != 0 {
 				return Replayed{}, errors.New("a period-close record is malformed")
 			}
@@ -136,6 +137,26 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 				return Replayed{}, errors.New("a recorded tick price does not match its market source evidence")
 			}
 		}
+		nativePrice := tick.PriceMicros
+		if policy.NativeFeePrice != nil && !tick.PeriodClose {
+			if tick.NativeFeePrimary == nil || tick.NativeFeeSecondary == nil ||
+				tick.NativeFeePriceMicros == 0 {
+				return Replayed{}, errors.New("a non-SOL tick has incomplete native fee-price evidence")
+			}
+			nativeEvidence, nativeErr := pricetrigger.Evaluate(
+				*policy.NativeFeePrice, *tick.NativeFeePrimary, *tick.NativeFeeSecondary, tick.At,
+			)
+			if nativeErr != nil || nativeEvidence.ConservativePrice != tick.NativeFeePriceMicros ||
+				tick.NativeFeePriceMicros > policy.NativeFeePriceCeilingMicros {
+				return Replayed{}, errors.New("a recorded native fee price does not match its source evidence")
+			}
+			nativePrice = tick.NativeFeePriceMicros
+		} else if policy.NativeFeePrice == nil &&
+			(tick.NativeFeePriceMicros != 0 || tick.NativeFeePrimary != nil || tick.NativeFeeSecondary != nil) {
+			return Replayed{}, errors.New("a SOL tick contains separate native fee-price evidence")
+		} else if policy.NativeFeePrice != nil && tick.PeriodClose {
+			nativePrice = result.Ledger.NativeFeePriceMicros
+		}
 		if strategy != nil && !tick.PeriodClose {
 			if tick.PrimaryPrice == nil || tick.SecondaryPrice == nil ||
 				!adaptiveSampleAdvances(
@@ -158,12 +179,12 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 			return Replayed{}, errors.New("a devnet tick contains mainnet USDC/USD evidence")
 		}
 		if !opened {
-			if result.Ledger, replayErr = NewLedger(policy, tick.PriceMicros); replayErr != nil {
+			if result.Ledger, replayErr = NewLedger(policy, tick.PriceMicros, nativePrice); replayErr != nil {
 				return Replayed{}, replayErr
 			}
 			opened = true
 		}
-		if result.Ledger, replayErr = result.Ledger.Mark(tick.PriceMicros); replayErr != nil {
+		if result.Ledger, replayErr = result.Ledger.Mark(tick.PriceMicros, nativePrice); replayErr != nil {
 			return Replayed{}, replayErr
 		}
 		if !tick.PeriodClose {
@@ -220,6 +241,7 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 			} else {
 				if pending != nil || tick.DecisionQuote == nil ||
 					validateQuote(*tick.DecisionQuote) != nil ||
+					!validDecisionQuoteTime(policy, *tick.DecisionQuote, tick.At) ||
 					tick.DecisionQuote.InputAmount != attemptAmount ||
 					!canFundAttempt(result.Ledger, nextSell, attemptAmount, feeReserve) {
 					return Replayed{}, errors.New("a new signal has invalid decision quote or state")
@@ -233,13 +255,14 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 				pending = &replayPending{
 					price: tick.PriceMicros, amount: attemptAmount, quote: *tick.DecisionQuote, sell: nextSell,
 					riskExit:    tick.Decision != nil && tick.Decision.Strategy == StrategyRiskExit,
-					settleAfter: tick.At.Add(policy.Settle()),
+					settleAfter: quoteReceivedAt(*tick.DecisionQuote, tick.At).Add(policy.Settle()),
 				}
 			}
 		case EventFiltered:
 			if policy.Adaptive == nil || pending != nil || !tick.Triggered || tick.Deferred ||
 				tick.Fill != nil || tick.PeriodClose || tick.DecisionQuote == nil ||
 				validateQuote(*tick.DecisionQuote) != nil ||
+				!validDecisionQuoteTime(policy, *tick.DecisionQuote, tick.At) ||
 				tick.DecisionQuote.InputAmount != attemptAmount ||
 				!canFundAttempt(result.Ledger, nextSell, attemptAmount, feeReserve) {
 				return Replayed{}, errors.New("a filtered tick has invalid quote or state")
@@ -276,6 +299,11 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 			if tick.DecisionQuote != nil || tick.Fill == nil || tick.Deferred != tick.Triggered {
 				return Replayed{}, errors.New("a settled tick is malformed")
 			}
+			if !validSettlementQuoteTime(
+				policy, tick.Fill.SettlementQuote, tick.At, pending.settleAfter,
+			) {
+				return Replayed{}, errors.New("a recorded settlement quote predates its settlement observation or deadline")
+			}
 			if policy.Adaptive != nil {
 				_, bounded, guardErr := adaptiveQuoteImpact(
 					policy, tick.Fill.SettlementQuote, tick.PriceMicros, pending.sell,
@@ -294,7 +322,9 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 				tick.Fill.DecisionQuote.InputAmount != pending.amount {
 				return Replayed{}, errors.New("a recorded fill is not supported by its decision quote")
 			}
-			if result.Ledger, replayErr = result.Ledger.Apply(*tick.Fill, tick.PriceMicros); replayErr != nil {
+			if result.Ledger, replayErr = result.Ledger.Apply(
+				*tick.Fill, tick.PriceMicros, nativePrice,
+			); replayErr != nil {
 				return Replayed{}, replayErr
 			}
 			result.Stats.Settled++
@@ -309,9 +339,13 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 					nextSell = !pending.sell
 					nextAmount = tick.Fill.ReceivedUnits
 					if nextSell {
-						nextAmount = capSellAmount(
-							nextAmount, result.Ledger.BaseUnits, roundTripFeeReserve(policy.FeeLamports),
-						)
+						reserve := nextSellFeeReserve(policy)
+						if result.Ledger, replayErr = result.Ledger.replenishFeeReserve(
+							reserve,
+						); replayErr != nil {
+							return Replayed{}, replayErr
+						}
+						nextAmount = capSellAmount(nextAmount, result.Ledger, reserve)
 					}
 				}
 				if strategy != nil {
@@ -341,11 +375,35 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 	return result, nil
 }
 
+func quoteReceivedAt(quote Quote, fallback time.Time) time.Time {
+	if quote.ReceivedAt.IsZero() {
+		return fallback
+	}
+	return quote.ReceivedAt
+}
+
+func validDecisionQuoteTime(policy Policy, quote Quote, tickAt time.Time) bool {
+	if quote.ReceivedAt.IsZero() {
+		return policy.Version != Version
+	}
+	return !quote.ReceivedAt.Before(tickAt)
+}
+
+func validSettlementQuoteTime(
+	policy Policy, quote Quote, tickAt, settleAfter time.Time,
+) bool {
+	if quote.ReceivedAt.IsZero() {
+		return policy.Version != Version && !tickAt.Before(settleAfter)
+	}
+	return !quote.ReceivedAt.Before(tickAt) && !quote.ReceivedAt.Before(settleAfter)
+}
+
 func validateUnobservableTick(tick Tick) error {
 	if tick.Event != EventUnobservable {
 		return errors.New("the record does not contain an unobservable tick")
 	}
 	if tick.PriceMicros != 0 || tick.QuoteLowerMicros != 0 || tick.QuoteUpperMicros != 0 ||
+		tick.NativeFeePriceMicros != 0 || tick.NativeFeePrimary != nil || tick.NativeFeeSecondary != nil ||
 		tick.Triggered || tick.Deferred || tick.DecisionQuote != nil || tick.Decision != nil ||
 		tick.PrimaryPrice != nil || tick.SecondaryPrice != nil ||
 		tick.Fill != nil || tick.EquityMicros != 0 ||

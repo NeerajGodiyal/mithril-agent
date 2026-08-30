@@ -160,6 +160,9 @@ func autoSelectShadowChallenger(
 			result.CandidatePolicySHA256 = challenger.CandidatePolicySHA256
 			return nil
 		}
+		if challenger.Research.WalkForward == nil {
+			return errors.New("paper challenger lacks walk-forward admission evidence")
+		}
 
 		challenge, err := shadowAutoSelectEvaluate(
 			base, championPointer, challengerPath, championRoot, challengerRoot,

@@ -65,6 +65,31 @@ func TestKrakenSOLUsesDistinctFeedIdentity(t *testing.T) {
 	}
 }
 
+func TestKrakenJUPUsesItsPinnedProductAndIdentity(t *testing.T) {
+	snapshotAt := time.Now().UTC().Truncate(time.Second)
+	client := fixtureClient(t, func(request *http.Request) string {
+		if request.URL.Host != "api.kraken.com" || request.URL.Path != "/0/public/PreTrade" ||
+			request.URL.Query().Get("symbol") != "JUP/USD" {
+			t.Fatalf("request URL = %s", request.URL)
+		}
+		return `{"result":{"symbol":"JUP/USD","bids":[{"side":"BUY","price":"0.4849","publication_ts":"` +
+			snapshotAt.Format(time.RFC3339Nano) + `"}],"asks":[{"side":"SELL","price":"0.4851","publication_ts":"` +
+			snapshotAt.Format(time.RFC3339Nano) + `"}]},"error":[]}`
+	}, http.Header{"Date": []string{snapshotAt.Format(http.TimeFormat)}})
+	source := NewKrakenJUP(client)
+	source.gate = testKrakenGate{}
+	sample, err := source.Latest(t.Context(), pricetrigger.FeedJUPUSD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sample.SourceSHA256 != KrakenJUPIdentitySHA256() ||
+		sample.SourceSHA256 == KrakenSOLIdentitySHA256() ||
+		sample.Feed != pricetrigger.FeedJUPUSD || sample.PriceMicros != 485_000 ||
+		sample.ConfidenceMicros != 100 {
+		t.Fatalf("JUP sample = %+v", sample)
+	}
+}
+
 func TestKrakenRejectsMalformedMarketData(t *testing.T) {
 	for _, body := range []string{
 		`{"result":{"symbol":"USDC/USD","bids":[],"asks":[]},"error":[]}`,
