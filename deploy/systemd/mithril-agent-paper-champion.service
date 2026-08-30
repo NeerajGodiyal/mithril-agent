@@ -1,0 +1,50 @@
+[Unit]
+Description=Mithril agent champion paper observer
+Wants=network-online.target
+After=network-online.target time-sync.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=mithril-agent-research
+Group=mithril-agent-research
+UMask=0077
+EnvironmentFile=/etc/mithril-agent/paper.env
+Environment=MITHRIL_AGENT_KRAKEN_RATE_STATE=/run/mithril-agent-research/kraken-rate
+RuntimeDirectory=mithril-agent-research
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ExecStart=/usr/local/libexec/mithril-agent/mithril-agent shadow run --policy /var/lib/mithril-agent-research/policy/policy.json --dir /var/lib/mithril-agent-research/runs/champion --candidate-pointer /var/lib/mithril-agent-research/champion/active.json --alert-status /var/lib/mithril-agent-research/status/champion/alerts.json
+Restart=always
+RestartSec=15s
+TimeoutStopSec=30s
+ReadWritePaths=/var/lib/mithril-agent-research/runs/champion /var/lib/mithril-agent-research/status/champion
+InaccessiblePaths=/proc
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+TasksMax=64
+LimitNOFILE=256
+
+[Install]
+WantedBy=multi-user.target

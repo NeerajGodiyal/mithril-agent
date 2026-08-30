@@ -22,6 +22,24 @@ type stubSource struct {
 	at       time.Time
 }
 
+type advancingSource struct {
+	identity string
+	price    uint64
+	clock    *time.Time
+	advance  time.Duration
+}
+
+func (s *advancingSource) IdentitySHA256() string { return s.identity }
+
+func (s *advancingSource) Latest(_ context.Context, feed string) (pricetrigger.Sample, error) {
+	*s.clock = s.clock.Add(s.advance)
+	return pricetrigger.Sample{
+		SourceSHA256: s.identity, Feed: feed,
+		PriceMicros: s.price, ConfidenceMicros: s.price / 10_000,
+		PublishedAt: *s.clock,
+	}, nil
+}
+
 func (s *stubSource) IdentitySHA256() string { return s.identity }
 
 func (s *stubSource) Latest(_ context.Context, feed string) (pricetrigger.Sample, error) {
@@ -81,18 +99,67 @@ func (q *stubQuoter) Quote(_ context.Context, _ string, sell bool, amount uint64
 type stubRecorder struct {
 	types []string
 	ticks []Tick
+	ats   []time.Time
 	err   error
 }
 
-func (r *stubRecorder) Record(_ time.Time, eventType string, payload any) error {
+func (r *stubRecorder) Record(at time.Time, eventType string, payload any) error {
 	if r.err != nil {
 		return r.err
 	}
 	r.types = append(r.types, eventType)
+	r.ats = append(r.ats, at)
 	if tick, ok := payload.(Tick); ok {
 		r.ticks = append(r.ticks, tick)
 	}
 	return nil
+}
+
+func TestObservationUsesThePostReadTimeWithoutEarlyMutation(t *testing.T) {
+	policy := sellPolicy()
+	policy.Trigger.ThresholdMicros = 22_000_000
+	policy.StartingInputUnits = 1_000_000_000
+	startedAt := time.Unix(1_700_000_000, 0).UTC()
+	clock := startedAt
+	primary := &advancingSource{
+		identity: policy.Trigger.PrimarySourceSHA256, price: 23_000_000, clock: &clock,
+	}
+	secondary := &advancingSource{
+		identity: policy.Trigger.SecondarySourceSHA256, price: 23_000_000,
+		clock: &clock, advance: 2 * time.Second,
+	}
+	recorder := &stubRecorder{}
+	runner, err := NewRunner(policy, primary, secondary, &stubQuoter{estimated: 21_525}, recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	observation := runner.Observe(t.Context())
+	if runner.started || runner.opened || runner.Counts() != (Counts{}) || len(recorder.types) != 0 {
+		t.Fatalf("Observe mutated runner state: runner=%+v records=%v", runner.Counts(), recorder.types)
+	}
+	tick, err := runner.StepObservation(t.Context(), clock, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tick.Event != EventSignal || !tick.At.Equal(startedAt.Add(2*time.Second)) {
+		t.Fatalf("post-read observation = %+v", tick)
+	}
+	if len(recorder.ats) != 2 || !recorder.ats[0].Equal(tick.At) || !recorder.ats[1].Equal(tick.At) {
+		t.Fatalf("journal times = %v, tick = %s", recorder.ats, tick.At)
+	}
+
+	clock = startedAt
+	fixed, err := NewRunner(
+		policy, primary, secondary, &stubQuoter{estimated: 21_525}, &stubRecorder{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tick, err := fixed.Step(t.Context(), startedAt); err != nil ||
+		tick.Event != EventUnobservable || tick.Reason != ReasonMarketPriceInvalid {
+		t.Fatalf("fixed pre-read time did not reproduce future evidence: tick=%+v err=%v", tick, err)
+	}
 }
 
 func newTestRunner(t *testing.T, price uint64, at time.Time) (
@@ -165,12 +232,14 @@ func TestContinuousRunnerAlternatesARoundTripAndReplaysIt(t *testing.T) {
 		t.Fatalf("return leg did not settle as a buy: %+v", tick)
 	}
 
-	if len(quoter.directions) != 2 || !quoter.directions[0] || quoter.directions[1] {
-		t.Fatalf("quote directions = %v, want sell then buy", quoter.directions)
+	if len(quoter.directions) != 4 || !quoter.directions[0] || !quoter.directions[1] ||
+		quoter.directions[2] || quoter.directions[3] {
+		t.Fatalf("quote directions = %v, want decision and settlement quotes for sell then buy",
+			quoter.directions)
 	}
-	if quoter.amounts[1] != quoter.quote(true, quoter.amounts[0]).EstimatedOutput {
+	if quoter.amounts[2] != quoter.quote(true, quoter.amounts[0]).EstimatedOutput {
 		t.Fatalf("return leg spent %d, want the first leg's %d output",
-			quoter.amounts[1], quoter.quote(true, quoter.amounts[0]).EstimatedOutput)
+			quoter.amounts[2], quoter.quote(true, quoter.amounts[0]).EstimatedOutput)
 	}
 	replayed, err := Replay(policy, recorder.ticks)
 	if err != nil {
@@ -275,6 +344,212 @@ func TestResumeRestoresRoundTripDirectionAmountAndBooks(t *testing.T) {
 	}
 	if len(secondRecord.types) != 1 || secondRecord.types[0] != EventSignal {
 		t.Fatalf("resume wrote a second opening header: %v", secondRecord.types)
+	}
+}
+
+func TestBuyHandoffReservesSellAndFollowingBuyFeesAcrossLiveReplayAndResume(t *testing.T) {
+	policy := sellPolicy()
+	policy.Trigger.Direction = pricetrigger.BuyAtOrBelow
+	policy.Trigger.ThresholdMicros = 18_000_000
+	policy.InputDecimals, policy.OutputDecimals = 6, 9
+	policy.StartingInputUnits = 1_000_000
+	policy.StartingOutputUnits = policy.FeeLamports
+	policy.InputAmount = 1_000_000
+	sell := policy.Trigger
+	sell.Direction = pricetrigger.SellAtOrAbove
+	sell.ThresholdMicros = 22_000_000
+	policy.ReturnTrigger = &sell
+	now := time.Unix(1_700_000_000, 0).UTC()
+	primary := &stubSource{identity: policy.Trigger.PrimarySourceSHA256, price: 17_000_000, at: now}
+	secondary := &stubSource{identity: policy.Trigger.SecondarySourceSHA256, price: 17_000_000, at: now}
+	quote := func(sell bool, amount uint64) Quote {
+		output := uint64(60_000_000)
+		if sell {
+			output = amount * 23_000_000 / 1_000_000_000
+		}
+		return Quote{InputAmount: amount, EstimatedOutput: output, MinimumOutput: output}
+	}
+	liveQuoter := &stubQuoter{quote: quote}
+	recorder := &stubRecorder{}
+	live, err := NewRunner(policy, primary, secondary, liveQuoter, recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tick, err := live.Step(t.Context(), now); err != nil || tick.Event != EventSignal {
+		t.Fatalf("buy decision = %+v, %v", tick, err)
+	}
+	settled := now.Add(policy.Settle())
+	primary.at, secondary.at = settled, settled
+	if tick, err := live.Step(t.Context(), settled); err != nil ||
+		tick.Event != EventFilled || tick.Fill == nil || tick.Fill.Sell {
+		t.Fatalf("buy settlement = %+v, %v", tick, err)
+	}
+	ticksAfterBuy := append([]Tick(nil), recorder.ticks...)
+	wantSell := uint64(60_000_000) - 2*policy.FeeLamports
+	if live.Ledger().BaseUnits != 60_000_000 {
+		t.Fatalf("buy ledger base = %d, want 60000000", live.Ledger().BaseUnits)
+	}
+
+	sellAt := settled.Add(time.Second)
+	primary.price, secondary.price = 23_000_000, 23_000_000
+	primary.at, secondary.at = sellAt, sellAt
+	if tick, err := live.Step(t.Context(), sellAt); err != nil || tick.Event != EventSignal {
+		t.Fatalf("live sell decision = %+v, %v", tick, err)
+	}
+	if got := liveQuoter.amounts[len(liveQuoter.amounts)-1]; got != wantSell {
+		t.Fatalf("live sell amount = %d, want %d", got, wantSell)
+	}
+
+	replayed, err := Replay(policy, ticksAfterBuy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Ledger.BaseUnits != 60_000_000 || replayed.Ledger.Fills != 1 {
+		t.Fatalf("replayed buy ledger = %+v", replayed.Ledger)
+	}
+	resumedQuoter := &stubQuoter{quote: quote}
+	resumed, err := ResumeRunner(
+		policy, primary, secondary, resumedQuoter, &stubRecorder{}, ticksAfterBuy,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tick, err := resumed.Step(t.Context(), sellAt); err != nil || tick.Event != EventSignal {
+		t.Fatalf("resumed sell decision = %+v, %v", tick, err)
+	}
+	if len(resumedQuoter.amounts) != 1 || resumedQuoter.amounts[0] != wantSell {
+		t.Fatalf("resumed sell amounts = %v, want [%d]", resumedQuoter.amounts, wantSell)
+	}
+}
+
+func TestResumeDoesNotShrinkARoundTripAfterARefusedSell(t *testing.T) {
+	policy := sellPolicy()
+	policy.Trigger.Direction = pricetrigger.BuyAtOrBelow
+	policy.Trigger.ThresholdMicros = 18_000_000
+	policy.InputDecimals, policy.OutputDecimals = 6, 9
+	policy.StartingInputUnits = 1_000_000
+	policy.StartingOutputUnits = policy.FeeLamports
+	policy.InputAmount = 1_000_000
+	sell := policy.Trigger
+	sell.Direction = pricetrigger.SellAtOrAbove
+	sell.ThresholdMicros = 22_000_000
+	policy.ReturnTrigger = &sell
+	now := time.Unix(1_700_000_000, 0).UTC()
+	primary := &stubSource{identity: policy.Trigger.PrimarySourceSHA256, price: 17_000_000, at: now}
+	secondary := &stubSource{identity: policy.Trigger.SecondarySourceSHA256, price: 17_000_000, at: now}
+	quoter := &stubQuoter{}
+	quoter.quote = func(sell bool, amount uint64) Quote {
+		if !sell {
+			return Quote{InputAmount: amount, EstimatedOutput: 60_000_000, MinimumOutput: 59_000_000}
+		}
+		if quoter.calls == 3 {
+			return Quote{InputAmount: amount, EstimatedOutput: 1_300_000, MinimumOutput: 1_290_000}
+		}
+		return Quote{InputAmount: amount, EstimatedOutput: 1_200_000, MinimumOutput: 1_190_000}
+	}
+	recorder := &stubRecorder{}
+	live, err := NewRunner(policy, primary, secondary, quoter, recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tick, err := live.Step(t.Context(), now); err != nil || tick.Event != EventSignal {
+		t.Fatalf("buy decision = %+v, %v", tick, err)
+	}
+	buySettled := now.Add(policy.Settle())
+	primary.at, secondary.at = buySettled, buySettled
+	if tick, err := live.Step(t.Context(), buySettled); err != nil || tick.Event != EventFilled {
+		t.Fatalf("buy settlement = %+v, %v", tick, err)
+	}
+	sellAt := buySettled.Add(time.Second)
+	primary.price, secondary.price = 23_000_000, 23_000_000
+	primary.at, secondary.at = sellAt, sellAt
+	if tick, err := live.Step(t.Context(), sellAt); err != nil || tick.Event != EventSignal {
+		t.Fatalf("sell decision = %+v, %v", tick, err)
+	}
+	sellSettled := sellAt.Add(policy.Settle())
+	primary.at, secondary.at = sellSettled, sellSettled
+	if tick, err := live.Step(t.Context(), sellSettled); err != nil || tick.Event != EventRefused {
+		t.Fatalf("sell refusal = %+v, %v", tick, err)
+	}
+	ticksAfterRefusal := append([]Tick(nil), recorder.ticks...)
+	if live.Ledger().BaseUnits != 60_000_000-policy.FeeLamports {
+		t.Fatalf("refusal base = %d", live.Ledger().BaseUnits)
+	}
+
+	retryAt := sellSettled.Add(time.Second)
+	primary.at, secondary.at = retryAt, retryAt
+	quotesBefore := quoter.calls
+	if tick, err := live.Step(t.Context(), retryAt); err != nil || tick.Event != EventMissed {
+		t.Fatalf("unfunded live retry = %+v, %v", tick, err)
+	}
+	if quoter.calls != quotesBefore {
+		t.Fatal("unfunded live retry reached the quoter")
+	}
+
+	resumedQuoter := &stubQuoter{quote: quoter.quote}
+	resumed, err := ResumeRunner(
+		policy, primary, secondary, resumedQuoter, &stubRecorder{}, ticksAfterRefusal,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tick, err := resumed.Step(t.Context(), retryAt); err != nil || tick.Event != EventMissed {
+		t.Fatalf("unfunded resumed retry = %+v, %v", tick, err)
+	}
+	if resumedQuoter.calls != 0 {
+		t.Fatal("resume silently shrank the target into a quotable sell")
+	}
+}
+
+func TestRepeatedSubmittedRefusalsStopChargingWhenTheAttemptIsUnfunded(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	runner, primary, secondary, quoter, recorder := newTestRunner(t, 23_000_000, now)
+	tight := runner.policy
+	tight.StartingInputUnits = tight.InputAmount + 2*tight.FeeLamports
+	// Rebuild with a deliberately tight two-attempt reserve.
+	var err error
+	runner, err = NewRunner(tight, primary, secondary, quoter, recorder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quoter.quote = func(_ bool, amount uint64) Quote {
+		if quoter.calls%2 == 1 {
+			return Quote{InputAmount: amount, EstimatedOutput: 21_525, MinimumOutput: 21_300}
+		}
+		return Quote{InputAmount: amount, EstimatedOutput: 21_000, MinimumOutput: 20_900}
+	}
+	stepAt := now
+	for attempt := 0; attempt < 2; attempt++ {
+		if tick, err := runner.Step(t.Context(), stepAt); err != nil || tick.Event != EventSignal {
+			t.Fatalf("attempt %d decision = %+v, %v", attempt, tick, err)
+		}
+		stepAt = stepAt.Add(runner.policy.Settle())
+		primary.at, secondary.at = stepAt, stepAt
+		if tick, err := runner.Step(t.Context(), stepAt); err != nil || tick.Event != EventRefused {
+			t.Fatalf("attempt %d refusal = %+v, %v", attempt, tick, err)
+		}
+		stepAt = stepAt.Add(time.Second)
+		primary.at, secondary.at = stepAt, stepAt
+	}
+	before := runner.Ledger()
+	if tick, err := runner.Step(t.Context(), stepAt); err != nil || tick.Event != EventMissed {
+		t.Fatalf("unfunded signal = %+v, %v", tick, err)
+	}
+	after := runner.Ledger()
+	if quoter.calls != 4 || before.BaseUnits != runner.policy.InputAmount ||
+		after.BaseUnits != before.BaseUnits || after.FeesMicros != before.FeesMicros ||
+		after.Fills != 0 || runner.Counts().Refused != 2 || runner.Counts().Missed != 1 {
+		t.Fatalf("repeated refusal state = ledger=%+v counts=%+v quotes=%d",
+			after, runner.Counts(), quoter.calls)
+	}
+	replayed, err := Replay(runner.policy, recorder.ticks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Ledger.BaseUnits != after.BaseUnits ||
+		replayed.Ledger.FeesMicros != after.FeesMicros || replayed.Counts != runner.Counts() {
+		t.Fatalf("replay diverged: replay=%+v/%+v live=%+v/%+v",
+			replayed.Ledger, replayed.Counts, after, runner.Counts())
 	}
 }
 
@@ -456,9 +731,16 @@ func TestBelowThresholdWaitsWithoutQuoting(t *testing.T) {
 
 // A signal is never scored on the price that produced it. It settles later,
 // against a price observed after the decision.
-func TestASignalSettlesAgainstALaterPrice(t *testing.T) {
+func TestASignalSettlesFromAFreshVenueQuote(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
-	runner, primary, secondary, _, recorder := newTestRunner(t, 23_000_000, now)
+	runner, primary, secondary, quoter, recorder := newTestRunner(t, 23_000_000, now)
+	quoter.quote = func(_ bool, amount uint64) Quote {
+		output := uint64(21_525)
+		if quoter.calls == 2 {
+			output = 21_400
+		}
+		return Quote{InputAmount: amount, EstimatedOutput: output, MinimumOutput: 21_300}
+	}
 
 	tick, err := runner.Step(t.Context(), now)
 	if err != nil {
@@ -491,14 +773,83 @@ func TestASignalSettlesAgainstALaterPrice(t *testing.T) {
 	if tick.Event != EventFilled || tick.Fill == nil || !tick.Fill.Filled {
 		t.Fatalf("the decision did not settle: %+v", tick)
 	}
-	if tick.Fill.SettlePriceMicros == tick.Fill.DecisionPriceMicros {
-		t.Error("the fill was scored at the decision price")
+	if tick.Fill.SettlementQuote.EstimatedOutput != 21_400 || tick.Fill.ReceivedUnits != 21_400 {
+		t.Fatalf("fill did not use the fresh settlement quote: %+v", tick.Fill)
+	}
+	if quoter.calls != 2 {
+		t.Fatalf("quoter calls = %d, want decision plus settlement", quoter.calls)
 	}
 	if runner.Counts().Fills != 1 {
 		t.Errorf("fills = %d, want 1", runner.Counts().Fills)
 	}
 	if !strings.Contains(strings.Join(recorder.types, ","), EventFilled) {
 		t.Error("the fill was not journalled")
+	}
+}
+
+func TestAnUnavailableSettlementQuoteIsMissedNotInvented(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	runner, primary, secondary, quoter, recorder := newTestRunner(t, 23_000_000, now)
+	if tick, err := runner.Step(t.Context(), now); err != nil || tick.Event != EventSignal {
+		t.Fatalf("opening decision = %+v, %v", tick, err)
+	}
+	quoter.err = errors.New("route unavailable")
+	settleAt := now.Add(runner.policy.Settle())
+	primary.at, secondary.at = settleAt, settleAt
+	tick, err := runner.Step(t.Context(), settleAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tick.Event != EventMissed || tick.Fill != nil || runner.Counts().Missed != 1 {
+		t.Fatalf("unavailable settlement route produced %+v with counts %+v",
+			tick, runner.Counts())
+	}
+	if quoter.calls != 2 {
+		t.Fatalf("quoter calls = %d, want one decision and one failed settlement quote", quoter.calls)
+	}
+	if _, err := Replay(runner.policy, recorder.ticks); err != nil {
+		t.Fatalf("missed settlement did not replay: %v", err)
+	}
+}
+
+func TestAResizedSettlementQuoteIsMissedNotInvented(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	runner, primary, secondary, quoter, recorder := newTestRunner(t, 23_000_000, now)
+	quoter.quote = func(_ bool, amount uint64) Quote {
+		if quoter.calls == 2 {
+			amount++
+		}
+		return Quote{InputAmount: amount, EstimatedOutput: 21_525, MinimumOutput: 21_310}
+	}
+	if tick, err := runner.Step(t.Context(), now); err != nil || tick.Event != EventSignal {
+		t.Fatalf("opening decision = %+v, %v", tick, err)
+	}
+	settleAt := now.Add(runner.policy.Settle())
+	primary.at, secondary.at = settleAt, settleAt
+	tick, err := runner.Step(t.Context(), settleAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tick.Event != EventMissed || tick.Fill != nil || runner.Counts().Missed != 1 {
+		t.Fatalf("resized settlement quote produced %+v with counts %+v", tick, runner.Counts())
+	}
+	if _, err := Replay(runner.policy, recorder.ticks); err != nil {
+		t.Fatalf("resized settlement miss did not replay: %v", err)
+	}
+}
+
+func TestResumeRejectsAClosedTickCarryingADecisionQuote(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	runner, primary, secondary, quoter, recorder := newTestRunner(t, 23_000_000, now)
+	quote := Quote{InputAmount: 1, EstimatedOutput: 1, MinimumOutput: 1}
+	_, err := ResumeRunner(
+		runner.policy, primary, secondary, quoter, recorder,
+		[]Tick{{
+			At: now, Event: EventClosed, PeriodClose: true, DecisionQuote: &quote,
+		}},
+	)
+	if err == nil {
+		t.Fatal("a closed record carrying decision evidence was accepted")
 	}
 }
 
@@ -519,6 +870,25 @@ func TestAnUnquotableSignalIsCountedAsMissed(t *testing.T) {
 	counts := runner.Counts()
 	if counts.Missed != 1 || counts.Signals != 1 || counts.Fills != 0 {
 		t.Fatalf("counts = %+v", counts)
+	}
+}
+
+func TestAMalformedDecisionQuoteIsMissedWithoutPoisoningReplay(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	runner, _, _, quoter, recorder := newTestRunner(t, 23_000_000, now)
+	quoter.quote = func(_ bool, amount uint64) Quote {
+		return Quote{InputAmount: amount, EstimatedOutput: 21_525}
+	}
+	tick, err := runner.Step(t.Context(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tick.Event != EventMissed || tick.DecisionQuote != nil || tick.Fill != nil ||
+		runner.Counts().Missed != 1 {
+		t.Fatalf("malformed quote produced %+v with counts %+v", tick, runner.Counts())
+	}
+	if _, err := Replay(runner.policy, recorder.ticks); err != nil {
+		t.Fatalf("malformed provider response poisoned the journal: %v", err)
 	}
 }
 
@@ -838,6 +1208,26 @@ func TestReplayRejectsUnsupportedFillEvidence(t *testing.T) {
 		tampered[1].Fill = &altered
 		if _, err := Replay(runner.policy, tampered); err == nil {
 			t.Fatal("a fill derived from a rewritten quote replayed")
+		}
+	})
+	t.Run("rewritten signal quote", func(t *testing.T) {
+		tampered := append([]Tick(nil), recorder.ticks...)
+		altered := *tampered[0].DecisionQuote
+		altered.EstimatedOutput++
+		tampered[0].DecisionQuote = &altered
+		if _, err := Replay(runner.policy, tampered); err == nil {
+			t.Fatal("a fill whose decision-time quote was rewritten replayed")
+		}
+	})
+	t.Run("rewritten settlement quote", func(t *testing.T) {
+		tampered := append([]Tick(nil), recorder.ticks...)
+		altered := *tampered[1].Fill
+		settlement := altered.SettlementQuote
+		settlement.EstimatedOutput++
+		altered.SettlementQuote = settlement
+		tampered[1].Fill = &altered
+		if _, err := Replay(runner.policy, tampered); err == nil {
+			t.Fatal("a fill derived from a rewritten settlement quote replayed")
 		}
 	})
 	t.Run("reversed time", func(t *testing.T) {

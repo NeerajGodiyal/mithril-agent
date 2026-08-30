@@ -1023,7 +1023,7 @@ func openSwapDependencies(cfg config) (swapDependencies, error) {
 			primary = pyth
 		}
 		prices, err = pricetrigger.NewEvaluator(
-			primary, pricesource.NewCoinbase(nil), nil,
+			primary, pricesource.NewKrakenSOL(nil), nil,
 		)
 		if err != nil {
 			return swapDependencies{}, fmt.Errorf("price evaluator: %w", err)
@@ -1042,7 +1042,7 @@ func priceSourcePolicyMatches(policy pricetrigger.Policy) bool {
 	primaryReviewed := policy.PrimarySourceSHA256 == pricesource.PythPushIdentitySHA256() ||
 		policy.PrimarySourceSHA256 == pricesource.PythIdentitySHA256()
 	return primaryReviewed &&
-		policy.SecondarySourceSHA256 == pricesource.CoinbaseIdentitySHA256()
+		policy.SecondarySourceSHA256 == pricesource.KrakenSOLIdentitySHA256()
 }
 
 func quoteBuilderConfig(cfg config) swapbuilder.Config {
@@ -1287,9 +1287,9 @@ func describePriceSource(policy *pricetrigger.Policy) string {
 	}
 	switch policy.PrimarySourceSHA256 {
 	case pricesource.PythPushIdentitySHA256():
-		return "Pyth on-chain push via Mithril + Coinbase"
+		return "Pyth on-chain push via Mithril + Kraken"
 	case pricesource.PythIdentitySHA256():
-		return "Pyth Hermes (operator-supplied credential) + Coinbase"
+		return "Pyth Hermes (operator-supplied credential) + Kraken"
 	default:
 		return "unrecognised"
 	}

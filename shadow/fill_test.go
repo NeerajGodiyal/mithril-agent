@@ -50,6 +50,14 @@ func TestPolicyFingerprintBindsTheQuotedRoute(t *testing.T) {
 	}
 }
 
+func TestPolicyRejectsTheLegacySettlementAccountingVersion(t *testing.T) {
+	policy := sellPolicy()
+	policy.Version = 3
+	if err := policy.Validate(); err == nil {
+		t.Fatal("a v3 policy could resume under v4 settlement accounting")
+	}
+}
+
 // The price conversion is the foundation everything else is measured in, so it
 // is pinned to a worked example rather than to itself.
 func TestPriceMicrosMatchesAWorkedExample(t *testing.T) {
@@ -145,7 +153,7 @@ func TestSettleFillRefusesRatherThanFillingAtTheFloor(t *testing.T) {
 	if fill.Filled {
 		t.Fatal("a fill was booked below the policy's own minimum output")
 	}
-	if fill.ReceivedUnits != 0 || fill.SpentUnits != 0 || fill.FeeLamports != 0 {
+	if fill.ReceivedUnits != 0 || fill.SpentUnits != 0 || fill.FeeLamports != policy.FeeLamports {
 		t.Errorf("a refused trade still moved value: %+v", fill)
 	}
 	if fill.Refusal == "" {
@@ -153,6 +161,29 @@ func TestSettleFillRefusesRatherThanFillingAtTheFloor(t *testing.T) {
 	}
 	if fill.SlippageBPS >= 0 {
 		t.Errorf("an adverse move recorded %d bps", fill.SlippageBPS)
+	}
+}
+
+func TestRequotedFillKeepsTheOriginalDecisionFloor(t *testing.T) {
+	policy := sellPolicy()
+	decision := Quote{
+		InputAmount: 1_000_000, EstimatedOutput: 21_525, MinimumOutput: 21_310,
+	}
+	// The venue now offers 21,200 and would accept 21,000 under a newly reset
+	// floor. The original decision committed to at least 21,310, so paper mode
+	// must refuse instead of erasing the adverse delay.
+	settlement := Quote{
+		InputAmount: 1_000_000, EstimatedOutput: 21_200, MinimumOutput: 21_000,
+	}
+	fill, err := SettleRequotedFillDirected(
+		policy, decision, settlement, 21_525_000, 21_200_000, true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fill.Filled || fill.SpentUnits != 0 || fill.ReceivedUnits != 0 ||
+		fill.FeeLamports != policy.FeeLamports {
+		t.Fatalf("fresh quote reset the original slippage floor: %+v", fill)
 	}
 }
 

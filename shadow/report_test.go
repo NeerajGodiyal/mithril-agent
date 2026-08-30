@@ -76,6 +76,19 @@ func TestCompareChecksTheMainnetAccountingBand(t *testing.T) {
 	}
 }
 
+func TestCompareTreatsAnUnlabelledV4ReportAsResetDaily(t *testing.T) {
+	replayed := testReport(t)
+	stored := replayed
+	stored.EvaluationMode = ""
+	if found := Compare(stored, replayed); len(found) != 0 {
+		t.Fatalf("legacy reset-daily report disagreed only on its missing label: %+v", found)
+	}
+	stored.EvaluationMode = "unknown_mode"
+	if found := Compare(stored, replayed); len(found) != 1 || found[0].Field != "evaluation_mode" {
+		t.Fatalf("unknown evaluation mode was accepted: %+v", found)
+	}
+}
+
 func TestCompareReallyChecksMetadataAndCoverage(t *testing.T) {
 	stored := testReport(t)
 	replayed := stored
@@ -122,7 +135,7 @@ func TestReportRefusesToLookTrustworthyWhenMostlyBlind(t *testing.T) {
 	if !strings.Contains(out.String(), "Read this with care") {
 		t.Errorf("the caveat is missing from the rendered report:\n%s", out.String())
 	}
-	if !strings.HasPrefix(strings.Split(out.String(), "Read this with care")[0], "Shadow report") {
+	if !strings.HasPrefix(strings.Split(out.String(), "Read this with care")[0], "Reset-daily paper canary report") {
 		t.Error("the caveat is buried below the numbers instead of above them")
 	}
 }

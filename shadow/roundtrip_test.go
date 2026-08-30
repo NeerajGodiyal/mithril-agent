@@ -2,6 +2,7 @@ package shadow
 
 import (
 	"testing"
+	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 )
@@ -45,11 +46,11 @@ func TestRoundTripProfitsWhenTheSpreadIsSmallerThanTheSwing(t *testing.T) {
 	if result.Counts.Sells != 1 || result.Counts.Buys != 1 {
 		t.Fatalf("counts = %+v, want exactly one sell and one buy", result.Counts)
 	}
-	if len(quotes) != 2 {
-		t.Fatalf("round trip produced %d quotes, want 2: %+v", len(quotes), quotes)
+	if len(quotes) != 4 {
+		t.Fatalf("round trip produced %d quotes, want decision and settlement for both legs: %+v",
+			len(quotes), quotes)
 	}
-	settledSellOutput := quotes[0].EstimatedOutput * prices[1] / prices[0]
-	if quotes[1].InputAmount != settledSellOutput {
+	if quotes[2].InputAmount != quotes[1].EstimatedOutput {
 		t.Fatalf("return leg did not spend the sell proceeds: %+v", quotes)
 	}
 	// The return leg spends the sell proceeds at the lower price, so the book
@@ -60,6 +61,134 @@ func TestRoundTripProfitsWhenTheSpreadIsSmallerThanTheSwing(t *testing.T) {
 	}
 	if result.Ledger.RealizedMicros <= 0 {
 		t.Errorf("realized = %d micros, want a profit", result.Ledger.RealizedMicros)
+	}
+}
+
+func TestRoundTripHonorsTheSettlementDelay(t *testing.T) {
+	policy := roundTripPolicy(t, 100)
+	policy.TickSeconds = 5
+	policy.SettleSeconds = 60
+	prices := []uint64{23_000_000}
+	for range 11 {
+		prices = append(prices, 17_000_000)
+	}
+	prices = append(prices, 24_000_000, 20_000_000)
+
+	var quotedAt []uint64
+	quote := tightQuote()
+	result, err := ReplayRoundTrip(policy, prices, func(
+		price uint64, sell bool, amount uint64,
+	) (Quote, error) {
+		quotedAt = append(quotedAt, price)
+		return quote(price, sell, amount)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quotedAt) != 2 || quotedAt[0] != 23_000_000 || quotedAt[1] != 24_000_000 {
+		t.Fatalf("decision/settlement quotes = %v, want [23000000 24000000]", quotedAt)
+	}
+	if result.Counts.Sells != 1 || result.Ledger.MaxDrawdownMicros == 0 {
+		t.Fatalf("settlement-delay result = %+v ledger=%+v", result.Counts, result.Ledger)
+	}
+}
+
+func TestRoundTripUsesJournalObservationTimes(t *testing.T) {
+	policy := roundTripPolicy(t, 100)
+	policy.TickSeconds = 5
+	policy.SettleSeconds = 60
+	start := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+	ticks := []Tick{
+		{At: start, PriceMicros: 23_000_000},
+		{At: start.Add(30 * time.Second), PriceMicros: 17_000_000},
+		{At: start.Add(75 * time.Second), PriceMicros: 24_000_000},
+		{At: start.Add(80 * time.Second), PriceMicros: 20_000_000},
+	}
+	var quotedAt []uint64
+	quote := tightQuote()
+	result, err := ReplayRoundTripTicks(policy, ticks, func(
+		price uint64, sell bool, amount uint64,
+	) (Quote, error) {
+		quotedAt = append(quotedAt, price)
+		return quote(price, sell, amount)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quotedAt) != 2 || quotedAt[0] != 23_000_000 || quotedAt[1] != 24_000_000 ||
+		result.Counts.Sells != 1 {
+		t.Fatalf("timed decision/settlement = %v, counts=%+v", quotedAt, result.Counts)
+	}
+}
+
+func TestRoundTripMissesAnUnobservableSettlementLikeTheLiveRunner(t *testing.T) {
+	policy := roundTripPolicy(t, 100)
+	policy.TickSeconds = 5
+	policy.SettleSeconds = 60
+	start := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+	ticks := []Tick{
+		{At: start, Event: EventWaiting, PriceMicros: 23_000_000},
+		{At: start.Add(60 * time.Second), Event: EventUnobservable},
+		{At: start.Add(120 * time.Second), Event: EventWaiting, PriceMicros: 20_000_000},
+	}
+	var quotedAt []uint64
+	quote := tightQuote()
+	result, err := ReplayRoundTripTicks(policy, ticks, func(
+		price uint64, sell bool, amount uint64,
+	) (Quote, error) {
+		quotedAt = append(quotedAt, price)
+		return quote(price, sell, amount)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quotedAt) != 1 || quotedAt[0] != 23_000_000 {
+		t.Fatalf("missed settlement quotes = %v, want only the decision quote", quotedAt)
+	}
+	if result.Counts.Missed != 1 || result.Counts.Sells != 0 || result.Counts.Buys != 0 {
+		t.Fatalf("missed settlement counts = %+v", result.Counts)
+	}
+}
+
+func TestRoundTripCountsAPendingDecisionMissedAtPeriodClose(t *testing.T) {
+	policy := roundTripPolicy(t, 100)
+	policy.TickSeconds = 5
+	policy.SettleSeconds = 60
+	start := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+	ticks := []Tick{
+		{At: start, Event: EventSignal, PriceMicros: 23_000_000},
+		{At: start.Add(30 * time.Second), Event: EventSignal, PriceMicros: 23_000_000},
+		{
+			At: start.Add(24*time.Hour - time.Nanosecond), Event: EventClosed,
+			PeriodClose: true,
+		},
+	}
+	result, err := ReplayRoundTripTicks(policy, ticks, tightQuote())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Counts.Missed != 1 || result.Counts.Sells != 0 || result.Counts.Buys != 0 {
+		t.Fatalf("terminal pending decision counts = %+v", result.Counts)
+	}
+}
+
+func TestRoundTripIgnoresOriginalMissWhenCandidateHasNoPendingDecision(t *testing.T) {
+	policy := roundTripPolicy(t, 100)
+	start := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+	ticks := []Tick{
+		{At: start, Event: EventWaiting, PriceMicros: 20_000_000},
+		{At: start.Add(policy.Tick()), Event: EventWaiting, PriceMicros: 20_000_000},
+		{
+			At: start.Add(24*time.Hour - time.Nanosecond), Event: EventMissed,
+			PriceMicros: 20_000_000, PeriodClose: true,
+		},
+	}
+	result, err := ReplayRoundTripTicks(policy, ticks, tightQuote())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Counts.Missed != 0 {
+		t.Fatalf("original-policy close changed candidate counts: %+v", result.Counts)
 	}
 }
 
@@ -197,23 +326,28 @@ func quoteWithSpread(spreadBPS uint64) func(uint64, bool, uint64) (Quote, error)
 // Nothing else in this package catches it — the other tests never refuse a leg
 // inside Apply — so this is the only thing standing between that bug and a
 // believable wrong answer.
-func TestARefusedLegLeavesTheBookIntact(t *testing.T) {
+func TestARefusedLegChargesItsFeeWithoutMovingTheTrade(t *testing.T) {
 	policy := roundTripPolicy(t, 100)
-	// Start with the buy leg and no separate SOL fee reserve. A deliberately
-	// tiny modelled output cannot pay the fee, so Ledger.Apply refuses after
-	// the quote has settled — the exact error path that once zeroed the book.
+	// Start with the buy leg and exactly one fee in SOL. The settlement quote
+	// crosses the original floor, modeling a submitted transaction that fails
+	// its slippage check and therefore pays only the fee.
 	sell := policy.Trigger
 	policy.Trigger = *policy.ReturnTrigger
 	policy.ReturnTrigger = &sell
 	policy.InputDecimals, policy.OutputDecimals = 6, 9
 	policy.StartingInputUnits = 1_000_000
-	policy.StartingOutputUnits = 0
+	policy.StartingOutputUnits = policy.FeeLamports
 	policy.InputAmount = 1_000_000
 	prices := []uint64{17_000_000, 17_000_000, 17_000_000}
 
+	quotes := 0
 	result, err := ReplayRoundTrip(policy, prices,
 		func(_ uint64, _ bool, amount uint64) (Quote, error) {
-			return Quote{InputAmount: amount, EstimatedOutput: 1, MinimumOutput: 1}, nil
+			quotes++
+			if quotes == 1 {
+				return Quote{InputAmount: amount, EstimatedOutput: 60_000_000, MinimumOutput: 59_000_000}, nil
+			}
+			return Quote{InputAmount: amount, EstimatedOutput: 58_000_000, MinimumOutput: 57_000_000}, nil
 		})
 	if err != nil {
 		t.Fatal(err)
@@ -224,13 +358,90 @@ func TestARefusedLegLeavesTheBookIntact(t *testing.T) {
 	if result.Counts.Buys != 0 {
 		t.Errorf("a refused leg was counted as a buy: %+v", result.Counts)
 	}
-	// The book must be exactly as it opened. Zero here is the bug.
+	// The traded quote inventory stays put, while the modeled submitted attempt
+	// consumes the only fee reserve. The later unfunded signal is missed.
 	if result.Ledger.QuoteUnits != policy.StartingInputUnits {
 		t.Fatalf("a refused leg changed the book: %d quote units, opened with %d",
 			result.Ledger.QuoteUnits, policy.StartingInputUnits)
 	}
-	if result.Ledger.RealizedMicros != 0 || result.Ledger.Fills != 0 {
-		t.Errorf("a refused leg was accounted for: realized=%d fills=%d",
-			result.Ledger.RealizedMicros, result.Ledger.Fills)
+	if result.Ledger.BaseUnits != 0 || result.Ledger.FeesMicros <= 0 ||
+		result.Ledger.RealizedMicros >= 0 || result.Ledger.Fills != 0 ||
+		result.Counts.Missed == 0 {
+		t.Errorf("refused fee accounting = ledger=%+v counts=%+v",
+			result.Ledger, result.Counts)
+	}
+}
+
+func TestBuyFirstRoundTripReservesAndPaysBothFees(t *testing.T) {
+	policy := roundTripPolicy(t, 100)
+	sell := policy.Trigger
+	policy.Trigger = *policy.ReturnTrigger
+	policy.ReturnTrigger = &sell
+	policy.InputDecimals, policy.OutputDecimals = 6, 9
+	policy.StartingInputUnits = 1_000_000
+	policy.StartingOutputUnits = policy.FeeLamports
+	policy.InputAmount = 1_000_000
+	var quoted []struct {
+		sell   bool
+		amount uint64
+	}
+	result, err := ReplayRoundTrip(
+		policy, []uint64{17_000_000, 17_000_000, 23_000_000, 23_000_000},
+		func(_ uint64, sell bool, amount uint64) (Quote, error) {
+			quoted = append(quoted, struct {
+				sell   bool
+				amount uint64
+			}{sell: sell, amount: amount})
+			output := uint64(60_000_000)
+			if sell {
+				output = amount * 23_000_000 / 1_000_000_000
+			}
+			return Quote{InputAmount: amount, EstimatedOutput: output, MinimumOutput: output}, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSell := uint64(60_000_000) - 2*policy.FeeLamports
+	if len(quoted) != 4 || quoted[2].amount != wantSell || !quoted[2].sell ||
+		result.Counts.Buys != 1 || result.Counts.Sells != 1 ||
+		result.Ledger.Fills != 2 || result.Ledger.BaseUnits != policy.FeeLamports ||
+		result.Ledger.FeesMicros <= 0 {
+		t.Fatalf("buy-first fee reserve: quotes=%+v counts=%+v ledger=%+v",
+			quoted, result.Counts, result.Ledger)
+	}
+}
+
+func TestRoundTripCyclesTwiceWithOnlyItsRequiredFeeReserve(t *testing.T) {
+	policy := roundTripPolicy(t, 100)
+	sell := policy.Trigger
+	policy.Trigger = *policy.ReturnTrigger
+	policy.ReturnTrigger = &sell
+	policy.InputDecimals, policy.OutputDecimals = 6, 9
+	policy.StartingInputUnits = 1_000_000
+	policy.StartingOutputUnits = policy.FeeLamports
+	policy.InputAmount = 1_000_000
+	result, err := ReplayRoundTrip(
+		policy,
+		[]uint64{
+			17_000_000, 17_000_000, 23_000_000, 23_000_000,
+			17_000_000, 17_000_000, 23_000_000, 23_000_000,
+		},
+		func(_ uint64, sell bool, amount uint64) (Quote, error) {
+			output := uint64(60_000_000)
+			if sell {
+				output = amount * 23_000_000 / 1_000_000_000
+			}
+			return Quote{InputAmount: amount, EstimatedOutput: output, MinimumOutput: output}, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Counts.Buys != 2 || result.Counts.Sells != 2 ||
+		result.Counts.Missed != 0 || result.Counts.Refused != 0 ||
+		result.Ledger.Fills != 4 || result.Ledger.BaseUnits != policy.FeeLamports {
+		t.Fatalf("two-cycle exact-reserve result: counts=%+v ledger=%+v",
+			result.Counts, result.Ledger)
 	}
 }

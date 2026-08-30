@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -1043,6 +1044,77 @@ func TestServiceInstallAlsoWiresTheAlertPath(t *testing.T) {
 	// reader. Only the sockets belong in the enable command.
 	if strings.Contains(printed.String(), "enable --now mithril-agent-status-sell.service") {
 		t.Errorf("told the operator to enable a socket-activated service:\n%s", printed.String())
+	}
+}
+
+func TestServiceInstallOptInWiresPaperAlertsIntoTheSingleTelegramConsumer(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sell := armedLegWithStatus(t, t.TempDir(), false, time.Second)
+	if err := recordStrategy(strategyPaths{sell: sell}); err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	paperStatus := filepath.Join(t.TempDir(), "champion-alerts.json")
+	args := []string{
+		"install", "--output", filepath.Join(directory, serviceUnitName),
+		"--paper-alert-status", paperStatus,
+	}
+	var printed bytes.Buffer
+	if err := runService(args, &printed); err != nil {
+		t.Fatal(err)
+	}
+	if err := runService(args, io.Discard); err != nil {
+		t.Fatalf("generated paper units could not be updated: %v", err)
+	}
+	for _, name := range []string{
+		paperStatusUnitName + ".socket", paperStatusUnitName + ".service", alertsUnitName,
+	} {
+		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
+			t.Fatalf("%s was not generated: %v", name, err)
+		}
+		if !strings.Contains(printed.String(), name) {
+			t.Fatalf("install instructions omit %s:\n%s", name, printed.String())
+		}
+	}
+	bridge, err := os.ReadFile(filepath.Join(directory, paperStatusUnitName+".service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bridge), "LoadCredential="+paperStatusCredential+":"+paperStatus) ||
+		!strings.Contains(string(bridge), "DynamicUser=yes") ||
+		!strings.Contains(string(bridge), "StartLimitIntervalSec=30s") ||
+		!strings.Contains(string(bridge), "StartLimitBurst=12") ||
+		strings.Contains(string(bridge), "\nUser=") {
+		t.Fatalf("paper bridge boundary is incomplete:\n%s", bridge)
+	}
+	alerts, err := os.ReadFile(filepath.Join(directory, alertsUnitName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Wants=network-online.target " + paperStatusUnitName + ".socket",
+		"--paper-status-socket " + paperStatusSocketPath,
+	} {
+		if !strings.Contains(string(alerts), want) {
+			t.Errorf("Telegram unit is missing %q:\n%s", want, alerts)
+		}
+	}
+	if strings.Contains(string(alerts), paperStatus) {
+		t.Fatalf("Telegram process can read the private paper file:\n%s", alerts)
+	}
+}
+
+func TestServiceInstallRefusesPaperAlertsWhenTelegramIsDisabled(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	sell := armedLegWithStatus(t, t.TempDir(), false, time.Second)
+	if err := recordStrategy(strategyPaths{sell: sell, telegram: "disabled"}); err != nil {
+		t.Fatal(err)
+	}
+	err := runService([]string{
+		"install", "--paper-alert-status", filepath.Join(t.TempDir(), "alerts.json"),
+	}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "requires Telegram") {
+		t.Fatalf("paper alerts with Telegram disabled = %v", err)
 	}
 }
 

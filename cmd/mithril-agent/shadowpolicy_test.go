@@ -40,7 +40,7 @@ func TestAGeneratedPolicyLoadsWithoutEditing(t *testing.T) {
 		t.Fatalf("a generated policy did not load: %v", err)
 	}
 	if policy.Trigger.PrimarySourceSHA256 != pricesource.PythPushIdentitySHA256() ||
-		policy.Trigger.SecondarySourceSHA256 != pricesource.CoinbaseIdentitySHA256() {
+		policy.Trigger.SecondarySourceSHA256 != pricesource.KrakenSOLIdentitySHA256() {
 		t.Fatal("the generated policy does not name the sources the runner uses")
 	}
 	if policy.QuotePeg == nil ||
@@ -90,6 +90,19 @@ func TestGeneratedSellPolicyFundsTheConfiguredNotional(t *testing.T) {
 	}
 	if policy.StartingInputUnits-policy.InputAmount < policy.FeeLamports {
 		t.Fatalf("generated sell policy cannot fund its trade and fee: %+v", policy)
+	}
+}
+
+func TestGeneratedRoundTripPreservesBothNativeFees(t *testing.T) {
+	const amount = "2000000000"
+	policy, err := loadShadowPolicy(generatedPolicyPath(t,
+		"--sell-at-usd", "80.00", "--buy-at-usd", "50.00", "--amount", amount))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reserve := policy.StartingInputUnits - policy.InputAmount; reserve < 2*policy.FeeLamports {
+		t.Fatalf("generated round trip reserved %d lamports, want at least %d",
+			reserve, 2*policy.FeeLamports)
 	}
 }
 

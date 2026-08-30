@@ -28,12 +28,15 @@ type Replayed struct {
 	// PeriodEnd is the last hash-chained record time. A clean stop writes an
 	// explicit close record, so a report can reproduce its time boundary
 	// without trusting the separate summary file.
-	PeriodEnd time.Time
+	PeriodEnd  time.Time
+	nextSell   bool
+	nextAmount uint64
 }
 
 type replayPending struct {
 	price       uint64
 	amount      uint64
+	quote       Quote
 	sell        bool
 	settleAfter time.Time
 }
@@ -64,7 +67,8 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 		result.PeriodEnd = tick.At
 		if tick.PeriodClose {
 			if tick.Triggered || tick.Deferred || tick.Fill != nil || tick.DecisionMissed ||
-				tick.Reason != "" || tick.QuoteLowerMicros != 0 || tick.QuoteUpperMicros != 0 {
+				tick.DecisionQuote != nil || tick.Reason != "" ||
+				tick.QuoteLowerMicros != 0 || tick.QuoteUpperMicros != 0 {
 				return Replayed{}, errors.New("a period-close record is malformed")
 			}
 			if tick.Event == EventClosed {
@@ -144,7 +148,8 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 		}
 		switch tick.Event {
 		case EventWaiting:
-			if tick.Triggered || tick.Deferred || tick.Fill != nil || tick.PeriodClose {
+			if tick.Triggered || tick.Deferred || tick.DecisionQuote != nil ||
+				tick.Fill != nil || tick.PeriodClose {
 				return Replayed{}, errors.New("a waiting tick is malformed")
 			}
 			if pending != nil && !tick.At.Before(pending.settleAfter) {
@@ -155,20 +160,25 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 				return Replayed{}, errors.New("a signal tick is malformed")
 			}
 			if tick.Deferred {
-				if pending == nil || !tick.At.Before(pending.settleAfter) {
+				if tick.DecisionQuote != nil || pending == nil || !tick.At.Before(pending.settleAfter) {
 					return Replayed{}, errors.New("a signal was deferred without an active decision")
 				}
 			} else {
-				if pending != nil {
-					return Replayed{}, errors.New("a second shadow decision was opened while one was pending")
+				if pending != nil || tick.DecisionQuote == nil ||
+					validateQuote(*tick.DecisionQuote) != nil ||
+					tick.DecisionQuote.InputAmount != nextAmount ||
+					!canFundAttempt(
+						result.Ledger, nextSell, nextAmount, attemptFeeReserve(policy, nextSell),
+					) {
+					return Replayed{}, errors.New("a new signal has invalid decision quote or state")
 				}
 				pending = &replayPending{
-					price: tick.PriceMicros, amount: nextAmount, sell: nextSell,
+					price: tick.PriceMicros, amount: nextAmount, quote: *tick.DecisionQuote, sell: nextSell,
 					settleAfter: tick.At.Add(policy.Settle()),
 				}
 			}
 		case EventMissed:
-			if tick.Fill != nil {
+			if tick.DecisionQuote != nil || tick.Fill != nil {
 				return Replayed{}, errors.New("a missed tick contains a fill")
 			}
 			result.Counts.Missed++
@@ -189,14 +199,16 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 			if pending == nil || tick.At.Before(pending.settleAfter) {
 				return Replayed{}, errors.New("a fill settled without a mature pending decision")
 			}
-			if tick.Fill == nil || tick.Deferred != tick.Triggered {
+			if tick.DecisionQuote != nil || tick.Fill == nil || tick.Deferred != tick.Triggered {
 				return Replayed{}, errors.New("a settled tick is malformed")
 			}
-			recomputed, fillErr := SettleFillDirected(
-				policy, tick.Fill.DecisionQuote, pending.price, tick.PriceMicros, pending.sell,
+			recomputed, fillErr := SettleRequotedFillDirected(
+				policy, pending.quote, tick.Fill.SettlementQuote,
+				pending.price, tick.PriceMicros, pending.sell,
 			)
 			if fillErr != nil || !reflect.DeepEqual(recomputed, *tick.Fill) ||
 				(tick.Event == EventFilled) != tick.Fill.Filled ||
+				tick.Fill.DecisionQuote != pending.quote ||
 				tick.Fill.DecisionQuote.InputAmount != pending.amount {
 				return Replayed{}, errors.New("a recorded fill is not supported by its decision quote")
 			}
@@ -214,8 +226,10 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 				if policy.RoundTrip() {
 					nextSell = !pending.sell
 					nextAmount = tick.Fill.ReceivedUnits
-					if nextSell && nextAmount > result.Ledger.BaseUnits {
-						nextAmount = result.Ledger.BaseUnits
+					if nextSell {
+						nextAmount = capSellAmount(
+							nextAmount, result.Ledger.BaseUnits, roundTripFeeReserve(policy.FeeLamports),
+						)
 					}
 				}
 			} else {
@@ -236,6 +250,7 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 		}
 		return Replayed{}, errors.New("the record contains no observable tick")
 	}
+	result.nextSell, result.nextAmount = nextSell, nextAmount
 	return result, nil
 }
 
@@ -244,7 +259,8 @@ func validateUnobservableTick(tick Tick) error {
 		return errors.New("the record does not contain an unobservable tick")
 	}
 	if tick.PriceMicros != 0 || tick.QuoteLowerMicros != 0 || tick.QuoteUpperMicros != 0 ||
-		tick.Triggered || tick.Deferred || tick.Fill != nil || tick.EquityMicros != 0 ||
+		tick.Triggered || tick.Deferred || tick.DecisionQuote != nil ||
+		tick.Fill != nil || tick.EquityMicros != 0 ||
 		tick.PeriodClose {
 		return errors.New("an unobservable tick contains market evidence")
 	}
@@ -283,6 +299,11 @@ type Disagreement struct {
 // difference rather than the first, because a single mismatched field and a
 // wholesale fabrication need to be distinguishable at a glance.
 func Compare(stored Report, replayed Report) []Disagreement {
+	// Report v4 predates the explicit label but already had these reset-daily
+	// semantics. Preserve its verifiability while rejecting any unknown mode.
+	if stored.EvaluationMode == "" && replayed.EvaluationMode == EvaluationResetDaily {
+		stored.EvaluationMode = EvaluationResetDaily
+	}
 	return compareStruct("", reflect.ValueOf(stored), reflect.ValueOf(replayed))
 }
 

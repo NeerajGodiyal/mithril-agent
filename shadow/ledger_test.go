@@ -1,6 +1,7 @@
 package shadow
 
 import (
+	"errors"
 	"math"
 	"testing"
 )
@@ -77,10 +78,16 @@ func TestSellBooksProceedsCostAndFee(t *testing.T) {
 	if after.QuoteUnits != 2_200_000 {
 		t.Errorf("quote units = %d, want 2200000", after.QuoteUnits)
 	}
-	// Sold 0.1 SOL that cost $20 for $2.20: 20 cents of profit, minus the fee.
-	feeMicros := int64(5_000) * 22_000_000 / 1_000_000_000
-	if want := int64(200_000) - feeMicros; after.RealizedMicros != want {
+	// Sold 0.1 SOL that cost $2 for $2.20. The fee removes its proportional
+	// opening basis from realized profit while FeesMicros records its value at
+	// the current mark.
+	feeBasisMicros := int64(5_000) * 20_000_000 / 1_000_000_000
+	if want := int64(200_000) - feeBasisMicros; after.RealizedMicros != want {
 		t.Errorf("realized = %d micros, want %d", after.RealizedMicros, want)
+	}
+	feeMicros := int64(5_000) * 22_000_000 / 1_000_000_000
+	if after.FeesMicros != feeMicros {
+		t.Errorf("fees = %d micros, want %d", after.FeesMicros, feeMicros)
 	}
 	if after.TurnoverMicros != 2_200_000 {
 		t.Errorf("turnover = %d, want 2200000", after.TurnoverMicros)
@@ -114,8 +121,8 @@ func TestFeeAlwaysReducesRealizedProfit(t *testing.T) {
 	}
 }
 
-// A refused fill must leave the books exactly as they were, apart from the
-// revaluation every tick performs.
+// A refusal that never reached submission has no fee and only revalues the
+// book. Post-submit slippage refusals carry a modeled fee separately.
 func TestRefusedFillMovesNoInventory(t *testing.T) {
 	policy := sellPolicy()
 	policy.StartingInputUnits = 1_000_000_000
@@ -130,6 +137,113 @@ func TestRefusedFillMovesNoInventory(t *testing.T) {
 	if after.BaseUnits != ledger.BaseUnits || after.QuoteUnits != ledger.QuoteUnits ||
 		after.RealizedMicros != ledger.RealizedMicros || after.Fills != 0 {
 		t.Fatalf("a refused fill changed the books: %+v", after)
+	}
+}
+
+func TestSubmittedRefusalChargesOnlyTheFee(t *testing.T) {
+	policy := sellPolicy()
+	policy.StartingInputUnits = 1_000_000_000
+	ledger, err := NewLedger(policy, 20_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := ledger.Apply(Fill{
+		Sell: true, Refusal: "slippage", FeeLamports: policy.FeeLamports,
+	}, 20_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.BaseUnits != ledger.BaseUnits-policy.FeeLamports ||
+		after.QuoteUnits != ledger.QuoteUnits || after.TurnoverMicros != 0 ||
+		after.Fills != 0 || after.FeesMicros <= 0 || after.RealizedMicros >= 0 {
+		t.Fatalf("submitted refusal accounting = %+v", after)
+	}
+}
+
+func TestSubmittedRefusalKeepsProfitBreakdownReconciledAtChangedMark(t *testing.T) {
+	policy := sellPolicy()
+	policy.StartingInputUnits = 1_000_000_000 // 1 SOL
+	ledger, err := NewLedger(policy, 100_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := ledger.Apply(Fill{
+		Sell: true, Refusal: "slippage", FeeLamports: 100_000_000,
+	}, 200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closing, err := after.EquityMicros(200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrealized, err := after.UnrealizedMicros(200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change := int64(closing) - int64(after.OpeningEquityMicros)
+	if after.RealizedMicros+unrealized != change {
+		t.Fatalf(
+			"profit breakdown does not reconcile: realized=%d unrealized=%d change=%d",
+			after.RealizedMicros, unrealized, change,
+		)
+	}
+}
+
+func TestBuyChargesFeeBeforeAddingBoughtInventory(t *testing.T) {
+	policy := sellPolicy()
+	policy.StartingInputUnits = 100_000_000  // 0.1 SOL
+	policy.StartingOutputUnits = 200_000_000 // 200 USDC
+	ledger, err := NewLedger(policy, 100_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := ledger.Apply(Fill{
+		Filled: true, Sell: false,
+		SpentUnits: 200_000_000, ReceivedUnits: 1_000_000_000,
+		FeeLamports: 100_000_000,
+	}, 200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrealized, err := after.UnrealizedMicros(200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.BaseUnits != 1_000_000_000 || after.CostBasisMicros != 200_000_000 ||
+		after.AverageCostMicros != 200_000_000 || after.RealizedMicros != -10_000_000 ||
+		unrealized != 0 {
+		t.Fatalf("buy charged fee against bought inventory: ledger=%+v unrealized=%d", after, unrealized)
+	}
+}
+
+func TestBuyCannotFundItsOwnFee(t *testing.T) {
+	policy := sellPolicy()
+	policy.Trigger.Direction = "buy_at_or_below"
+	policy.InputDecimals, policy.OutputDecimals = 6, 9
+	policy.StartingInputUnits = 1_000_000
+	policy.StartingOutputUnits = policy.FeeLamports
+	ledger, err := NewLedger(policy, 20_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger.BaseUnits = 0 // exercise Apply's defense even if policy creation was bypassed
+	if _, err := ledger.Apply(Fill{
+		Filled: true, SpentUnits: 1_000_000, ReceivedUnits: 50_000_000,
+		FeeLamports: policy.FeeLamports,
+	}, 20_000_000); !errors.Is(err, errInsufficientInventory) {
+		t.Fatalf("buy funded its fee from its output: %v", err)
+	}
+	ledger.BaseUnits = policy.FeeLamports
+	after, err := ledger.Apply(Fill{
+		Filled: true, SpentUnits: 1_000_000, ReceivedUnits: 50_000_000,
+		FeeLamports: policy.FeeLamports,
+	}, 20_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.BaseUnits != 50_000_000 {
+		t.Fatalf("buy base = %d, want received amount 50000000", after.BaseUnits)
 	}
 }
 
@@ -223,17 +337,18 @@ func TestBuyingReAveragesCostBasis(t *testing.T) {
 	if ledger.BaseUnits != 1_000_000_000 || ledger.QuoteUnits != 100_000_000 {
 		t.Fatalf("a buy policy mapped its inventory the wrong way round: %+v", ledger)
 	}
-	// Buy another whole SOL at $10, so the average of 1 at $20 and 1 at $10 is $15.
+	// The fee first removes 0.000005 of the original SOL and its $20 basis,
+	// then one whole SOL is bought at $10.
 	after, err := ledger.Apply(Fill{
 		Filled: true, Sell: false, SpentUnits: 10_000_000, ReceivedUnits: 1_000_000_000, FeeLamports: 5_000,
 	}, 10_000_000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.AverageCostMicros != 15_000_000 {
-		t.Fatalf("average cost = %d micros, want 15000000 ($15)", after.AverageCostMicros)
+	if after.AverageCostMicros != 14_999_987 {
+		t.Fatalf("average cost = %d micros, want 14999987", after.AverageCostMicros)
 	}
-	unrealized, err := after.UnrealizedMicros(15_000_000)
+	unrealized, err := after.UnrealizedMicros(after.AverageCostMicros)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,6 +365,31 @@ func TestLedgerRefusesAnInvalidPolicy(t *testing.T) {
 	}
 	if _, err := NewLedger(sellPolicy(), 0); err == nil {
 		t.Error("books were opened with no opening price")
+	}
+}
+
+func TestBuyPolicyRequiresAPreexistingFeeReserve(t *testing.T) {
+	policy := sellPolicy()
+	policy.Trigger.Direction = "buy_at_or_below"
+	policy.InputDecimals, policy.OutputDecimals = 6, 9
+	policy.StartingOutputUnits = policy.FeeLamports - 1
+	if err := policy.Validate(); err == nil {
+		t.Fatal("buy policy opened without enough SOL to fund its first fee")
+	}
+	policy.StartingOutputUnits++
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("exact fee reserve was refused: %v", err)
+	}
+}
+
+func TestRoundTripRejectsAnOverflowingFeeReserve(t *testing.T) {
+	policy := sellPolicy()
+	buy := policy.Trigger
+	buy.Direction = "buy_at_or_below"
+	policy.ReturnTrigger = &buy
+	policy.FeeLamports = math.MaxUint64/2 + 1
+	if err := policy.Validate(); err == nil {
+		t.Fatal("round trip accepted a two-fee reserve that overflows")
 	}
 }
 

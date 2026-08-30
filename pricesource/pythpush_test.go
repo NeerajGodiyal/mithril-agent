@@ -45,6 +45,10 @@ func TestPythPushReadsSponsoredUSDCFeed(t *testing.T) {
 			ContextSlot: 100, Owner: pythPushLegacyOwner,
 			DataLength: pythPushAccountBytes, Data: data,
 		},
+		pythPushUSDCUpgradedAccount: {
+			ContextSlot: 100, Owner: pythPushUpgradedOwner,
+			DataLength: pythPushAccountBytes, Data: data,
+		},
 	}}
 	source, err := NewPythPushUSDC(reader, func() time.Time { return now })
 	if err != nil {
@@ -61,6 +65,50 @@ func TestPythPushReadsSponsoredUSDCFeed(t *testing.T) {
 	}
 	if PythPushUSDCIdentitySHA256() == PythPushIdentitySHA256() {
 		t.Fatal("SOL and USDC feed identities collided")
+	}
+}
+
+func TestPythPushUSDCSurvivesLegacyFeedRetirement(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	data := validPushAccountFor(USDCUSDFeedID, 99_999_800, 1_000, -8,
+		now.Add(-20*time.Second).Unix())
+	reader := &fakeReader{
+		byAccount: map[string]AccountData{
+			pythPushUSDCUpgradedAccount: {
+				ContextSlot: 100, Owner: pythPushUpgradedOwner,
+				DataLength: pythPushAccountBytes, Data: data,
+			},
+		},
+		err: map[string]error{pythPushUSDCAccount: errors.New("legacy feed retired")},
+	}
+	source, err := NewPythPushUSDC(reader, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.LatestAtSlot(t.Context(), pricetrigger.FeedUSDCUSD, 99); err != nil {
+		t.Fatalf("upgraded USDC feed did not carry the read: %v", err)
+	}
+}
+
+func TestPythPushUSDCRejectsDisagreeingMigrationFeeds(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(-20 * time.Second).Unix()
+	reader := &fakeReader{byAccount: map[string]AccountData{
+		pythPushUSDCAccount: {
+			ContextSlot: 100, Owner: pythPushLegacyOwner, DataLength: pythPushAccountBytes,
+			Data: validPushAccountFor(USDCUSDFeedID, 100_000_000, 1_000, -8, fresh),
+		},
+		pythPushUSDCUpgradedAccount: {
+			ContextSlot: 100, Owner: pythPushUpgradedOwner, DataLength: pythPushAccountBytes,
+			Data: validPushAccountFor(USDCUSDFeedID, 110_000_000, 1_000, -8, fresh),
+		},
+	}}
+	source, err := NewPythPushUSDC(reader, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.LatestAtSlot(t.Context(), pricetrigger.FeedUSDCUSD, 99); err == nil {
+		t.Fatal("disagreeing legacy and upgraded USDC feeds were accepted")
 	}
 }
 
@@ -302,7 +350,7 @@ func TestPythPushRejectsDisagreeingAccounts(t *testing.T) {
 	}
 }
 
-// The Aug 18 cutover: one account stops, the other must carry the read.
+// After the completed upgrade, one account may stop and the other must carry the read.
 func TestPythPushSurvivesOneAccountFailing(t *testing.T) {
 	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 	fresh := now.Add(-20 * time.Second).Unix()

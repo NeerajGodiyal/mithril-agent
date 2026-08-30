@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/indexmcp"
 	"github.com/Overclock-Validator/mithril-agent/rootedindex"
@@ -358,17 +359,20 @@ func runIndexStatus(args []string, output io.Writer) error {
 	if *jsonOutput {
 		return json.NewEncoder(output).Encode(status)
 	}
-	last, root := "none", "none"
+	last, root, recordedAt := "none", "none", "none"
 	if status.LastCursor != nil {
 		last = status.LastCursor.String()
 	}
 	if status.LastRoot != nil {
 		root = status.LastRoot.String()
 	}
+	if status.LastRecordedAt != nil {
+		recordedAt = status.LastRecordedAt.Format(time.RFC3339Nano)
+	}
 	_, err = fmt.Fprintf(output,
-		"Rooted index integrity verified\nSnapshot complete: %t\nSchemas: index=%d event=%d\nProvenance: %s (%s)\nTransactions: %d\nAccount updates: %d\nRooted slots: %d\nLast cursor: %s\nLast root: %s\nChain head: %s\n",
+		"Rooted index integrity verified\nSnapshot complete: %t\nSchemas: index=%d event=%d\nProvenance: %s (%s)\nTransactions: %d\nAccount updates: %d\nRooted slots: %d\nLast cursor: %s\nLast root: %s\nLast recorded at: %s\nChain head: %s\n",
 		status.Complete, status.SchemaVersion, status.EventSchemaVersion, status.Provenance, status.Finality,
-		status.Transactions, status.Accounts, status.Roots, last, root, status.ChainHead)
+		status.Transactions, status.Accounts, status.Roots, last, root, recordedAt, status.ChainHead)
 	return err
 }
 

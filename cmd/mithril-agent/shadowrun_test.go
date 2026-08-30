@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/journal"
+	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 	"github.com/Overclock-Validator/mithril-agent/pricesource"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
@@ -102,6 +104,19 @@ func TestShadowPolicyIsValidatedAtLoad(t *testing.T) {
 	}
 	if _, err := loadShadowPolicy(writeShadowPolicy(t, validShadowPolicy())); err != nil {
 		t.Errorf("a valid policy was rejected: %v", err)
+	}
+	legacy := validShadowPolicy()
+	legacy.Trigger.SecondarySourceSHA256 = pricesource.CoinbaseIdentitySHA256()
+	if legacy.ReturnTrigger != nil {
+		legacy.ReturnTrigger.SecondarySourceSHA256 = pricesource.CoinbaseIdentitySHA256()
+	}
+	legacyPath := writeShadowPolicy(t, legacy)
+	if _, err := loadShadowPolicy(legacyPath); err != nil {
+		t.Fatalf("legacy policy could not be loaded for historical audit: %v", err)
+	}
+	if _, err := loadActiveShadowPolicy(legacyPath); err == nil ||
+		!strings.Contains(err.Error(), "Coinbase") || !strings.Contains(err.Error(), "regenerate") {
+		t.Fatalf("legacy Coinbase active-policy refusal = %v", err)
 	}
 }
 
@@ -249,6 +264,84 @@ func TestDailyJournalRollsOnTheUTCDay(t *testing.T) {
 	}
 }
 
+func TestDailyJournalRefusesRecordsFromAnotherUTCDay(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	current := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	path := filepath.Join(root, "shadow-"+dayKey(current)+".jsonl")
+	store, err := journal.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(
+		current.Add(-24*time.Hour), shadow.EventOpened, "", shadow.Opening{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	roll, err := newDailyJournal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer roll.Close()
+	if err := roll.openFor(current); err == nil ||
+		!strings.Contains(err.Error(), "different UTC day") {
+		t.Fatalf("active journal accepted another day's records: %v", err)
+	}
+}
+
+func TestRolloverDiscardsPreparedObservationBeforeRunnerMutation(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldAt := time.Date(2026, 8, 30, 23, 59, 59, 0, time.UTC)
+	newAt := oldAt.Add(2 * time.Second)
+	policy := candidateTestPolicy()
+	primary := candidatePriceSource{identity: policy.Trigger.PrimarySourceSHA256, at: newAt}
+	secondary := candidatePriceSource{identity: policy.Trigger.SecondarySourceSHA256, at: newAt}
+	roll, err := newDailyJournal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer roll.Close()
+	if err := roll.openFor(oldAt); err != nil {
+		t.Fatal(err)
+	}
+	run := &shadowRun{
+		policy: policy, primary: primary, secondary: secondary,
+		quoter: liveStubQuoter{estimated: 21_525}, roll: roll,
+	}
+	if run.runner, err = run.newRunner(); err != nil {
+		t.Fatal(err)
+	}
+	oldRunner := run.runner
+	_ = oldRunner.Observe(t.Context())
+	if oldRunner.Counts() != (shadow.Counts{}) {
+		t.Fatalf("pre-roll observation mutated counts: %+v", oldRunner.Counts())
+	}
+	rolled, err := run.rollDay(newAt, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rolled || run.runner == oldRunner || oldRunner.Counts() != (shadow.Counts{}) {
+		t.Fatalf("rollover reused or mutated old runner: rolled=%t counts=%+v", rolled, oldRunner.Counts())
+	}
+	if _, err := os.Stat(filepath.Join(root, "shadow-2026-08-31.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("old observation opened the new-day journal: %v", err)
+	}
+}
+
 // A relative or unclean directory must be refused: the journal is the evidence,
 // and it has to land where the operator thinks it does.
 func TestDailyJournalRefusesAnUnsafeDirectory(t *testing.T) {
@@ -311,6 +404,41 @@ func TestShadowJournalHeaderBindsThePolicyAndRefusesTheOldFormat(t *testing.T) {
 	if _, err := shadowTicksFrom(old.Records(), policy, true); err == nil ||
 		!strings.Contains(err.Error(), "unsupported opening format") {
 		t.Fatalf("old opening format was not refused clearly: %v", err)
+	}
+}
+
+func TestShadowJournalRecordTimeBindsTheTick(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	policy := validShadowPolicy()
+	fingerprint, err := policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	roll, err := newDailyJournal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer roll.Close()
+	at := time.Date(2026, 3, 2, 12, 0, 0, 0, time.UTC)
+	if err := roll.Record(at, shadow.EventOpened, shadow.Opening{
+		Version: shadow.JournalVersion, PolicySHA256: fingerprint,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := roll.Record(at.Add(time.Second), shadow.EventWaiting, shadow.Tick{
+		At: at, Event: shadow.EventWaiting,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := shadowTicksFrom(roll.Records(), policy, false); err == nil ||
+		!strings.Contains(err.Error(), "timestamp does not match") {
+		t.Fatalf("journal/tick time mismatch was accepted: %v", err)
 	}
 }
 
@@ -399,6 +527,46 @@ func TestShadowReportIsAtomicallyReplacedAndUsesTheActualPartialPeriod(t *testin
 		!strings.Contains(output.String(), "matches the journal exactly") {
 		t.Fatalf("partial report did not recompute exactly:\n%s", output.String())
 	}
+	if err := os.Remove(filepath.Join(root, "report-2026-03-02.json")); err != nil {
+		t.Fatal(err)
+	}
+	alertPath := filepath.Join(root, "alerts.json")
+	run.alerts, err = paperstatus.OpenWriter(alertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := run.reconcileMissingShadowReports(); err != nil {
+		t.Fatal(err)
+	}
+	recoveredRaw, err := os.ReadFile(filepath.Join(root, "report-2026-03-02.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recovered shadow.Report
+	if err := json.Unmarshal(recoveredRaw, &recovered); err != nil || !recovered.To.Equal(secondEnd) {
+		t.Fatalf("recovered report = %+v, %v", recovered, err)
+	}
+	current, err := newDailyJournal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer current.Close()
+	if err := current.openFor(time.Date(2026, 3, 3, 1, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	run.roll = current
+	if err := run.reconcileStoredShadowReports(); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot paperstatus.Snapshot
+	alertRaw, err := os.ReadFile(alertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(alertRaw, &snapshot); err != nil || len(snapshot.Events) != 1 ||
+		snapshot.Events[0].Kind != paperstatus.KindPeriodClosed {
+		t.Fatalf("reconciled report alert = %+v, %v", snapshot, err)
+	}
 }
 
 func TestStoredShadowReportComparisonIsStrictAndFailsClosed(t *testing.T) {
@@ -460,7 +628,7 @@ func TestLiveShadowReadsMainnet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondary := pricesource.NewCoinbase(nil)
+	secondary := pricesource.NewKrakenSOL(nil)
 	quotePrimary, err := pricesource.NewPythPushUSDC(publicAccountReader(endpoint), time.Now)
 	if err != nil {
 		t.Fatal(err)
@@ -582,7 +750,7 @@ func TestTheDayReportCoversTheWholeJournalNotOneProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondary := pricesource.NewCoinbase(nil)
+	secondary := pricesource.NewKrakenSOL(nil)
 	quotePrimary, err := pricesource.NewPythPushUSDC(publicAccountReader(endpoint), time.Now)
 	if err != nil {
 		t.Fatal(err)

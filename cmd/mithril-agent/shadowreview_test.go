@@ -22,7 +22,8 @@ func completeShadowReport(from time.Time) shadow.Report {
 		Counts:        shadow.Counts{Ticks: 24, Signals: 2, Fills: 1},
 		ExpectedTicks: 24, ObservableBPS: 10_000,
 		QuotePegMinimumMicros: 990_000, QuotePegMaximumMicros: 1_010_000,
-		VersusHoldMicros: 12_000, MaxDrawdownMicros: 3_000,
+		OpeningEquityMicros: 1_000_000,
+		VersusHoldMicros:    12_000, MaxDrawdownMicros: 3_000,
 	}
 }
 

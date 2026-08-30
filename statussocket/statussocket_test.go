@@ -62,6 +62,31 @@ func TestUnixBridgeServesAtMostOneValidatedSnapshotWithoutARequest(t *testing.T)
 	cancel()
 }
 
+func TestCredentialReaderAcceptsSystemdServiceOwnedCredential(t *testing.T) {
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(validSnapshot(time.Now().UTC()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "operator-status")
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := NewCredentialReader(directory, "operator-status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := reader.Read(); err != nil || got.Profile == "" {
+		t.Fatalf("service-owned credential = %+v, %v", got, err)
+	}
+}
+
 func TestServeConnectionReturnsNothingForUnavailableOrInvalidStatus(t *testing.T) {
 	for name, reader := range map[string]*snapshotStub{
 		"unavailable": {err: errors.New("private source detail")},

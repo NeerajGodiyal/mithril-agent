@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
@@ -176,7 +177,25 @@ func readShadowTicks(path string, policy shadow.Policy) ([]shadow.Tick, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateShadowJournalDay(path, records); err != nil {
+		return nil, err
+	}
 	return shadowTicksFrom(records, policy, false)
+}
+
+func validateShadowJournalDay(path string, records []journal.Record) error {
+	name := filepath.Base(path)
+	day := strings.TrimSuffix(strings.TrimPrefix(name, "shadow-"), ".jsonl")
+	parsed, err := time.Parse("2006-01-02", day)
+	if err != nil || name != "shadow-"+parsed.Format("2006-01-02")+".jsonl" {
+		return errors.New("the shadow journal filename has an invalid UTC day")
+	}
+	for _, record := range records {
+		if dayKey(record.At) != day {
+			return errors.New("the shadow journal contains a record from a different UTC day")
+		}
+	}
+	return nil
 }
 
 // shadowTicksFrom verifies the journal's policy-bound header and decodes its
@@ -224,6 +243,9 @@ func shadowTicksFrom(
 		}
 		if tick.Event != record.Type {
 			return nil, errors.New("a journal record type does not match its tick")
+		}
+		if !tick.At.Equal(record.At) {
+			return nil, errors.New("a journal record timestamp does not match its tick")
 		}
 		ticks = append(ticks, tick)
 	}

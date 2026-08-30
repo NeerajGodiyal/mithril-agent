@@ -4,10 +4,12 @@ package telegramoperator
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log"
 	"math"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +21,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/agent"
 	"github.com/Overclock-Validator/mithril-agent/internal/operatorstatus"
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
+	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 )
 
@@ -26,14 +29,18 @@ const (
 	BotTokenEnvironment   = "MITHRIL_AGENT_TELEGRAM_BOT_TOKEN"
 	AllowedIDsEnvironment = "MITHRIL_AGENT_TELEGRAM_CHAT_IDS"
 
-	maxInputBytes       = 1024
-	maxQuestionBytes    = 512
-	maxExplanationBytes = 1600
-	maxOutputBytes      = 3500
-	defaultPollTimeout  = 25 * time.Second
-	defaultMinInterval  = time.Second
-	defaultExplainTime  = 5 * time.Second
-	statusSource        = "local bounded operator status"
+	maxInputBytes          = 1024
+	maxQuestionBytes       = 512
+	maxExplanationBytes    = 1600
+	maxOutputBytes         = 3500
+	defaultPollTimeout     = 25 * time.Second
+	defaultMinInterval     = time.Second
+	defaultExplainTime     = 5 * time.Second
+	statusSource           = "local bounded operator status"
+	maxPaperSources        = 4
+	maxPaperAlertChats     = 8
+	maxPaperAnnounced      = 2304
+	maxPaperAnnouncedBytes = 192 << 10
 )
 
 // Update is the only Telegram update shape consumed by Service.
@@ -62,6 +69,12 @@ type StatusReader interface {
 	Read() (operatorstatus.Snapshot, error)
 }
 
+// PaperStatusReader returns only the bounded simulation-event projection. It
+// cannot read a journal, select a strategy, sign, or submit.
+type PaperStatusReader interface {
+	Read() (paperstatus.Snapshot, error)
+}
+
 // ExplanationRequest is the complete optional model boundary. It contains a
 // bounded question and deterministic text derived from operatorstatus only.
 // There is intentionally no action, tool, key, configuration, or endpoint API.
@@ -82,6 +95,8 @@ type Config struct {
 	Bot     Bot
 	Cursor  Cursor
 	Sources []StatusReader
+	// PaperSources are optional, read-only simulation alert sockets.
+	PaperSources []PaperStatusReader
 	// AnnouncedPath persists which actions have been announced so a restart
 	// does not repeat them. Empty keeps dedup in memory only.
 	AnnouncedPath     string
@@ -109,6 +124,7 @@ type Service struct {
 	bot               Bot
 	cursor            Cursor
 	sources           []StatusReader
+	paperSources      []PaperStatusReader
 	allowed           map[int64]struct{}
 	explainer         Explainer
 	explanationBudget ExplanationBudget
@@ -130,13 +146,25 @@ type Service struct {
 	// should not hear about it again because the process bounced.
 	announcedAction map[string]string
 	announceSeeded  map[string]bool
-	// announced survives restarts; announcedAction does not.
-	announced *announcedStore
+	// The independent stores keep a busy live strategy from evicting paper
+	// delivery IDs that are still present in a bounded paper snapshot.
+	announced       *announcedStore
+	paperAnnounced  *announcedStore
+	paperHealthSeen map[int]bool
+	paperHealthy    map[int]bool
 }
 
 func New(config Config) (*Service, error) {
 	if config.Bot == nil || config.Cursor == nil || len(config.Sources) == 0 {
 		return nil, errors.New("Telegram bot, cursor, and operator status reader are required")
+	}
+	for _, source := range config.PaperSources {
+		if source == nil {
+			return nil, errors.New("paper status readers must not be nil")
+		}
+	}
+	if len(config.PaperSources) > maxPaperSources {
+		return nil, fmt.Errorf("at most %d paper status readers are supported", maxPaperSources)
 	}
 	allowed := make(map[int64]struct{}, len(config.AllowedChatIDs))
 	for _, id := range config.AllowedChatIDs {
@@ -150,6 +178,9 @@ func New(config Config) (*Service, error) {
 	}
 	if len(allowed) == 0 {
 		return nil, errors.New("at least one allowed Telegram chat ID is required")
+	}
+	if len(config.PaperSources) != 0 && len(allowed) > maxPaperAlertChats {
+		return nil, fmt.Errorf("paper alerts support at most %d Telegram chats", maxPaperAlertChats)
 	}
 	if (config.Explainer == nil) != (config.ExplanationBudget == nil) {
 		return nil, errors.New("explanation provider and budget must be configured together")
@@ -175,10 +206,21 @@ func New(config Config) (*Service, error) {
 	if config.ExplanationLimit < 100*time.Millisecond || config.ExplanationLimit > 15*time.Second {
 		return nil, errors.New("explanation timeout must be between 100 milliseconds and 15 seconds")
 	}
+	paperAnnouncedPath := ""
+	if config.AnnouncedPath != "" {
+		paperAnnouncedPath = filepath.Join(
+			filepath.Dir(config.AnnouncedPath), "announced-paper-events.json",
+		)
+	}
 	return &Service{
-		bot: config.Bot, cursor: config.Cursor, sources: config.Sources, allowed: allowed,
+		bot: config.Bot, cursor: config.Cursor, sources: config.Sources,
+		paperSources: config.PaperSources, allowed: allowed,
 		announcedAction: map[string]string{}, announceSeeded: map[string]bool{},
 		announced: loadAnnouncedStore(config.AnnouncedPath),
+		paperAnnounced: loadBoundedAnnouncedStore(
+			paperAnnouncedPath, maxPaperAnnounced, maxPaperAnnouncedBytes,
+		),
+		paperHealthSeen: map[int]bool{}, paperHealthy: map[int]bool{},
 		explainer: config.Explainer, explanationBudget: config.ExplanationBudget, now: config.Now,
 		pollTimeout: config.PollTimeout, minInterval: config.MinimumInterval,
 		pollRetryDelay: defaultPollRetryDelay,
@@ -310,6 +352,69 @@ func (s *Service) announce(ctx context.Context) {
 	for index, source := range s.sources {
 		s.announceSource(ctx, index, source)
 	}
+	for index, source := range s.paperSources {
+		s.announcePaperSource(ctx, index, source)
+	}
+}
+
+func (s *Service) announcePaperSource(ctx context.Context, index int, source PaperStatusReader) {
+	snapshot, err := source.Read()
+	if err != nil || paperstatus.ValidateSnapshot(snapshot) != nil {
+		s.recordPaperHealth(index, false)
+		return
+	}
+	s.recordPaperHealth(index, true)
+	events := snapshot.Events
+	if gap, ok := paperstatus.TruncationEvent(snapshot); ok {
+		events = append([]paperstatus.Event{gap}, events...)
+	}
+	blocked := make(map[int64]bool)
+	for _, event := range events {
+		delivered := 0
+		for chatID := range s.allowed {
+			if blocked[chatID] {
+				continue
+			}
+			deliveryID := paperDeliveryID(index, event.ID, chatID)
+			if s.paperAnnounced.announced(deliveryID) {
+				continue
+			}
+			if err := s.bot.Send(ctx, chatID, bounded(event.Message)); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("telegram: paper announcement to chat %d failed: %v", chatID, err)
+				blocked[chatID] = true
+				continue
+			}
+			delivered++
+			if err := s.paperAnnounced.record(deliveryID); err != nil {
+				log.Printf("telegram: %v", err)
+			}
+		}
+		if delivered > 0 {
+			log.Printf("telegram: announced paper event %s to %d chat(s)", shortActionID(event.ID), delivered)
+		}
+	}
+}
+
+func (s *Service) recordPaperHealth(index int, healthy bool) {
+	seen, previous := s.paperHealthSeen[index], s.paperHealthy[index]
+	s.paperHealthSeen[index], s.paperHealthy[index] = true, healthy
+	if !healthy && (!seen || previous) {
+		log.Printf("telegram: paper status source %d unavailable", index+1)
+	}
+	if healthy && seen && !previous {
+		log.Printf("telegram: paper status source %d available again", index+1)
+	}
+}
+
+func paperDeliveryID(source int, eventID string, chatID int64) string {
+	digest := sha256.Sum256([]byte(
+		"mithril-agent/paper-telegram-delivery/v1\x00" + strconv.Itoa(source) + "\x00" +
+			eventID + "\x00" + strconv.FormatInt(chatID, 10),
+	))
+	return fmt.Sprintf("%x", digest)
 }
 
 // announceSource reports one leg. The dedup state is per SOURCE, so a restart

@@ -93,20 +93,34 @@ func NewLedger(policy Policy, openingPriceMicros uint64) (Ledger, error) {
 	return ledger, nil
 }
 
-// Apply books a filled trade and returns the resulting ledger. A refused fill
-// changes nothing, which is the point of recording refusals separately.
+// Apply books a settled attempt and returns the resulting ledger. A refused
+// submitted attempt moves no traded inventory but still pays its network fee.
 func (l Ledger) Apply(fill Fill, markPriceMicros uint64) (Ledger, error) {
-	if !fill.Filled {
-		return l.mark(markPriceMicros)
-	}
 	if markPriceMicros == 0 {
 		return Ledger{}, errZeroReference
 	}
+	// A transaction fee is withdrawn before its instructions execute. Bought
+	// SOL therefore cannot fund its own fee, and a sell must leave the fee.
+	if fill.FeeLamports > l.BaseUnits ||
+		(fill.Filled && fill.Sell && fill.SpentUnits > l.BaseUnits-fill.FeeLamports) {
+		return Ledger{}, errInsufficientInventory
+	}
 	next := l
-	baseDecimals, quoteDecimals := l.baseDecimals(), l.quoteDecimals()
+	if !fill.Filled {
+		if next, err := next.chargeFee(fill.FeeLamports, markPriceMicros); err != nil {
+			return Ledger{}, err
+		} else {
+			return next.mark(markPriceMicros)
+		}
+	}
+	var err error
+	if next, err = next.chargeFee(fill.FeeLamports, markPriceMicros); err != nil {
+		return Ledger{}, err
+	}
+	quoteDecimals := next.quoteDecimals()
 
 	if fill.Sell {
-		if fill.SpentUnits > l.BaseUnits {
+		if fill.SpentUnits > next.BaseUnits {
 			return Ledger{}, errInsufficientInventory
 		}
 		proceeds, err := scaleToMicros(fill.ReceivedUnits, quoteDecimals)
@@ -115,7 +129,7 @@ func (l Ledger) Apply(fill Fill, markPriceMicros uint64) (Ledger, error) {
 		}
 		// Proportional to what is actually held, so the basis is exact rather
 		// than reconstructed from a rounded average.
-		cost := shareOf(l.CostBasisMicros, fill.SpentUnits, l.BaseUnits)
+		cost := shareOf(next.CostBasisMicros, fill.SpentUnits, next.BaseUnits)
 		signedProceeds, err := signed(proceeds)
 		if err != nil {
 			return Ledger{}, err
@@ -142,7 +156,7 @@ func (l Ledger) Apply(fill Fill, markPriceMicros uint64) (Ledger, error) {
 		next.RealizedMicros = realized
 		next.TurnoverMicros = turnover
 	} else {
-		if fill.SpentUnits > l.QuoteUnits {
+		if fill.SpentUnits > next.QuoteUnits {
 			return Ledger{}, errInsufficientInventory
 		}
 		spent, err := scaleToMicros(fill.SpentUnits, quoteDecimals)
@@ -168,11 +182,35 @@ func (l Ledger) Apply(fill Fill, markPriceMicros uint64) (Ledger, error) {
 		next.TurnoverMicros = turnover
 	}
 
-	// The fee is always paid in the native asset, which is the base.
-	if fill.FeeLamports > next.BaseUnits {
+	if next.AverageCostMicros, err = averageCost(
+		next.CostBasisMicros, next.BaseUnits, next.baseDecimals(),
+	); err != nil {
+		return Ledger{}, err
+	}
+	fills, err := addUnits(next.Fills, 1)
+	if err != nil {
+		return Ledger{}, err
+	}
+	next.Fills = fills
+	return next.mark(markPriceMicros)
+}
+
+// chargeFee removes the native fee and its proportional cost basis. It is
+// shared by fills and modeled post-submit refusals so every execution path uses
+// identical accounting.
+func (l Ledger) chargeFee(feeLamports, markPriceMicros uint64) (Ledger, error) {
+	if feeLamports == 0 {
+		return l, nil
+	}
+	if feeLamports > l.BaseUnits {
 		return Ledger{}, errInsufficientInventory
 	}
-	feeMicros, err := valueAt(fill.FeeLamports, markPriceMicros, baseDecimals)
+	feeMicros, err := valueAt(feeLamports, markPriceMicros, l.baseDecimals())
+	if err != nil {
+		return Ledger{}, err
+	}
+	basis := shareOf(l.CostBasisMicros, feeLamports, l.BaseUnits)
+	signedBasis, err := signed(basis)
 	if err != nil {
 		return Ledger{}, err
 	}
@@ -180,32 +218,54 @@ func (l Ledger) Apply(fill Fill, markPriceMicros uint64) (Ledger, error) {
 	if err != nil {
 		return Ledger{}, err
 	}
-	fees, err := addSigned(next.FeesMicros, signedFee)
+	fees, err := addSigned(l.FeesMicros, signedFee)
 	if err != nil {
 		return Ledger{}, err
 	}
-	realized, err := addSigned(next.RealizedMicros, -signedFee)
+	realized, err := addSigned(l.RealizedMicros, -signedBasis)
 	if err != nil {
 		return Ledger{}, err
 	}
-	fills, err := addUnits(next.Fills, 1)
-	if err != nil {
-		return Ledger{}, err
-	}
-	// The fee lamports leave the book, so their share of the basis leaves with
-	// them. The small unrealized gain on those few thousand lamports is not
-	// separately booked; at a transaction fee's scale it is far below a micro.
-	next.CostBasisMicros -= shareOf(next.CostBasisMicros, fill.FeeLamports, next.BaseUnits)
-	next.BaseUnits -= fill.FeeLamports
+	// Treat the fee as a disposal at the current mark followed by an equal fee
+	// expense. The mark terms cancel, so the net realized change is the removed
+	// basis. FeesMicros still records the fee's current value for reporting.
+	next := l
+	next.CostBasisMicros -= basis
+	next.BaseUnits -= feeLamports
 	next.FeesMicros = fees
 	next.RealizedMicros = realized
-	next.Fills = fills
 	if next.AverageCostMicros, err = averageCost(
-		next.CostBasisMicros, next.BaseUnits, baseDecimals,
+		next.CostBasisMicros, next.BaseUnits, l.baseDecimals(),
 	); err != nil {
 		return Ledger{}, err
 	}
-	return next.mark(markPriceMicros)
+	return next, nil
+}
+
+func canFundAttempt(ledger Ledger, sell bool, amount, reserveLamports uint64) bool {
+	if amount == 0 || reserveLamports > ledger.BaseUnits {
+		return false
+	}
+	if sell {
+		return amount <= ledger.BaseUnits-reserveLamports
+	}
+	return amount <= ledger.QuoteUnits
+}
+
+func capSellAmount(amount, baseUnits, reserveLamports uint64) uint64 {
+	if reserveLamports >= baseUnits {
+		return 0
+	}
+	return min(amount, baseUnits-reserveLamports)
+}
+
+func roundTripFeeReserve(feeLamports uint64) uint64 { return 2 * feeLamports }
+
+func attemptFeeReserve(policy Policy, sell bool) uint64 {
+	if sell && policy.RoundTrip() {
+		return roundTripFeeReserve(policy.FeeLamports)
+	}
+	return policy.FeeLamports
 }
 
 // mark revalues the book at the current price and updates the high-water mark

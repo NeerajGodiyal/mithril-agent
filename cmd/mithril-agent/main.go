@@ -101,6 +101,9 @@ Other supported tools:
   mithril-agent shadow report --policy PATH --dir PATH
   mithril-agent shadow review --policy PATH --dir PATH --days N
   mithril-agent shadow search --policy PATH --dir PATH --train-day DATE --validation-day DATE
+  mithril-agent shadow select --policy PATH --candidate PATH --pointer PATH --lifecycle-lock PATH
+  mithril-agent shadow challenge --policy PATH --champion-pointer PATH --challenger PATH --champion-dir PATH --challenger-dir PATH --days N
+  mithril-agent shadow research-mcp --policy PATH --journal-dir PATH ...
   mithril-agent proposal evidence-check --primary-trust-domain NAME --secondary-trust-domain NAME --archive-probe-signature SIGNATURE
   mithril-agent proposal check --taker ADDR --input-mint ADDR --output-mint ADDR --amount N
   mithril-agent proposal recheck --candidate ABSOLUTE_PATH [provider bindings]
@@ -331,6 +334,15 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		}
 		if len(args) > 1 && args[1] == "search" {
 			return runShadowSearch(args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "select" {
+			return runShadowSelect(args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "challenge" {
+			return runShadowChallenge(args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "research-mcp" {
+			return runShadowResearchMCP(ctx, args[2:], os.Stdin, output)
 		}
 		return runShadow(args[1:], output)
 	case "proposal":
@@ -1774,16 +1786,27 @@ func runShadow(args []string, output io.Writer) error {
   mithril-agent shadow review --policy PATH --dir PATH --days N [--json]
                                        verify consecutive complete Mainnet days
                                        for operator review; never approves
+  mithril-agent shadow challenge --policy PATH --champion-pointer PATH
+                                 --challenger PATH --champion-dir PATH
+                                 --challenger-dir PATH --days N
+                                       compare paired forward paper evidence;
+                                       read-only and never selects
   mithril-agent shadow backtest --policy PATH --dir PATH --buy-at-usd N
                                 [--spread-bps N] [--day DATE] [--json]
                                        score a sell-then-buy-back ROUND TRIP over
                                        recorded prices, on one set of books
   mithril-agent shadow search --policy PATH --dir PATH
                               --train-day DATE --validation-day DATE
-                              [--spread-bps N]
+                              [--spread-bps N] [--candidate-out PATH]
                                        choose thresholds on one recorded day and
                                        score them on a later untouched day;
                                        research only, never authorizes
+  mithril-agent shadow select --policy PATH --candidate PATH --pointer PATH --lifecycle-lock PATH
+                                       atomically select an immutable paper
+                                       candidate for startup/next UTC day
+  mithril-agent shadow research-mcp --policy PATH --journal-dir PATH ...
+                                       serve bounded local paper-research tools;
+                                       cannot authorize, sign, or submit
 
 Each subcommand takes --help of its own.
 

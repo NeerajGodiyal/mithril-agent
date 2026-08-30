@@ -14,11 +14,9 @@ import (
 
 // Pyth publishes SOL/USD as a sponsored on-chain push feed, so the price can be
 // read through the operator's own Mithril node with no data subscription. The
-// Core upgrade on 2026-08-18 has separate early-upgrade program and feed
-// addresses, while Pyth will upgrade the current contract in place at cutover.
+// Core upgrade has separate legacy and upgraded program-derived feed accounts.
 // Both sponsored accounts and their exact owners are pinned here: reading both
-// avoids an operator-side address switch, and while both publish they
-// cross-check each other for free.
+// survives the migration, and while both publish they cross-check each other.
 //
 // The dangerous failure of a sponsored feed is not disappearance but silent
 // staleness — a stopped feed keeps serving a well-formed, plausible price
@@ -33,8 +31,9 @@ const (
 	pythPushUpgradedAccount = "7AviUf9nL62mcxNbQGKm4nKDQnPjswo6c5MX4D57HmyE"
 	pythPushUpgradedOwner   = "rec2HHDDnjLfj4kE7VyEtFA1HPGQLK33259532cRyHp"
 
-	pythPushUSDCAccount = "Dpw1EAVrSB1ibxiDQyTAW6Zip3J4Btk2x4SgApQCeFbX"
-	USDCUSDFeedID       = "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"
+	pythPushUSDCAccount         = "Dpw1EAVrSB1ibxiDQyTAW6Zip3J4Btk2x4SgApQCeFbX"
+	pythPushUSDCUpgradedAccount = "6HAuqASbHEh4w4REJEUUUCginTLfj1kwCh215ZLtMkrT"
+	USDCUSDFeedID               = "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"
 
 	// PriceUpdateV2 is a fixed-size Anchor account: an 8-byte discriminator,
 	// a 32-byte write authority, a 1-byte verification level, the 32-byte feed
@@ -78,10 +77,8 @@ var pythPushFeeds = []pythPushFeed{
 }
 
 var pythPushUSDCFeeds = []pythPushFeed{
-	// Pyth's sponsored-feed registry publishes one current USDC/USD account.
-	// The current receiver contract is upgraded in place at the 2026-08-18
-	// cutover, so this account does not need an early-upgrade sibling.
 	{account: pythPushUSDCAccount, owner: pythPushLegacyOwner},
+	{account: pythPushUSDCUpgradedAccount, owner: pythPushUpgradedOwner},
 }
 
 type pythPushDefinition struct {

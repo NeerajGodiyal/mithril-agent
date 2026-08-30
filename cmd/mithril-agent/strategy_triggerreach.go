@@ -160,7 +160,7 @@ func describeReach(reach triggerReach, movement string) string {
 }
 
 // liveTriggerSamples reads the same two sources the written profile names —
-// the on-chain Pyth account and Coinbase — so the advice is computed from the
+// the on-chain Pyth account and Kraken — so the advice is computed from the
 // evidence the runner will be judged on.
 //
 // It reaches Pyth over the primary RPC, NOT through the operator's Mithril node
@@ -190,7 +190,7 @@ func liveTriggerSamples(ctx context.Context) (pricetrigger.Sample, pricetrigger.
 	if err != nil {
 		return pricetrigger.Sample{}, pricetrigger.Sample{}, err
 	}
-	secondary, err := pricesource.NewCoinbase(&http.Client{Timeout: 15 * time.Second}).
+	secondary, err := pricesource.NewKrakenSOL(&http.Client{Timeout: 15 * time.Second}).
 		Latest(readCtx, pricetrigger.FeedSOLUSD)
 	if err != nil {
 		return pricetrigger.Sample{}, pricetrigger.Sample{}, err

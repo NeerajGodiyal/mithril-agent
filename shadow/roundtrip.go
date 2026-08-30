@@ -2,6 +2,7 @@ package shadow
 
 import (
 	"errors"
+	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 )
@@ -39,6 +40,9 @@ type RoundTripCounts struct {
 	// Refused counts legs the slippage floor stopped. High refusal with high
 	// signal means the thresholds are reachable but the pool cannot fill them.
 	Refused uint64 `json:"refused"`
+	// Missed counts a decision whose settlement time arrived without an
+	// observable market price, matching the live runner's fail-closed behavior.
+	Missed uint64 `json:"missed"`
 	// SellSignals and BuySignals are ticks where the active rule fired. Comparing
 	// them with completed legs and refusals shows whether the route could act on
 	// the prices the strategy selected.
@@ -68,10 +72,73 @@ func ReplayRoundTrip(
 	if err := policy.Validate(); err != nil {
 		return RoundTripResult{}, err
 	}
+	observations := make([]roundTripObservation, len(prices))
+	at := time.Unix(0, 0).UTC()
+	for index, price := range prices {
+		if index != 0 {
+			at = at.Add(policy.Tick())
+		}
+		observations[index] = roundTripObservation{at: at, priceMicros: price, observable: true}
+	}
+	return replayRoundTrip(policy, observations, quoteFor)
+}
+
+// ReplayRoundTripTicks uses the journal's actual observation times. This is
+// the production backtest/search path: missing market reads must not shorten a
+// configured settlement delay.
+func ReplayRoundTripTicks(
+	policy Policy,
+	ticks []Tick,
+	quoteFor func(priceMicros uint64, sell bool, inputAmount uint64) (Quote, error),
+) (RoundTripResult, error) {
+	if err := policy.Validate(); err != nil {
+		return RoundTripResult{}, err
+	}
+	observations := make([]roundTripObservation, 0, len(ticks))
+	for _, tick := range ticks {
+		if tick.PeriodClose {
+			if tick.Event != EventClosed && tick.Event != EventMissed {
+				return RoundTripResult{}, errors.New("round-trip period close is invalid")
+			}
+			observations = append(observations, roundTripObservation{
+				at: tick.At, periodClose: true,
+			})
+			continue
+		}
+		if tick.PriceMicros == 0 && tick.Event != EventUnobservable ||
+			tick.PriceMicros != 0 && tick.Event == EventUnobservable {
+			return RoundTripResult{}, errors.New("round-trip tick has inconsistent observability")
+		}
+		observations = append(observations, roundTripObservation{
+			at: tick.At, priceMicros: tick.PriceMicros, observable: tick.PriceMicros != 0,
+		})
+	}
+	return replayRoundTrip(policy, observations, quoteFor)
+}
+
+type roundTripObservation struct {
+	at          time.Time
+	priceMicros uint64
+	observable  bool
+	periodClose bool
+}
+
+type roundTripPending struct {
+	priceMicros uint64
+	quote       Quote
+	sell        bool
+	settleAfter time.Time
+}
+
+func replayRoundTrip(
+	policy Policy,
+	observations []roundTripObservation,
+	quoteFor func(priceMicros uint64, sell bool, inputAmount uint64) (Quote, error),
+) (RoundTripResult, error) {
 	if !policy.RoundTrip() {
 		return RoundTripResult{}, errors.New("policy has no return trigger; use Replay for one direction")
 	}
-	if len(prices) < 2 {
+	if len(observations) < 2 {
 		return RoundTripResult{}, errors.New("a round trip needs at least two prices to settle against")
 	}
 	if quoteFor == nil {
@@ -83,7 +150,17 @@ func ReplayRoundTrip(
 		sellRule, buyRule = buyRule, sellRule
 	}
 
-	ledger, err := NewLedger(policy, prices[0])
+	openingPrice := uint64(0)
+	for _, observation := range observations {
+		if observation.observable {
+			openingPrice = observation.priceMicros
+			break
+		}
+	}
+	if openingPrice == 0 {
+		return RoundTripResult{}, errors.New("a round trip needs an observable opening price")
+	}
+	ledger, err := NewLedger(policy, openingPrice)
 	if err != nil {
 		return RoundTripResult{}, err
 	}
@@ -91,86 +168,132 @@ func ReplayRoundTrip(
 	// The leg the run is waiting to make.
 	sell := policy.IsSell()
 	nextAmount := policy.InputAmount
+	var pending *roundTripPending
 
-	// The last price has no later price to settle against, and settling a
-	// decision against the price that produced it is the single easiest way to
-	// make a paper result flatter itself.
-	for index := 0; index < len(prices)-1; index++ {
-		decision, settle := prices[index], prices[index+1]
+	var previous time.Time
+	for _, observation := range observations {
+		if observation.at.IsZero() || !previous.IsZero() && observation.at.Before(previous) {
+			return RoundTripResult{}, errors.New("round-trip observations are not chronological")
+		}
+		previous = observation.at
+		if observation.periodClose {
+			// The journal close describes the original policy. Hypothetical
+			// thresholds can have different pending state, so use only its time
+			// boundary and close the candidate's own decision if it has one.
+			if pending != nil {
+				pending = nil
+				result.Counts.Missed++
+			}
+			continue
+		}
 		result.Counts.Ticks++
-		if decision == 0 || settle == 0 {
+		if !observation.observable {
+			if pending != nil && !observation.at.Before(pending.settleAfter) {
+				pending = nil
+				result.Counts.Missed++
+			}
+			continue
+		}
+		price := observation.priceMicros
+		if price == 0 {
 			return RoundTripResult{}, errZeroReference
 		}
+		marked, err := result.Ledger.Mark(price)
+		if err != nil {
+			return RoundTripResult{}, err
+		}
+		result.Ledger = marked
 
 		rule := buyRule
 		if sell {
 			rule = sellRule
 		}
-		if !thresholdMet(rule, decision) {
-			continue
-		}
-		if sell {
-			result.Counts.SellSignals++
-		} else {
-			result.Counts.BuySignals++
-		}
-
-		// Spend what the previous leg produced, bounded by what is actually held,
-		// so the book can never go short and the return leg cannot invent size.
-		held := result.Ledger.QuoteUnits
-		if sell {
-			held = result.Ledger.BaseUnits
-		}
-		if nextAmount == 0 || nextAmount > held {
-			continue
-		}
-		quote, err := quoteFor(decision, sell, nextAmount)
-		if err != nil {
-			return RoundTripResult{}, err
-		}
-		if quote.InputAmount != nextAmount {
-			return RoundTripResult{}, errors.New("round-trip quote changed the requested input amount")
+		triggered := thresholdMet(rule, price)
+		if triggered {
+			if sell {
+				result.Counts.SellSignals++
+			} else {
+				result.Counts.BuySignals++
+			}
 		}
 
-		fill, err := SettleFillDirected(policy, quote, decision, settle, sell)
-		if err != nil {
-			return RoundTripResult{}, err
-		}
-		if !fill.Filled {
-			result.Counts.Refused++
-			continue
-		}
-		// Into a TEMPORARY, because Apply returns a zero Ledger on failure and
-		// assigning before checking the error wiped the entire book on the first
-		// refused fill — every later tick then read as the opposite direction.
-		applied, err := result.Ledger.Apply(fill, settle)
-		if err != nil {
-			// Not enough inventory is a real refusal, not a programming error:
-			// the fee is charged out of the same balance the trade spends, so a
-			// leg sized at the whole balance can never settle.
-			if errors.Is(err, errInsufficientInventory) {
+		if pending != nil {
+			if observation.at.Before(pending.settleAfter) {
+				continue
+			}
+			settlementQuote, err := quoteFor(price, pending.sell, pending.quote.InputAmount)
+			if err != nil {
+				return RoundTripResult{}, err
+			}
+			if settlementQuote.InputAmount != pending.quote.InputAmount {
+				return RoundTripResult{}, errors.New("round-trip settlement quote changed the requested input amount")
+			}
+			fill, err := SettleRequotedFillDirected(
+				policy, pending.quote, settlementQuote,
+				pending.priceMicros, price, pending.sell,
+			)
+			pending = nil
+			if err != nil {
+				return RoundTripResult{}, err
+			}
+			applied, err := result.Ledger.Apply(fill, price)
+			if err != nil {
+				if errors.Is(err, errInsufficientInventory) {
+					result.Counts.Missed++
+					continue
+				}
+				return RoundTripResult{}, err
+			}
+			result.Ledger = applied
+			if !fill.Filled {
 				result.Counts.Refused++
 				continue
 			}
+			nextAmount = fill.ReceivedUnits
+			if sell {
+				result.Counts.Sells++
+			} else {
+				result.Counts.Buys++
+			}
+			sell = !sell
+			if sell {
+				nextAmount = capSellAmount(
+					nextAmount, result.Ledger.BaseUnits, roundTripFeeReserve(policy.FeeLamports),
+				)
+			}
+			// A live observation that settles a decision cannot also open the
+			// next leg. Reusing it would give the model information twice.
+			continue
+		}
+		if !triggered {
+			continue
+		}
+		// Spend what the previous leg produced, bounded by what is actually held,
+		// so the book can never go short and the return leg cannot invent size.
+		if !canFundAttempt(
+			result.Ledger, sell, nextAmount, attemptFeeReserve(policy, sell),
+		) {
+			result.Counts.Missed++
+			continue
+		}
+		decisionQuote, err := quoteFor(price, sell, nextAmount)
+		if err != nil {
 			return RoundTripResult{}, err
 		}
-		result.Ledger = applied
-		nextAmount = fill.ReceivedUnits
-		if sell {
-			result.Counts.Sells++
-		} else {
-			result.Counts.Buys++
+		if decisionQuote.InputAmount != nextAmount {
+			return RoundTripResult{}, errors.New("round-trip quote changed the requested input amount")
 		}
-		// Handed over: the next leg is the other direction.
-		sell = !sell
-		if sell && nextAmount > result.Ledger.BaseUnits {
-			nextAmount = result.Ledger.BaseUnits
+		pending = &roundTripPending{
+			priceMicros: price, quote: decisionQuote, sell: sell,
+			settleAfter: observation.at.Add(policy.Settle()),
 		}
 	}
 
-	result.ClosingPrice = prices[len(prices)-1]
-	if result.Ledger, err = result.Ledger.Mark(result.ClosingPrice); err != nil {
-		return RoundTripResult{}, err
+	for index := len(observations) - 1; index >= 0; index-- {
+		if observations[index].observable {
+			result.ClosingPrice = observations[index].priceMicros
+			break
+		}
 	}
 	return result, nil
 }

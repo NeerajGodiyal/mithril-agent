@@ -169,7 +169,8 @@ func TestIndexRestartQueryAndIdempotence(t *testing.T) {
 		t.Fatal(err)
 	}
 	if status.Provenance != "mithril_alpenglow_rooted_feed" || status.Finality != "rooted" ||
-		status.Accounts != 2 || status.Roots != 2 || status.LastRoot == nil || status.LastRoot.Slot != 11 {
+		status.Accounts != 2 || status.Roots != 2 || status.LastRoot == nil || status.LastRoot.Slot != 11 ||
+		status.LastRecordedAt == nil || status.LastRecordedAt.IsZero() {
 		t.Fatalf("status = %+v", status)
 	}
 	results, err := QueryAccounts(dir, Query{Owner: testOwner, Limit: 10, IncludeData: true})

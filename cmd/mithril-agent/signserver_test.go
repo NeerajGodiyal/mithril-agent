@@ -101,6 +101,31 @@ func TestAPostedSignatureIsVerifiedNotMerelyReceived(t *testing.T) {
 	}
 }
 
+func TestSigningServerRejectsAnOversizedSignatureRequest(t *testing.T) {
+	collector, err := newSignatureCollector("challenge-text", servedPage(t), func(string) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() { _, _ = collector.collect(ctx) }()
+	waitForServer(t, collector.url())
+
+	body := `{"signature":"good-signature"}` + strings.Repeat(" ", signMaxBodyBytes)
+	response, err := http.Post(
+		collector.url()+"/signature", "application/json", strings.NewReader(body),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversized signature request returned %d, want 400", response.StatusCode)
+	}
+}
+
 func TestSigningServerWaitsForTheDesktopHelperToObserveSuccess(t *testing.T) {
 	collector, err := newSignatureCollector("challenge", servedPage(t), func(string) error {
 		return nil
@@ -136,6 +161,34 @@ func TestSigningServerWaitsForTheDesktopHelperToObserveSuccess(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("the server did not close after success was observed")
+	}
+}
+
+func TestSigningServerReportsAnUnexpectedListenerFailure(t *testing.T) {
+	collector, err := newSignatureCollector("challenge", servedPage(t), func(string) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := collector.collect(t.Context())
+		result <- err
+	}()
+	waitForServer(t, collector.url())
+	if err := collector.listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-result:
+		if err == nil || err.Error() != "wallet signing page stopped unexpectedly" {
+			t.Fatalf("collector error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener failure waited for the signing timeout")
 	}
 }
 
@@ -289,9 +342,17 @@ func TestServingIsTheDefaultNotAFlag(t *testing.T) {
 	if !strings.Contains(text, "collectSweepSignature(") {
 		t.Fatal("the interactive ceremony does not offer the served page")
 	}
+	start := strings.Index(text, "func collectSweepSignature(")
+	if start < 0 {
+		t.Fatal("the interactive signature collector is missing")
+	}
+	wizard := text[start:]
+	if end := strings.Index(wizard, "\nfunc "); end > 0 {
+		wizard = wizard[:end]
+	}
 	// And pasting must survive: somebody signing with the Solana CLI should not
 	// be made to open a tunnel.
-	if !strings.Contains(text, "paste the base58 signature here") {
+	if !strings.Contains(wizard, "paste the base58 signature here") {
 		t.Error("the keyboard route was removed; CLI signers have no way through")
 	}
 }

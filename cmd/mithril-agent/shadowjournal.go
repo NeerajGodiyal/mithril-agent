@@ -67,8 +67,13 @@ func (d *dailyJournal) openFor(at time.Time) error {
 	if err := d.Close(); err != nil {
 		return err
 	}
-	store, err := journal.Open(filepath.Join(d.directory, "shadow-"+key+".jsonl"))
+	path := filepath.Join(d.directory, "shadow-"+key+".jsonl")
+	store, err := journal.Open(path)
 	if err != nil {
+		return err
+	}
+	if err := validateShadowJournalDay(path, store.Records()); err != nil {
+		_ = store.Close()
 		return err
 	}
 	d.store, d.day = store, key

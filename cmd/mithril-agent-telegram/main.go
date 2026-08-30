@@ -18,12 +18,13 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/openaiexplainer"
+	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 	"github.com/Overclock-Validator/mithril-agent/statussocket"
 	"github.com/Overclock-Validator/mithril-agent/telegramoperator"
 )
 
 const usage = `Usage:
-  mithril-agent-telegram --status-socket PATH --cursor PATH [--explanations off|openai|local] [--explanation-budget PATH]
+  mithril-agent-telegram --status-socket PATH [--paper-status-socket PATH] --cursor PATH [--explanations off|openai|local] [--explanation-budget PATH]
   mithril-agent-telegram link    discover your chat ID (read-only; see link --help)
   mithril-agent-telegram test    send one test message to every allowed chat
 
@@ -42,6 +43,8 @@ const (
 	openAIBaseURLEnvironment            = "MITHRIL_AGENT_OPENAI_BASE_URL"
 	explanationEnvironment              = "MITHRIL_AGENT_TELEGRAM_EXPLANATIONS"
 	dailyExplanationRequestsEnvironment = "MITHRIL_AGENT_TELEGRAM_DAILY_EXPLANATION_REQUESTS"
+	announcedActionsFile                = "announced-actions.json"
+	announcedPaperFile                  = "announced-paper-events.json"
 )
 
 var runTelegramService = func(ctx context.Context, config telegramoperator.Config) error {
@@ -93,8 +96,11 @@ func run(
 	flags := flag.NewFlagSet("mithril-agent-telegram", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var statusSockets socketPaths
+	var paperStatusSockets paperSocketPaths
 	flags.Var(&statusSockets, "status-socket",
 		"bounded operator status socket; repeat once per strategy leg")
+	flags.Var(&paperStatusSockets, "paper-status-socket",
+		"bounded paper simulation status socket; may be repeated")
 	cursorPath := flags.String("cursor", "", "private Telegram update cursor")
 	explanations := flags.String("explanations", "", "off, openai, or local")
 	explanationBudgetPath := flags.String("explanation-budget", "", "private daily explanation request budget")
@@ -108,9 +114,23 @@ func run(
 	if flags.NArg() != 0 || len(statusSockets) == 0 || !cleanAbsolutePath(*cursorPath) {
 		return errors.New("--status-socket and --cursor must be distinct clean absolute paths")
 	}
+	if base := filepath.Base(*cursorPath); base == announcedActionsFile || base == announcedPaperFile {
+		return errors.New("--cursor uses a reserved Telegram state filename")
+	}
+	announcedActionsPath := filepath.Join(filepath.Dir(*cursorPath), announcedActionsFile)
+	announcedPaperPath := filepath.Join(filepath.Dir(*cursorPath), announcedPaperFile)
+	reservedStatePath := func(path string) bool {
+		return path == announcedActionsPath || path == announcedPaperPath
+	}
 	for _, socket := range statusSockets {
-		if !cleanAbsolutePath(socket) || socket == *cursorPath {
+		if !cleanAbsolutePath(socket) || socket == *cursorPath || reservedStatePath(socket) {
 			return errors.New("--status-socket and --cursor must be distinct clean absolute paths")
+		}
+	}
+	for _, socket := range paperStatusSockets {
+		if !cleanAbsolutePath(socket) || socket == *cursorPath || statusSockets.contains(socket) ||
+			reservedStatePath(socket) {
+			return errors.New("paper status sockets must be distinct clean absolute paths")
 		}
 	}
 	if getenv == nil {
@@ -151,29 +171,34 @@ func run(
 		return err
 	}
 	if explanationBudget != nil &&
-		(statusSockets.contains(resolvedBudgetPath) || resolvedBudgetPath == *cursorPath) {
+		(statusSockets.contains(resolvedBudgetPath) || paperStatusSockets.contains(resolvedBudgetPath) ||
+			resolvedBudgetPath == *cursorPath || reservedStatePath(resolvedBudgetPath)) {
 		return errors.New("explanation budget path must be distinct from status socket and cursor paths")
 	}
 	sources, err := statusReaders(statusSockets)
 	if err != nil {
 		return err
 	}
+	paperSources, err := paperStatusReaders(paperStatusSockets)
+	if err != nil {
+		return err
+	}
 	if _, err := fmt.Fprintf(
 		output,
-		"Mithril Telegram operator starting: read-only, %d allowed chat(s), explanations %s. Waiting for Telegram…\n",
-		len(chatIDs), explanationMode,
+		"Mithril Telegram operator starting: read-only, %d allowed chat(s), %d paper source(s), explanations %s. Waiting for Telegram…\n",
+		len(chatIDs), len(paperSources), explanationMode,
 	); err != nil {
 		return err
 	}
 	return runTelegramService(ctx, telegramoperator.Config{
 		Bot: bot, Cursor: telegramoperator.FileCursor(*cursorPath),
-		Sources: sources,
+		Sources: sources, PaperSources: paperSources,
 		// Derived from the cursor rather than taking a flag of its own: it is
 		// the same private state directory, already validated absolute, and a
 		// sibling name cannot collide with it. That also means an existing
 		// install needs no new flag, credential, or unit change to stop
 		// repeating announcements after a restart.
-		AnnouncedPath:  filepath.Join(filepath.Dir(*cursorPath), "announced-actions.json"),
+		AnnouncedPath:  filepath.Join(filepath.Dir(*cursorPath), announcedActionsFile),
 		AllowedChatIDs: chatIDs, Explainer: explainer,
 		ExplanationBudget: explanationBudget,
 	})
@@ -286,6 +311,42 @@ func statusReaders(paths socketPaths) ([]telegramoperator.StatusReader, error) {
 	readers := make([]telegramoperator.StatusReader, 0, len(paths))
 	for _, path := range paths {
 		reader, err := statussocket.NewReader(path)
+		if err != nil {
+			return nil, err
+		}
+		readers = append(readers, reader)
+	}
+	return readers, nil
+}
+
+type paperSocketPaths []string
+
+func (p *paperSocketPaths) String() string { return strings.Join(*p, ",") }
+
+func (p *paperSocketPaths) Set(value string) error {
+	if !cleanAbsolutePath(value) {
+		return errors.New("--paper-status-socket must be a clean absolute path")
+	}
+	if p.contains(value) {
+		return errors.New("--paper-status-socket was given the same path twice")
+	}
+	*p = append(*p, value)
+	return nil
+}
+
+func (p paperSocketPaths) contains(candidate string) bool {
+	for _, existing := range p {
+		if existing == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func paperStatusReaders(paths paperSocketPaths) ([]telegramoperator.PaperStatusReader, error) {
+	readers := make([]telegramoperator.PaperStatusReader, 0, len(paths))
+	for _, path := range paths {
+		reader, err := paperstatus.NewSocketReader(path)
 		if err != nil {
 			return nil, err
 		}

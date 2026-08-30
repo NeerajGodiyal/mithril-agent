@@ -1,0 +1,82 @@
+services:
+  hermes-research:
+    image: nousresearch/hermes-agent:v2026.8.27@sha256:e0df6adebddf29b91112aefc999d4aaf6846c9eb544faca5672a16a13590ff79
+    container_name: hermes-research
+    restart: unless-stopped
+    cpus: 2.0
+    mem_limit: 4g
+    pids_limit: 512
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "5"
+    command:
+      - hermes
+      - -p
+      - mithril-research
+      - gateway
+      - run
+    environment:
+      HERMES_UID: "${MITHRIL_UID:?set MITHRIL_UID}"
+      HERMES_GID: "${MITHRIL_GID:?set MITHRIL_GID}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY}"
+      TAVILY_API_KEY: "${TAVILY_API_KEY:?set TAVILY_API_KEY}"
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:?set TELEGRAM_BOT_TOKEN}"
+      TELEGRAM_ALLOWED_USERS: "${TELEGRAM_ALLOWED_USERS:?set TELEGRAM_ALLOWED_USERS}"
+      TELEGRAM_HOME_CHANNEL: "${TELEGRAM_HOME_CHANNEL:?set TELEGRAM_HOME_CHANNEL}"
+    volumes:
+      - ./state:/opt/data
+      - type: bind
+        source: "${MITHRIL_AGENT_BIN:?set MITHRIL_AGENT_BIN}"
+        target: /opt/mithril/bin/mithril-agent
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${MITHRIL_STATUS_SOCKET:?set MITHRIL_STATUS_SOCKET}"
+        target: /run/mithril-agent/status.sock
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${MITHRIL_INDEX_DIR:?set MITHRIL_INDEX_DIR}"
+        target: /var/lib/mithril-agent/index
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${MITHRIL_PAPER_POLICY_DIR:?set MITHRIL_PAPER_POLICY_DIR}"
+        target: /var/lib/mithril-agent-research/policy
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${MITHRIL_PAPER_JOURNAL_DIR:?set MITHRIL_PAPER_JOURNAL_DIR}"
+        target: /var/lib/mithril-agent-research/journals
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${MITHRIL_PAPER_CHAMPION_DIR:?set MITHRIL_PAPER_CHAMPION_DIR}"
+        target: /var/lib/mithril-agent-research/champion
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${MITHRIL_PAPER_CHALLENGER_DIR:?set MITHRIL_PAPER_CHALLENGER_DIR}"
+        target: /var/lib/mithril-agent-research/challenger
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${MITHRIL_PAPER_CHAMPION_RUN_DIR:?set MITHRIL_PAPER_CHAMPION_RUN_DIR}"
+        target: /var/lib/mithril-agent-research/runs/champion
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: "${MITHRIL_PAPER_CHALLENGER_RUN_DIR:?set MITHRIL_PAPER_CHALLENGER_RUN_DIR}"
+        target: /var/lib/mithril-agent-research/runs/challenger
+        read_only: true
+        bind:
+          create_host_path: false

@@ -16,17 +16,21 @@ import (
 // of the market could not be read is not a profitable day, and the report has
 // to say so itself rather than relying on someone to ask.
 //
-// Every period is scored strictly out of sample: a decision is settled against
-// a price observed after it was made, and no result is ever refitted. A run of
-// consecutive daily reports is therefore a walk-forward, not a backtest.
+// Every period is scored strictly forward in time: a decision is settled
+// against a later observed price, and no result is refitted within that day.
+// Consecutive reports are reset-daily operational observations, not a
+// continuous portfolio and not statistical proof of independent trials.
+
+const EvaluationResetDaily = "reset_daily_operational_canary"
 
 // Report is one period's result. The units are explicit in the field names
 // because a number whose scale is ambiguous is a number that gets misread.
 type Report struct {
-	Version uint32    `json:"version"`
-	Cluster string    `json:"cluster"`
-	From    time.Time `json:"from"`
-	To      time.Time `json:"to"`
+	Version        uint32    `json:"version"`
+	Cluster        string    `json:"cluster"`
+	EvaluationMode string    `json:"evaluation_mode,omitempty"`
+	From           time.Time `json:"from"`
+	To             time.Time `json:"to"`
 
 	Counts Counts `json:"counts"`
 	Stats  Stats  `json:"stats"`
@@ -104,7 +108,8 @@ func BuildReport(
 		return Report{}, err
 	}
 	report := Report{
-		Version: Version, Cluster: policy.Cluster, From: from, To: to,
+		Version: Version, Cluster: policy.Cluster, EvaluationMode: EvaluationResetDaily,
+		From: from, To: to,
 		Counts: counts, Stats: stats,
 		ClosingPriceMicros: closingPriceMicros,
 		BaseUnits:          ledger.BaseUnits, QuoteUnits: ledger.QuoteUnits,
@@ -147,6 +152,7 @@ func (r Report) Trustworthy() bool {
 	const minimumObservable = int32(9_500) // 95%
 	return r.Counts.Ticks > 0 && r.ExpectedTicks >= r.Counts.Ticks &&
 		r.ObservableBPS >= minimumObservable &&
+		(r.EvaluationMode == "" || r.EvaluationMode == EvaluationResetDaily) &&
 		(r.Cluster != Mainnet || r.validQuotePeg())
 }
 
@@ -181,7 +187,10 @@ func (r Report) Render(out io.Writer) error {
 		_, err := fmt.Fprintf(out, format+"\n", args...)
 		return err
 	}
-	if err := write("Shadow report — %s", r.Cluster); err != nil {
+	if err := write("Reset-daily paper canary report — %s", r.Cluster); err != nil {
+		return err
+	}
+	if err := write("Mode: %s; each UTC period restarts from configured opening inventory and results cannot be compounded.", EvaluationResetDaily); err != nil {
 		return err
 	}
 	if err := write("%s to %s (UTC)\n",
@@ -209,7 +218,7 @@ func (r Report) Render(out io.Writer) error {
 			return err
 		}
 	}
-	if err := write("What it would have done"); err != nil {
+	if err := write("What this UTC-period simulation modeled"); err != nil {
 		return err
 	}
 	if err := write("  %d observations out of %d expected, %d signals, %d trades, %d refused by the slippage floor",
@@ -220,7 +229,7 @@ func (r Report) Render(out io.Writer) error {
 		r.Counts.Missed, r.Counts.Unobservable); err != nil {
 		return err
 	}
-	if err := write("\nWhat it would have made"); err != nil {
+	if err := write("\nReset-daily modeled result"); err != nil {
 		return err
 	}
 	// Realized is already net of fees, so the fee line is labelled as a
@@ -241,13 +250,13 @@ func (r Report) Render(out io.Writer) error {
 	if err := write("  Turnover               %s", usd(turnover)); err != nil {
 		return err
 	}
-	if err := write("\nAgainst simply holding"); err != nil {
+	if err := write("\nAgainst holding over the same reset period"); err != nil {
 		return err
 	}
 	if err := write("  Holding would be worth  %s", usd(benchmark)); err != nil {
 		return err
 	}
-	if err := write("  This strategy is worth  %s", usd(closing)); err != nil {
+	if err := write("  Closing paper book      %s", usd(closing)); err != nil {
 		return err
 	}
 	if err := write("  Difference              %s", usd(r.VersusHoldMicros)); err != nil {

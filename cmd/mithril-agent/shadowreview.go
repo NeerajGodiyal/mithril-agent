@@ -29,6 +29,7 @@ whether the strategy is profitable and cannot sign, submit, or enable trading.
 type shadowReviewResult struct {
 	Version                  uint32    `json:"version"`
 	Status                   string    `json:"status"`
+	EvaluationMode           string    `json:"evaluation_mode"`
 	PolicySHA256             string    `json:"policy_sha256"`
 	From                     time.Time `json:"from"`
 	To                       time.Time `json:"to"`
@@ -170,7 +171,8 @@ func summarizeShadowReview(
 	}
 	result := shadowReviewResult{
 		Version: 1, Status: "strategy_evidence_complete_not_approved",
-		PolicySHA256: fingerprint, From: reports[0].From,
+		EvaluationMode: shadow.EvaluationResetDaily,
+		PolicySHA256:   fingerprint, From: reports[0].From,
 		To: reports[len(reports)-1].To, CompleteDays: uint32(len(reports)),
 		MinimumObservableBPS:     math.MaxInt32,
 		RequiresOperatorDecision: true,
@@ -215,7 +217,8 @@ func renderShadowReview(output io.Writer, result shadowReviewResult) error {
 			"  period       %s to %s\n"+
 			"  observability at least %d.%02d%% each day\n"+
 			"  signals      %d; hypothetical fills %d; refused %d; missed %d\n"+
-			"  vs holding   $%s; maximum drawdown $%s\n\n"+
+			"  summed daily-reset vs holding $%s; maximum single-day drawdown $%s\n\n"+
+			"These reset-daily results are an operational canary and cannot be compounded.\n"+
 			"This is evidence for an operator to review, not strategy approval.\n"+
 			"Nothing was signed, submitted, or enabled.\n",
 		result.CompleteDays, result.From.Format(time.RFC3339), result.To.Format(time.RFC3339),

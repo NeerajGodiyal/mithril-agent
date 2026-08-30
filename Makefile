@@ -11,7 +11,7 @@ SHELL := /bin/bash
 BIN_DIR := bin
 CMDS := mithril-agent mithril-agent-policy mithril-agent-signer \
         mithril-agent-submitter mithril-agent-quote mithril-agent-telegram \
-        mithril-agent-status-bridge
+        mithril-agent-status-bridge mithril-agent-paper-status-bridge
 ADAPTER_DIR := adapters/orca
 MANIFEST ?= mithril-agent-source.sha256
 # Public watch-only owner whose canonical Mainnet USDC account already exists.
@@ -40,14 +40,14 @@ help:
 	@echo "  make test-free-rehearsal     rehearse the complete unfunded Mainnet boundary offline"
 	@echo "  make test-free-custody       qualify local custody without accounts or network calls"
 	@echo "  make test-free-policy        verify offline matching Mainnet policy generation"
-	@echo "  make test-free-market-data   check public Pyth, Coinbase, and Kraken reads"
+	@echo "  make test-free-market-data   check public Pyth and Kraken reads"
 	@echo "  make test-free-jupiter       check keyless Jupiter build and pinned program reads"
 	@echo "  make test-free-evidence      check two public origins retain identical history"
 	@echo "  make test-prometheus         validate monitoring rules and alert scenarios"
 	@echo "  make test-route-guard        test the isolated keyless Jupiter deployment guard"
 	@echo "  make build-route-guard ROUTE_GUARD_OUT=/private/path"
 	@echo "                         build SBF outside the checkout (needs Agave CLI 4.2+)"
-	@echo "  make build           build all seven binaries into ./$(BIN_DIR)"
+	@echo "  make build           build all eight binaries into ./$(BIN_DIR)"
 	@echo "  make adapter         install the Orca quote adapter (needs Node 24.18+)"
 	@echo "  make test            full test suite, race detector, vet, format check"
 	@echo "  make explain         print what this software can and cannot do"
@@ -136,12 +136,15 @@ verify-source:
 	@expected=$$(mktemp); listed=$$(mktemp); \
 	 trap 'rm -f "$$expected" "$$listed"' EXIT; \
 	 find . -type f \( -name '*.go' -o -name '*.rs' -o -name '*.mjs' -o -name '*.html' -o -name '*.json' \
+	      -o -name '*.yaml' -o -name '*.sh' -o -name '*.example' -o -name 'Dockerfile' -o -name '.dockerignore' \
 	      -o -name '*.md' -o -name 'Makefile' -o -name '*.service' \
-	      -o -name '*.socket' -o -name '*.conf' -o -name '*.yml' \
+	      -o -name '*.socket' -o -name '*.path' -o -name '*.conf' -o -name '*.yml' \
 	      -o -name 'go.mod' -o -name 'go.sum' -o -name 'Cargo.toml' \
 	      -o -name 'Cargo.lock' -o -name '.gitignore' \) \
 	    -not -path './.git/*' -not -path './bin/*' \
 	    -not -path '*/node_modules/*' -not -path '*/target/*' \
+	    -not -path './deploy/hermes-research/state/*' \
+	    -not -path './deploy/hermes-research/secrets/*' \
 	    -not -name '$(MANIFEST)' \
 	    | LC_ALL=C sort > "$$expected"; \
 	 awk '{print $$2}' "$(MANIFEST)" | LC_ALL=C sort > "$$listed"; \
@@ -169,12 +172,15 @@ verify-source:
 .PHONY: manifest
 manifest:
 	@find . -type f \( -name '*.go' -o -name '*.rs' -o -name '*.mjs' -o -name '*.html' -o -name '*.json' \
+	     -o -name '*.yaml' -o -name '*.sh' -o -name '*.example' -o -name 'Dockerfile' -o -name '.dockerignore' \
 	     -o -name '*.md' -o -name 'Makefile' -o -name '*.service' \
-	     -o -name '*.socket' -o -name '*.conf' -o -name '*.yml' \
+	     -o -name '*.socket' -o -name '*.path' -o -name '*.conf' -o -name '*.yml' \
 	     -o -name 'go.mod' -o -name 'go.sum' -o -name 'Cargo.toml' \
 	     -o -name 'Cargo.lock' -o -name '.gitignore' \) \
 	   -not -path './.git/*' -not -path './bin/*' \
 	   -not -path '*/node_modules/*' -not -path '*/target/*' \
+	   -not -path './deploy/hermes-research/state/*' \
+	   -not -path './deploy/hermes-research/secrets/*' \
 	   -not -name '$(MANIFEST)' \
 	   | LC_ALL=C sort \
 	   | xargs $$(command -v sha256sum || echo "shasum -a 256") > "$(MANIFEST)"
@@ -409,8 +415,8 @@ test-free-market-data:
 	 MITHRIL_AGENT_LIVE_PRICE_TEST=1 \
 	 MITHRIL_AGENT_LIVE_SOLANA_RPC="$${MITHRIL_AGENT_LIVE_SOLANA_RPC:-https://api.mainnet-beta.solana.com}" \
 	 go test ./pricesource \
-		-run 'TestLive(PythPushMatchesCoinbase|USDCUSDEvidence)$$' -count=1 -v
-	@echo "OK: the account-free Pyth, Coinbase, and Kraken evidence path is live."
+		-run 'TestLive(PythPushMatchesKraken|USDCUSDEvidence)$$' -count=1 -v
+	@echo "OK: the account-free Pyth and Kraken evidence path is live."
 	@echo "This is a current-data smoke test, not a production availability or SLA qualification."
 
 # Exercise today's Jupiter build contract and pinned on-chain deployment using

@@ -58,7 +58,7 @@ func triggeredLeg(t *testing.T, dir string, buy bool, thresholdMicros uint64) st
 			MaxAgeSeconds: 120, MaxSourceSkewSeconds: 90,
 			MaxDeviationBPS: 200, MaxConfidenceBPS: 200,
 			PrimarySourceSHA256:   pricesource.PythPushIdentitySHA256(),
-			SecondarySourceSHA256: pricesource.CoinbaseIdentitySHA256(),
+			SecondarySourceSHA256: pricesource.KrakenSOLIdentitySHA256(),
 		}
 	}
 	stateDir := filepath.Join(dir, stableStateDirName)
@@ -314,7 +314,7 @@ func TestStrategyEnableRefusesLegsOnDifferentWallets(t *testing.T) {
 		MaxAgeSeconds: 120, MaxSourceSkewSeconds: 90,
 		MaxDeviationBPS: 200, MaxConfidenceBPS: 200,
 		PrimarySourceSHA256:   pricesource.PythPushIdentitySHA256(),
-		SecondarySourceSHA256: pricesource.CoinbaseIdentitySHA256(),
+		SecondarySourceSHA256: pricesource.KrakenSOLIdentitySHA256(),
 	}
 	dir := t.TempDir()
 	cfg := config{Swap: &other}

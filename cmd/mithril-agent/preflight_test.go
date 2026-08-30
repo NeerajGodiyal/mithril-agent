@@ -829,7 +829,7 @@ func TestPreflightRequiresPythKeyOnlyForConfiguredPriceRule(t *testing.T) {
 		MaxAgeSeconds: 30, MaxSourceSkewSeconds: 10,
 		MaxDeviationBPS: 200, MaxConfidenceBPS: 200,
 		PrimarySourceSHA256:   pricesource.PythIdentitySHA256(),
-		SecondarySourceSHA256: pricesource.CoinbaseIdentitySHA256(),
+		SecondarySourceSHA256: pricesource.KrakenSOLIdentitySHA256(),
 	}
 	configureSwapPreflightFixture(t, &fixture, profile)
 	installPreflightEnvironment(t, profile.ClockUncertaintyLimit())

@@ -274,6 +274,7 @@ type Status struct {
 	Roots              int              `json:"rooted_slots"`
 	LastCursor         *Cursor          `json:"last_cursor,omitempty"`
 	LastRoot           *Cursor          `json:"last_root,omitempty"`
+	LastRecordedAt     *time.Time       `json:"last_recorded_at,omitempty"`
 	ChainHead          string           `json:"chain_head_sha256"`
 }
 
@@ -1423,6 +1424,8 @@ func ReadStatus(dir string) (Status, error) {
 	}
 	if len(records) > 0 {
 		status.ChainHead = records[len(records)-1].Hash
+		recordedAt := records[len(records)-1].At.UTC()
+		status.LastRecordedAt = &recordedAt
 	}
 	return status, nil
 }

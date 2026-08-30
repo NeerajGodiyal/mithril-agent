@@ -148,10 +148,17 @@ func buildShadowPolicy(
 	startingInput := max(uint64(1_000_000_000), amount)
 	startingOutput := uint64(0)
 	if direction == pricetrigger.SellAtOrAbove {
-		if amount > math.MaxUint64-feeLamports {
+		feeReserve := feeLamports
+		if sellAt != "" && buyAt != "" {
+			if feeLamports > math.MaxUint64/2 {
+				return shadow.Policy{}, errors.New("shadow transaction fee is too large")
+			}
+			feeReserve *= 2
+		}
+		if amount > math.MaxUint64-feeReserve {
 			return shadow.Policy{}, errors.New("shadow trade amount is too large")
 		}
-		startingInput = max(startingInput, amount+feeLamports)
+		startingInput = max(startingInput, amount+feeReserve)
 	} else {
 		// The notional book pays Solana fees in SOL even when its first trade
 		// spends USDC. Carry a fee reserve so a tiny valid buy is not refused for
@@ -169,7 +176,7 @@ func buildShadowPolicy(
 			// read through a node, cross-checked against a public exchange:
 			// neither needs a paid subscription.
 			PrimarySourceSHA256:   pricesource.PythPushIdentitySHA256(),
-			SecondarySourceSHA256: pricesource.CoinbaseIdentitySHA256(),
+			SecondarySourceSHA256: pricesource.KrakenSOLIdentitySHA256(),
 		},
 		Observe:     observe,
 		InputAmount: amount, InputDecimals: inputDecimals, OutputDecimals: outputDecimals,

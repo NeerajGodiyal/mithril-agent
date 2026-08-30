@@ -11,7 +11,7 @@ import (
 // Both reviewed primary adapters must be accepted, and nothing else. The
 // on-chain push feed is the default so a paid subscription is not required.
 func TestPriceSourcePolicyAcceptsBothReviewedPrimaries(t *testing.T) {
-	coinbase := pricesource.CoinbaseIdentitySHA256()
+	kraken := pricesource.KrakenSOLIdentitySHA256()
 
 	for name, primary := range map[string]string{
 		"on-chain push": pricesource.PythPushIdentitySHA256(),
@@ -20,7 +20,7 @@ func TestPriceSourcePolicyAcceptsBothReviewedPrimaries(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if !priceSourcePolicyMatches(pricetrigger.Policy{
 				PrimarySourceSHA256:   primary,
-				SecondarySourceSHA256: coinbase,
+				SecondarySourceSHA256: kraken,
 			}) {
 				t.Fatalf("%s was rejected as a primary source", name)
 			}
@@ -29,7 +29,7 @@ func TestPriceSourcePolicyAcceptsBothReviewedPrimaries(t *testing.T) {
 
 	if priceSourcePolicyMatches(pricetrigger.Policy{
 		PrimarySourceSHA256:   strings.Repeat("c", 64),
-		SecondarySourceSHA256: coinbase,
+		SecondarySourceSHA256: kraken,
 	}) {
 		t.Fatal("an unreviewed primary source was accepted")
 	}
@@ -38,6 +38,12 @@ func TestPriceSourcePolicyAcceptsBothReviewedPrimaries(t *testing.T) {
 		SecondarySourceSHA256: strings.Repeat("d", 64),
 	}) {
 		t.Fatal("an unreviewed secondary source was accepted")
+	}
+	if priceSourcePolicyMatches(pricetrigger.Policy{
+		PrimarySourceSHA256:   pricesource.PythPushIdentitySHA256(),
+		SecondarySourceSHA256: pricesource.CoinbaseIdentitySHA256(),
+	}) {
+		t.Fatal("a legacy Coinbase-bound policy was accepted")
 	}
 	// The two primaries are distinct trust configurations and must not collide.
 	if pricesource.PythPushIdentitySHA256() == pricesource.PythIdentitySHA256() {
@@ -54,7 +60,7 @@ func TestDescribePriceSourceNamesReviewedAdaptersOnly(t *testing.T) {
 	push := describePriceSource(&pricetrigger.Policy{
 		PrimarySourceSHA256: pricesource.PythPushIdentitySHA256(),
 	})
-	if !strings.Contains(push, "on-chain") || !strings.Contains(push, "Coinbase") {
+	if !strings.Contains(push, "on-chain") || !strings.Contains(push, "Kraken") {
 		t.Fatalf("push source = %q", push)
 	}
 	hermes := describePriceSource(&pricetrigger.Policy{

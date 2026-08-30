@@ -27,6 +27,7 @@ transport-key
 *-transport-key
 *.env
 *.env.*
+/deploy/hermes-research/state/
 *.private
 *credential*.json
 *-candidate.json

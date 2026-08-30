@@ -135,8 +135,9 @@ type Runner struct {
 	stats   Stats
 	waiting *pending
 	// resumePending means the prior process recorded a decision but not its
-	// settlement. The quote is intentionally not persisted, so the first fresh
-	// observation records that decision as missed instead of inventing a fill.
+	// settlement. The quote is persisted for audit, but the stopped process did
+	// not obtain executable evidence at the scheduled settlement time, so the
+	// first fresh observation records that decision as missed.
 	resumePending    bool
 	nextSell         bool
 	nextAmount       uint64
@@ -154,9 +155,12 @@ type Tick struct {
 	// Deferred marks a signal that arrived while a decision was already in
 	// flight. Without it the journal cannot distinguish a deferred signal from
 	// an acted one, and the report is no longer re-derivable from the record.
-	Deferred     bool   `json:"deferred,omitempty"`
-	Fill         *Fill  `json:"fill,omitempty"`
-	EquityMicros uint64 `json:"equity_micros,omitempty"`
+	Deferred bool `json:"deferred,omitempty"`
+	// DecisionQuote is present only on a new signal. It binds replay of the
+	// later fill to the exact quote already recorded with the decision.
+	DecisionQuote *Quote `json:"decision_quote,omitempty"`
+	Fill          *Fill  `json:"fill,omitempty"`
+	EquityMicros  uint64 `json:"equity_micros,omitempty"`
 	// QuoteLowerMicros and QuoteUpperMicros are the widest independently
 	// supported USDC/USD interval on a Mainnet observation. USD accounting is
 	// valid only while this whole interval remains inside policy.
@@ -219,9 +223,9 @@ func NewRunner(
 }
 
 // ResumeRunner restores the decision state that can be proven from a verified
-// journal. An in-flight quote cannot be reconstructed honestly because quotes
-// are intentionally not stored, so it becomes one missed decision on the first
-// fresh observation.
+// journal. An in-flight decision becomes missed on the first fresh observation:
+// although its quote is stored for audit, the stopped process could not obtain
+// executable evidence at the scheduled settlement time.
 func ResumeRunner(
 	policy Policy,
 	primary, secondary PriceReader,
@@ -255,8 +259,9 @@ func ResumeRunner(
 			}
 			if tick.Event == EventClosed {
 				if !tick.PeriodClose || tick.PriceMicros != 0 || tick.EquityMicros != 0 ||
-					tick.Triggered || tick.Deferred || tick.Fill != nil || tick.DecisionMissed ||
-					tick.Reason != "" || tick.QuoteLowerMicros != 0 || tick.QuoteUpperMicros != 0 {
+					tick.Triggered || tick.Deferred || tick.DecisionQuote != nil ||
+					tick.Fill != nil || tick.DecisionMissed || tick.Reason != "" ||
+					tick.QuoteLowerMicros != 0 || tick.QuoteUpperMicros != 0 {
 					return nil, errors.New("a period-close record is malformed")
 				}
 				lastAt = tick.At
@@ -286,18 +291,7 @@ func ResumeRunner(
 	runner.stats = replayed.Stats
 
 	if policy.RoundTrip() {
-		for index := len(ticks) - 1; index >= 0; index-- {
-			fill := ticks[index].Fill
-			if ticks[index].Event != EventFilled || fill == nil || !fill.Filled {
-				continue
-			}
-			runner.nextSell = !fill.Sell
-			runner.nextAmount = fill.ReceivedUnits
-			if runner.nextSell && runner.nextAmount > runner.ledger.BaseUnits {
-				runner.nextAmount = runner.ledger.BaseUnits
-			}
-			break
-		}
+		runner.nextSell, runner.nextAmount = replayed.nextSell, replayed.nextAmount
 	}
 
 	for _, tick := range ticks {
@@ -326,10 +320,57 @@ func (r *Runner) Ledger() Ledger { return r.ledger }
 // Stats reports the per-decision measurements gathered so far.
 func (r *Runner) Stats() Stats { return r.stats }
 
-// Step performs one observation. It never blocks on a wall clock: the caller
-// supplies the time, so a test can run a week of market in a millisecond and
-// the production loop is the only thing that has to know about sleeping.
+// NextSell reports the direction the next accepted signal would paper-trade.
+// It exposes no action surface; callers use it only to label an alert emitted
+// after Step has already committed the decision to the journal.
+func (r *Runner) NextSell() bool { return r.nextSell }
+
+// Observation is an opaque, read-only market snapshot. Separating acquisition
+// from application lets the production loop establish the event time after
+// every source returns, while still checking a UTC rollover before mutating or
+// journaling the old day's runner.
+type Observation struct {
+	primary, secondary           pricetrigger.Sample
+	quotePrimary, quoteSecondary pricetrigger.Sample
+	unavailable                  UnobservableReason
+}
+
+// Observe reads every source needed for one Step without changing runner
+// state. Provider errors are reduced to a bounded reason for the journal.
+func (r *Runner) Observe(ctx context.Context) Observation {
+	primary, secondary, err := r.read(ctx)
+	if err != nil {
+		return Observation{unavailable: ReasonMarketPriceUnavailable}
+	}
+	observation := Observation{primary: primary, secondary: secondary}
+	if r.policy.QuotePeg == nil {
+		return observation
+	}
+	quotePrimary, quoteSecondary, err := r.readQuotePeg(ctx)
+	if err != nil {
+		observation.unavailable = ReasonQuoteCurrencyUnavailable
+		return observation
+	}
+	observation.quotePrimary, observation.quoteSecondary = quotePrimary, quoteSecondary
+	return observation
+}
+
+// Step performs one observation at a fixed time. Tests and replay callers can
+// run a week of market in a millisecond; production uses Observe followed by
+// StepObservation with a fresh post-read time.
 func (r *Runner) Step(ctx context.Context, now time.Time) (Tick, error) {
+	return r.StepObservation(ctx, now, r.Observe(ctx))
+}
+
+// StepObservation applies an acquired snapshot at one authoritative event
+// time. It performs no price-source reads.
+func (r *Runner) StepObservation(
+	ctx context.Context, now time.Time, observation Observation,
+) (Tick, error) {
+	now = now.UTC()
+	if now.IsZero() {
+		return Tick{}, errors.New("shadow observation time is required")
+	}
 	if !r.started {
 		fingerprint, err := r.policy.Fingerprint()
 		if err != nil {
@@ -345,17 +386,12 @@ func (r *Runner) Step(ctx context.Context, now time.Time) (Tick, error) {
 	r.counts.Ticks++
 	r.quoteLowerMicros, r.quoteUpperMicros = 0, 0
 
-	primary, secondary, err := r.read(ctx)
-	if err != nil {
-		return r.emitUnobservable(now, ReasonMarketPriceUnavailable)
+	if observation.unavailable != "" {
+		return r.emitUnobservable(now, observation.unavailable)
 	}
 	if r.policy.QuotePeg != nil {
-		quotePrimary, quoteSecondary, quoteErr := r.readQuotePeg(ctx)
-		if quoteErr != nil {
-			return r.emitUnobservable(now, ReasonQuoteCurrencyUnavailable)
-		}
 		quoteEvidence, quoteErr := pricetrigger.EvaluateBand(
-			*r.policy.QuotePeg, quotePrimary, quoteSecondary, now,
+			*r.policy.QuotePeg, observation.quotePrimary, observation.quoteSecondary, now,
 		)
 		if quoteErr != nil {
 			return r.emitUnobservable(now, ReasonQuoteCurrencyInvalid)
@@ -366,7 +402,9 @@ func (r *Runner) Step(ctx context.Context, now time.Time) (Tick, error) {
 		r.quoteLowerMicros = quoteEvidence.LowerMicros
 		r.quoteUpperMicros = quoteEvidence.UpperMicros
 	}
-	evidence, err := pricetrigger.Evaluate(r.activeTrigger(), primary, secondary, now)
+	evidence, err := pricetrigger.Evaluate(
+		r.activeTrigger(), observation.primary, observation.secondary, now,
+	)
 	if err != nil {
 		return r.emitUnobservable(now, ReasonMarketPriceInvalid)
 	}
@@ -400,7 +438,7 @@ func (r *Runner) Step(ctx context.Context, now time.Time) (Tick, error) {
 		}, nil)
 	}
 
-	if settled, done, err := r.settle(now, price, evidence.Triggered); err != nil {
+	if settled, done, err := r.settle(ctx, now, price, evidence.Triggered); err != nil {
 		return Tick{}, err
 	} else if done {
 		return settled, nil
@@ -420,6 +458,14 @@ func (r *Runner) Step(ctx context.Context, now time.Time) (Tick, error) {
 			Triggered: true, Deferred: true,
 		}, nil)
 	}
+	if !canFundAttempt(
+		r.ledger, r.nextSell, r.nextAmount, attemptFeeReserve(r.policy, r.nextSell),
+	) {
+		r.counts.Missed++
+		return r.emit(now, Tick{
+			At: now, Event: EventMissed, PriceMicros: price, Triggered: true,
+		}, nil)
+	}
 
 	quote, err := r.quoter.Quote(
 		ctx, r.policy.Observe, r.nextSell, r.nextAmount, r.policy.SlippageBPS,
@@ -430,7 +476,7 @@ func (r *Runner) Step(ctx context.Context, now time.Time) (Tick, error) {
 		r.counts.Missed++
 		return r.emit(now, Tick{At: now, Event: EventMissed, PriceMicros: price, Triggered: true}, nil)
 	}
-	if quote.InputAmount != r.nextAmount {
+	if validateQuote(quote) != nil || quote.InputAmount != r.nextAmount {
 		// A quote for a larger amount silently changes the strategy's size; one
 		// for a smaller amount silently flatters its fill quality. Either is not
 		// the decision this run was asked to measure.
@@ -441,7 +487,11 @@ func (r *Runner) Step(ctx context.Context, now time.Time) (Tick, error) {
 		decidedAt: now, priceMicros: price, quote: quote, sell: r.nextSell,
 		settleAfter: now.Add(r.policy.Settle()),
 	}
-	return r.emit(now, Tick{At: now, Event: EventSignal, PriceMicros: price, Triggered: true}, nil)
+	decisionQuote := quote
+	return r.emit(now, Tick{
+		At: now, Event: EventSignal, PriceMicros: price, Triggered: true,
+		DecisionQuote: &decisionQuote,
+	}, nil)
 }
 
 func (r *Runner) emitUnobservable(now time.Time, reason UnobservableReason) (Tick, error) {
@@ -488,7 +538,9 @@ func (r *Runner) ClosePeriod(now time.Time, lastPrice uint64) error {
 // is still counted — as a deferred one. Not counting it would shrink the
 // denominator the report divides by and quietly flatter how much of the market
 // the strategy could actually act on.
-func (r *Runner) settle(now time.Time, price uint64, triggered bool) (Tick, bool, error) {
+func (r *Runner) settle(
+	ctx context.Context, now time.Time, price uint64, triggered bool,
+) (Tick, bool, error) {
 	if r.waiting == nil || now.Before(r.waiting.settleAfter) {
 		return Tick{}, false, nil
 	}
@@ -499,8 +551,25 @@ func (r *Runner) settle(now time.Time, price uint64, triggered bool) (Tick, bool
 		r.counts.Deferred++
 	}
 
-	fill, err := SettleFillDirected(
-		r.policy, decision.quote, decision.priceMicros, price, decision.sell,
+	settlementQuote, err := r.quoter.Quote(
+		ctx, r.policy.Observe, decision.sell,
+		decision.quote.InputAmount, r.policy.SlippageBPS,
+	)
+	if err == nil && settlementQuote.InputAmount != decision.quote.InputAmount {
+		err = errors.New("settlement quote changed the requested input amount")
+	}
+	if err != nil {
+		r.counts.Missed++
+		tick, emitErr := r.emit(now, Tick{
+			At: now, Event: EventMissed, PriceMicros: price,
+			Triggered: triggered, Deferred: triggered,
+		}, nil)
+		return tick, true, emitErr
+	}
+
+	fill, err := SettleRequotedFillDirected(
+		r.policy, decision.quote, settlementQuote,
+		decision.priceMicros, price, decision.sell,
 	)
 	if err != nil {
 		r.counts.Missed++
@@ -525,11 +594,12 @@ func (r *Runner) settle(now time.Time, price uint64, triggered bool) (Tick, bool
 	if fill.Filled && r.policy.RoundTrip() {
 		r.nextSell = !decision.sell
 		r.nextAmount = fill.ReceivedUnits
-		// The native fee leaves the base side of the book. When the next leg
-		// sells base, cap it to what is actually left so a completed buy can
-		// always hand over to a valid sell instead of failing by exactly one fee.
-		if r.nextSell && r.nextAmount > r.ledger.BaseUnits {
-			r.nextAmount = r.ledger.BaseUnits
+		// A sell following a buy leaves native fees for itself and the next buy,
+		// so the repeating round trip cannot strand its return leg.
+		if r.nextSell {
+			r.nextAmount = capSellAmount(
+				r.nextAmount, r.ledger.BaseUnits, roundTripFeeReserve(r.policy.FeeLamports),
+			)
 		}
 	}
 

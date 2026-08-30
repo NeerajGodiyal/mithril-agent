@@ -7,34 +7,72 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 )
 
 const (
-	KrakenTrustDomain         = "kraken"
-	KrakenOrigin              = "https://api.kraken.com"
-	krakenProduct             = "USDC/USD"
-	krakenIdentityDescription = "mithril-agent/price-source-v1|kraken-spot|api.kraken.com|USDC/USD|pre-trade|best-bid-ask|http-date"
+	KrakenTrustDomain             = "kraken"
+	KrakenOrigin                  = "https://api.kraken.com"
+	krakenUSDCProduct             = "USDC/USD"
+	krakenSOLProduct              = "SOL/USD"
+	krakenUSDCIdentityDescription = "mithril-agent/price-source-v1|kraken-spot|api.kraken.com|USDC/USD|pre-trade|best-bid-ask|http-date"
+	krakenSOLIdentityDescription  = "mithril-agent/price-source-v1|kraken-spot|api.kraken.com|SOL/USD|pre-trade|best-bid-ask|http-date"
+	KrakenRateStateEnvironment    = "MITHRIL_AGENT_KRAKEN_RATE_STATE"
 )
 
-type Kraken struct{ client *http.Client }
+type Kraken struct {
+	client   *http.Client
+	feed     string
+	product  string
+	identity string
+	gate     krakenRequestGate
+}
 
 func KrakenIdentitySHA256() string {
-	hash := sha256.Sum256([]byte(krakenIdentityDescription))
+	hash := sha256.Sum256([]byte(krakenUSDCIdentityDescription))
 	return hex.EncodeToString(hash[:])
 }
 
-func NewKraken(client *http.Client) *Kraken { return &Kraken{client: boundedClient(client)} }
-func (*Kraken) IdentitySHA256() string      { return KrakenIdentitySHA256() }
+func KrakenSOLIdentitySHA256() string {
+	hash := sha256.Sum256([]byte(krakenSOLIdentityDescription))
+	return hex.EncodeToString(hash[:])
+}
+
+func NewKraken(client *http.Client) *Kraken {
+	return &Kraken{
+		client: boundedClient(client), feed: pricetrigger.FeedUSDCUSD,
+		product: krakenUSDCProduct, identity: KrakenIdentitySHA256(),
+		gate: newKrakenRequestGate(os.Getenv(KrakenRateStateEnvironment)),
+	}
+}
+
+func NewKrakenSOL(client *http.Client) *Kraken {
+	return &Kraken{
+		client: boundedClient(client), feed: pricetrigger.FeedSOLUSD,
+		product: krakenSOLProduct, identity: KrakenSOLIdentitySHA256(),
+		gate: newKrakenRequestGate(os.Getenv(KrakenRateStateEnvironment)),
+	}
+}
+
+func (source *Kraken) IdentitySHA256() string {
+	if source == nil {
+		return ""
+	}
+	return source.identity
+}
 
 func (source *Kraken) Latest(ctx context.Context, feed string) (pricetrigger.Sample, error) {
-	if feed != pricetrigger.FeedUSDCUSD {
+	if source == nil || source.gate == nil || feed != source.feed {
 		return pricetrigger.Sample{}, errors.New("Kraken price feed is unsupported")
 	}
+	if err := source.gate.Wait(ctx); err != nil {
+		return pricetrigger.Sample{}, errors.New("Kraken price request was rate-limited locally")
+	}
 	request, err := http.NewRequestWithContext(
-		ctx, http.MethodGet, KrakenOrigin+"/0/public/PreTrade?symbol=USDC%2FUSD", nil,
+		ctx, http.MethodGet, KrakenOrigin+"/0/public/PreTrade?symbol="+source.product, nil,
 	)
 	if err != nil {
 		return pricetrigger.Sample{}, errors.New("create Kraken price request")
@@ -58,7 +96,7 @@ func (source *Kraken) Latest(ctx context.Context, feed string) (pricetrigger.Sam
 	if err != nil {
 		return pricetrigger.Sample{}, errors.New("Kraken price is unavailable")
 	}
-	if len(response.Error) != 0 || response.Result.Symbol != krakenProduct ||
+	if len(response.Error) != 0 || response.Result.Symbol != source.product ||
 		len(response.Result.Bids) == 0 || len(response.Result.Asks) == 0 {
 		return pricetrigger.Sample{}, errors.New("Kraken price response is invalid")
 	}
@@ -94,7 +132,7 @@ func (source *Kraken) Latest(ctx context.Context, feed string) (pricetrigger.Sam
 		return pricetrigger.Sample{}, errors.New("Kraken price response is invalid")
 	}
 	return pricetrigger.Sample{
-		SourceSHA256: KrakenIdentitySHA256(), Feed: feed,
+		SourceSHA256: source.IdentitySHA256(), Feed: feed,
 		PriceMicros: price, ConfidenceMicros: confidence,
 		PublishedAt: publishedAt.UTC(),
 	}, nil

@@ -19,11 +19,11 @@ import (
 // second leg spends exactly what the first produced and the spread plus two
 // fees comes out of one book.
 //
-// One thing it does NOT do is pretend to know the pool. A recorded tick carries
-// the price, not the quote that was available at the time, so the fill has to be
-// modelled from a spread the operator supplies — and the report says so on its
-// own face rather than leaving the reader to assume the number came from a real
-// quote. A backtest that hides its assumptions is worse than no backtest.
+// One thing it does NOT do is pretend to know the pool. The recorded quotes
+// belong only to decisions the original policy actually made; hypothetical
+// thresholds have no venue quote at every tick. Their fills therefore have to
+// be modelled from a spread the operator supplies — and the report says so on
+// its own face. A backtest that hides its assumptions is worse than no backtest.
 const shadowBacktestUsage = `Usage: mithril-agent shadow backtest --policy PATH --dir PATH
                               --buy-at-usd PRICE [--spread-bps N] [--day YYYY-MM-DD] [--json]
 
@@ -98,12 +98,17 @@ func runShadowBacktest(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if _, err := shadow.Replay(journalPolicy, ticks); err != nil {
+		return fmt.Errorf("replay source shadow journal: %w", err)
+	}
 	prices := observedPrices(ticks)
 	if len(prices) < 2 {
 		return errors.New("that day recorded fewer than two observable prices to score")
 	}
 
-	result, err := shadow.ReplayRoundTrip(policy, prices, modelledPool(uint64(*spreadBPS)))
+	result, err := shadow.ReplayRoundTripTicks(
+		policy, ticks, modelledPool(uint64(*spreadBPS), policy.SlippageBPS),
+	)
 	if err != nil {
 		return err
 	}
@@ -123,7 +128,7 @@ func runShadowBacktest(args []string, output io.Writer) error {
 func observedPrices(ticks []shadow.Tick) []uint64 {
 	prices := make([]uint64, 0, len(ticks))
 	for _, tick := range ticks {
-		if tick.PriceMicros != 0 {
+		if tick.PriceMicros != 0 && !tick.PeriodClose {
 			prices = append(prices, tick.PriceMicros)
 		}
 	}
@@ -136,10 +141,15 @@ func observedPrices(ticks []shadow.Tick) []uint64 {
 // SOL carries 9 decimals and devUSDC 6, and a price is USD micros per whole
 // SOL, so one lot of lamports yields lot*price/1e9 devUSDC units, and spending
 // u devUSDC units yields u*1e9/price lamports.
-func modelledPool(spreadBPS uint64) func(uint64, bool, uint64) (shadow.Quote, error) {
+func modelledPool(
+	spreadBPS uint64, slippageBPS uint16,
+) func(uint64, bool, uint64) (shadow.Quote, error) {
 	return func(price uint64, sell bool, input uint64) (shadow.Quote, error) {
 		if price == 0 || input == 0 {
 			return shadow.Quote{}, errors.New("cannot model a fill at a zero price")
+		}
+		if slippageBPS == 0 || slippageBPS >= 10_000 {
+			return shadow.Quote{}, errors.New("cannot model a fill with invalid slippage")
 		}
 		multiplier, divisor := price, uint64(lamportsPerSOL)
 		if sell {
@@ -155,7 +165,13 @@ func modelledPool(spreadBPS uint64) func(uint64, bool, uint64) (shadow.Quote, er
 		if !ok || out == 0 {
 			return shadow.Quote{}, errors.New("the modelled fill rounds to nothing at this price")
 		}
-		return shadow.Quote{InputAmount: input, EstimatedOutput: out, MinimumOutput: out}, nil
+		minimum, ok := boundedMulDivCeil(out, 10_000-uint64(slippageBPS), 10_000)
+		if !ok || minimum == 0 {
+			return shadow.Quote{}, errors.New("the modelled slippage floor is out of range")
+		}
+		return shadow.Quote{
+			InputAmount: input, EstimatedOutput: out, MinimumOutput: minimum,
+		}, nil
 	}
 }
 
@@ -165,6 +181,21 @@ func boundedMulDiv(value, multiplier, divisor uint64) (uint64, bool) {
 		return 0, false
 	}
 	result, _ := bits.Div64(high, low, divisor)
+	return result, true
+}
+
+func boundedMulDivCeil(value, multiplier, divisor uint64) (uint64, bool) {
+	high, low := bits.Mul64(value, multiplier)
+	if divisor == 0 || high >= divisor {
+		return 0, false
+	}
+	result, remainder := bits.Div64(high, low, divisor)
+	if remainder != 0 {
+		if result == ^uint64(0) {
+			return 0, false
+		}
+		result++
+	}
 	return result, true
 }
 

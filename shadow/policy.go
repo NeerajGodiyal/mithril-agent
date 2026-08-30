@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/internal/base58"
@@ -30,7 +31,7 @@ const (
 
 // Version is written into every record so a report can refuse to mix results
 // produced by different accounting rules.
-const Version = uint32(3)
+const Version = uint32(4)
 
 const (
 	QuoteJupiter = "jupiter"
@@ -110,8 +111,8 @@ type Policy struct {
 	// one, so a shadow result cannot look better than the real rule permits.
 	SlippageBPS uint16 `json:"slippage_bps"`
 
-	// FeeLamports is the transaction cost charged against every hypothetical
-	// fill. Ignoring it is the most common way a paper result flatters itself.
+	// FeeLamports is the transaction cost charged against every modeled
+	// submitted attempt, including a runtime slippage refusal.
 	FeeLamports uint64 `json:"fee_lamports"`
 
 	// TickSeconds is how often the market is observed.
@@ -248,8 +249,18 @@ func (p Policy) Validate() error {
 	if p.StartingInputUnits < p.InputAmount {
 		return errors.New("shadow policy opening input inventory is smaller than one trade")
 	}
-	if p.IsSell() && p.StartingInputUnits-p.InputAmount < p.FeeLamports {
+	feeReserve := p.FeeLamports
+	if p.RoundTrip() {
+		if p.FeeLamports > math.MaxUint64/2 {
+			return errors.New("shadow policy round-trip fees are too large")
+		}
+		feeReserve *= 2
+	}
+	if p.IsSell() && p.StartingInputUnits-p.InputAmount < feeReserve {
 		return errors.New("shadow policy opening SOL inventory does not leave its transaction fee")
+	}
+	if !p.IsSell() && p.StartingOutputUnits < p.FeeLamports {
+		return errors.New("shadow policy opening SOL inventory does not fund its transaction fee")
 	}
 	return nil
 }
