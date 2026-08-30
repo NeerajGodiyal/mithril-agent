@@ -16,15 +16,18 @@ func (s *shadowRun) alertStrategy(at time.Time, kind string) error {
 	if s.alerts == nil {
 		return nil
 	}
-	message := fmt.Sprintf(
-		"PAPER SIMULATION — reset-daily operational canary active for %s; policy %s; %s %s. A running observer applies changes at the next UTC boundary; a restarted observer resumes today's journal policy. %s",
-		s.policy.Cluster, s.policySHA256[:12], shadowThresholds(s.policy), shadowSize(s.policy), paperDisclaimer,
-	)
+	title := "STRATEGY ACTIVE"
 	label := "active"
 	if kind == paperstatus.KindStrategyChanged {
+		title = "STRATEGY CHANGE ACTIVE"
 		label = "changed"
-		message = strings.Replace(message, "canary active", "canary changed", 1)
 	}
+	message := fmt.Sprintf(
+		"PAPER SIMULATION — %s\nMarket: %s\nPolicy: %s\nRules: %s\nSize: %s\nEvidence: %s\nConfig: Changes apply at the next UTC boundary; a restart keeps today's journal policy.\nSafety: %s",
+		title,
+		shadowMarket(s.policy), s.alertPolicyID(), shadowThresholds(s.policy), shadowSize(s.policy),
+		shadowEvidence(s.policy), paperDisclaimer,
+	)
 	return s.appendAlert(at, kind, s.policySHA256+"/"+dayKey(at)+"/"+label, message)
 }
 
@@ -37,28 +40,31 @@ func (s *shadowRun) alertTick(tick shadow.Tick, nextSell bool) error {
 	case tick.Event == shadow.EventSignal && tick.DecisionQuote != nil:
 		input, output := shadowAssets(s.policy, nextSell)
 		message := fmt.Sprintf(
-			"PAPER SIMULATION — order opened: would %s %s %s for an estimated %s %s (minimum %s), reference $%s. %s",
-			shadowVerb(nextSell), formatShadowAmount(tick.DecisionQuote.InputAmount, input.decimals), input.name,
+			"PAPER SIMULATION — ORDER OPENED\nMarket: %s\nPolicy: %s\nSide: %s\nRule: %s\nInput: %s %s\nEstimated output: %s %s\nMinimum output: %s %s\nReference price: $%s\nEvidence: %s\nSafety: %s",
+			shadowMarket(s.policy), s.alertPolicyID(), shadowSide(nextSell), shadowRule(s.policy, nextSell),
+			formatShadowAmount(tick.DecisionQuote.InputAmount, input.decimals), input.name,
 			formatShadowAmount(tick.DecisionQuote.EstimatedOutput, output.decimals), output.name,
-			formatShadowAmount(tick.DecisionQuote.MinimumOutput, output.decimals),
-			formatUnits(tick.PriceMicros, 6), paperDisclaimer,
+			formatShadowAmount(tick.DecisionQuote.MinimumOutput, output.decimals), output.name,
+			formatUnits(tick.PriceMicros, 6), shadowEvidence(s.policy), paperDisclaimer,
 		)
 		return s.appendAlert(tick.At, paperstatus.KindOrderOpened, key, message)
 	case tick.Event == shadow.EventFilled && tick.Fill != nil && tick.Fill.Filled:
 		input, output := shadowAssets(s.policy, tick.Fill.Sell)
 		message := fmt.Sprintf(
-			"PAPER SIMULATION — order filled: would %s %s %s for %s %s; fee %s SOL; impact %d bps; settlement slippage %d bps; daily-reset paper equity $%s. %s",
-			shadowVerb(tick.Fill.Sell), formatShadowAmount(tick.Fill.SpentUnits, input.decimals), input.name,
+			"PAPER SIMULATION — ORDER FILLED\nMarket: %s\nPolicy: %s\nSide: %s\nRule: %s\nSpent: %s %s\nReceived: %s %s\nModeled fee: %s SOL\nPrice impact: %d bps\nSettlement slippage: %d bps\nDaily-reset paper equity: $%s\nEvidence: %s\nSafety: %s",
+			shadowMarket(s.policy), s.alertPolicyID(), shadowSide(tick.Fill.Sell), shadowRule(s.policy, tick.Fill.Sell),
+			formatShadowAmount(tick.Fill.SpentUnits, input.decimals), input.name,
 			formatShadowAmount(tick.Fill.ReceivedUnits, output.decimals), output.name,
 			formatShadowAmount(tick.Fill.FeeLamports, 9), tick.Fill.ImpactBPS, tick.Fill.SlippageBPS,
-			formatUnits(tick.EquityMicros, 6), paperDisclaimer,
+			formatUnits(tick.EquityMicros, 6), shadowEvidence(s.policy), paperDisclaimer,
 		)
 		return s.appendAlert(tick.At, paperstatus.KindOrderFilled, key, message)
 	case tick.Event == shadow.EventRefused && tick.Fill != nil:
 		message := fmt.Sprintf(
-			"PAPER SIMULATION — modeled submitted order refused by the paper slippage guard: %s; modeled fee %s SOL; impact %d bps; settlement slippage %d bps. %s",
+			"PAPER SIMULATION — ORDER REFUSED\nMarket: %s\nPolicy: %s\nSide: %s\nRule: %s\nReason: %s\nModeled fee: %s SOL\nPrice impact: %d bps\nSettlement slippage: %d bps\nEvidence: %s\nSafety: %s",
+			shadowMarket(s.policy), s.alertPolicyID(), shadowSide(tick.Fill.Sell), shadowRule(s.policy, tick.Fill.Sell),
 			tick.Fill.Refusal, formatShadowAmount(tick.Fill.FeeLamports, 9),
-			tick.Fill.ImpactBPS, tick.Fill.SlippageBPS, paperDisclaimer,
+			tick.Fill.ImpactBPS, tick.Fill.SlippageBPS, shadowEvidence(s.policy), paperDisclaimer,
 		)
 		return s.appendAlert(tick.At, paperstatus.KindOrderRefused, key, message)
 	case tick.Event == shadow.EventMissed || tick.Event == shadow.EventUnobservable && tick.DecisionMissed:
@@ -66,7 +72,10 @@ func (s *shadowRun) alertTick(tick shadow.Tick, nextSell bool) error {
 		if tick.Reason != "" {
 			reason = strings.ReplaceAll(string(tick.Reason), "_", " ")
 		}
-		message := fmt.Sprintf("PAPER SIMULATION — order missed: %s. %s", reason, paperDisclaimer)
+		message := fmt.Sprintf(
+			"PAPER SIMULATION — ORDER MISSED\nMarket: %s\nPolicy: %s\nReason: %s\nEvidence: %s\nSafety: %s",
+			shadowMarket(s.policy), s.alertPolicyID(), reason, shadowEvidence(s.policy), paperDisclaimer,
+		)
 		return s.appendAlert(tick.At, paperstatus.KindOrderMissed, key, message)
 	default:
 		return nil
@@ -101,8 +110,8 @@ func (s *shadowRun) alertReport(report shadow.Report) error {
 		period = "UTC day closed"
 	}
 	message := fmt.Sprintf(
-		"PAPER SIMULATION — reset-daily canary %s: fills %d, refused %d, missed %d, unobservable %d; same-period reset-book versus hold %s USD; observable %s; acted on %s of signals. This result cannot be compounded across days. No funds moved. %s",
-		period,
+		"PAPER SIMULATION — PERIOD CLOSED\nMarket: %s\nPolicy: %s\nPeriod: %s\nFills: %d\nRefused: %d\nMissed: %d\nUnobservable: %d\nReset book vs hold: %s USD\nObservable: %s\nActed on: %s of signals\nNote: Daily-reset results cannot be compounded across days.\nSafety: No funds moved. %s",
+		shadowMarket(s.policy), s.alertPolicyID(), period,
 		report.Counts.Fills, report.Counts.Refused, report.Counts.Missed, report.Counts.Unobservable,
 		formatSignedMicros(report.VersusHoldMicros), formatBasisPoints(report.ObservableBPS),
 		formatBasisPoints(report.ActedBPS), paperDisclaimer,
@@ -116,6 +125,17 @@ func (s *shadowRun) appendAlert(at time.Time, kind, key, message string) error {
 		return s.alerts.Reconcile(at, kind, key, message)
 	}
 	return s.alerts.Append(at, kind, key, message)
+}
+
+func (s *shadowRun) alertPolicyID() string {
+	fingerprint := s.policySHA256
+	if len(fingerprint) < 12 {
+		fingerprint, _ = s.policy.Fingerprint()
+	}
+	if len(fingerprint) < 12 {
+		return "unavailable"
+	}
+	return fingerprint[:12]
 }
 
 type shadowAsset struct {
@@ -139,23 +159,48 @@ func shadowAssets(policy shadow.Policy, sell bool) (shadowAsset, shadowAsset) {
 	return counter, base
 }
 
-func shadowVerb(sell bool) string {
+func shadowSide(sell bool) string {
 	if sell {
-		return "sell"
+		return "SELL"
 	}
-	return "buy with"
+	return "BUY"
+}
+
+func shadowRule(policy shadow.Policy, sell bool) string {
+	trigger := policy.Trigger
+	if policy.ReturnTrigger != nil && sell != policy.IsSell() {
+		trigger = *policy.ReturnTrigger
+	}
+	return fmt.Sprintf("%s %s $%s", strings.ToLower(shadowSide(sell)),
+		triggerComparator(trigger.Direction), formatUnits(trigger.ThresholdMicros, 6))
+}
+
+func shadowMarket(policy shadow.Policy) string {
+	quote := "devUSDC"
+	if policy.Cluster == shadow.Mainnet {
+		quote = "USDC"
+	}
+	return policy.Cluster + " · SOL/" + quote
+}
+
+func shadowEvidence(policy shadow.Policy) string {
+	provider := "Orca"
+	if policy.QuoteRoute.Provider == shadow.QuoteJupiter {
+		provider = "Jupiter"
+	}
+	return "Pyth + Kraken price · " + provider + " quote"
 }
 
 func shadowThresholds(policy shadow.Policy) string {
 	if policy.ReturnTrigger == nil {
-		return fmt.Sprintf("trigger %s $%s;", triggerComparator(policy.Trigger.Direction),
+		return fmt.Sprintf("trigger %s $%s", triggerComparator(policy.Trigger.Direction),
 			formatUnits(policy.Trigger.ThresholdMicros, 6))
 	}
 	sell, buy := policy.Trigger, *policy.ReturnTrigger
 	if !policy.IsSell() {
 		sell, buy = buy, sell
 	}
-	return fmt.Sprintf("sell at or above $%s and buy below $%s;",
+	return fmt.Sprintf("sell at or above $%s and buy below $%s",
 		formatUnits(sell.ThresholdMicros, 6), formatUnits(buy.ThresholdMicros, 6))
 }
 
@@ -168,7 +213,7 @@ func triggerComparator(direction pricetrigger.Direction) string {
 
 func shadowSize(policy shadow.Policy) string {
 	input, _ := shadowAssets(policy, policy.IsSell())
-	return fmt.Sprintf("paper size %s %s", formatShadowAmount(policy.InputAmount, input.decimals), input.name)
+	return fmt.Sprintf("%s %s", formatShadowAmount(policy.InputAmount, input.decimals), input.name)
 }
 
 func formatShadowAmount(amount uint64, decimals uint) string {

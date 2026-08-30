@@ -50,7 +50,7 @@ func TestPaperAnnouncementsAreExplicitPersistentAndReadOnly(t *testing.T) {
 		Version: paperstatus.Version, ObservedAt: now,
 		Events: []paperstatus.Event{{
 			ID: id, At: now, Kind: paperstatus.KindOrderFilled,
-			Message: "PAPER SIMULATION — order filled. No transaction was signed or submitted.",
+			Message: "PAPER SIMULATION — ORDER FILLED\nSide: SELL\nSafety: No transaction was signed or submitted.",
 		}},
 	}}
 	path := filepath.Join(protectedTempDir(t), "announced.json")
@@ -71,6 +71,11 @@ func TestPaperAnnouncementsAreExplicitPersistentAndReadOnly(t *testing.T) {
 	for _, sent := range bot.sent {
 		if !strings.HasPrefix(sent.Text, "PAPER SIMULATION") ||
 			!strings.Contains(sent.Text, "No transaction was signed or submitted") ||
+			!strings.Contains(sent.Text,
+				"PAPER SIMULATION — ORDER FILLED\n"+
+					"Time: 2026-08-30 01:02:03 UTC\n"+
+					"Event: bbbbbbbbbbbb\n"+
+					"Side: SELL\n") ||
 			strings.Contains(sent.Text, "explorer.solana.com") {
 			t.Fatalf("ambiguous paper alert = %q", sent.Text)
 		}

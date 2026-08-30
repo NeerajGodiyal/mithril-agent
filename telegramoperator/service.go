@@ -379,7 +379,7 @@ func (s *Service) announcePaperSource(ctx context.Context, index int, source Pap
 			if s.paperAnnounced.announced(deliveryID) {
 				continue
 			}
-			if err := s.bot.Send(ctx, chatID, bounded(event.Message)); err != nil {
+			if err := s.bot.Send(ctx, chatID, bounded(paperAnnouncement(event))); err != nil {
 				if ctx.Err() != nil {
 					return
 				}
@@ -396,6 +396,16 @@ func (s *Service) announcePaperSource(ctx context.Context, index int, source Pap
 			log.Printf("telegram: announced paper event %s to %d chat(s)", shortActionID(event.ID), delivered)
 		}
 	}
+}
+
+func paperAnnouncement(event paperstatus.Event) string {
+	metadata := fmt.Sprintf("Time: %s\nEvent: %s", event.At.Format("2006-01-02 15:04:05 UTC"),
+		shortActionID(event.ID))
+	header, body, multiline := strings.Cut(event.Message, "\n")
+	if multiline {
+		return header + "\n" + metadata + "\n" + body
+	}
+	return event.Message + "\n" + metadata
 }
 
 func (s *Service) recordPaperHealth(index int, healthy bool) {

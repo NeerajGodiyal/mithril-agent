@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/paperstatus"
+	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
 
@@ -64,10 +65,26 @@ func TestShadowAlertsAreBoundedExplicitAndContainNoLiveAuthority(t *testing.T) {
 	for _, event := range snapshot.Events {
 		if !strings.HasPrefix(event.Message, "PAPER SIMULATION") ||
 			!strings.Contains(event.Message, "No transaction was signed or submitted") ||
+			!strings.Contains(event.Message, "\nSafety: ") ||
 			strings.Contains(event.Message, "explorer.solana.com") ||
 			len(event.Message) > paperstatus.MaxMessageBytes {
 			t.Fatalf("unsafe paper alert: %q", event.Message)
 		}
+	}
+	if message := snapshot.Events[0].Message; !strings.Contains(message, "\nMarket: mainnet-beta · SOL/USDC\n") ||
+		!strings.Contains(message, "\nRules: trigger at or above") ||
+		!strings.Contains(message, "\nSize: 0.001 SOL\n") {
+		t.Fatalf("unreadable strategy alert: %q", message)
+	}
+	if message := snapshot.Events[1].Message; !strings.Contains(message, "\nSide: SELL\n") ||
+		!strings.Contains(message, "\nEstimated output: 0.2 USDC\n") ||
+		!strings.Contains(message, "\nMinimum output: 0.199 USDC\n") {
+		t.Fatalf("unreadable opened-order alert: %q", message)
+	}
+	if message := snapshot.Events[2].Message; !strings.Contains(message, "\nSpent: 0.001 SOL\n") ||
+		!strings.Contains(message, "\nReceived: 0.2 USDC\n") ||
+		!strings.Contains(message, "\nModeled fee: 0.000005 SOL\n") {
+		t.Fatalf("unreadable filled-order alert: %q", message)
 	}
 }
 
@@ -78,6 +95,66 @@ func TestShadowAlertsIgnoreRoutineWaitingTicks(t *testing.T) {
 		At: time.Now().UTC(), Event: shadow.EventWaiting,
 	}, policy.IsSell()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestShadowAlertsFormatBuyRefusalAndMissedEvidence(t *testing.T) {
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "alerts.json")
+	writer, err := paperstatus.OpenWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := validShadowPolicy()
+	buy := policy.Trigger
+	buy.Direction = pricetrigger.BuyAtOrBelow
+	buy.ThresholdMicros = 100_000_000
+	policy.ReturnTrigger = &buy
+	fingerprint, err := policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := shadowRun{policy: policy, policySHA256: fingerprint, alerts: writer}
+	now := time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC)
+	if err := run.alertTick(shadow.Tick{
+		At: now, Event: shadow.EventRefused,
+		Fill: &shadow.Fill{
+			Sell: false, Refusal: "settlement crossed the slippage floor",
+			FeeLamports: 5_000, ImpactBPS: 3, SlippageBPS: 4,
+		},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := run.alertTick(shadow.Tick{
+		At: now.Add(time.Second), Event: shadow.EventUnobservable, DecisionMissed: true,
+		Reason: shadow.ReasonMarketPriceUnavailable,
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot paperstatus.Snapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 2 {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+	}
+	refused := snapshot.Events[0].Message
+	if !strings.Contains(refused, "PAPER SIMULATION — ORDER REFUSED\n") ||
+		!strings.Contains(refused, "\nSide: BUY\nRule: buy at or below $100.000000\n") ||
+		!strings.Contains(refused, "\nReason: settlement crossed the slippage floor\n") {
+		t.Fatalf("unreadable buy refusal: %q", refused)
+	}
+	missed := snapshot.Events[1].Message
+	if !strings.Contains(missed, "PAPER SIMULATION — ORDER MISSED\n") ||
+		!strings.Contains(missed, "\nReason: market price unavailable\n") {
+		t.Fatalf("unreadable missed order: %q", missed)
 	}
 }
 
@@ -165,7 +242,7 @@ func TestShadowAlertReconciliationKeepsOneWayDirectionAfterFill(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := snapshot.Events[len(snapshot.Events)-1].Message
-	if !strings.Contains(last, "would sell") || strings.Contains(last, "buy with") {
+	if !strings.Contains(last, "Side: SELL") || strings.Contains(last, "Side: BUY") {
 		t.Fatalf("one-way restart changed direction: %q", last)
 	}
 }
@@ -209,5 +286,38 @@ func TestPartialAndCompletePeriodReportsHaveDistinctAlerts(t *testing.T) {
 		!strings.Contains(snapshot.Events[0].Message, "closed early") ||
 		!strings.Contains(snapshot.Events[1].Message, "UTC day closed") {
 		t.Fatalf("period alerts = %+v", snapshot.Events)
+	}
+}
+
+func TestShadowReportAlertDerivesMissingCachedPolicyID(t *testing.T) {
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := paperstatus.OpenWriter(filepath.Join(directory, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := validShadowPolicy()
+	fingerprint, err := policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := shadowRun{policy: policy, alerts: writer}
+	from := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+	if err := run.alertReport(shadow.Report{From: from, To: from.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(directory, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot paperstatus.Snapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 1 ||
+		!strings.Contains(snapshot.Events[0].Message, "Policy: "+fingerprint[:12]) {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 }
