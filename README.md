@@ -291,7 +291,7 @@ make build
 make adapter
 ```
 
-`make build` produces all seven Go binaries. Keep them together; copying only
+`make build` produces all eight Go binaries. Keep them together; copying only
 the main executable creates an incomplete runtime that setup refuses.
 
 ## Fresh installation
@@ -407,11 +407,11 @@ The repository does **not** currently provide:
 
 Mainnet shadow mode holds no wallet signing key and is the current place to evaluate rules using
 real prices. Its policy fingerprint binds the quote provider, pool, and token
-pair alongside hypothetical decisions and fills, but has no dependency on signer or submitter code. Its continuous runner supports a single direction
+pair alongside hypothetical decisions and fills, but has no dependency on signer or submitter code. Within each independent UTC trial, its runner supports a single direction
 or an alternating sell-then-buy-back round trip, with each return leg bounded
 by what the preceding leg actually received. The offline replay command remains
 available for deliberately modelled what-if analysis. Devnet remains the place
-to prove the execution, policy, recovery, and UX mechanics.
+to prove the execution, policy, recovery, and UX mechanics. A pinned Nous Hermes profile is in [`deploy/hermes-research`](deploy/hermes-research); its bounded MCP server may prepare an immutable paper challenger and read that challenge's status, but it cannot change the champion or any live policy and has no wallet, signer, submitter, or execution authority.
 
 Because the Mainnet route settles in USDC, shadow accounting does not silently
 assume that USDC equals one dollar. Every observable Mainnet tick also requires
@@ -419,8 +419,8 @@ fresh, agreeing USDC/USD confidence intervals from Pyth's sponsored on-chain
 feed through the configured RPC and Kraken's public timestamped order-book snapshot.
 The generated policy pins a $0.99-$1.01 band; stale, disagreeing, or depegged
 evidence makes the tick unobservable and prevents a hypothetical decision.
-Reports bind their exact period end, include expected observations, and replay
-each quote. `shadow review --days N` verifies consecutive complete Mainnet days
+Reports bind the period end, expected observations, decision quote, and fresh exact-size
+venue re-quote. Policy v4 requires a new journal; never append v3 evidence. `shadow search --candidate-out` writes an immutable paper candidate; `shadow select` stages it under the shared paper lifecycle lock for startup or the next UTC boundary in a policy-fingerprinted journal directory. Neither command grants authority. `shadow challenge` compares paired forward paper runs without changing the pointer. `shadow review --days N` verifies consecutive complete Mainnet days
 at 95% coverage without approving the strategy. Devnet makes no P&L claim.
 
 The local `proposal check` command is the first read-only Mainnet execution boundary. It accepts
@@ -484,7 +484,7 @@ and refuses private runtime artifacts in the source checkout. The shorter loop i
 make test-short
 ```
 
-Every push and pull request verifies the manifest, runs Go and Rust checks, builds all seven release binaries, and runs `govulncheck`. External actions are pinned to immutable releases. `make build-route-guard
+Every push and pull request verifies the manifest, runs Go and Rust checks, builds all eight release binaries, and runs `govulncheck`. External actions are pinned to immutable releases. `make build-route-guard
 ROUTE_GUARD_OUT=/absolute/private/path` separately requires Agave CLI 4.2+ and
 neither deploys nor activates the guard.
 
