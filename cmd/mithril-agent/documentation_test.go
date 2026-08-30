@@ -238,9 +238,16 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	compose := readDocumentation(t, "../../deploy/hermes-research/compose.yaml")
 	for _, want := range []string{
 		"nousresearch/hermes-agent:v2026.8.27@sha256:e0df6adebddf29b91112aefc999d4aaf6846c9eb544faca5672a16a13590ff79",
+		"name: mithril-hermes-research", "external: true",
+		"source: /usr/local/libexec/mithril-agent/mithril-agent",
+		"source: /var/lib/mithril-agent-research/index",
+		"source: /var/lib/mithril-agent-research/policy",
+		"source: /var/lib/mithril-agent-research/journals",
+		"source: /var/lib/mithril-agent-research/champion",
+		"source: /var/lib/mithril-agent-research/challenger",
+		"source: /var/lib/mithril-agent-research/runs/champion",
+		"source: /var/lib/mithril-agent-research/runs/challenger",
 		"target: /opt/mithril/bin/mithril-agent",
-		"source: \"${MITHRIL_STATUS_SOCKET:?set MITHRIL_STATUS_SOCKET}\"",
-		"target: /run/mithril-agent/status.sock",
 		"target: /var/lib/mithril-agent/index",
 		"target: /var/lib/mithril-agent-research/challenger",
 		"target: /var/lib/mithril-agent-research/runs/challenger",
@@ -251,11 +258,11 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 			t.Errorf("Hermes compose file is missing pinned read-only boundary %q", want)
 		}
 	}
-	if got := strings.Count(compose, "read_only: true"); got != 8 {
-		t.Errorf("Hermes compose has %d read-only Mithril mounts; want 8", got)
+	if got := strings.Count(compose, "read_only: true"); got != 7 {
+		t.Errorf("Hermes compose has %d read-only Mithril mounts; want 7", got)
 	}
-	if got := strings.Count(compose, "create_host_path: false"); got != 9 {
-		t.Errorf("Hermes compose protects %d Mithril host paths; want 9", got)
+	if got := strings.Count(compose, "create_host_path: false"); got != 8 {
+		t.Errorf("Hermes compose protects %d Mithril host paths; want 8", got)
 	}
 	challengerMount := strings.Index(compose, "target: /var/lib/mithril-agent-research/challenger\n")
 	championRunMount := strings.Index(compose, "target: /var/lib/mithril-agent-research/runs/champion\n")
@@ -266,6 +273,8 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	for _, forbidden := range []string{
 		"nousresearch/hermes-agent:latest", "network_mode:", "ports:",
 		"docker.sock", "turnkey", "signer", "submitter", "helius", "secrets:", "build:",
+		"openrouter_api_key", "tavily_api_key", "telegram_bot_token",
+		"restart:",
 	} {
 		if strings.Contains(strings.ToLower(compose), forbidden) {
 			t.Errorf("Hermes compose file contains forbidden capability %q", forbidden)
@@ -275,17 +284,16 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	config := readDocumentation(t, "../../deploy/hermes-research/config.yaml")
 	for _, want := range []string{
 		"_config_version: 39",
+		"provider: openai-codex", "default: gpt-5.6-terra",
 		"cron_mode: deny", "single_query_mode: deny", "allow_private_urls: false",
-		"\nprovider_routing:\n  data_collection: deny",
-		"search_backend: tavily", "extract_backend: tavily",
-		"keyless_fallback: false", "keyless_rescue: false",
-		"allow_lazy_installs: false", "tirith_fail_open: false",
+		"keyless_fallback: true", "keyless_rescue: true",
+		"hard_stop_enabled: true", "exact_failure: 5", "idempotent_no_progress: 5",
+		"allow_lazy_installs: false", "tirith_enabled: false", "tirith_fail_open: false",
 		"memory_enabled: false", "user_profile_enabled: false",
 		"allow_agent_scheduling: false", "unauthorized_dm_behavior: ignore",
-		"plugins:\n  enabled: []",
-		"guest_mode: false", "observe_unmentioned_group_messages: false",
-		"mithril_status", "mithril_index", "mithril_paper", "solana_docs",
-		"mithril_agent_status", "mithril_index_transactions",
+		"plugins:\n  enabled: []", "telegram:\n    enabled: false",
+		"mithril_index", "mithril_paper", "solana_docs",
+		"mithril_index_transactions",
 		"mithril_paper_create_challenger", "mithril_paper_challenge_status",
 		"/var/lib/mithril-agent-research/challenger/active.json",
 	} {
@@ -293,14 +301,14 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 			t.Errorf("Hermes config is missing read-only boundary %q", want)
 		}
 	}
-	if got := strings.Count(config, "sampling:\n      enabled: false"); got != 4 {
-		t.Errorf("Hermes config disables sampling for %d MCP servers; want 4", got)
+	if got := strings.Count(config, "sampling:\n      enabled: false"); got != 3 {
+		t.Errorf("Hermes config disables sampling for %d MCP servers; want 3", got)
 	}
-	if got := strings.Count(config, "elicitation:\n      enabled: false"); got != 4 {
-		t.Errorf("Hermes config disables elicitation for %d MCP servers; want 4", got)
+	if got := strings.Count(config, "elicitation:\n      enabled: false"); got != 3 {
+		t.Errorf("Hermes config disables elicitation for %d MCP servers; want 3", got)
 	}
-	if got := strings.Count(config, "\n    trust: full\n"); got != 4 {
-		t.Errorf("Hermes config grants reviewed full trust to %d MCP servers; want 4", got)
+	if got := strings.Count(config, "\n    trust: full\n"); got != 3 {
+		t.Errorf("Hermes config grants reviewed full trust to %d MCP servers; want 3", got)
 	}
 	if strings.Contains(config, "trust: untrusted") {
 		t.Fatal("Hermes config cannot use interactive MCP trust in unattended sessions")
@@ -318,7 +326,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		"helius", "secret_sources:", "solana_documentation_search",
-		"solana_expert__ask_for_help", "\n  provider_routing:",
+		"solana_expert__ask_for_help", "provider_routing:",
 	} {
 		if strings.Contains(strings.ToLower(config), forbidden) {
 			t.Errorf("Hermes config contains forbidden capability %q", forbidden)
@@ -341,13 +349,27 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		t.Error("README.md does not route operators to the bounded Hermes profile")
 	}
 	deployReadme := readDocumentation(t, "../../deploy/hermes-research/README.md")
+	if strings.Contains(deployReadme, "\ndocker compose ") {
+		t.Error("rootful Hermes deployment README runs Docker Compose without sudo")
+	}
+	if strings.Contains(deployReadme, "\ndocker ") {
+		t.Error("rootful Hermes deployment README runs Docker without sudo")
+	}
+	for _, forbidden := range []string{
+		"-p mithril-research", "/profiles/mithril-research",
+		"HERMES_HOME=/opt/data/profiles", "--deliver telegram",
+	} {
+		for name, contents := range map[string]string{
+			"README": deployReadme, "Compose": compose, "config": config,
+		} {
+			if strings.Contains(contents, forbidden) {
+				t.Errorf("Hermes %s still contains removed profile form %q", name, forbidden)
+			}
+		}
+	}
 	for _, want := range []string{
 		"state/.no-bundled-skills",
-		"hermes profile create mithril-research \\\n  --no-skills",
 		"only the official `hermes-agent/SKILL.md`",
-		"MITHRIL_STATUS_SOCKET",
-		"/run/mithril-agent-status-sell.sock",
-		"do not\nmount all of `/run`",
 		"mcp test mithril_paper",
 		"Only `challenger/` is writable by Hermes",
 		"later market days cannot reverse a completed decision",
@@ -359,19 +381,19 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"exactly one URL per invocation",
 		"browser_exec",
 		"discover_mcp_tools",
-		"the model receives exactly the configured 11 MCP tools",
+		"the model receives exactly the configured 7 MCP tools",
 		"github.com/NousResearch/hermes-agent/issues/88858",
 		"`full` removes the per-call approval gate",
 		"Run the canary with stdin closed and no TTY",
 		"Helius MCP is deliberately not installed",
 		"without an opt-out",
 		"not maintain a fork or proxy",
-		"every 6h", "--provider openrouter", "--model anthropic/claude-opus-4.6",
-		"different bot", "`getMe` bot IDs differ", "never join the Docker group",
+		"every 6h", "--provider openai-codex", "--model gpt-5.6-terra",
+		"auth add openai-codex", "never join the Docker group",
 		"rootless Docker", "last recorded time", "Hetzner server backups",
 		"mithril-agent-paper-challenger.path", "--paper-alert-status",
 		"/var/lib/mithril-agent-research/status/champion/alerts.json",
-		"single-URL extraction canary: pass", "state/profiles/mithril-research/cache/web",
+		"single-URL extraction canary: pass", "state/cache/web",
 		"REVIEWED_SHA256", "'root:root 755'",
 	} {
 		if !strings.Contains(deployReadme, want) {
@@ -383,7 +405,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"https://solana.com/changelog", "https://github.com/anza-xyz/agave/releases",
 		"https://status.jup.ag/", "https://status.pyth.network/",
 		"https://docs.kraken.com/api-reference/transparency/pre-trade-data",
-		"https://status.kraken.com/", "Do not ingest Telegram channels",
+		"https://status.kraken.com/", "Do not ingest or deliver through Telegram",
 	} {
 		if !strings.Contains(marketScout, want) {
 			t.Errorf("Hermes market scout omits official source rule %q", want)
@@ -409,9 +431,12 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		t.Error("Hermes deploy does not ignore private secret material")
 	}
 	envExample := readDocumentation(t, "../../deploy/hermes-research/env.example")
-	if !strings.Contains(envExample,
-		"MITHRIL_AGENT_BIN=/usr/local/libexec/mithril-agent/mithril-agent") {
-		t.Error("Hermes environment example does not select the supervised agent binary")
+	for _, forbidden := range []string{
+		"OPENROUTER", "TAVILY", "TELEGRAM", "MITHRIL_AGENT_BIN", "MITHRIL_INDEX_DIR", "MITHRIL_PAPER_",
+	} {
+		if strings.Contains(envExample, forbidden) {
+			t.Errorf("Hermes environment example still requests %s credentials", forbidden)
+		}
 	}
 	if _, err := os.Stat("../../deploy/hermes-research/env.example"); err != nil {
 		t.Fatal("Hermes environment example is missing")
@@ -436,6 +461,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		}
 	}
 	for _, path := range []string{
+		"./deploy/hermes-research/check-network.sh",
 		"./deploy/hermes-research/compose.yaml",
 		"./deploy/hermes-research/config.yaml",
 		"./deploy/hermes-research/env.example",
@@ -443,6 +469,8 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"./deploy/systemd/mithril-agent-paper-champion.service",
 		"./deploy/systemd/mithril-agent-paper-challenger.service",
 		"./deploy/systemd/mithril-agent-paper-challenger.path",
+		"./deploy/systemd/mithril-hermes-research-egress.service",
+		"./deploy/systemd/mithril-hermes-research.service",
 	} {
 		if !strings.Contains(manifest, path) {
 			t.Errorf("source manifest omits Hermes deployment input %q", path)
@@ -477,6 +505,45 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		strings.Contains(challengerPath, "PathExists=") {
 		t.Fatal("challenger path does not watch pointer changes safely")
 	}
+	networkCheck := readDocumentation(t, "../../deploy/hermes-research/check-network.sh")
+	for _, want := range []string{
+		"bridge false false 1", "docker network inspect",
+	} {
+		if !strings.Contains(networkCheck, want) {
+			t.Errorf("Hermes network preflight is missing %q", want)
+		}
+	}
+	egressUnit := readDocumentation(t, "../../deploy/systemd/mithril-hermes-research-egress.service")
+	for _, want := range []string{
+		"/opt/mithril-hermes-research/check-network.sh",
+		"BindsTo=docker.service", "PartOf=docker.service", "WantedBy=docker.service",
+		"-j MITHRIL_HERMES", "-j RETURN", "-D INPUT", "-I INPUT",
+	} {
+		if !strings.Contains(egressUnit, want) {
+			t.Errorf("Hermes egress unit is missing %q", want)
+		}
+	}
+	if got := strings.Count(egressUnit, "-A MITHRIL_HERMES -d"); got != 6 {
+		t.Errorf("Hermes egress unit rejects %d private ranges; want 6", got)
+	}
+	hermesUnit := readDocumentation(t, "../../deploy/systemd/mithril-hermes-research.service")
+	for _, want := range []string{
+		"Requires=docker.service mithril-hermes-research-egress.service",
+		"BindsTo=docker.service mithril-hermes-research-egress.service",
+		"After=docker.service mithril-hermes-research-egress.service",
+		"ConditionPathExists=/opt/mithril-hermes-research/state/auth.json",
+		"ConditionPathExists=/var/lib/mithril-agent-research/champion/active.json",
+		"ConditionPathExists=/var/lib/mithril-agent-research/index/events.jsonl",
+		"iptables -C DOCKER-USER", "iptables -C INPUT",
+		"index doctor --dir /var/lib/mithril-agent-research/index",
+		"docker compose up --no-color --exit-code-from hermes-research",
+		"docker compose down --timeout 30",
+		"WantedBy=docker.service",
+	} {
+		if !strings.Contains(hermesUnit, want) {
+			t.Errorf("Hermes systemd owner is missing %q", want)
+		}
+	}
 	championUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-champion.service")
 	bridgeUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-status-bridge.service")
 	legacyTelegramUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-telegram.service")
@@ -492,17 +559,28 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		t.Fatal("paper status bridge can see the research tree outside its credential")
 	}
 	for _, want := range []string{
+		"/var/lib/mithril-agent-research/index \\",
 		"/var/lib/mithril-agent-research/runs \\",
 		"/var/lib/mithril-agent-research/status \\",
-		"getent group mithril-agent-status | cut -d: -f3",
+		"id -g mithril-agent-research",
+		"Do not copy or hand-edit `events.jsonl`",
 		"/opt/mithril-hermes-research",
 		"sudo -u mithril-agent-research env HOME=/var/lib/mithril-agent-research",
-		"hermes -p mithril-research gateway stop",
-		"hermes -p mithril-research gateway start",
+		"systemctl stop mithril-hermes-research.service",
+		"systemctl start mithril-hermes-research.service",
+		"$(id -u mithril-agent-research):600",
+		"sudo test ! -d state/cache/web",
+		"sudo find state/cache/web",
+		"sudo find state/skills -name SKILL.md -print",
+		"This profile disables Tirith",
+		"prevents Hermes from downloading an unpinned",
 	} {
 		if !strings.Contains(deployReadme, want) {
 			t.Errorf("Hermes deployment README is missing safe operation %q", want)
 		}
+	}
+	if strings.Contains(deployReadme, "enabling Telegram or cron") {
+		t.Error("Hermes deployment README suggests enabling its disabled Telegram platform")
 	}
 }
 

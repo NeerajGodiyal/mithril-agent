@@ -20,7 +20,8 @@ a release or incident category:
 
 General news and social posts are discovery hints only. Follow each material
 claim to a direct protocol, repository, provider, regulator, or status source
-before using it. Do not ingest Telegram channels; Telegram is delivery-only.
+before using it. Do not ingest or deliver through Telegram; the separate
+deterministic Mithril service owns operator notifications.
 
 First read the current paper challenge status. Create at most one challenger
 only when no challenger is active, the completed prior challenge is rejected,

@@ -136,7 +136,7 @@ func TruncationEvent(snapshot Snapshot) (Event, bool) {
 	return Event{
 		ID: eventID("history_truncated", fmt.Sprintf("truncated/%d", bucket)),
 		At: snapshot.ObservedAt, Kind: "history_truncated",
-		Message: "PAPER SIMULATION — earlier paper alerts were omitted from this bounded delivery snapshot; review the complete hash-chained journal. No transaction was signed or submitted.",
+		Message: "PAPER SIMULATION — ⚠️ ALERT HISTORY TRUNCATED\nReview the hash-chained journal.\nNo transaction was signed or submitted.",
 	}, true
 }
 

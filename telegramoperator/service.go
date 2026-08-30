@@ -399,13 +399,7 @@ func (s *Service) announcePaperSource(ctx context.Context, index int, source Pap
 }
 
 func paperAnnouncement(event paperstatus.Event) string {
-	metadata := fmt.Sprintf("Time: %s\nEvent: %s", event.At.Format("2006-01-02 15:04:05 UTC"),
-		shortActionID(event.ID))
-	header, body, multiline := strings.Cut(event.Message, "\n")
-	if multiline {
-		return header + "\n" + metadata + "\n" + body
-	}
-	return event.Message + "\n" + metadata
+	return event.Message + "\n" + event.At.Format("2006-01-02 15:04 UTC") + " · " + shortActionID(event.ID)
 }
 
 func (s *Service) recordPaperHealth(index int, healthy bool) {

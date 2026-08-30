@@ -43,14 +43,14 @@ func (s *paperStatusStub) Read() (paperstatus.Snapshot, error) {
 	return s.snapshot, s.err
 }
 
-func TestPaperAnnouncementsAreExplicitPersistentAndReadOnly(t *testing.T) {
+func TestPaperAnnouncementsAreCompactPersistentAndReadOnly(t *testing.T) {
 	now := time.Date(2026, time.August, 30, 1, 2, 3, 0, time.UTC)
 	id := strings.Repeat("b", 64)
 	reader := &paperStatusStub{snapshot: paperstatus.Snapshot{
 		Version: paperstatus.Version, ObservedAt: now,
 		Events: []paperstatus.Event{{
 			ID: id, At: now, Kind: paperstatus.KindOrderFilled,
-			Message: "PAPER SIMULATION — ORDER FILLED\nSide: SELL\nSafety: No transaction was signed or submitted.",
+			Message: "PAPER SIMULATION — 🟢 SOLD\n0.001 SOL → 0.2 USDC at $200\nNo transaction was signed or submitted.",
 		}},
 	}}
 	path := filepath.Join(protectedTempDir(t), "announced.json")
@@ -69,13 +69,10 @@ func TestPaperAnnouncementsAreExplicitPersistentAndReadOnly(t *testing.T) {
 		t.Fatalf("paper sends = %+v", bot.sent)
 	}
 	for _, sent := range bot.sent {
-		if !strings.HasPrefix(sent.Text, "PAPER SIMULATION") ||
-			!strings.Contains(sent.Text, "No transaction was signed or submitted") ||
-			!strings.Contains(sent.Text,
-				"PAPER SIMULATION — ORDER FILLED\n"+
-					"Time: 2026-08-30 01:02:03 UTC\n"+
-					"Event: bbbbbbbbbbbb\n"+
-					"Side: SELL\n") ||
+		if sent.Text != "PAPER SIMULATION — 🟢 SOLD\n"+
+			"0.001 SOL → 0.2 USDC at $200\n"+
+			"No transaction was signed or submitted.\n"+
+			"2026-08-30 01:02 UTC · bbbbbbbbbbbb" ||
 			strings.Contains(sent.Text, "explorer.solana.com") {
 			t.Fatalf("ambiguous paper alert = %q", sent.Text)
 		}
