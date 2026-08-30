@@ -451,6 +451,33 @@ func TestSetupDetectsAnInstalledLayout(t *testing.T) {
 	}
 }
 
+func TestMithrilDiscoveryRejectsTheStandalonePrototype(t *testing.T) {
+	installed := t.TempDir()
+	previous := installedLibexecDirs
+	installedLibexecDirs = []string{installed}
+	t.Cleanup(func() { installedLibexecDirs = previous })
+	t.Setenv("PATH", t.TempDir())
+
+	legacy := filepath.Join(installed, "mithril-mcp")
+	if err := os.WriteFile(legacy, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectMithrilCommand(); got != "" {
+		t.Fatalf("legacy standalone MCP was selected as the public Mithril CLI: %q", got)
+	}
+
+	public := filepath.Join(installed, "mithril")
+	if err := os.WriteFile(public, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := detectMithrilCommand(); got != public {
+		t.Fatalf("Mithril CLI = %q, want %q", got, public)
+	}
+	if siblingMithrilCommand != "mithril" {
+		t.Fatalf("packaged sibling = %q, want public Mithril CLI", siblingMithrilCommand)
+	}
+}
+
 // The agent runs the node as a health monitor before it acts, and that needs
 // the node's own config. Omitting the question produced a configuration that
 // looked complete and could never observe anything.

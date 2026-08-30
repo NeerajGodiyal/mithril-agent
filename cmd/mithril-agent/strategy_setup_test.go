@@ -337,7 +337,7 @@ func TestSetupStrategyAsksOnlyForWhatItCannotFindItself(t *testing.T) {
 	text := string(source)
 	// Each of these is discovered from the host, exactly as the wizard does.
 	for _, discovered := range []string{
-		`detectInstalled("mithril-node", "mithril-mcp")`,
+		`detectMithrilCommand()`,
 		`detectInstalled("node")`,
 		`detectSourceAdapter()`,
 	} {

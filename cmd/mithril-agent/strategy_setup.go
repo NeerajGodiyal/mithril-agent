@@ -339,8 +339,7 @@ func runStrategySetup(ctx context.Context, args []string, output io.Writer) (fai
 	if *walletKeypair == "" {
 		*walletKeypair = filepath.Join(filepath.Dir(*directory), "agent-account.json")
 	}
-	*mithrilCommand = firstNonEmpty(*mithrilCommand,
-		detectInstalled("mithril-node", "mithril-mcp"), detectExecutable("mithril"))
+	*mithrilCommand = firstNonEmpty(*mithrilCommand, detectMithrilCommand())
 	*nodeCommand = firstNonEmpty(*nodeCommand, detectInstalled("node"), detectExecutable("node"))
 	*quoteScript = firstNonEmpty(*quoteScript, detectSourceAdapter(), detectInstalled("quote.mjs"))
 	var missing []string

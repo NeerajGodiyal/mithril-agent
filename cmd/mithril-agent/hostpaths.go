@@ -37,7 +37,7 @@ type hostPaths struct {
 
 // conventional names, as installed beside the agent binary.
 const (
-	siblingMithrilCommand = "mithril-mcp"
+	siblingMithrilCommand = "mithril"
 	siblingNodeCommand    = "node"
 	siblingQuoteScript    = "quote.mjs"
 )
