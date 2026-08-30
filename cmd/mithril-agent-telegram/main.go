@@ -128,8 +128,8 @@ func run(
 		}
 	}
 	for _, socket := range paperStatusSockets {
-		if !cleanAbsolutePath(socket) || socket == *cursorPath || statusSockets.contains(socket) ||
-			reservedStatePath(socket) {
+		if socket.path == *cursorPath || statusSockets.contains(socket.path) ||
+			reservedStatePath(socket.path) {
 			return errors.New("paper status sockets must be distinct clean absolute paths")
 		}
 	}
@@ -319,24 +319,61 @@ func statusReaders(paths socketPaths) ([]telegramoperator.StatusReader, error) {
 	return readers, nil
 }
 
-type paperSocketPaths []string
+type paperSocketPath struct {
+	path  string
+	label string
+}
 
-func (p *paperSocketPaths) String() string { return strings.Join(*p, ",") }
+type paperSocketPaths []paperSocketPath
+
+func (p *paperSocketPaths) String() string {
+	items := make([]string, 0, len(*p))
+	for _, item := range *p {
+		if item.label == "" {
+			items = append(items, item.path)
+		} else {
+			items = append(items, item.label+"="+item.path)
+		}
+	}
+	return strings.Join(items, ",")
+}
 
 func (p *paperSocketPaths) Set(value string) error {
-	if !cleanAbsolutePath(value) {
+	label, path := "", value
+	if candidate, candidatePath, found := strings.Cut(value, "="); found {
+		label, path = candidate, candidatePath
+		if !validPaperSocketLabel(label) {
+			return errors.New("--paper-status-socket label is invalid")
+		}
+	}
+	if !cleanAbsolutePath(path) {
 		return errors.New("--paper-status-socket must be a clean absolute path")
 	}
-	if p.contains(value) {
+	if p.contains(path) {
 		return errors.New("--paper-status-socket was given the same path twice")
 	}
-	*p = append(*p, value)
+	*p = append(*p, paperSocketPath{path: path, label: label})
 	return nil
+}
+
+func validPaperSocketLabel(label string) bool {
+	if label == "" || len(label) > 32 {
+		return false
+	}
+	for _, character := range label {
+		if character != '/' && character != '-' && character != '_' &&
+			(character < '0' || character > '9') &&
+			(character < 'A' || character > 'Z') &&
+			(character < 'a' || character > 'z') {
+			return false
+		}
+	}
+	return true
 }
 
 func (p paperSocketPaths) contains(candidate string) bool {
 	for _, existing := range p {
-		if existing == candidate {
+		if existing.path == candidate {
 			return true
 		}
 	}
@@ -345,8 +382,14 @@ func (p paperSocketPaths) contains(candidate string) bool {
 
 func paperStatusReaders(paths paperSocketPaths) ([]telegramoperator.PaperStatusReader, error) {
 	readers := make([]telegramoperator.PaperStatusReader, 0, len(paths))
-	for _, path := range paths {
-		reader, err := paperstatus.NewSocketReader(path)
+	for _, item := range paths {
+		var reader *paperstatus.SocketReader
+		var err error
+		if item.label == "" {
+			reader, err = paperstatus.NewSocketReader(item.path)
+		} else {
+			reader, err = paperstatus.NewLabeledSocketReader(item.path, item.label)
+		}
 		if err != nil {
 			return nil, err
 		}

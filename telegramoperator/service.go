@@ -174,7 +174,7 @@ func New(config Config) (*Service, error) {
 			return nil, errors.New("paper status reader identities must be unique")
 		}
 		paperSourceIDs[identity] = struct{}{}
-		label := paperSourceLabel(identity)
+		label := paperReaderLabel(source)
 		if _, duplicate := paperSourceLabels[label]; duplicate {
 			return nil, errors.New("paper status reader identities have colliding display tags")
 		}
@@ -388,6 +388,9 @@ func (s *Service) announcePaperSource(ctx context.Context, index int, source Pap
 	}
 	blocked := make(map[int64]bool)
 	for _, event := range events {
+		if !paperAnnounceWorthy(event.Kind) {
+			continue
+		}
 		delivered := 0
 		for chatID := range s.allowed {
 			if blocked[chatID] {
@@ -412,7 +415,7 @@ func (s *Service) announcePaperSource(ctx context.Context, index int, source Pap
 			}
 			label := ""
 			if len(s.paperSources) > 1 {
-				label = paperSourceLabel(sourceID)
+				label = paperReaderLabel(source)
 			}
 			if err := s.bot.Send(ctx, chatID, bounded(paperAnnouncement(event, label))); err != nil {
 				if ctx.Err() != nil {
@@ -433,6 +436,17 @@ func (s *Service) announcePaperSource(ctx context.Context, index int, source Pap
 	}
 }
 
+func paperAnnounceWorthy(kind string) bool {
+	switch kind {
+	case paperstatus.KindStrategyActive, paperstatus.KindStrategyChanged,
+		paperstatus.KindOrderFilled, paperstatus.KindRiskHalted,
+		paperstatus.KindPeriodClosed, "history_truncated":
+		return true
+	default:
+		return false
+	}
+}
+
 func paperAnnouncement(event paperstatus.Event, label string) string {
 	message := event.Message
 	if label != "" {
@@ -442,7 +456,41 @@ func paperAnnouncement(event paperstatus.Event, label string) string {
 			message = strings.Replace(message, "PAPER SIMULATION —", "PAPER SIMULATION · "+label+" ·", 1)
 		}
 	}
-	return message + " · " + event.At.Format("2006-01-02 15:04 UTC")
+	return timestampPaperMessage(message, event.At)
+}
+
+func timestampPaperMessage(message string, at time.Time) string {
+	first, rest, found := strings.Cut(message, "\n")
+	first += " · " + at.Format("2006-01-02 15:04 UTC")
+	if !found {
+		return first
+	}
+	return first + "\n" + rest
+}
+
+func paperCurrentAge(message string, fresh bool) string {
+	if fresh {
+		return message
+	}
+	_, details, found := strings.Cut(
+		strings.Replace(message, "\nToday ", "\nLast result ", 1), "\n",
+	)
+	if !found {
+		return "PAPER · ⚠️ Observer stale"
+	}
+	return "PAPER · ⚠️ Observer stale\n" + details
+}
+
+func paperSnapshotFresh(snapshot paperstatus.Snapshot, now time.Time) bool {
+	if snapshot.ObservedAt.After(now.Add(5*time.Second)) ||
+		snapshot.ObservedAt.UTC().Format("2006-01-02") != now.UTC().Format("2006-01-02") {
+		return false
+	}
+	staleAfter := 5 * time.Minute
+	if snapshot.Summary != nil {
+		staleAfter = max(2*time.Minute, 3*time.Duration(snapshot.Summary.TickSeconds)*time.Second)
+	}
+	return now.Sub(snapshot.ObservedAt) <= staleAfter
 }
 
 func (s *Service) recordPaperHealth(index int, sourceID string, healthy bool) {
@@ -475,6 +523,15 @@ func legacyPaperDeliveryID(source int, eventID string, chatID int64) string {
 func paperSourceLabel(sourceID string) string {
 	digest := sha256.Sum256([]byte("mithril-agent/paper-source-label/v1\x00" + sourceID))
 	return fmt.Sprintf("SRC %X", digest[:3])
+}
+
+func paperReaderLabel(source PaperStatusReader) string {
+	if labeled, ok := source.(interface{ SourceLabel() string }); ok {
+		if label := labeled.SourceLabel(); label != "" {
+			return label
+		}
+	}
+	return paperSourceLabel(source.SourceID())
 }
 
 // announceSource reports one leg. The dedup state is per SOURCE, so a restart
@@ -699,7 +756,7 @@ func (s *Service) allowAt(chatID int64, now time.Time) bool {
 func (s *Service) help(_ time.Time) string {
 	commands := "/help — commands\n/status — live strategy status\n/price — live price rule\n/last_trade — latest live action"
 	if len(s.paperSources) > 0 {
-		commands += "\n/paper — latest paper event"
+		commands += "\n/paper — paper status and today's P&L"
 	}
 	if s.explainer != nil {
 		commands += "\n/explain QUESTION — explain live status"
@@ -714,11 +771,13 @@ func (s *Service) paperReports() string {
 		return "Paper: not configured"
 	}
 	reports := make([]string, 0, len(s.paperSources))
+	summaries := make([]paperstatus.CurrentSummary, 0, len(s.paperSources))
+	now := s.now()
 	for _, source := range s.paperSources {
 		snapshot, err := source.Read()
 		label := ""
 		if len(s.paperSources) > 1 {
-			label = paperSourceLabel(source.SourceID())
+			label = paperReaderLabel(source)
 		}
 		if err != nil || paperstatus.ValidateSnapshot(snapshot) != nil {
 			report := "PAPER ALERTS · ⚠️ Unavailable"
@@ -728,19 +787,91 @@ func (s *Service) paperReports() string {
 			reports = append(reports, report)
 			continue
 		}
+		fresh := paperSnapshotFresh(snapshot, now)
+		if fresh && snapshot.Summary != nil && snapshot.Summary.Day == now.UTC().Format("2006-01-02") {
+			summaries = append(summaries, *snapshot.Summary)
+		}
 		if len(snapshot.Events) == 0 {
-			report := "PAPER · No events yet"
-			if label != "" {
-				report = "PAPER · " + label + " · No events yet"
+			report := paperCurrentAge(snapshot.Current, fresh)
+			if report == "" {
+				report = "PAPER · No events yet"
 			}
+			if label != "" {
+				report = labelPaperMessage(report, label)
+			}
+			report = timestampPaperMessage(report, snapshot.ObservedAt)
 			reports = append(reports, report)
+			continue
+		}
+		if snapshot.Current != "" {
+			report := timestampPaperMessage(
+				labelPaperMessage(
+					paperCurrentAge(snapshot.Current, fresh), label,
+				), snapshot.ObservedAt,
+			)
+			reports = append(reports, paperReportExcerpt(report))
 			continue
 		}
 		reports = append(reports, paperReportExcerpt(
 			paperAnnouncement(snapshot.Events[len(snapshot.Events)-1], label),
 		))
 	}
+	if aggregate := paperPortfolioSummary(summaries); aggregate != "" {
+		reports = append([]string{aggregate}, reports...)
+	}
 	return strings.Join(reports, "\n\n")
+}
+
+func paperPortfolioSummary(summaries []paperstatus.CurrentSummary) string {
+	if len(summaries) < 2 {
+		return ""
+	}
+	var opening, equity, hold, trades uint64
+	paused := 0
+	for _, summary := range summaries {
+		if summary.OpeningEquityMicros > math.MaxUint64-opening ||
+			summary.EquityMicros > math.MaxUint64-equity ||
+			summary.HoldBenchmarkMicros > math.MaxUint64-hold ||
+			summary.Trades > math.MaxUint64-trades {
+			return ""
+		}
+		opening += summary.OpeningEquityMicros
+		equity += summary.EquityMicros
+		hold += summary.HoldBenchmarkMicros
+		trades += summary.Trades
+		if summary.RiskHalted {
+			paused++
+		}
+	}
+	if opening > math.MaxInt64 || equity > math.MaxInt64 || hold > math.MaxInt64 {
+		return ""
+	}
+	line := fmt.Sprintf("%d markets · %d trades", len(summaries), trades)
+	if paused != 0 {
+		line += fmt.Sprintf(" · %d paused", paused)
+	}
+	return "PAPER · Portfolio\nToday " + signedPaperChange(opening, equity) +
+		" · vs hold " + signedPaperChange(hold, equity) + "\n" + line
+}
+
+func signedPaperChange(reference, current uint64) string {
+	delta := int64(current) - int64(reference)
+	sign := "+"
+	if delta < 0 {
+		sign = "-"
+		delta = -delta
+	}
+	return sign + formatUSDMicros(uint64(delta))
+}
+
+func labelPaperMessage(message, label string) string {
+	if label == "" {
+		return message
+	}
+	if strings.HasPrefix(message, "PAPER ·") {
+		return strings.Replace(message, "PAPER ·", "PAPER · "+label+" ·", 1)
+	}
+	return message
 }
 
 func paperReportExcerpt(message string) string {

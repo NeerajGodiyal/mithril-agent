@@ -513,7 +513,7 @@ func TestAnnounceSeedsAnIDLessFailureAsHistory(t *testing.T) {
 // apart from "settled while I was down".
 func TestARestartDoesNotRepeatAnAlreadyAnnouncedAction(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
-	record := filepath.Join(t.TempDir(), "announced.json")
+	record := filepath.Join(protectedTempDir(t), "announced.json")
 	const actionID = "6652b6b3932c"
 
 	build := func(status *statusStub, bot *botStub) *Service {

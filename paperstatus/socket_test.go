@@ -73,7 +73,7 @@ func TestSocketServesOneValidatedSnapshotWithoutRequest(t *testing.T) {
 	}}
 	serverError := make(chan error, 1)
 	go func() { serverError <- Serve(t.Context(), listener, stub) }()
-	reader, err := newSocketReader(path, defaultTimeout, false)
+	reader, err := newSocketReader(path, "JUP/USDC", defaultTimeout, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,6 +83,9 @@ func TestSocketServesOneValidatedSnapshotWithoutRequest(t *testing.T) {
 	}
 	if len(snapshot.Events) != 1 || snapshot.Events[0].Kind != KindOrderFilled || stub.reads != 1 {
 		t.Fatalf("snapshot=%+v reads=%d", snapshot, stub.reads)
+	}
+	if reader.SourceLabel() != "JUP/USDC" {
+		t.Fatalf("source label = %q", reader.SourceLabel())
 	}
 	if err := <-serverError; err != nil {
 		t.Fatal(err)

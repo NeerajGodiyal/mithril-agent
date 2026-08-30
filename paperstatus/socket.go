@@ -45,14 +45,22 @@ func (r *CredentialReader) Read() (Snapshot, error) {
 type SocketReader struct {
 	reader   *statuswire.Reader
 	sourceID string
+	label    string
 }
 
 func NewSocketReader(path string) (*SocketReader, error) {
-	return newSocketReader(path, defaultTimeout, true)
+	return newSocketReader(path, "", defaultTimeout, true)
+}
+
+func NewLabeledSocketReader(path, label string) (*SocketReader, error) {
+	if !validSourceLabel(label) {
+		return nil, errors.New("paper status source label is invalid")
+	}
+	return newSocketReader(path, label, defaultTimeout, true)
 }
 
 func newSocketReader(
-	path string, timeout time.Duration, requireRootedPath bool,
+	path, label string, timeout time.Duration, requireRootedPath bool,
 ) (*SocketReader, error) {
 	reader, err := statuswire.NewReaderWithTrust(
 		path, maxSnapshotBytes, timeout, requireRootedPath, validateJSON,
@@ -60,7 +68,29 @@ func newSocketReader(
 	if err != nil {
 		return nil, err
 	}
-	return &SocketReader{reader: reader, sourceID: path}, nil
+	return &SocketReader{reader: reader, sourceID: path, label: label}, nil
+}
+
+func (r *SocketReader) SourceLabel() string {
+	if r == nil {
+		return ""
+	}
+	return r.label
+}
+
+func validSourceLabel(label string) bool {
+	if label == "" || len(label) > 32 {
+		return false
+	}
+	for _, character := range label {
+		if character != '/' && character != '-' && character != '_' &&
+			(character < '0' || character > '9') &&
+			(character < 'A' || character > 'Z') &&
+			(character < 'a' || character > 'z') {
+			return false
+		}
+	}
+	return true
 }
 
 // SourceID is the stable local endpoint identity used to deduplicate alerts

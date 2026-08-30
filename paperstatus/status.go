@@ -21,6 +21,7 @@ const (
 	Version             = 1
 	MaxEvents           = 64
 	MaxMessageBytes     = 3000
+	maxCurrentBytes     = 512
 	maxSnapshotBytes    = 256 << 10
 	messagePrefix       = "PAPER ·"
 	legacyMessagePrefix = "PAPER SIMULATION —"
@@ -52,6 +53,27 @@ type Snapshot struct {
 	ObservedAt    time.Time `json:"observed_at"`
 	DroppedEvents uint64    `json:"dropped_events"`
 	Events        []Event   `json:"events"`
+	// Current is a compact, non-alerting view of what the paper engine is doing
+	// now. It lets an operator distinguish a quiet market from a stopped loop
+	// without receiving a Telegram message for every observation.
+	Current string `json:"current,omitempty"`
+	// Summary is the small numeric projection needed to combine several paper
+	// markets without parsing human-facing Telegram text. The journal remains
+	// authoritative; this is only a read-only current view.
+	Summary *CurrentSummary `json:"summary,omitempty"`
+}
+
+type CurrentSummary struct {
+	Market              string `json:"market"`
+	Day                 string `json:"day"`
+	TickSeconds         uint64 `json:"tick_seconds"`
+	OpeningEquityMicros uint64 `json:"opening_equity_micros"`
+	EquityMicros        uint64 `json:"equity_micros"`
+	HoldBenchmarkMicros uint64 `json:"hold_benchmark_micros"`
+	Checks              uint64 `json:"checks"`
+	Signals             uint64 `json:"signals"`
+	Trades              uint64 `json:"trades"`
+	RiskHalted          bool   `json:"risk_halted,omitempty"`
 }
 
 type Writer struct {
@@ -76,6 +98,36 @@ func (w *Writer) Append(at time.Time, kind, key, message string) error {
 // dropped-event counter and must not make every later restart fail.
 func (w *Writer) Reconcile(at time.Time, kind, key, message string) error {
 	return w.append(at, kind, key, message, true)
+}
+
+// UpdateCurrent refreshes the operator-facing state without creating an alert
+// event. Alerts remain reserved for fills, risk pauses, and period summaries.
+func (w *Writer) UpdateCurrent(at time.Time, current string) error {
+	return w.UpdateCurrentSummary(at, current, nil)
+}
+
+func (w *Writer) UpdateCurrentSummary(
+	at time.Time, current string, summary *CurrentSummary,
+) error {
+	if w == nil || !cleanPath(w.path) || at.IsZero() || !at.Equal(at.UTC()) ||
+		len(current) == 0 || len(current) > maxCurrentBytes || !validMessage(current) ||
+		validateCurrentSummary(summary) != nil {
+		return errors.New("paper current status is invalid")
+	}
+	snapshot := Snapshot{Version: Version, ObservedAt: at, Events: []Event{}}
+	data, err := securefile.ReadPrivate(w.path, maxSnapshotBytes)
+	if err == nil {
+		if err := strictjson.Decode(data, &snapshot); err != nil || ValidateSnapshot(snapshot) != nil {
+			return errors.New("existing paper alert status is invalid")
+		}
+		if at.Before(snapshot.ObservedAt) {
+			return errors.New("paper current status is not chronological")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return errors.New("read paper alert status")
+	}
+	snapshot.ObservedAt, snapshot.Current, snapshot.Summary = at, current, summary
+	return w.write(snapshot)
 }
 
 func (w *Writer) append(at time.Time, kind, key, message string, reconcile bool) error {
@@ -106,7 +158,16 @@ func (w *Writer) append(at time.Time, kind, key, message string, reconcile bool)
 		}
 		return errors.New("paper alert event is not chronological")
 	}
-	snapshot.ObservedAt = at
+	if !at.Before(snapshot.ObservedAt) {
+		if at.After(snapshot.ObservedAt) {
+			snapshot.ObservedAt = at
+		}
+		// A current or newer alert is the most current state until the runner
+		// publishes the same tick's non-alerting status. This also keeps a crash between
+		// those writes, or a same-time period close, from hiding the alert
+		// behind stale text.
+		snapshot.Current, snapshot.Summary = "", nil
+	}
 	snapshot.Events = append(snapshot.Events, Event{ID: id, At: at, Kind: kind, Message: message})
 	if len(snapshot.Events) > MaxEvents {
 		dropped := uint64(len(snapshot.Events) - MaxEvents)
@@ -116,6 +177,10 @@ func (w *Writer) append(at time.Time, kind, key, message string, reconcile bool)
 		snapshot.DroppedEvents += dropped
 		snapshot.Events = snapshot.Events[len(snapshot.Events)-MaxEvents:]
 	}
+	return w.write(snapshot)
+}
+
+func (w *Writer) write(snapshot Snapshot) error {
 	encoded, err := json.Marshal(snapshot)
 	if err != nil || len(encoded) > maxSnapshotBytes {
 		return errors.New("encode paper alert status")
@@ -145,7 +210,11 @@ func ValidateSnapshot(snapshot Snapshot) error {
 	if snapshot.Version != Version || snapshot.ObservedAt.IsZero() ||
 		!snapshot.ObservedAt.Equal(snapshot.ObservedAt.UTC()) ||
 		len(snapshot.Events) > MaxEvents ||
-		(snapshot.DroppedEvents != 0 && len(snapshot.Events) == 0) {
+		(snapshot.DroppedEvents != 0 && len(snapshot.Events) == 0) ||
+		(snapshot.Current != "" && (len(snapshot.Current) > maxCurrentBytes ||
+			!validMessage(snapshot.Current))) ||
+		(snapshot.Current == "" && snapshot.Summary != nil) ||
+		validateCurrentSummary(snapshot.Summary) != nil {
 		return errors.New("paper alert snapshot is invalid")
 	}
 	seen := make(map[string]struct{}, len(snapshot.Events))
@@ -165,6 +234,31 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		}
 		seen[event.ID] = struct{}{}
 		previous = event.At
+	}
+	return nil
+}
+
+func validateCurrentSummary(summary *CurrentSummary) error {
+	if summary == nil {
+		return nil
+	}
+	if len(summary.Market) == 0 || len(summary.Market) > 32 ||
+		summary.TickSeconds < 5 || summary.TickSeconds > 3600 ||
+		summary.OpeningEquityMicros == 0 || summary.HoldBenchmarkMicros == 0 ||
+		summary.Signals > summary.Checks || summary.Trades > summary.Signals {
+		return errors.New("paper current summary is invalid")
+	}
+	for _, character := range summary.Market {
+		if character != '/' && character != '-' && character != '_' &&
+			(character < '0' || character > '9') &&
+			(character < 'A' || character > 'Z') &&
+			(character < 'a' || character > 'z') {
+			return errors.New("paper current summary is invalid")
+		}
+	}
+	day, err := time.Parse("2006-01-02", summary.Day)
+	if err != nil || day.Format("2006-01-02") != summary.Day {
+		return errors.New("paper current summary is invalid")
 	}
 	return nil
 }

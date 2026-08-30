@@ -31,7 +31,7 @@ func TestRunBuildsReadOnlyTelegramServiceWithoutExposingInputs(t *testing.T) {
 	var output bytes.Buffer
 	err := run(t.Context(), []string{
 		"--status-socket", "/private/operator-status.sock",
-		"--paper-status-socket", "/private/paper-status.sock",
+		"--paper-status-socket", "SOL/USDC=/private/paper-status.sock",
 		"--cursor", "/private/telegram-cursor.json",
 	}, &output, func(key string) string { return environment[key] })
 	if err != nil {
@@ -42,6 +42,9 @@ func TestRunBuildsReadOnlyTelegramServiceWithoutExposingInputs(t *testing.T) {
 		captured.Explainer != nil || captured.ExplanationBudget != nil ||
 		len(captured.AllowedChatIDs) != 2 {
 		t.Fatalf("config = %+v", captured)
+	}
+	if labeled, ok := captured.PaperSources[0].(interface{ SourceLabel() string }); !ok || labeled.SourceLabel() != "SOL/USDC" {
+		t.Fatalf("paper source label = %T", captured.PaperSources[0])
 	}
 	text := output.String()
 	if !strings.Contains(text, "read-only, 2 allowed chat(s), 1 paper source(s), explanations off") ||
@@ -106,6 +109,7 @@ func TestRunRejectsAmbiguousOrUnsafeConfiguration(t *testing.T) {
 		{name: "cursor aliases paper dedup", args: []string{"--status-socket", "/private/status.sock", "--cursor", "/private/announced-paper-events.json"}},
 		{name: "status aliases action dedup", args: []string{"--status-socket", "/private/announced-actions.json", "--cursor", "/private/cursor.json"}},
 		{name: "paper aliases paper dedup", args: []string{"--status-socket", "/private/status.sock", "--paper-status-socket", "/private/announced-paper-events.json", "--cursor", "/private/cursor.json"}},
+		{name: "invalid paper label", args: []string{"--status-socket", "/private/status.sock", "--paper-status-socket", "bad label=/private/paper.sock", "--cursor", "/private/cursor.json"}},
 		{name: "unknown mode", args: []string{"--status-socket", "/private/status.sock", "--cursor", "/private/cursor.json", "--explanations", "other"}},
 		{name: "custom remote", args: []string{"--status-socket", "/private/status.sock", "--cursor", "/private/cursor.json", "--explanations", "local"}, env: map[string]string{
 			openAIKeyEnvironment: "test-api-key", openAIModelEnvironment: "gpt-test",
