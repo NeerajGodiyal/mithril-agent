@@ -120,10 +120,11 @@ it only at a UTC boundary. `shadow challenge` compares preselected champion and
 challenger runs. None of those commands authorizes real trading.
 
 The pinned Nous Hermes profile in [`deploy/hermes-research`](deploy/hermes-research)
-can search official sources and prepare only the next paper challenger. Its four
-explicit MCP servers expose 11 allowlisted tools; terminal, files, code execution,
-delegation, scheduling, browser control, wallets, signing, and submission are
-absent. Research prose is input to a deterministic search, not a trading command.
+can search official sources every six hours and prepare only the next paper
+challenger after its evidence gates open. Its three explicit MCP servers expose
+7 allowlisted tools; terminal, files, code execution, delegation, browser
+control, wallets, signing, and submission are absent. Research prose is input
+to a deterministic search, not a trading command.
 
 ## Optional Devnet execution
 

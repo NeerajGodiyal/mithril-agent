@@ -11,8 +11,21 @@ services:
         max-size: 10m
         max-file: "5"
     command:
-      - gateway
-      - run
+      - hermes
+      - chat
+      - --query-file
+      - /opt/mithril/prompts/market-scout.md
+      - --provider
+      - openai-codex
+      - --model
+      - gpt-5.6-terra
+      - --reasoning
+      - high
+      - --toolsets
+      - "${MITHRIL_HERMES_TOOLSETS:-web,solana_docs}"
+      - --run-budget
+      - "300"
+      - --quiet
     environment:
       HERMES_UID: "${MITHRIL_UID:?set MITHRIL_UID}"
       HERMES_GID: "${MITHRIL_GID:?set MITHRIL_GID}"
@@ -21,6 +34,12 @@ services:
       - type: bind
         source: /usr/local/libexec/mithril-agent/mithril-agent
         target: /opt/mithril/bin/mithril-agent
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /opt/mithril-hermes-research/prompts/market-scout.md
+        target: /opt/mithril/prompts/market-scout.md
         read_only: true
         bind:
           create_host_path: false

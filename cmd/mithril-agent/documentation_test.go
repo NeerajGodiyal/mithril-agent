@@ -240,6 +240,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"nousresearch/hermes-agent:v2026.8.27@sha256:e0df6adebddf29b91112aefc999d4aaf6846c9eb544faca5672a16a13590ff79",
 		"name: mithril-hermes-research", "external: true",
 		"source: /usr/local/libexec/mithril-agent/mithril-agent",
+		"source: /opt/mithril-hermes-research/prompts/market-scout.md",
 		"source: /var/lib/mithril-agent-research/index",
 		"source: /var/lib/mithril-agent-research/policy",
 		"source: /var/lib/mithril-agent-research/journals",
@@ -248,21 +249,26 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"source: /var/lib/mithril-agent-research/runs/champion",
 		"source: /var/lib/mithril-agent-research/runs/challenger",
 		"target: /opt/mithril/bin/mithril-agent",
+		"target: /opt/mithril/prompts/market-scout.md",
 		"target: /var/lib/mithril-agent/index",
 		"target: /var/lib/mithril-agent-research/challenger",
 		"target: /var/lib/mithril-agent-research/runs/challenger",
 		"cpus: 2.0", "mem_limit: 4g", "pids_limit: 512",
 		"driver: local", "max-size: 10m", "max-file: \"5\"",
+		"- hermes", "- chat", "- --query-file", "- /opt/mithril/prompts/market-scout.md",
+		"- --provider", "- openai-codex", "- --model", "- gpt-5.6-terra",
+		"- --reasoning", "- high", "- --toolsets",
+		"${MITHRIL_HERMES_TOOLSETS:-web,solana_docs}", "- --run-budget", "- \"300\"", "- --quiet",
 	} {
 		if !strings.Contains(compose, want) {
 			t.Errorf("Hermes compose file is missing pinned read-only boundary %q", want)
 		}
 	}
-	if got := strings.Count(compose, "read_only: true"); got != 7 {
-		t.Errorf("Hermes compose has %d read-only Mithril mounts; want 7", got)
+	if got := strings.Count(compose, "read_only: true"); got != 8 {
+		t.Errorf("Hermes compose has %d read-only mounts; want 8", got)
 	}
-	if got := strings.Count(compose, "create_host_path: false"); got != 8 {
-		t.Errorf("Hermes compose protects %d Mithril host paths; want 8", got)
+	if got := strings.Count(compose, "create_host_path: false"); got != 9 {
+		t.Errorf("Hermes compose protects %d host paths; want 9", got)
 	}
 	challengerMount := strings.Index(compose, "target: /var/lib/mithril-agent-research/challenger\n")
 	championRunMount := strings.Index(compose, "target: /var/lib/mithril-agent-research/runs/champion\n")
@@ -274,7 +280,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"nousresearch/hermes-agent:latest", "network_mode:", "ports:",
 		"docker.sock", "turnkey", "signer", "submitter", "helius", "secrets:", "build:",
 		"openrouter_api_key", "tavily_api_key", "telegram_bot_token",
-		"restart:",
+		"restart:", "gateway\n", "gateway run",
 	} {
 		if strings.Contains(strings.ToLower(compose), forbidden) {
 			t.Errorf("Hermes compose file contains forbidden capability %q", forbidden)
@@ -373,7 +379,8 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"mcp test mithril_paper",
 		"Only `challenger/` is writable by Hermes",
 		"later market days cannot reverse a completed decision",
-		"The resolver assertion proves that Telegram omits the paper server",
+		"explicit pre-champion registry must contain exactly",
+		"pre-champion tools:", "post-filter registry assertion after each gate opens",
 		"_get_platform_tools",
 		"get_tool_definitions",
 		"web_search",
@@ -388,7 +395,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"Helius MCP is deliberately not installed",
 		"without an opt-out",
 		"not maintain a fork or proxy",
-		"every 6h", "--provider openai-codex", "--model gpt-5.6-terra",
+		"mithril-hermes-research.timer", "systemctl list-timers",
 		"auth add openai-codex", "never join the Docker group",
 		"rootless Docker", "last recorded time", "Hetzner server backups",
 		"mithril-agent-paper-challenger.path", "--paper-alert-status",
@@ -406,10 +413,14 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"https://status.jup.ag/", "https://status.pyth.network/",
 		"https://docs.kraken.com/api-reference/transparency/pre-trade-data",
 		"https://status.kraken.com/", "Do not ingest or deliver through Telegram",
+		"previous 12 hours",
 	} {
 		if !strings.Contains(marketScout, want) {
 			t.Errorf("Hermes market scout omits official source rule %q", want)
 		}
+	}
+	if strings.Contains(marketScout, "since the previous run") {
+		t.Error("stateless Hermes market scout uses an unknowable previous-run window")
 	}
 	if strings.Contains(deployReadme, "/usr/local/bin/mithril-agent") {
 		t.Error("Hermes runbook invokes a different agent binary than the supervised units")
@@ -462,6 +473,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	}
 	for _, path := range []string{
 		"./deploy/hermes-research/check-network.sh",
+		"./deploy/hermes-research/run-market-scout.sh",
 		"./deploy/hermes-research/compose.yaml",
 		"./deploy/hermes-research/config.yaml",
 		"./deploy/hermes-research/env.example",
@@ -471,9 +483,22 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"./deploy/systemd/mithril-agent-paper-challenger.path",
 		"./deploy/systemd/mithril-hermes-research-egress.service",
 		"./deploy/systemd/mithril-hermes-research.service",
+		"./deploy/systemd/mithril-hermes-research.timer",
 	} {
 		if !strings.Contains(manifest, path) {
 			t.Errorf("source manifest omits Hermes deployment input %q", path)
+		}
+	}
+	for _, path := range []string{
+		"../../deploy/hermes-research/check-network.sh",
+		"../../deploy/hermes-research/run-market-scout.sh",
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm()&0111 == 0 {
+			t.Errorf("Hermes deployment script is not executable: %q", path)
 		}
 	}
 
@@ -532,16 +557,46 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"BindsTo=docker.service mithril-hermes-research-egress.service",
 		"After=docker.service mithril-hermes-research-egress.service",
 		"ConditionPathExists=/opt/mithril-hermes-research/state/auth.json",
-		"ConditionPathExists=/var/lib/mithril-agent-research/champion/active.json",
-		"ConditionPathExists=/var/lib/mithril-agent-research/index/events.jsonl",
+		"ConditionPathExists=/var/lib/mithril-agent-research/policy/policy.json",
+		"Type=oneshot", "UMask=0077",
 		"iptables -C DOCKER-USER", "iptables -C INPUT",
-		"index doctor --dir /var/lib/mithril-agent-research/index",
-		"docker compose up --no-color --exit-code-from hermes-research",
-		"docker compose down --timeout 30",
-		"WantedBy=docker.service",
+		"ExecStart=/opt/mithril-hermes-research/run-market-scout.sh",
+		"TimeoutStartSec=6min", "TimeoutStopSec=1min",
 	} {
 		if !strings.Contains(hermesUnit, want) {
 			t.Errorf("Hermes systemd owner is missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"gateway", "docker compose up", "docker compose down", "Restart=", "[Install]",
+	} {
+		if strings.Contains(hermesUnit, forbidden) {
+			t.Errorf("Hermes one-shot unit contains obsolete behavior %q", forbidden)
+		}
+	}
+	researchRunner := readDocumentation(t, "../../deploy/hermes-research/run-market-scout.sh")
+	for _, want := range []string{
+		"toolsets='web,solana_docs'",
+		"/var/lib/mithril-agent-research/champion/active.json",
+		"toolsets=\"$toolsets,mithril_paper\"",
+		"/var/lib/mithril-agent-research/index/events.jsonl",
+		"index doctor",
+		"toolsets=\"$toolsets,mithril_index\"",
+		"export MITHRIL_HERMES_TOOLSETS=\"$toolsets\"",
+		"exec /usr/bin/docker compose run --rm --no-TTY hermes-research",
+	} {
+		if !strings.Contains(researchRunner, want) {
+			t.Errorf("Hermes market scout wrapper is missing %q", want)
+		}
+	}
+	researchTimer := readDocumentation(t, "../../deploy/systemd/mithril-hermes-research.timer")
+	for _, want := range []string{
+		"OnCalendar=*-*-* 00,06,12,18:15:00 UTC", "Persistent=true",
+		"RandomizedDelaySec=15min", "AccuracySec=1min",
+		"Unit=mithril-hermes-research.service", "WantedBy=timers.target",
+	} {
+		if !strings.Contains(researchTimer, want) {
+			t.Errorf("Hermes market scout timer is missing %q", want)
 		}
 	}
 	championUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-champion.service")
@@ -566,8 +621,11 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"Do not copy or hand-edit `events.jsonl`",
 		"/opt/mithril-hermes-research",
 		"sudo -u mithril-agent-research env HOME=/var/lib/mithril-agent-research",
-		"systemctl stop mithril-hermes-research.service",
+		"docker compose down --timeout 30",
+		"test -z \"$(sudo docker compose ps -q)\"",
+		"systemctl stop mithril-hermes-research.timer",
 		"systemctl start mithril-hermes-research.service",
+		"systemctl enable --now mithril-hermes-research.timer",
 		"$(id -u mithril-agent-research):600",
 		"sudo test ! -d state/cache/web",
 		"sudo find state/cache/web",
@@ -581,6 +639,11 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	}
 	if strings.Contains(deployReadme, "enabling Telegram or cron") {
 		t.Error("Hermes deployment README suggests enabling its disabled Telegram platform")
+	}
+	for _, forbidden := range []string{"hermes cron create", "supervised gateway", "restore the gateway"} {
+		if strings.Contains(deployReadme, forbidden) {
+			t.Errorf("Hermes deployment README contains obsolete schedule guidance %q", forbidden)
+		}
 	}
 }
 

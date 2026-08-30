@@ -138,7 +138,7 @@ verify-source:
 	 find . -type f \( -name '*.go' -o -name '*.rs' -o -name '*.mjs' -o -name '*.html' -o -name '*.json' \
 	      -o -name '*.yaml' -o -name '*.sh' -o -name '*.example' -o -name 'Dockerfile' -o -name '.dockerignore' \
 	      -o -name '*.md' -o -name 'Makefile' -o -name '*.service' \
-	      -o -name '*.socket' -o -name '*.path' -o -name '*.conf' -o -name '*.yml' \
+	      -o -name '*.socket' -o -name '*.path' -o -name '*.timer' -o -name '*.conf' -o -name '*.yml' \
 	      -o -name 'go.mod' -o -name 'go.sum' -o -name 'Cargo.toml' \
 	      -o -name 'Cargo.lock' -o -name '.gitignore' \) \
 	    -not -path './.git/*' -not -path './bin/*' \
@@ -174,7 +174,7 @@ manifest:
 	@find . -type f \( -name '*.go' -o -name '*.rs' -o -name '*.mjs' -o -name '*.html' -o -name '*.json' \
 	     -o -name '*.yaml' -o -name '*.sh' -o -name '*.example' -o -name 'Dockerfile' -o -name '.dockerignore' \
 	     -o -name '*.md' -o -name 'Makefile' -o -name '*.service' \
-	     -o -name '*.socket' -o -name '*.path' -o -name '*.conf' -o -name '*.yml' \
+	     -o -name '*.socket' -o -name '*.path' -o -name '*.timer' -o -name '*.conf' -o -name '*.yml' \
 	     -o -name 'go.mod' -o -name 'go.sum' -o -name 'Cargo.toml' \
 	     -o -name 'Cargo.lock' -o -name '.gitignore' \) \
 	   -not -path './.git/*' -not -path './bin/*' \

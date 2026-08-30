@@ -1,7 +1,7 @@
 # Nous Hermes research profile
 
-This deploys Nous Research Hermes Agent as a research process with one bounded
-paper-only write: CLI and cron sessions may create an
+This deploys Nous Research Hermes Agent as a scheduled research process with one
+bounded paper-only write: mature one-shot sessions may create an
 immutable challenger and update its dedicated challenger pointer. It can also
 read the local rooted index, current paper challenge state, official Solana
 documentation, and public web sources. It cannot change the
@@ -32,13 +32,13 @@ so do not add or rename a server or tool without reviewing the resulting
 authority. On every Hermes upgrade, recheck the upstream issue and repeat the
 closed-stdin unattended canary. Even when the read-only bug is fixed, the paper
 write still needs an explicit unattended authorization path; do not silently
-change this profile back to an approval mode that makes cron hang.
+change this profile back to an approval mode that makes unattended runs hang.
 
 ## Host boundary
 
 Use a dedicated host or container account and a dedicated `state/` directory.
-Hermes writes its own profile, session, cron, and web-result cache beneath that
-state directory; the container itself is not filesystem-read-only.
+Hermes writes its own profile, sessions, and web-result cache beneath that state
+directory; the container itself is not filesystem-read-only.
 Mount only:
 
 - the pinned Linux `mithril-agent` binary, read-only;
@@ -73,7 +73,7 @@ never be mounted or pasted into it.
 Do not configure a Bitwarden, 1Password, or plugin secret source in this
 profile. Hermes v2026.8.27 forwards variables from external secret sources to
 every stdio MCP subprocess. The ordinary model and Telegram variables in the
-gateway environment are not inherited by these MCP children.
+container environment are not inherited by these MCP children.
 
 `MITHRIL_UID` and `MITHRIL_GID` must be the decimal UID and primary GID, from 1
 through 65534, of the dedicated no-login `mithril-agent-research` identity.
@@ -112,22 +112,23 @@ sudo install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
   /var/lib/mithril-agent-research/status/champion
 ```
 
-Before validating or enabling Hermes, populate that fixed `index/` directory
-with a completed rooted-event ingest using the producer and recovery procedure
-in [`INDEXING.md`](../../INDEXING.md). Run the `mithril-agent index ingest`
-side of the supervisor-owned pipe as `mithril-agent-research`, keep the Mithril
-AccountsDB private to its existing node identity, and use the permanent cluster,
-genesis hash, and account/owner/mention filter selected for this research
-profile. Do not copy or hand-edit `events.jsonl`. The final command must pass
-before Compose is started:
+Before the rooted index may inform research, populate that fixed `index/`
+directory with a completed rooted-event ingest using the producer and recovery
+procedure in [`INDEXING.md`](../../INDEXING.md). Run the `mithril-agent index
+ingest` side of the supervisor-owned pipe as `mithril-agent-research`, keep the
+Mithril AccountsDB private to its existing node identity, and use the permanent
+cluster, genesis hash, and account/owner/mention filter selected for this
+research profile. Do not copy or hand-edit `events.jsonl`. The final command
+must pass before the wrapper exposes the index toolset:
 
 ```sh
 sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
   index doctor --dir /var/lib/mithril-agent-research/index
 ```
 
-The systemd unit deliberately remains ineligible until that verified index has
-an `events.jsonl`; an empty provisioned directory is not research evidence.
+An empty provisioned directory is not research evidence. The wrapper runs
+official-source research without the index until both `events.jsonl` exists and
+`index doctor` passes.
 
 For rootful Docker, copy the reviewed deployment inputs into a root-owned
 directory before running Compose. Running root-equivalent Compose from a
@@ -146,7 +147,8 @@ sudo install -o root -g root -m 0644 \
   /opt/mithril-hermes-research/
 sudo install -o root -g root -m 0755 \
   deploy/hermes-research/check-network.sh \
-  /opt/mithril-hermes-research/check-network.sh
+  deploy/hermes-research/run-market-scout.sh \
+  /opt/mithril-hermes-research/
 sudo install -o root -g root -m 0644 \
   deploy/hermes-research/prompts/market-scout.md \
   /opt/mithril-hermes-research/prompts/market-scout.md
@@ -157,6 +159,7 @@ sudo install -o root -g root -m 0644 \
   deploy/systemd/mithril-agent-paper-challenger.path \
   deploy/systemd/mithril-hermes-research-egress.service \
   deploy/systemd/mithril-hermes-research.service \
+  deploy/systemd/mithril-hermes-research.timer \
   /opt/mithril-hermes-research/systemd/
 sudo install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
   /opt/mithril-hermes-research/state
@@ -180,13 +183,31 @@ sudo docker network create --driver bridge --subnet 172.30.77.0/28 \
   mithril-hermes-research
 test "$(sudo docker network inspect mithril-hermes-research \
   --format '{{(index .IPAM.Config 0).Subnet}}')" = 172.30.77.0/28
+```
+
+When upgrading from the former persistent gateway unit, stop it while its old
+unit definition is still loaded and remove its Compose container before
+installing the one-shot unit. On a fresh installation only the final empty
+Compose check is required:
+
+```sh
+sudo systemctl stop mithril-hermes-research.service
+sudo docker compose down --timeout 30
+test -z "$(sudo docker compose ps -q)"
+```
+
+Then install and verify the one-shot service and timer:
+
+```sh
 sudo install -o root -g root -m 0644 \
   systemd/mithril-hermes-research-egress.service \
   systemd/mithril-hermes-research.service \
+  systemd/mithril-hermes-research.timer \
   /etc/systemd/system/
 sudo systemd-analyze verify \
   /etc/systemd/system/mithril-hermes-research-egress.service \
-  /etc/systemd/system/mithril-hermes-research.service
+  /etc/systemd/system/mithril-hermes-research.service \
+  /etc/systemd/system/mithril-hermes-research.timer
 sudo systemctl daemon-reload
 sudo systemctl enable mithril-hermes-research-egress.service
 sudo systemctl restart mithril-hermes-research-egress.service
@@ -414,16 +435,16 @@ this file owner-only and back it up separately from public source.
 
 ## Validate before starting
 
-Run these commands through pinned one-off containers before starting the
-service:
+Run the base checks through pinned one-off containers before starting the
+timer. The index and paper MCP checks require a healthy rooted index and an
+operator-selected champion respectively; run the gated checks only after those
+inputs exist:
 
 ```sh
 sudo docker compose run --rm hermes-research id
 sudo docker compose run --rm hermes-research config check
 sudo docker compose run --rm hermes-research doctor
 sudo docker compose run --rm hermes-research mcp list
-sudo docker compose run --rm hermes-research mcp test mithril_index
-sudo docker compose run --rm hermes-research mcp test mithril_paper
 sudo docker compose run --rm hermes-research mcp test solana_docs
 sudo docker compose run --rm hermes-research tools list --platform cli
 sudo docker compose run --rm hermes-research tools list --platform telegram
@@ -432,6 +453,11 @@ sudo docker compose run --rm hermes-research python -c \
   'from hermes_cli.config import load_config; from hermes_cli.tools_config import _get_platform_tools; c = load_config(); expected = {"cli": {"web", "mithril_index", "mithril_paper", "solana_docs"}, "telegram": {"web", "mithril_index", "solana_docs"}, "cron": {"web", "mithril_index", "mithril_paper", "solana_docs"}}; got = {p: set(_get_platform_tools(c, p)) for p in expected}; assert got == expected, got; print({p: sorted(v) for p, v in got.items()})'
 sudo docker compose run --rm hermes-research python -c \
   'from hermes_cli.config import load_config; from hermes_cli.tools_config import _get_platform_tools; from model_tools import get_tool_definitions; c = load_config(); disabled = c.get("agent", {}).get("disabled_toolsets", []); names = {p: {d["function"]["name"] for d in get_tool_definitions(sorted(_get_platform_tools(c, p)), disabled, quiet_mode=True, skip_tool_search_assembly=True)} for p in ("cli", "telegram", "cron")}; assert all({"web_search", "web_extract"} <= value for value in names.values()), names; assert not any(name.startswith("browser_") or name == "browser_exec" for value in names.values() for name in value), names; print({p: sorted({"web_search", "web_extract"} & value) for p, value in names.items()})'
+sudo docker compose run --rm hermes-research python -c \
+  'import logging; from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build; ensure_mcp_discovery_before_agent_build(logger=logging.getLogger(__name__), single_query=True); from hermes_cli.config import load_config; from model_tools import get_tool_definitions; c = load_config(); disabled = c.get("agent", {}).get("disabled_toolsets", []); want = {"web_search", "web_extract", "mcp__solana_docs__list_sections", "mcp__solana_docs__get_documentation"}; got = {d["function"]["name"] for d in get_tool_definitions(enabled_toolsets=["web", "solana_docs"], disabled_toolsets=disabled, quiet_mode=True, skip_tool_search_assembly=True)}; assert got == want, sorted(got ^ want); print("pre-champion tools:", len(got))'
+# After the rooted index and first champion exist:
+sudo docker compose run --rm hermes-research mcp test mithril_index
+sudo docker compose run --rm hermes-research mcp test mithril_paper
 sudo docker compose run --rm hermes-research python -c \
   'from tools.mcp_tool import discover_mcp_tools, shutdown_mcp_servers; expected = {"mithril_index": {"mithril_index_status", "mithril_index_accounts", "mithril_index_transactions"}, "mithril_paper": {"mithril_paper_create_challenger", "mithril_paper_challenge_status"}, "solana_docs": {"list_sections", "get_documentation"}}; want = {f"mcp__{server}__{tool}" for server, tools in expected.items() for tool in tools}; got = set(discover_mcp_tools()); assert got == want, sorted(got ^ want); print("effective MCP tools:", len(got)); shutdown_mcp_servers()'
 sudo test ! -d state/cache/web || \
@@ -494,17 +520,17 @@ fresh web-cache state; if an older
 deployment ever used batched extraction, preserve that state for audit and
 create a fresh dedicated state directory instead of trusting its cache.
 
-The CLI and cron resolved toolsets must contain web search/extraction, three
-`mithril_index_*` tools, and only the two
-read-annotated Solana documentation tools, `list_sections` and
-`get_documentation`, plus `mithril_paper_create_challenger` and
-`mithril_paper_challenge_status`.
-The resolver assertion proves that Telegram omits the paper server while CLI
-and cron include it. In Hermes v2026.8.27, `tools list --platform` prints every
-globally configured MCP server and its include filter, even when that server is
-not a member of the selected platform. Use those three listings to inspect the
-built-in toolsets and global MCP filters, not as the per-platform MCP-membership
-proof.
+The scheduled one-shot's explicit pre-champion registry must contain exactly
+four tools: web search/extraction and the two read-only Solana documentation
+tools. The wrapper adds the two paper tools only after a champion exists and
+the three index tools only after `index doctor` passes. Repeat the exact
+post-filter registry assertion after each gate opens. The static CLI, Telegram,
+and cron resolver assertions remain upgrade checks for the underlying profile;
+they are not proof of the one-shot's dynamic runtime registry. In Hermes
+v2026.8.27, `tools list --platform` prints every globally configured MCP server
+and its include filter, even when that server is not a member of the selected
+platform. Use those listings to inspect the built-in toolsets and global MCP
+filters only.
 `mcp test` remains the raw discovery/schema check; neither it nor a toolset
 summary substitutes for the post-filter registry assertion.
 It must not contain terminal, process, file mutation, code execution, browser
@@ -512,69 +538,54 @@ automation, skills, memory mutation, delegation, cron mutation, messaging,
 wallet, signer, submitter, program build, signing, sending, submission, or
 service-control tools.
 
-Only after that review should the systemd-owned service start. Do not run
+Only after that review should the systemd-owned one-shot start. Do not run
 `docker compose up` directly and do not add a Docker restart policy: the unit
-orders every start after the egress boundary and refuses startup until the
-OAuth file, selected champion, and rooted index exist.
+orders every run after the egress boundary and requires the OAuth file and
+paper policy. The wrapper starts with only `web,solana_docs`, adds
+`mithril_paper` when the first champion pointer exists, and adds
+`mithril_index` only when the index file exists and `index doctor` passes.
 
 ```sh
-sudo systemctl enable --now mithril-hermes-research.service
+sudo systemctl start mithril-hermes-research.service
+sudo systemctl status mithril-hermes-research.service
+sudo journalctl -u mithril-hermes-research.service
 ```
 
 ## First recurring brief
 
-Use the exact prompt in `prompts/market-scout.md` for the initial manual canary:
+The manual one-shot above uses the exact reviewed prompt in
+`prompts/market-scout.md`. Inspect its cited sources and confirm it created no
+challenger before a champion exists. Then enable the fixed native schedule:
 
 ```sh
-sudo docker compose exec -T hermes-research /command/s6-setuidgid hermes \
-  hermes chat --query-file - < prompts/market-scout.md
+sudo systemctl enable --now mithril-hermes-research.timer
+sudo systemctl list-timers mithril-hermes-research.timer
 ```
 
-Inspect its sources and verify `[SILENT]` behavior before creating a schedule.
-After the service passes its canary, the tagged CLI supports:
+The timer starts at 00:15, 06:15, 12:15, and 18:15 UTC with up to 15 minutes of
+jitter, and catches up after downtime. Research output is retained in the
+systemd journal rather than sent to Telegram. Once the paper tool becomes
+available, a successful research call may change only the dedicated paper
+challenger pointer; an operator still decides whether a qualified challenger
+becomes the next champion. An identical digest in the champion pointer is the
+durable promotion acknowledgement and permits the next research cycle without
+deleting or resetting either observer.
+
+Six-hour scans stay within the intended research cadence. Monitor the pinned
+provider/model, timer age, service result, Codex usage-limit errors, and keyless
+search/extraction failures. Before upgrade validation against this state, stop
+the timer and wait for the one-shot service to become inactive:
 
 ```sh
-sudo docker compose exec hermes-research /command/s6-setuidgid hermes \
-  hermes cron create \
-  "every 6h" \
-  "Research material Solana and market changes published or occurring in the previous 12 hours. Record both source publication time and event time, use current primary sources and configured Mithril and Solana evidence tools, and mark inference. Read paper challenge status first. Create at most one cited paper challenger only when none is active, the completed prior challenger was rejected, or its exact artifact was promoted by the operator. Never change the champion or perform live execution. If nothing materially changed and no operator attention is needed, respond with exactly [SILENT]." \
-  --name "Mithril market scout" \
-  --provider openai-codex \
-  --model gpt-5.6-terra \
-  --deliver local \
-  --continuity
+sudo systemctl stop mithril-hermes-research.timer
+sudo systemctl is-active mithril-hermes-research.service
 ```
 
-The model-facing cron tool is disabled. The platform `cron` allowlist repeats
-the exact raw MCP server keys so Hermes does not fall back to enabling every
-configured MCP server. A successful research call changes only the dedicated
-paper challenger pointer; an operator still decides whether a qualified
-challenger becomes the next champion. An identical digest in the champion
-pointer is the durable promotion acknowledgement and permits the next research
-cycle without deleting or resetting either observer.
-
-Six-hour scans stay within the intended research cadence. The overlapping
-12-hour window is intentional: continuity carries only recent output and is
-not a durable news ledger. Monitor the pinned provider/model, latest successful
-execution age, failed or unknown status, consecutive failure count, Codex
-usage-limit errors, and keyless search/extraction failures. A `[SILENT]` result
-is successful only when the execution record says so.
-
-After the service starts, use `compose exec` with the explicit Hermes identity
-as shown above. A one-off `compose run` against shared live state can reconcile
-gateway state while the supervised gateway is still running, while a plain
-root `exec` can leave state files with the wrong owner. Before upgrade
-validation that must use one-off containers against this state, stop the
-systemd owner:
-
-```sh
-sudo systemctl stop mithril-hermes-research.service
-```
-
-After validation, restore the gateway through the same ordered owner:
+After validation, run one manual canary and restore the schedule:
 
 ```sh
 sudo systemctl start mithril-hermes-research.service
+sudo systemctl enable --now mithril-hermes-research.timer
 ```
 
 ## Freshness and recovery
@@ -599,8 +610,8 @@ the rooted index or retained feed needed to rebuild it. Hetzner server backups
 and snapshots exclude attached Volumes, so export those volumes separately.
 Restore binaries/config/owners/modes first, then prove index integrity and
 freshness, restore paper trees, restore Telegram cursor/dedup state, canary the
-runners, canary Hermes MCP/schema/search, and enable cron
-last. Keep cron stopped until freshness and delivery checks pass.
+runners, canary Hermes MCP/schema/search, and enable the timer last. Keep the
+timer stopped until freshness and delivery checks pass.
 
 ## Helius
 
@@ -621,6 +632,8 @@ after an exact reviewed release provides a documented telemetry opt-out.
 
 For each Hermes or MCP upgrade, review the tagged configuration parser and tool
 resolver, update the exact tag and OCI index digest, rerun every validation command,
-and compare the full tool list before enabling cron. Roll back by
-stopping the container and restoring the previous image/config pair; preserve
-the profile state for audit rather than copying it into a broader profile.
+and compare the full tool list before enabling the timer. Roll back by stopping
+the timer and restoring the complete previous Compose, prompt, service, image,
+and config set. If that set used the persistent gateway, restore its matching
+`ExecStop` ownership semantics before starting it. Preserve the profile state
+for audit rather than copying it into a broader profile.

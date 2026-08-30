@@ -1,27 +1,20 @@
 [Unit]
-Description=Mithril bounded Hermes research gateway
+Description=Mithril bounded Hermes market research
 Requires=docker.service mithril-hermes-research-egress.service
 BindsTo=docker.service mithril-hermes-research-egress.service
 After=docker.service mithril-hermes-research-egress.service network-online.target
 Wants=network-online.target
 PartOf=docker.service
 ConditionPathExists=/opt/mithril-hermes-research/state/auth.json
-ConditionPathExists=/var/lib/mithril-agent-research/champion/active.json
-ConditionPathExists=/var/lib/mithril-agent-research/index/events.jsonl
+ConditionPathExists=/var/lib/mithril-agent-research/policy/policy.json
 
 [Service]
-Type=simple
+Type=oneshot
 WorkingDirectory=/opt/mithril-hermes-research
+UMask=0077
 ExecStartPre=/opt/mithril-hermes-research/check-network.sh
 ExecStartPre=/usr/sbin/iptables -C DOCKER-USER -s 172.30.77.0/28 -j MITHRIL_HERMES
 ExecStartPre=/usr/sbin/iptables -C INPUT -s 172.30.77.0/28 -j REJECT
-ExecStartPre=/usr/sbin/runuser -u mithril-agent-research -- /usr/local/libexec/mithril-agent/mithril-agent index doctor --dir /var/lib/mithril-agent-research/index
-ExecStart=/usr/bin/docker compose up --no-color --exit-code-from hermes-research
-ExecStop=/usr/bin/docker compose down --timeout 30
-Restart=on-failure
-RestartSec=15s
-TimeoutStartSec=2min
+ExecStart=/opt/mithril-hermes-research/run-market-scout.sh
+TimeoutStartSec=6min
 TimeoutStopSec=1min
-
-[Install]
-WantedBy=docker.service

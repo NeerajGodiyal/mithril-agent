@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Mithril bounded Hermes market research every six hours
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:15:00 UTC
+Persistent=true
+RandomizedDelaySec=15min
+AccuracySec=1min
+Unit=mithril-hermes-research.service
+
+[Install]
+WantedBy=timers.target
