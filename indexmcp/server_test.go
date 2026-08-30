@@ -20,6 +20,15 @@ var testSource = rootedindex.SourceDescriptor{
 	AccountsDBRootRunID: "0123abcd",
 }
 
+func testRoot(parent uint64, accounts uint32) *rootedindex.RootedSlot {
+	return &rootedindex.RootedSlot{
+		ParentSlot: parent, Blockhash: testSource.GenesisHash, ParentBlockhash: testSource.GenesisHash,
+		Bankhash: testSource.GenesisHash, BlockID: testSource.GenesisHash,
+		ParentBlockID: testSource.GenesisHash, FinalitySource: rootedindex.FinalityAlpenglowCertificate,
+		AccountCount: accounts,
+	}
+}
+
 func beginBatch(t *testing.T, index *rootedindex.Index, sequence, slot uint64) {
 	t.Helper()
 	_, err := index.BeginBatch(rootedindex.BatchDescriptor{
@@ -58,10 +67,7 @@ func TestServerExposesOnlyBoundedMetadataQueries(t *testing.T) {
 		SchemaVersion: rootedindex.SchemaVersion,
 		Cursor:        rootedindex.Cursor{Slot: 50, Ordinal: 1},
 		Kind:          "slot_rooted",
-		Root: &rootedindex.RootedSlot{
-			ParentSlot: 49, Bankhash: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-			AccountCount: 1,
-		},
+		Root:          testRoot(49, 1),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -129,10 +135,7 @@ func TestServerExposesOnlyBoundedMetadataQueries(t *testing.T) {
 		SchemaVersion: rootedindex.SchemaVersion,
 		Cursor:        rootedindex.Cursor{Slot: 51, Ordinal: 1},
 		Kind:          "slot_rooted",
-		Root: &rootedindex.RootedSlot{
-			ParentSlot: 50, Bankhash: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-			AccountCount: 1,
-		},
+		Root:          testRoot(50, 1),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -193,6 +196,22 @@ func TestServerRequiresPrivateDirectory(t *testing.T) {
 	defer writer.Close()
 	if err := Serve(t.Context(), dir, reader, io.Discard); err == nil {
 		t.Fatal("non-private index directory was accepted")
+	}
+}
+
+func TestTransactionMetadataKeepsIdentityAndDropsPayload(t *testing.T) {
+	results := transactionMetadata([]rootedindex.TransactionResult{{
+		Version: rootedindex.TransactionVersionV1, MessageHash: testSource.GenesisHash,
+		Transaction: []byte("private signed wire"), Logs: []string{"private log"},
+	}})
+	encoded, err := json.Marshal(results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Version != rootedindex.TransactionVersionV1 ||
+		results[0].MessageHash != testSource.GenesisHash ||
+		bytes.Contains(encoded, []byte("private signed wire")) || bytes.Contains(encoded, []byte("private log")) {
+		t.Fatalf("transaction metadata = %s", encoded)
 	}
 }
 

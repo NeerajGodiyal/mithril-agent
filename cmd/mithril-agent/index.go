@@ -366,8 +366,8 @@ func runIndexStatus(args []string, output io.Writer) error {
 		root = status.LastRoot.String()
 	}
 	_, err = fmt.Fprintf(output,
-		"Rooted index integrity verified\nSnapshot complete: %t\nProvenance: %s (%s)\nTransactions: %d\nAccount updates: %d\nRooted slots: %d\nLast cursor: %s\nLast root: %s\nChain head: %s\n",
-		status.Complete, status.Provenance, status.Finality,
+		"Rooted index integrity verified\nSnapshot complete: %t\nSchemas: index=%d event=%d\nProvenance: %s (%s)\nTransactions: %d\nAccount updates: %d\nRooted slots: %d\nLast cursor: %s\nLast root: %s\nChain head: %s\n",
+		status.Complete, status.SchemaVersion, status.EventSchemaVersion, status.Provenance, status.Finality,
 		status.Transactions, status.Accounts, status.Roots, last, root, status.ChainHead)
 	return err
 }
@@ -445,7 +445,7 @@ func runIndexTransactions(args []string, output io.Writer) error {
 	mention := flags.String("mention", "", "mentioned address")
 	afterText := flags.String("after", "", "exclusive rooted cursor")
 	limit := flags.Int("limit", 100, "maximum results")
-	includePayload := flags.Bool("include-payload", false, "include message, logs, CPI, and return data")
+	includePayload := flags.Bool("include-payload", false, "include signed transaction, logs, CPI, and return data")
 	jsonOutput := flags.Bool("json", false, "print JSON")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -493,8 +493,8 @@ func runIndexTransactions(args []string, output io.Writer) error {
 	}
 	for _, result := range results {
 		if _, err := fmt.Fprintf(output,
-			"  %s  signature=%s succeeded=%t compute_units=%d failure=%s logs_truncated=%t\n",
-			result.Cursor, result.Signature, result.Succeeded, result.ComputeUnits,
+			"  %s  signature=%s version=%s message_hash=%s succeeded=%t compute_units=%d failure=%s logs_truncated=%t\n",
+			result.Cursor, result.Signature, result.Version, result.MessageHash, result.Succeeded, result.ComputeUnits,
 			result.Failure, result.LogsTruncated); err != nil {
 			return err
 		}

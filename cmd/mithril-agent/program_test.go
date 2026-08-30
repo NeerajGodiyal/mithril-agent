@@ -149,10 +149,7 @@ func TestProgramDecodeAccountFromRootedIndex(t *testing.T) {
 		SchemaVersion: rootedindex.SchemaVersion,
 		Cursor:        rootedindex.Cursor{Slot: 1, Ordinal: 1},
 		Kind:          "slot_rooted",
-		Root: &rootedindex.RootedSlot{
-			ParentSlot: 0, Bankhash: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-			AccountCount: 1,
-		},
+		Root:          testRootedSlot(testRootedSource(), 0, 0, 1),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -223,23 +220,20 @@ func TestProgramDecodeEventFromRootedTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	beginRootedBatch(t, index, 1, 2, 2)
-	signature := strings.Repeat("1", 64)
+	transaction := testRootedTransaction(t, programCommandAddress, []string{
+		"Program ComputeBudget111111111111111111111111111111 invoke [1]",
+		"Program data: " + base64.StdEncoding.EncodeToString([]byte("other")) + " " + encoded,
+		"Program ComputeBudget111111111111111111111111111111 success",
+		"Program " + programCommandAddress + " invoke [1]",
+		"Program data: " + base64.StdEncoding.EncodeToString([]byte("other")) + " " + encoded,
+		"Program " + programCommandAddress + " success",
+	})
+	signature := transaction.Signature
 	if _, err := index.Append(rootedindex.Event{
 		SchemaVersion: rootedindex.SchemaVersion,
 		Cursor:        rootedindex.Cursor{Slot: 2},
 		Kind:          "transaction_executed",
-		Transaction: &rootedindex.Transaction{
-			Signature: signature, Message: []byte("message"),
-			AccountKeys: []string{programCommandAddress}, Succeeded: true,
-			Logs: []string{
-				"Program ComputeBudget111111111111111111111111111111 invoke [1]",
-				"Program data: " + base64.StdEncoding.EncodeToString([]byte("other")) + " " + encoded,
-				"Program ComputeBudget111111111111111111111111111111 success",
-				"Program " + programCommandAddress + " invoke [1]",
-				"Program data: " + base64.StdEncoding.EncodeToString([]byte("other")) + " " + encoded,
-				"Program " + programCommandAddress + " success",
-			},
-		},
+		Transaction:   transaction,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -247,10 +241,7 @@ func TestProgramDecodeEventFromRootedTransaction(t *testing.T) {
 		SchemaVersion: rootedindex.SchemaVersion,
 		Cursor:        rootedindex.Cursor{Slot: 2, Ordinal: 1},
 		Kind:          "slot_rooted",
-		Root: &rootedindex.RootedSlot{
-			ParentSlot: 1, Bankhash: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-			TransactionCount: 1,
-		},
+		Root:          testRootedSlot(testRootedSource(), 1, 1, 0),
 	}); err != nil {
 		t.Fatal(err)
 	}

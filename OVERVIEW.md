@@ -197,8 +197,9 @@ be built into the signer.
 ## What this does not claim yet
 
 - No Mainnet signing or autonomous Mainnet execution is enabled.
-- Solana v1 transactions are not decoded or signed; supported execution stays
-  on the existing bounded legacy and v0 paths.
+- Rooted Solana v1 transactions are decoded and identity-checked for the local
+  index. They are not signed or executed; supported execution stays on the
+  existing bounded legacy and v0 paths.
 - The demonstrated live route is one fixed Devnet SOL/devUSDC route, not an
   arbitrary-token trading system.
 - Telegram and MCP cannot approve or initiate trades.

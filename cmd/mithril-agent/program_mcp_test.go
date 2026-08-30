@@ -553,7 +553,7 @@ func TestProgramWorkspaceRejectsMixedRootedIndexLineage(t *testing.T) {
 	beginRootedBatch(t, state, 1, 1, 1)
 	if _, err := state.Append(rootedindex.Event{
 		SchemaVersion: rootedindex.SchemaVersion, Cursor: rootedindex.Cursor{Slot: 1},
-		Kind: "slot_rooted", Root: &rootedindex.RootedSlot{Bankhash: solana.DevnetGenesisHash},
+		Kind: "slot_rooted", Root: testRootedSlot(testRootedSource(), 0, 0, 0),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -570,7 +570,7 @@ func TestProgramWorkspaceRejectsMixedRootedIndexLineage(t *testing.T) {
 	beginRootedBatch(t, activity, 1, 1, 1)
 	if _, err := activity.Append(rootedindex.Event{
 		SchemaVersion: rootedindex.SchemaVersion, Cursor: rootedindex.Cursor{Slot: 1},
-		Kind: "slot_rooted", Root: &rootedindex.RootedSlot{Bankhash: solana.DevnetGenesisHash},
+		Kind: "slot_rooted", Root: testRootedSlot(otherSource, 0, 0, 0),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -652,13 +652,13 @@ func seedProgramMCPIndexesFromSource(
 	}
 	if _, err := state.Append(rootedindex.Event{
 		SchemaVersion: rootedindex.SchemaVersion, Cursor: rootedindex.Cursor{Slot: 1, Ordinal: 1},
-		Kind: "slot_rooted", Root: &rootedindex.RootedSlot{ParentSlot: 0, Bankhash: source.GenesisHash, AccountCount: 1},
+		Kind: "slot_rooted", Root: testRootedSlot(source, 0, 0, 1),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := state.Append(rootedindex.Event{
 		SchemaVersion: rootedindex.SchemaVersion, Cursor: rootedindex.Cursor{Slot: 2},
-		Kind: "slot_rooted", Root: &rootedindex.RootedSlot{ParentSlot: 1, Bankhash: source.GenesisHash},
+		Kind: "slot_rooted", Root: testRootedSlot(source, 1, 0, 0),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -666,8 +666,13 @@ func seedProgramMCPIndexesFromSource(
 		t.Fatal(err)
 	}
 
-	signature := strings.Repeat("1", 64)
 	eventData := binary.LittleEndian.AppendUint64([]byte{9, 10, 11, 12, 13, 14, 15, 16}, 7)
+	transaction := testRootedTransaction(t, programCommandAddress, []string{
+		"Program " + programCommandAddress + " invoke [1]",
+		"Program data: " + base64.StdEncoding.EncodeToString(eventData),
+		"Program " + programCommandAddress + " success",
+	})
+	signature := transaction.Signature
 	activity, err := rootedindex.Open(view.ActivityIndex, source, rootedindex.Filter{Mention: programCommandAddress})
 	if err != nil {
 		t.Fatal(err)
@@ -675,26 +680,19 @@ func seedProgramMCPIndexesFromSource(
 	beginRootedBatch(t, activity, 1, 1, 2)
 	if _, err := activity.Append(rootedindex.Event{
 		SchemaVersion: rootedindex.SchemaVersion, Cursor: rootedindex.Cursor{Slot: 1},
-		Kind: "slot_rooted", Root: &rootedindex.RootedSlot{ParentSlot: 0, Bankhash: source.GenesisHash},
+		Kind: "slot_rooted", Root: testRootedSlot(source, 0, 0, 0),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := activity.Append(rootedindex.Event{
 		SchemaVersion: rootedindex.SchemaVersion, Cursor: rootedindex.Cursor{Slot: 2},
-		Kind: "transaction_executed", Transaction: &rootedindex.Transaction{
-			Signature: signature, Message: []byte("message"), AccountKeys: []string{programCommandAddress},
-			Succeeded: true, Logs: []string{
-				"Program " + programCommandAddress + " invoke [1]",
-				"Program data: " + base64.StdEncoding.EncodeToString(eventData),
-				"Program " + programCommandAddress + " success",
-			},
-		},
+		Kind: "transaction_executed", Transaction: transaction,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := activity.Append(rootedindex.Event{
 		SchemaVersion: rootedindex.SchemaVersion, Cursor: rootedindex.Cursor{Slot: 2, Ordinal: 1},
-		Kind: "slot_rooted", Root: &rootedindex.RootedSlot{ParentSlot: 1, Bankhash: source.GenesisHash, TransactionCount: 1},
+		Kind: "slot_rooted", Root: testRootedSlot(source, 1, 1, 0),
 	}); err != nil {
 		t.Fatal(err)
 	}

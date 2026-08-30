@@ -380,7 +380,7 @@ Mithril exporter as the unprivileged node service identity that can read its
 private AccountsDB; if the index has a different owner, use a supervised stdout
 pipe instead of broadening AccountsDB permissions. The framed source identity,
 initial stream boundary, and selected sidecar hashes are permanently bound to
-each v4 index. The explicit node config preserves its configured retention
+each v5 index. The explicit node config preserves its configured retention
 horizon while `--accounts` overrides only the storage path. The commands stop
 at the first malformed event, source mismatch, batch sequence gap, or history conflict.
 

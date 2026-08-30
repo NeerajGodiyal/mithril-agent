@@ -390,8 +390,8 @@ be asked to edit protected environment files or debug systemd.
 The repository does **not** currently provide:
 
 - autonomous Mainnet strategy execution or submission;
-- Solana v1 transaction decoding or signing; the existing legacy and v0 paths
-  remain deliberately bounded;
+- Solana v1 signing or execution. The rooted feed and private index decode and
+  verify v1 identity, while executable paths remain bounded to legacy and v0;
 - arbitrary tokens, arbitrary venues, perpetual futures, or leverage;
 - approval or trade initiation through Telegram or an LLM;
 - a proven profitable strategy;

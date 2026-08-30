@@ -36,9 +36,10 @@ Review both repositories together with:
 make test-rooted-contract MITHRIL_SOURCE=/absolute/path/to/Mithril
 ```
 
-That test feeds the public producer-owned golden source/start/batch/event
-fixture through this consumer so independent unit suites cannot hide a
-wire-contract drift.
+That test feeds the public producer-owned stable and transaction-v1 golden
+source/start/batch/event fixtures through this consumer so independent unit
+suites cannot hide wire, message-hash, signed-payload, or inline-priority-fee
+contract drift.
 
 The first query implementation intentionally scans verified retained metadata.
 It supports local queries and MCP while ingest continues, but it is not a
@@ -187,9 +188,11 @@ events between its last durable cursor and the current tip.
 `--framed` is mandatory. Its source and stream-start records bind the index to
 Mithril's ready AccountsDB lineage and to either full retained history or one
 exact resume cursor. Every selected immutable sidecar contributes its manifest
-sequence, slot range, version, and SHA-256. Index schemas before v4 cannot prove
-both bindings. Preserve them for audit and backfill a new private v4 directory;
-do not relabel or edit them in place.
+sequence, slot range, version, and SHA-256. Private index schemas before v5 do
+not bind the retained event schema or persist the current transaction identity
+and full root lineage. Preserve them for audit and backfill a new private v5
+directory; do not relabel or edit them in place. The public rooted-event wire
+remains schema 3, so retained schema-3 batches stay resumable.
 
 For a program workspace, prefer the shorter form below. It derives the fixed
 index directory, cluster, genesis hash, and permanent filter from the private
@@ -220,10 +223,11 @@ mithril-agent index transactions --dir "$ACTIVITY_INDEX" \
   --signature '<TRANSACTION_SIGNATURE>' --include-payload --json
 ```
 
-Account bytes are omitted by default. Include them only when needed; JSON
-encodes the bytes as base64. JSON account and transaction queries return a
-single envelope that labels `provenance` and `finality` beside the results, so
-an agent never has to infer rootedness from a command name:
+Account bytes and signed transaction payloads are omitted by default. Include
+them only when needed; JSON encodes bytes as base64. Transaction version and
+message hash remain available as bounded metadata. JSON account and transaction
+queries return a single envelope that labels `provenance` and `finality` beside
+the results, so an agent never has to infer rootedness from a command name:
 
 ```sh
 mithril-agent index query --dir "$INDEX" --account '<ACCOUNT_ADDRESS>' \
@@ -375,10 +379,10 @@ partially written slot or batch. That account and the exact private directory in
 authorize access; no port is opened and no bearer token is stored. The three
 tools expose verified status, bounded account metadata, and bounded transaction
 metadata. They cap queries at 1,000 results and never return raw account bytes,
-messages, logs, CPI, or return data. The local server runs at most four tool
-calls concurrently and immediately refuses additional calls; clients may retry
-after an active call finishes. Use the local CLI when a reviewed workflow
-explicitly needs those payloads.
+signed transactions, logs, CPI, or return data. The local server runs at most
+four tool calls concurrently and immediately refuses additional calls; clients
+may retry after an active call finishes. Use the local CLI when a reviewed
+workflow explicitly needs those payloads.
 
 This path is read-only from Solana's perspective. It cannot sign or submit a
 transaction and has no dependency on the optional trading system.

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/Overclock-Validator/mithril-agent/rootedindex"
 	"github.com/Overclock-Validator/mithril-agent/solana"
+	solanago "github.com/gagliardetto/solana-go"
+	"github.com/zeebo/blake3"
 )
 
 func testRootedSource() rootedindex.SourceDescriptor {
@@ -28,6 +31,66 @@ func testClassicRootedSource() rootedindex.SourceDescriptor {
 		Cluster:             "mainnet-beta",
 		GenesisHash:         solana.MainnetBetaGenesisHash,
 		AccountsDBRootRunID: "0123abcd",
+	}
+}
+
+func testRootedSlot(source rootedindex.SourceDescriptor, parent uint64, transactions, accounts uint32) *rootedindex.RootedSlot {
+	root := &rootedindex.RootedSlot{
+		ParentSlot: parent, Blockhash: source.GenesisHash, ParentBlockhash: source.GenesisHash,
+		Bankhash: source.GenesisHash, TransactionCount: transactions, AccountCount: accounts,
+	}
+	if source.Cluster == "alpenglow" {
+		root.BlockID, root.ParentBlockID = source.GenesisHash, source.GenesisHash
+		root.FinalitySource = rootedindex.FinalityAlpenglowCertificate
+	} else {
+		root.FinalitySource = rootedindex.FinalityRPCFinalized
+	}
+	return root
+}
+
+func testRootedTransaction(t *testing.T, program string, logs []string) *rootedindex.Transaction {
+	t.Helper()
+	privateKey := solanago.PrivateKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize)))
+	payer := privateKey.PublicKey()
+	programKey, err := solanago.PublicKeyFromBase58(program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockhash, err := solanago.HashFromBase58(testRootedSource().GenesisHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transaction := &solanago.Transaction{Message: solanago.Message{
+		Header: solanago.MessageHeader{
+			NumRequiredSignatures: 1, NumReadonlyUnsignedAccounts: 1,
+		},
+		AccountKeys: solanago.PublicKeySlice{payer, programKey}, RecentBlockhash: blockhash,
+		Instructions: []solanago.CompiledInstruction{{ProgramIDIndex: 1, Accounts: []uint16{0}, Data: []byte{1}}},
+	}}
+	if _, err := transaction.Sign(func(key solanago.PublicKey) *solanago.PrivateKey {
+		if key == payer {
+			return &privateKey
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wire, err := transaction.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := transaction.Message.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasher := blake3.New()
+	_, _ = hasher.Write([]byte("solana-tx-message-v1"))
+	_, _ = hasher.Write(message)
+	var messageHash solanago.Hash
+	hasher.Sum(messageHash[:0])
+	return &rootedindex.Transaction{
+		Signature: transaction.Signatures[0].String(), Transaction: wire, MessageHash: messageHash.String(),
+		AccountKeys: []string{payer.String(), program}, Succeeded: true, Logs: logs,
 	}
 }
 
@@ -72,17 +135,14 @@ func writeRootedFrames(t *testing.T, output *bytes.Buffer, sequence, from, throu
 }
 
 func TestIndexCLIIngestStatusAndQuery(t *testing.T) {
+	transaction := testRootedTransaction(t, "ComputeBudget111111111111111111111111111111", []string{"Program success"})
 	dir := t.TempDir()
 	events := []rootedindex.Event{
 		{
 			SchemaVersion: rootedindex.SchemaVersion,
 			Cursor:        rootedindex.Cursor{Slot: 50, Ordinal: 0},
 			Kind:          "transaction_executed",
-			Transaction: &rootedindex.Transaction{
-				Signature: strings.Repeat("1", 64), Message: []byte("message"),
-				AccountKeys: []string{"ComputeBudget111111111111111111111111111111"},
-				Succeeded:   true, Logs: []string{"Program success"},
-			},
+			Transaction:   transaction,
 		},
 		{
 			SchemaVersion: rootedindex.SchemaVersion,
@@ -99,10 +159,7 @@ func TestIndexCLIIngestStatusAndQuery(t *testing.T) {
 			SchemaVersion: rootedindex.SchemaVersion,
 			Cursor:        rootedindex.Cursor{Slot: 50, Ordinal: 2},
 			Kind:          "slot_rooted",
-			Root: &rootedindex.RootedSlot{
-				ParentSlot: 49, Bankhash: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-				TransactionCount: 1, AccountCount: 1,
-			},
+			Root:          testRootedSlot(testRootedSource(), 49, 1, 1),
 		},
 	}
 	var input bytes.Buffer
@@ -162,7 +219,8 @@ func TestIndexCLIIngestStatusAndQuery(t *testing.T) {
 	}
 	if transactions.Provenance != rootedindex.RootedProvenance ||
 		transactions.Finality != rootedindex.RootedFinality ||
-		len(transactions.Results) != 1 || string(transactions.Results[0].Message) != "message" {
+		len(transactions.Results) != 1 || !bytes.Equal(transactions.Results[0].Transaction, transaction.Transaction) ||
+		transactions.Results[0].Version != rootedindex.TransactionVersionLegacy {
 		t.Fatalf("transaction results = %+v", transactions)
 	}
 }
@@ -201,7 +259,7 @@ func TestIndexCLIWorkspaceDerivesSourcePathAndFilter(t *testing.T) {
 	workspace := filepath.Join(workspaceDir, programWorkspaceFile)
 	rootEvent := rootedindex.Event{
 		SchemaVersion: rootedindex.SchemaVersion, Cursor: rootedindex.Cursor{Slot: 1},
-		Kind: "slot_rooted", Root: &rootedindex.RootedSlot{Bankhash: testRootedSource().GenesisHash},
+		Kind: "slot_rooted", Root: testRootedSlot(testRootedSource(), 0, 0, 0),
 	}
 	var input, output bytes.Buffer
 	writeRootedFrames(t, &input, 1, 1, 1, []rootedindex.Event{rootEvent})
@@ -230,9 +288,7 @@ func TestIndexDoctorReadyAndFailedRecoveryIsReadOnly(t *testing.T) {
 		SchemaVersion: rootedindex.SchemaVersion,
 		Cursor:        rootedindex.Cursor{Slot: 50, Ordinal: 0},
 		Kind:          "slot_rooted",
-		Root: &rootedindex.RootedSlot{
-			ParentSlot: 49, Bankhash: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-		},
+		Root:          testRootedSlot(testRootedSource(), 49, 0, 0),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -415,9 +471,7 @@ func TestIndexCLIRejectsEmptyFirstIngestAndAcceptsEmptyResume(t *testing.T) {
 		SchemaVersion: rootedindex.SchemaVersion,
 		Cursor:        rootedindex.Cursor{Slot: 0, Ordinal: 0},
 		Kind:          "slot_rooted",
-		Root: &rootedindex.RootedSlot{
-			Bankhash: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-		},
+		Root:          testRootedSlot(testRootedSource(), 0, 0, 0),
 	}
 	var input bytes.Buffer
 	writeRootedFrames(t, &input, 1, 0, 0, []rootedindex.Event{root})
@@ -463,9 +517,7 @@ func TestIndexCLIRejectsMidBatchStartForNewIndex(t *testing.T) {
 		SchemaVersion: rootedindex.SchemaVersion,
 		Cursor:        rootedindex.Cursor{Slot: 50, Ordinal: 1},
 		Kind:          "slot_rooted",
-		Root: &rootedindex.RootedSlot{
-			ParentSlot: 49, Bankhash: testRootedSource().GenesisHash, AccountCount: 1,
-		},
+		Root:          testRootedSlot(testRootedSource(), 49, 0, 1),
 	}
 	for _, frame := range []any{
 		map[string]any{
@@ -540,9 +592,7 @@ func TestIndexMCPConfigBindsOnePrivateIndex(t *testing.T) {
 		SchemaVersion: rootedindex.SchemaVersion,
 		Cursor:        rootedindex.Cursor{Slot: 1, Ordinal: 0},
 		Kind:          "slot_rooted",
-		Root: &rootedindex.RootedSlot{
-			Bankhash: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-		},
+		Root:          testRootedSlot(testRootedSource(), 0, 0, 0),
 	}); err != nil {
 		t.Fatal(err)
 	}

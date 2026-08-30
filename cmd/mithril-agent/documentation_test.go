@@ -104,6 +104,8 @@ func TestFullStrategyDocumentationMatchesGeneratedLayout(t *testing.T) {
 		"mithril-agent proposal turnkey-check",
 		"temporary, unfunded test identities",
 		"No operator wallet or custody-provider or messaging account is required",
+		"rooted feed and private index decode and",
+		"executable paths remain",
 	} {
 		if !strings.Contains(readme, want) {
 			t.Errorf("README.md is missing entry-point fact %q", want)
@@ -127,6 +129,7 @@ func TestFullStrategyDocumentationMatchesGeneratedLayout(t *testing.T) {
 		"mithril-agent program decode-event",
 		"mithril-agent program simulate",
 		"source-bound to this workspace and AccountsDB lineage",
+		"each v5 index",
 		"no browser wallet, signing key, or block explorer",
 		"valid shreds and Alpenglow certificates",
 		"sha256sum *.json >SHA256SUMS",
@@ -169,10 +172,19 @@ func TestFullStrategyDocumentationMatchesGeneratedLayout(t *testing.T) {
 	roadmap := readDocumentation(t, "../../ROADMAP.md")
 	for _, want := range []string{
 		"Observe and index", "fee payer signature", "Rooted event feed",
-		"Custom indexer", "Mainnet stays",
+		"Custom indexer", "Mainnet stays", "Rooted Solana v1 transaction ingestion",
 	} {
 		if !strings.Contains(roadmap, want) {
 			t.Errorf("ROADMAP.md is missing product-direction fact %q", want)
+		}
+	}
+	overview := readDocumentation(t, "../../OVERVIEW.md")
+	for _, want := range []string{
+		"Rooted Solana v1 transactions are decoded and identity-checked",
+		"They are not signed or executed",
+	} {
+		if !strings.Contains(overview, want) {
+			t.Errorf("OVERVIEW.md is missing Solana v1 boundary %q", want)
 		}
 	}
 	for _, stale := range []string{

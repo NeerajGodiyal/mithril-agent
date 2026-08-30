@@ -62,14 +62,16 @@ type transactionResults struct {
 }
 
 type transactionResult struct {
-	Cursor        rootedindex.Cursor `json:"cursor"`
-	Index         uint32             `json:"index"`
-	Signature     string             `json:"signature"`
-	AccountKeys   []string           `json:"account_keys"`
-	Succeeded     bool               `json:"succeeded"`
-	Failure       string             `json:"failure,omitempty"`
-	ComputeUnits  uint64             `json:"compute_units"`
-	LogsTruncated bool               `json:"logs_truncated,omitempty"`
+	Cursor        rootedindex.Cursor             `json:"cursor"`
+	Index         uint32                         `json:"index"`
+	Signature     string                         `json:"signature"`
+	Version       rootedindex.TransactionVersion `json:"version"`
+	MessageHash   string                         `json:"message_hash"`
+	AccountKeys   []string                       `json:"account_keys"`
+	Succeeded     bool                           `json:"succeeded"`
+	Failure       string                         `json:"failure,omitempty"`
+	ComputeUnits  uint64                         `json:"compute_units"`
+	LogsTruncated bool                           `json:"logs_truncated,omitempty"`
 }
 
 // Serve runs one local, read-only MCP server bound to one private index.
@@ -87,7 +89,7 @@ func Serve(ctx context.Context, dir string, input io.ReadCloser, output io.Write
 	server := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name: "mithril-rooted-index", Title: "Mithril rooted program index", Version: "0.1.0",
 	}, &mcpsdk.ServerOptions{
-		Instructions: "Read one operator-authorized local Mithril rooted index. Tools are bounded and omit raw account data, messages, logs, CPI, and return data. No tool loads a wallet, signs, submits, or contacts a network.",
+		Instructions: "Read one operator-authorized local Mithril rooted index. Tools are bounded and omit raw account data, signed transactions, logs, CPI, and return data. No tool loads a wallet, signs, submits, or contacts a network.",
 	})
 	server.AddReceivingMiddleware(mcpstdio.LimitToolCalls(4))
 	closedWorld := false
@@ -124,7 +126,7 @@ func Serve(ctx context.Context, dir string, input io.ReadCloser, output io.Write
 	})
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name: "mithril_index_transactions", Title: "Rooted Transactions",
-		Description: "Query bounded rooted transaction metadata. Without after it is newest-first; with after it is oldest-unseen-first and returns next_after for lossless burst paging. Messages, logs, CPI, and return data are never returned.",
+		Description: "Query bounded rooted transaction metadata. Without after it is newest-first; with after it is oldest-unseen-first and returns next_after for lossless burst paging. Signed transactions, logs, CPI, and return data are never returned.",
 		Annotations: annotations,
 	}, func(_ context.Context, _ *mcpsdk.CallToolRequest, input transactionQuery) (*mcpsdk.CallToolResult, transactionResults, error) {
 		query, err := buildTransactionQuery(input)
@@ -247,6 +249,7 @@ func transactionMetadata(results []rootedindex.TransactionResult) []transactionR
 	for index, result := range results {
 		metadata[index] = transactionResult{
 			Cursor: result.Cursor, Index: result.Index, Signature: result.Signature,
+			Version: result.Version, MessageHash: result.MessageHash,
 			AccountKeys: append([]string(nil), result.AccountKeys...),
 			Succeeded:   result.Succeeded, Failure: result.Failure,
 			ComputeUnits: result.ComputeUnits, LogsTruncated: result.LogsTruncated,

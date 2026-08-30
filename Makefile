@@ -480,13 +480,16 @@ test-walletless:
 test-rooted-contract:
 	@test -f "$(MITHRIL_SOURCE)/pkg/rootedfeed/testdata/framed-v1.jsonl" || \
 	  { echo "Public Mithril fixture not found; set MITHRIL_SOURCE=/absolute/path/to/Mithril" >&2; exit 2; }
+	@test -f "$(MITHRIL_SOURCE)/pkg/rootedfeed/testdata/framed-transaction-v1.jsonl" || \
+	  { echo "Public Mithril transaction-v1 fixture not found; set MITHRIL_SOURCE=/absolute/path/to/Mithril" >&2; exit 2; }
 	@test -f "$(MITHRIL_SOURCE)/pkg/rpcserver/testdata/walletless-provenance-v1.json" || \
 	  { echo "Public Mithril provenance fixture not found; set MITHRIL_SOURCE=/absolute/path/to/Mithril" >&2; exit 2; }
 	@umask 077; MITHRIL_ROOTED_CONTRACT_FIXTURE="$(abspath $(MITHRIL_SOURCE))/pkg/rootedfeed/testdata/framed-v1.jsonl" \
-	  go test ./rootedindex -run '^TestPublicMithrilRootedContractFixture$$' -count=1
+	  MITHRIL_ROOTED_V1_CONTRACT_FIXTURE="$(abspath $(MITHRIL_SOURCE))/pkg/rootedfeed/testdata/framed-transaction-v1.jsonl" \
+	  go test ./rootedindex -run '^TestPublicMithril(Rooted|V1Transaction)ContractFixture$$' -count=1
 	@umask 077; MITHRIL_PROVENANCE_CONTRACT_FIXTURE="$(abspath $(MITHRIL_SOURCE))/pkg/rpcserver/testdata/walletless-provenance-v1.json" \
 	  go test ./solanarpc -run '^TestPublicMithrilProvenanceContractFixture$$' -count=1
-	@echo "Public Mithril framed output and provenance RPC contract are accepted by the agent consumer."
+	@echo "Public Mithril framed output, transaction-v1, and provenance RPC contracts are accepted by the agent consumer."
 
 .PHONY: explain
 explain:

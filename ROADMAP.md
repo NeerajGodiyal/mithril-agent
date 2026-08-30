@@ -74,7 +74,8 @@ of the same work.
 ## Limits
 
 - Funded Mainnet stays disabled.
-- Solana version-1 transactions are not supported.
+- Rooted Solana v1 transaction ingestion and indexing are supported; signing
+  and execution remain limited to the reviewed legacy and v0 paths.
 - The live trading pilot covers one reviewed Devnet route, not arbitrary assets.
 - MCP and Telegram are read only and cannot approve, sign, or submit actions.
 - The local index is designed for bounded private queries, not public multi-user
