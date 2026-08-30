@@ -22,6 +22,7 @@ recovery, and operator messaging outside the language model.
 | --- | --- | --- | --- |
 | Observe and index | None | No | Implemented for native Alpenglow rooted events and the separately labelled classic finalized feed |
 | Build and simulate | None | No | Implemented for pinned Solana IDL and supported Codama interfaces |
+| Paper evaluate | None | No | Reset-daily Mainnet observation, candidate comparison, and Telegram alerts; no execution path |
 | Execute | Isolated signer | Yes | Bounded Devnet pilot only; funded Mainnet execution remains disabled |
 
 "Walletless" means the read, index, build, and simulation paths do not load a
@@ -52,6 +53,8 @@ RPC or MCP.
 - decoded current accounts, rooted account history, and program events;
 - bounded Devnet strategy, signer, submitter, recovery, Telegram, and metrics;
 - keyless Mainnet shadow observation with policy-bound route and price evidence;
+- bounded paper research that can write only an immutable challenger and its
+  dedicated pointer; and
 - offline Mainnet proposal checks that stop before authorization or submission.
 
 The walletless isolation tests reject dependencies on signer, submission,
@@ -63,9 +66,16 @@ the on-chain safety program.
 The agent consumes public Mithril work in this order:
 
 1. `feature/mcp` for local node inspection;
-2. `koro/rpc` for transaction and verification evidence;
-3. the focused Alpenglow replay and durable-rooting work; and
-4. the rooted RPC and event-feed contract.
+2. `feature/durable-rooting-and-recovery`;
+3. `feature/snapshot-bootstrap`;
+4. `feature/transaction-v1-compatibility`;
+5. `feature/alpenglow-replay-and-forking`;
+6. `feature/transaction-rpc-and-evidence`;
+7. `feature/mcp-rpc-evidence`;
+8. `feature/rooted-event-feed`;
+9. `feature/node-monitor-service`;
+10. `feature/monitoring-alert-delivery`; and
+11. `feature/transaction-v1-feeds`.
 
 The old all-in-one node integration branch is a comparison and test source. It
 should not be merged after the focused branches because it contains older copies
@@ -77,7 +87,9 @@ of the same work.
 - Rooted Solana v1 transaction ingestion and indexing are supported; signing
   and execution remain limited to the reviewed legacy and v0 paths.
 - The live trading pilot covers one reviewed Devnet route, not arbitrary assets.
-- MCP and Telegram are read only and cannot approve, sign, or submit actions.
+- Telegram plus the program, index, and status MCP surfaces are read-only. The
+  dedicated research MCP can write only an immutable paper challenger and its
+  pointer; no MCP can approve, sign, or submit an action.
 - The local index is designed for bounded private queries, not public multi-user
   serving.
 - A later producer or consumer revision must repeat the cross-repository

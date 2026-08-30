@@ -15,7 +15,7 @@ The result is deliberately limited:
 
 - Devnet only;
 - one fixed SOL/devUSDC route;
-- Telegram and MCP are read-only;
+- Telegram and the execution/status MCP are read-only;
 - the agent uses a dedicated limited-balance account, not your main wallet;
 - every trading grant expires and has an action limit; and
 - the first sell is a one-time bootstrap before the buy leg can be created.
@@ -26,8 +26,8 @@ Use a full-node/RPC host, not a voting validator host.
 ## 1. Use a matching Mithril build
 
 Do not use the old `koro/agent-node-integration-wip` branch for a new setup.
-Build the reviewed focused branches in order: `feature/mcp`, `koro/rpc`,
-`koro/node-monitoring`, replay/rooting, then rooted RPC/feed. Until those are
+Build the reviewed focused branches in the dependency order listed under
+[node prerequisites](ROADMAP.md#node-prerequisites). Until those revisions are
 published together, treat this guide as a local integration review rather than
 a production deployment.
 

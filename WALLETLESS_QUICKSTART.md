@@ -103,17 +103,16 @@ validator, voter, or withdrawer private key into this setup.
 This path needs Go 1.26.6 or newer. It does not need Node.js, a quote adapter,
 Telegram, a custody account, or any of the optional trading services:
 
-This walletless work is newer than the published trading pilot. The current
-operator-supplied source bundle is `mithril-walletless-port-20260826-r12.tar.gz` (SHA-256
-`f98c3e5b60b493a22a5a0c38ccf0ef82f5e97c741a649b62e7ff6c9ce9a88e34`).
-It is an unpublished review artifact, not a release. Use it only for local
-cross-repository testing after its source and contract checks pass.
+This walletless work is newer than the published trading pilot. Use the exact
+operator-supplied source bundle or focused branch revisions under review, and
+only after their source and cross-repository contract checks pass. Do not rely
+on a stale bundle name or checksum copied from an earlier review.
 The Mithril source must contain the `events` command and
 `storage.rooted_events`; the agent source must contain this guide plus the
 `program` and `index` commands. Do not clone the older trading-pilot revision
-and assume it contains these features. The archive is a non-Git review
-artifact, not a published revision. The old `koro/agent-node-integration-wip`
-branch is not a substitute for the focused node prerequisites.
+and assume it contains these features. An archive is review evidence, not a
+published revision. The old all-in-one node integration branch is not a
+substitute for the focused node prerequisites.
 
 ```sh
 cd /path/to/verified/mithril-agent-source

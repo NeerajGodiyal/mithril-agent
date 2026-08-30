@@ -112,8 +112,8 @@ func TestFullStrategyDocumentationMatchesGeneratedLayout(t *testing.T) {
 			t.Errorf("README.md is missing entry-point fact %q", want)
 		}
 	}
-	if lines := strings.Count(readme, "\n") + 1; lines < 250 || lines > 500 {
-		t.Errorf("README.md has %d lines; want a complete 250..500-line orientation", lines)
+	if lines := strings.Count(readme, "\n") + 1; lines < 250 || lines > 300 {
+		t.Errorf("README.md has %d lines; keep detailed procedures in the linked guides", lines)
 	}
 	walletless := readDocumentation(t, "../../WALLETLESS_QUICKSTART.md")
 	for _, want := range []string{
