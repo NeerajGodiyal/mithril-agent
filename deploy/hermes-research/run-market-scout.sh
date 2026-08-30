@@ -3,7 +3,9 @@ set -eu
 
 toolsets='web,solana_docs'
 
-if [ -f /var/lib/mithril-agent-research/champion/active.json ]; then
+if [ -f /var/lib/mithril-agent-research/champion/active.json ] &&
+  /usr/bin/systemctl is-active --quiet mithril-agent-paper-base.service &&
+  /usr/bin/systemctl is-active --quiet mithril-agent-paper-champion.service; then
   toolsets="$toolsets,mithril_paper"
 fi
 

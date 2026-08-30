@@ -3189,9 +3189,11 @@ pool quotes, runs the same deterministic decision pipeline, and writes down the
 trade it would have made — without ever being able to make one.
 
 Create the policy with `mithril-agent shadow policy`; its output prints the
-correct run command for that policy's cluster and direction. For Mainnet it
-uses Jupiter and fixes the pair to SOL/USDC. A sell spends wrapped SOL and
-receives the canonical classic-SPL USDC mint; a buy reverses those two mints.
+correct run command for that policy's cluster and direction. Mainnet supports
+two pinned Jupiter paper pairs: SOL/USDC and JUP/USDC. A SOL sell spends wrapped
+SOL and receives canonical classic-SPL USDC; its buy reverses those mints. JUP
+uses the verified six-decimal classic-SPL JUP mint and starts from a USDC buy
+leg.
 For Devnet, provide `--pool`, `--input-mint`, and `--output-mint` while creating
 the policy; it prints the Orca adapter form instead. The quote provider, pool,
 and pair are part of the policy fingerprint. Optional route flags on `shadow
@@ -3199,8 +3201,10 @@ run` can only repeat those values and cannot replace them.
 
 The endpoint comes from `MITHRIL_AGENT_SHADOW_RPC_URL` and is never printed,
 logged, or journalled. The default price pair — the sponsored Pyth push
-accounts read through an RPC, cross-checked against Kraken SOL/USD pre-trade
-best bid/ask — needs no credential on either side. Kraken is used only for the
+accounts read through an RPC, cross-checked against the matching Kraken
+pre-trade best bid/ask — needs no credential on either side. JUP/USDC adds a
+separate SOL/USD pair to value native lamport fees; it never values fees at the
+JUP price. Kraken is used only for the
 operator's own paper evidence; do not assume its terms grant redistribution or
 a public derived-data service.
 
@@ -3226,10 +3230,12 @@ check without copying provider errors, endpoints, credentials, or response
 payloads into terminal output or the shareable journal. A later `shadow report`
 with no observable tick repeats the latest bounded reason.
 
-Shadow policy version 4 persists the exact decision quote and requires a fresh
-exact-size venue re-quote after the settlement delay. Version 3 and older
-policies are intentionally refused; generate a new policy and start a new
-evidence directory rather than relabelling old accounting as current evidence.
+Shadow policy version 6 additionally models one-time token setup rent as locked,
+recoverable native capital and timestamps venue-quote receipt before starting
+the settlement delay. Journal version 4 records that evidence. Version 5 and
+journal version 3 remain readable for earlier non-SOL runs; version 4 SOL-only
+policies and journal version 2 also remain reviewable. Start each new policy
+version in a new evidence directory rather than mixing accounting contracts.
 
 `adapters/orca/quote.mjs` serves the trading path and is pinned to Devnet.
 Mainnet shadow mode uses the separate keyless Jupiter reader in Go; it does not
@@ -3257,12 +3263,38 @@ mithril-agent shadow policy --out POLICY --observe WATCH_ONLY_ADDRESS \
   --sell-at-usd 240 --buy-at-usd 200 --amount 1000000
 ```
 
-Or create an adaptive paper policy with no absolute buy or sell price:
+Or create a bounded adaptive paper mandate with no absolute buy or sell price:
 
 ```bash
 mithril-agent shadow policy --out POLICY --observe WATCH_ONLY_ADDRESS \
-  --adaptive --amount 1000000
+  --adaptive --market SOL/USDC --budget-sol 0.25 \
+  --drawdown-stop-bps 300
 ```
+
+Or add the isolated JUP/USDC observer with a USDC trading budget and native fee
+reserve:
+
+```bash
+mithril-agent shadow policy --out JUP_POLICY --observe WATCH_ONLY_ADDRESS \
+  --adaptive --market JUP/USDC --budget-usdc 250 \
+  --fee-reserve-sol 0.004 --setup-rent-sol 0.003 \
+  --drawdown-stop-bps 300 --fee-lamports 100000
+```
+
+The SOL mandate keeps a conservative 0.004 SOL native reserve by default; the
+JUP budget is USDC and its SOL reserve is separate. Both reserve 0.003 SOL as
+locked setup capital on the first successful Jupiter route, covering the case
+where the observed owner still needs its output token account.
+`--fee-lamports` is a conservative recurring all-in modeled attempt cap, not a
+live fee quote. The first successful JUP buy moves `--setup-rent-sol` from the
+liquid reserve into locked capital; it remains in equity and is not reported as
+a fee. A refused attempt pays the recurring fee but locks no setup rent. Funded
+execution still has to use `proposalcheck` to simulate the built transaction,
+calculate its exact fee, inspect its actual account-rent requirements, and
+verify blockheight expiry. The drawdown stop pauses new trading for that UTC day; it is not a
+guaranteed maximum loss because a delayed quote can cross the boundary. The
+paper book and its stop reset at 00:00 UTC. Low-level test scripts may still
+use `--amount` for the first lot instead of the mandate aliases.
 
 The adaptive runner uses the same independently validated price evidence,
 Jupiter quotes, settlement delay, ledger, fees, and replay checks. Its fixed,
@@ -3277,12 +3309,12 @@ risk, quote, source, timing, and fee boundaries stay unchanged. `InputAmount`
 is the first lot. Each later leg spends only the previous simulated proceeds,
 so gains and losses resize the paper lot within one reset-daily UTC run; no
 outside funds, leverage, or shorts are introduced. A drawdown risk exit sells
-the full simulated SOL inventory to reduce exposure.
+the full simulated base-asset inventory to reduce exposure.
 
-`shadow run` starts with the sell leg, switches to the buy-back leg only after
-a filled sell, and sizes that return leg from what the sell actually received.
-After a filled buy it switches back, never spending more than that leg returned
-or the shadow book holds. It still cannot sign or submit anything.
+`shadow run` starts from the policy's configured inventory leg, switches sides
+only after a fill, and sizes the return leg from what the prior leg actually
+received. It never spends more than that leg returned or the shadow book holds.
+It still cannot sign or submit anything.
 
 The offline replay below is useful for testing different thresholds against an
 already-recorded price series without waiting for another live period:
@@ -3338,6 +3370,13 @@ How it avoids flattering itself:
 
 Every report ends by stating that nothing was traded, no wallet signing key was loaded, and
 nothing was signed.
+
+Telegram keeps the paper stream deliberately quiet. It pushes only settled
+paper fills, risk pauses, strategy lifecycle changes, and one short period
+result with P&L versus the opening book and versus holding. Raw signals,
+refused or missed attempts, warm-up, and ordinary waiting remain in the
+hash-chained journal and the on-demand `/paper` view; they do not interrupt the
+operator.
 
 The report is not something you take on trust. It is derived by replaying the
 day's hash-chained journal, and it can be recomputed independently at any time:
@@ -3431,9 +3470,11 @@ mithril-agent shadow research-mcp --policy /var/lib/mithril-agent-research/polic
   --challenge-days 7
 ```
 
-Its input contains cited prose and the immediately preceding two completed UTC
-day names, never paths, policy parameters, keys, or grants. It deterministically searches the fixed
-journals, writes a content-addressed paper candidate, and updates only the
+Its input contains cited prose plus yesterday and the day before as a date
+anchor, never paths, policy parameters, keys, or grants. The server derives and
+requires the full eight-day completed window, runs seven chronological
+train/out-of-sample folds, writes a content-addressed paper candidate only when
+that admission gate passes, and updates only the
 dedicated challenger pointer. The pointer binds `selected_at`, the next UTC day
 as `eligible_from`, the fixed challenge duration, and the evaluator version, so
 reports created before selection or a changed gate cannot qualify it.

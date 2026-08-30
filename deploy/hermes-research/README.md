@@ -107,9 +107,10 @@ sudo install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
   /var/lib/mithril-agent-research/runs \
   /var/lib/mithril-agent-research/status \
   /var/lib/mithril-agent-research/{policy,journals,champion,challenger} \
+  /var/lib/mithril-agent-research/journals-jup \
   /var/lib/mithril-agent-research/challenger/candidates \
   /var/lib/mithril-agent-research/runs/{champion,challenger} \
-  /var/lib/mithril-agent-research/status/champion
+  /var/lib/mithril-agent-research/status/{champion,jup}
 ```
 
 Before the rooted index may inform research, populate that fixed `index/`
@@ -147,6 +148,7 @@ sudo install -o root -g root -m 0644 \
   /opt/mithril-hermes-research/
 sudo install -o root -g root -m 0755 \
   deploy/hermes-research/check-network.sh \
+  deploy/hermes-research/bootstrap-first-champion.sh \
   deploy/hermes-research/run-market-scout.sh \
   /opt/mithril-hermes-research/
 sudo install -o root -g root -m 0644 \
@@ -155,8 +157,11 @@ sudo install -o root -g root -m 0644 \
 sudo install -o root -g root -m 0644 \
   deploy/systemd/mithril-agent-paper-base.service \
   deploy/systemd/mithril-agent-paper-champion.service \
+  deploy/systemd/mithril-agent-paper-champion.path \
   deploy/systemd/mithril-agent-paper-challenger.service \
   deploy/systemd/mithril-agent-paper-challenger.path \
+  deploy/systemd/mithril-agent-paper-bootstrap.service \
+  deploy/systemd/mithril-agent-paper-bootstrap.timer \
   deploy/systemd/mithril-agent-paper-auto-select.service \
   deploy/systemd/mithril-agent-paper-auto-select.timer \
   deploy/systemd/mithril-hermes-research-egress.service \
@@ -252,9 +257,10 @@ sources are literal paths in `compose.yaml`; `.env` cannot redirect them after
 the systemd preflights validate those paths.
 
 Install a reviewed Mainnet paper policy as
-`/var/lib/mithril-agent-research/policy/policy.json`. Put its completed
-training/validation journals in `journals/`, its operator-selected immutable
-champion artifacts and `active.json` pointer in `champion/`, and the two
+`/var/lib/mithril-agent-research/policy/policy.json`. Put its completed daily
+journals in `journals/`, its automatically bootstrapped or later paper-selected
+immutable champion artifacts and `active.json` pointer in
+`champion/`, and the two
 policy-fingerprinted observer run trees below `runs/champion/` and
 `runs/challenger/`. Only `challenger/` is writable by Hermes. Its candidate
 files are content-addressed and its `active.json` pointer records selection,
@@ -276,9 +282,10 @@ reject the pointer.
 
 ## Paper lifecycle bootstrap
 
-The research MCP needs completed base-policy journals and one operator-selected
-champion before it starts. First install the reviewed policy with the exact
-observer owner; never copy a root-owned mode-`0600` policy into this tree:
+The research MCP can produce cited market briefs before a champion exists, but
+its paper candidate tools remain absent until a first champion is selected.
+First install the reviewed policy with the exact observer owner; never copy a
+root-owned mode-`0600` policy into this tree:
 
 ```sh
 sudo install -o mithril-agent-research -g mithril-agent-research -m 0600 \
@@ -287,8 +294,10 @@ sudo install -o mithril-agent-research -g mithril-agent-research -m 0600 \
 
 The tracked `mithril-agent-paper-base.service`,
 `mithril-agent-paper-champion.service`, and
-`mithril-agent-paper-challenger.path` supervise those observers. The separate
-paper auto-selector checks the fixed forward gate without network access. Install them
+the champion and challenger path units supervise those observers. The separate
+paper bootstrap selects the first champion from the immediately preceding two
+complete UTC base journals, and the auto-selector checks later fixed forward
+gates. Both run without network access. Install them
 only after creating `/etc/mithril-agent/paper.env` as root-owned mode `0600`
 with `MITHRIL_AGENT_SHADOW_RPC_URL` and, when used,
 `MITHRIL_AGENT_JUPITER_API_KEY`. Review the fixed paths, owners, sandbox, and
@@ -300,47 +309,55 @@ at least one second apart; do not replace that with retries after a 429.
 sudo install -o root -g root -m 0644 \
   systemd/mithril-agent-paper-base.service \
   systemd/mithril-agent-paper-champion.service \
+  systemd/mithril-agent-paper-champion.path \
   systemd/mithril-agent-paper-challenger.service \
   systemd/mithril-agent-paper-challenger.path \
+  systemd/mithril-agent-paper-bootstrap.service \
+  systemd/mithril-agent-paper-bootstrap.timer \
   systemd/mithril-agent-paper-auto-select.service \
   systemd/mithril-agent-paper-auto-select.timer \
   /etc/systemd/system/
 sudo systemd-analyze verify \
   /etc/systemd/system/mithril-agent-paper-{base,champion,challenger}.service \
-  /etc/systemd/system/mithril-agent-paper-auto-select.service \
-  /etc/systemd/system/mithril-agent-paper-{challenger.path,auto-select.timer}
+  /etc/systemd/system/mithril-agent-paper-{bootstrap,auto-select}.service \
+  /etc/systemd/system/mithril-agent-paper-{champion.path,challenger.path,bootstrap.timer,auto-select.timer}
 sudo systemctl enable --now systemd-time-wait-sync.service
 test "$(timedatectl show -p NTPSynchronized --value)" = yes
 sudo systemctl daemon-reload
-sudo systemctl enable --now mithril-agent-paper-base.service
-```
-
-After two complete UTC base journals exist, create and select the first
-immutable champion as the same no-login identity. Operator authority is the
-reviewed `sudo` action; matching file ownership keeps every later strict read
-valid:
-
-```sh
-sudo -u mithril-agent-research env HOME=/var/lib/mithril-agent-research \
-  /usr/local/libexec/mithril-agent/mithril-agent shadow search \
-  --policy /var/lib/mithril-agent-research/policy/policy.json \
-  --dir /var/lib/mithril-agent-research/journals \
-  --train-day YYYY-MM-DD --validation-day YYYY-MM-DD \
-  --candidate-out /var/lib/mithril-agent-research/champion/candidate.json
-sudo -u mithril-agent-research env HOME=/var/lib/mithril-agent-research \
-  /usr/local/libexec/mithril-agent/mithril-agent shadow select \
-  --policy /var/lib/mithril-agent-research/policy/policy.json \
-  --candidate /var/lib/mithril-agent-research/champion/candidate.json \
-  --pointer /var/lib/mithril-agent-research/champion/active.json \
-  --lifecycle-lock /var/lib/mithril-agent-research/challenger/lifecycle.lock
-sudo systemctl enable --now mithril-agent-paper-champion.service \
+sudo systemctl enable --now mithril-agent-paper-base.service \
+  mithril-agent-paper-champion.service \
+  mithril-agent-paper-champion.path \
   mithril-agent-paper-challenger.service \
   mithril-agent-paper-challenger.path \
+  mithril-agent-paper-bootstrap.timer \
   mithril-agent-paper-auto-select.timer
 ```
 
-Start Hermes only after the champion pointer exists and both base and champion
-services are healthy. The enabled challenger service starts at boot when its
+The hourly bootstrap remains a no-op until the prior two UTC journals are both
+complete and replayable. It then searches those exact chronological days,
+writes one immutable initial candidate, and selects it only if no champion
+pointer already exists. `shadow select --initial` checks that condition under
+the shared lifecycle lock, so this automation cannot replace an existing
+champion. After the pointer appears, verify the already-enabled paper observers
+and later challenger selector:
+
+```sh
+sudo systemctl status mithril-agent-paper-bootstrap.timer
+sudo journalctl -u mithril-agent-paper-bootstrap.service
+test -f /var/lib/mithril-agent-research/champion/active.json
+sudo systemctl is-active mithril-agent-paper-champion.service
+```
+
+Hermes research may run before this point with only its public research tools;
+it gains the bounded paper candidate tools only after the champion pointer
+exists. The initial champion deliberately needs only the prior two completed
+days so startup is not blocked for a week. Every later automatic challenger
+requires eight consecutive completed, replayable days ending yesterday. The
+server selects a fresh candidate on each earlier day and scores it only on the
+following untouched day; at least four of seven out-of-sample folds, the
+aggregate advantage, and the aggregate round-trip count must pass before an
+artifact or pointer can be written. The separate fixed forward challenge still
+runs afterward. The enabled challenger service starts at boot when its
 pointer exists; the `.path` unit watches `challenger/active.json` for later
 creation or replacement. Future rejected or paper-selected
 challengers replace the same pointer and the running observer loads the new
@@ -388,6 +405,50 @@ sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
 The first attachment may deliver retained bounded history. Verify every new message
 starts with `PAPER ·` and that the bridge never exposes the source
 path or any live transaction authority.
+
+### Optional JUP/USDC observer
+
+JUP/USDC is a second isolated paper observer, not a second full-budget
+champion. Divide the total simulated capital explicitly between the SOL and JUP
+policies. Generate the JUP policy with a USDC budget and a separate native SOL
+fee reserve; use `--fee-lamports` as a reviewed conservative all-in recurring
+attempt cost. Setup rent is modeled separately as locked, recoverable capital;
+it is neither a recurring fee nor paper profit. Funded execution must still use
+`proposalcheck` to simulate the built transaction and verify its exact fee,
+actual account-rent requirements, and blockheight expiry.
+
+```sh
+sudo -u mithril-agent-research env HOME=/var/lib/mithril-agent-research \
+  /usr/local/libexec/mithril-agent/mithril-agent shadow policy \
+  --out /var/lib/mithril-agent-research/policy/jup-policy.json \
+  --observe WATCH_ONLY_ADDRESS --adaptive --market JUP/USDC \
+  --budget-usdc 250 --fee-reserve-sol 0.004 --setup-rent-sol 0.003 \
+  --drawdown-stop-bps 300 --fee-lamports 100000
+sudo install -o root -g root -m 0644 \
+  systemd/mithril-agent-paper-jup.service \
+  systemd/mithril-agent-paper-jup-status.socket \
+  systemd/mithril-agent-paper-jup-status-bridge.service \
+  /etc/systemd/system/
+sudo install -d -o root -g root -m 0755 \
+  /etc/systemd/system/mithril-agent-telegram.service.d
+sudo install -o root -g root -m 0644 \
+  systemd/mithril-agent-telegram-paper.conf \
+  /etc/systemd/system/mithril-agent-telegram.service.d/paper.conf
+sudo systemd-analyze verify \
+  /etc/systemd/system/mithril-agent-paper-jup.service \
+  /etc/systemd/system/mithril-agent-paper-jup-status.socket \
+  /etc/systemd/system/mithril-agent-paper-jup-status-bridge.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now mithril-agent-paper-jup.service \
+  mithril-agent-paper-jup-status.socket
+sudo systemctl restart mithril-agent-telegram.service
+```
+
+`/paper` then leads with combined current P&L and versus-hold for fresh market
+summaries, followed by the separately labelled `SOL/USDC` and `JUP/USDC`
+states. Alerts remain limited to strategy changes, fills, risk pauses, and
+period closes. JUP has its own journal, status directory, notional budget, and
+fee reserve; it does not enter the SOL champion/challenger lifecycle yet.
 
 The initial deployment uses Hermes' keyless web ring for both search and
 single-URL extraction. It requires no Tavily key, but it is rate-limited and is
@@ -448,7 +509,7 @@ this file owner-only and back it up separately from public source.
 
 Run the base checks through pinned one-off containers before starting the
 timer. The index and paper MCP checks require a healthy rooted index and an
-operator-selected champion respectively; run the gated checks only after those
+automatically bootstrapped paper champion respectively; run the gated checks only after those
 inputs exist:
 
 ```sh
@@ -566,7 +627,8 @@ sudo journalctl -u mithril-hermes-research.service
 
 The manual one-shot above uses the exact reviewed prompt in
 `prompts/market-scout.md`. Inspect its cited sources and confirm it created no
-challenger before a champion exists. Then enable the fixed native schedule:
+challenger before a champion exists. Then enable the fixed native schedule;
+there is no reason to wait for the first champion to keep collecting briefs:
 
 ```sh
 sudo systemctl enable --now mithril-hermes-research.timer

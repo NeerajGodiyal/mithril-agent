@@ -1,9 +1,9 @@
 [Unit]
-Description=Mithril agent champion paper observer
+Description=Mithril agent JUP/USDC paper observer
 Wants=network-online.target
 After=network-online.target time-sync.target
+ConditionPathExists=/var/lib/mithril-agent-research/policy/jup-policy.json
 StartLimitIntervalSec=0
-ConditionPathExists=/var/lib/mithril-agent-research/champion/active.json
 
 [Service]
 Type=simple
@@ -15,11 +15,11 @@ Environment=MITHRIL_AGENT_KRAKEN_RATE_STATE=/run/mithril-agent-research/kraken-r
 RuntimeDirectory=mithril-agent-research
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
-ExecStart=/usr/local/libexec/mithril-agent/mithril-agent shadow run --policy /var/lib/mithril-agent-research/policy/policy.json --dir /var/lib/mithril-agent-research/runs/champion --candidate-pointer /var/lib/mithril-agent-research/champion/active.json --alert-status /var/lib/mithril-agent-research/status/champion/alerts.json
+ExecStart=/usr/local/libexec/mithril-agent/mithril-agent shadow run --policy /var/lib/mithril-agent-research/policy/jup-policy.json --dir /var/lib/mithril-agent-research/journals-jup --alert-status /var/lib/mithril-agent-research/status/jup/alerts.json
 Restart=always
 RestartSec=15s
 TimeoutStopSec=30s
-ReadWritePaths=/var/lib/mithril-agent-research/runs/champion /var/lib/mithril-agent-research/status/champion
+ReadWritePaths=/var/lib/mithril-agent-research/journals-jup /var/lib/mithril-agent-research/status/jup
 InaccessiblePaths=/proc
 NoNewPrivileges=yes
 CapabilityBoundingSet=

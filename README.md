@@ -106,9 +106,11 @@ settlement-time re-quote?”
 For example, a policy can hypothetically sell 1 SOL at or above a threshold,
 wait, re-quote the same venue, and later buy back using only the simulated USDC
 actually received. The ledger charges both fees and reports the result against
-holding. Telegram can announce the paper signal, decision quote, settled fill,
-miss, daily close, and strategy state. No SOL or USDC is needed because nothing
-is signed, submitted, or placed on an exchange.
+holding. Telegram interrupts the operator only for a settled fill, risk pause,
+strategy lifecycle change, or daily result; signals, refused attempts, and
+ordinary waiting remain available in the journal and compact `/paper` status.
+No SOL or USDC is needed because nothing is signed, submitted, or placed on an
+exchange.
 
 Each UTC day is a reset-daily operational canary with its own opening mark.
 Separate days are not a continuous portfolio or independent statistical trials,
@@ -125,8 +127,8 @@ a paper heuristic, not a profitability claim. `InputAmount` is the initial lot;
 later legs spend only the preceding simulated proceeds, so paper profits or
 losses change the next lot within that UTC day. The learner cannot inject funds,
 add leverage, short, or change fees, sources, quote limits, cooldown,
-volatility, or drawdown boundaries. A risk exit may sell the full simulated SOL
-inventory because that reduces exposure rather than increasing it.
+volatility, or drawdown boundaries. A risk exit may sell the full simulated
+base-asset inventory because that reduces exposure rather than increasing it.
 
 Candidate changes are deliberate and bounded. `shadow search` can write an
 immutable candidate, `shadow select` can stage it, and a running observer adopts

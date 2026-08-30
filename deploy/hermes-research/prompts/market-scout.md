@@ -29,11 +29,13 @@ until the operator has selected the first champion; before that gate, research
 and report hypotheses but do not try to create a challenger. If the tool is
 available, create at most one challenger only when no challenger is active, the
 completed prior challenge is rejected, or its exact artifact was selected by
-the independent paper gate, and only when the two UTC days immediately preceding today
-provide the training and validation journals. Do not fall back to older or
-cherry-picked dates when either journal is absent. The hypothesis must cite the
-primary sources used and must retain all paper-only, unauthorized, and
-non-promotable markers. Never rotate a pending or qualified challenger.
+the independent paper gate. Supply the two UTC days immediately preceding today
+as the final training/validation anchor. The server derives and requires all
+eight consecutive completed journals needed for seven chronological
+train/out-of-sample folds; do not fall back to older or cherry-picked dates
+when any journal is absent. The hypothesis must cite the primary sources used
+and must retain all paper-only, unauthorized, and non-promotable markers. Never
+rotate a pending or qualified challenger.
 
 Return a concise brief with:
 

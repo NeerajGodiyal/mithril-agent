@@ -399,6 +399,8 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"auth add openai-codex", "never join the Docker group",
 		"rootless Docker", "last recorded time", "Hetzner server backups",
 		"mithril-agent-paper-challenger.path", "--paper-alert-status",
+		"mithril-agent-paper-champion.path",
+		"mithril-agent-paper-bootstrap.timer", "shadow select --initial",
 		"mithril-agent-paper-auto-select.timer", "shadow restore", "champion/previous.json",
 		"/var/lib/mithril-agent-research/status/champion/alerts.json",
 		"single-URL extraction canary: pass", "state/cache/web",
@@ -474,14 +476,18 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	}
 	for _, path := range []string{
 		"./deploy/hermes-research/check-network.sh",
+		"./deploy/hermes-research/bootstrap-first-champion.sh",
 		"./deploy/hermes-research/run-market-scout.sh",
 		"./deploy/hermes-research/compose.yaml",
 		"./deploy/hermes-research/config.yaml",
 		"./deploy/hermes-research/env.example",
 		"./deploy/systemd/mithril-agent-paper-base.service",
 		"./deploy/systemd/mithril-agent-paper-champion.service",
+		"./deploy/systemd/mithril-agent-paper-champion.path",
 		"./deploy/systemd/mithril-agent-paper-challenger.service",
 		"./deploy/systemd/mithril-agent-paper-challenger.path",
+		"./deploy/systemd/mithril-agent-paper-bootstrap.service",
+		"./deploy/systemd/mithril-agent-paper-bootstrap.timer",
 		"./deploy/systemd/mithril-agent-paper-auto-select.service",
 		"./deploy/systemd/mithril-agent-paper-auto-select.timer",
 		"./deploy/systemd/mithril-hermes-research-egress.service",
@@ -494,6 +500,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	}
 	for _, path := range []string{
 		"../../deploy/hermes-research/check-network.sh",
+		"../../deploy/hermes-research/bootstrap-first-champion.sh",
 		"../../deploy/hermes-research/run-market-scout.sh",
 	} {
 		info, err := os.Stat(path)
@@ -533,6 +540,24 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		strings.Contains(challengerPath, "PathExists=") {
 		t.Fatal("challenger path does not watch pointer changes safely")
 	}
+	championPath := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-champion.path")
+	if !strings.Contains(championPath, "PathChanged=/var/lib/mithril-agent-research/champion/active.json") ||
+		strings.Contains(championPath, "PathExists=") {
+		t.Fatal("champion path does not watch pointer changes safely")
+	}
+	championUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-champion.service")
+	if !strings.Contains(championUnit, "ConditionPathExists=/var/lib/mithril-agent-research/champion/active.json") {
+		t.Fatal("champion service does not require its selected pointer")
+	}
+	marketScoutWrapper := readDocumentation(t, "../../deploy/hermes-research/run-market-scout.sh")
+	for _, want := range []string{
+		"systemctl is-active --quiet mithril-agent-paper-base.service",
+		"systemctl is-active --quiet mithril-agent-paper-champion.service",
+	} {
+		if !strings.Contains(marketScoutWrapper, want) {
+			t.Errorf("Hermes paper tools are not gated by a healthy observer: %q", want)
+		}
+	}
 	autoSelectUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-auto-select.service")
 	for _, want := range []string{
 		"shadow auto-select", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
@@ -550,6 +575,27 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	} {
 		if !strings.Contains(autoSelectTimer, want) {
 			t.Errorf("paper auto-selector timer is missing %q", want)
+		}
+	}
+	bootstrapUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-bootstrap.service")
+	for _, want := range []string{
+		"ConditionPathExists=/var/lib/mithril-agent-research/policy/policy.json",
+		"ConditionPathExists=!/var/lib/mithril-agent-research/champion/active.json",
+		"PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
+		"ReadOnlyPaths=/var/lib/mithril-agent-research/policy /var/lib/mithril-agent-research/journals",
+		"ReadWritePaths=/var/lib/mithril-agent-research/champion /var/lib/mithril-agent-research/challenger",
+	} {
+		if !strings.Contains(bootstrapUnit, want) {
+			t.Errorf("paper bootstrap unit is missing %q", want)
+		}
+	}
+	bootstrapTimer := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-bootstrap.timer")
+	for _, want := range []string{
+		"OnCalendar=*-*-* *:30:00 UTC", "Persistent=true",
+		"Unit=mithril-agent-paper-bootstrap.service", "WantedBy=timers.target",
+	} {
+		if !strings.Contains(bootstrapTimer, want) {
+			t.Errorf("paper bootstrap timer is missing %q", want)
 		}
 	}
 	networkCheck := readDocumentation(t, "../../deploy/hermes-research/check-network.sh")
@@ -621,7 +667,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 			t.Errorf("Hermes market scout timer is missing %q", want)
 		}
 	}
-	championUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-champion.service")
+	championUnit = readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-champion.service")
 	bridgeUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-status-bridge.service")
 	legacyTelegramUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-telegram.service")
 	if strings.Contains(legacyTelegramUnit, "paper-status") {
@@ -634,6 +680,34 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	}
 	if !strings.Contains(bridgeUnit, "InaccessiblePaths=/var/lib/mithril-agent-research") {
 		t.Fatal("paper status bridge can see the research tree outside its credential")
+	}
+	jupUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup.service")
+	jupBridge := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup-status-bridge.service")
+	jupSocket := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup-status.socket")
+	telegramPaper := readDocumentation(t, "../../deploy/systemd/mithril-agent-telegram-paper.conf")
+	const jupAlertPath = "/var/lib/mithril-agent-research/status/jup/alerts.json"
+	for _, want := range []string{
+		"ConditionPathExists=/var/lib/mithril-agent-research/policy/jup-policy.json",
+		"--dir /var/lib/mithril-agent-research/journals-jup",
+		"--alert-status " + jupAlertPath,
+		"ReadWritePaths=/var/lib/mithril-agent-research/journals-jup /var/lib/mithril-agent-research/status/jup",
+	} {
+		if !strings.Contains(jupUnit, want) {
+			t.Errorf("JUP observer is missing %q", want)
+		}
+	}
+	if !strings.Contains(jupBridge, "LoadCredential=paper-status:"+jupAlertPath) ||
+		!strings.Contains(jupBridge, "InaccessiblePaths=/var/lib/mithril-agent-research") ||
+		!strings.Contains(jupSocket, "ListenStream=/run/mithril-agent-paper-jup-status.sock") {
+		t.Fatal("JUP status bridge/socket does not preserve the bounded credential path")
+	}
+	for _, want := range []string{
+		"SOL/USDC=/run/mithril-agent-paper-status.sock",
+		"JUP/USDC=/run/mithril-agent-paper-jup-status.sock",
+	} {
+		if !strings.Contains(telegramPaper, want) {
+			t.Errorf("paper Telegram opt-in is missing %q", want)
+		}
 	}
 	for _, want := range []string{
 		"/var/lib/mithril-agent-research/index \\",

@@ -1,0 +1,9 @@
+[Unit]
+Description=Mithril agent champion paper pointer watcher
+
+[Path]
+PathChanged=/var/lib/mithril-agent-research/champion/active.json
+Unit=mithril-agent-paper-champion.service
+
+[Install]
+WantedBy=multi-user.target
