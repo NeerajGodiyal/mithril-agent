@@ -738,7 +738,12 @@ func (s *shadowRun) reconcileStoredShadowReports() error {
 	for _, path := range paths {
 		name := filepath.Base(path)
 		day := name[len("report-") : len(name)-len(".json")]
-		ticks, err := readShadowTicks(filepath.Join(s.roll.directory, "shadow-"+day+".jsonl"), s.policy)
+		var ticks []shadow.Tick
+		if day == s.roll.Day() {
+			ticks, err = shadowTicksFrom(s.roll.Records(), s.policy, false)
+		} else {
+			ticks, err = readShadowTicks(filepath.Join(s.roll.directory, "shadow-"+day+".jsonl"), s.policy)
+		}
 		if err != nil {
 			return err
 		}

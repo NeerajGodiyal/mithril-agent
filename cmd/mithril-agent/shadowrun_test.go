@@ -551,10 +551,16 @@ func TestShadowReportIsAtomicallyReplacedAndUsesTheActualPartialPeriod(t *testin
 		t.Fatal(err)
 	}
 	defer current.Close()
-	if err := current.openFor(time.Date(2026, 3, 3, 1, 0, 0, 0, time.UTC)); err != nil {
+	if err := current.openFor(time.Date(2026, 3, 2, 13, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
 	run.roll = current
+	if err := run.reconcileStoredShadowReports(); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.openFor(time.Date(2026, 3, 3, 1, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
 	if err := run.reconcileStoredShadowReports(); err != nil {
 		t.Fatal(err)
 	}
