@@ -467,6 +467,12 @@ func paperAttempt(
 		}
 		reserve += policy.OneTimeSetupRentLamports
 	}
+	// Admission measures the buy route at one exact USDC notional. Profits may
+	// grow later quote inventory, but they cannot silently increase the next
+	// risk-adding buy beyond the amount that was qualified.
+	if policy.Version == AdmittedVersion && !sell {
+		normalAmount = min(normalAmount, policy.InputAmount)
+	}
 	return normalAmount, reserve
 }
 
@@ -650,7 +656,7 @@ func (l Ledger) separateFeeReserve() bool {
 	return l.Policy.StartingFeeReserveLamports != 0
 }
 
-func usesSeparateNativePrice(policy Policy) bool { return policy.Market == MarketJUPUSDC }
+func usesSeparateNativePrice(policy Policy) bool { return policy.NativeFeePrice != nil }
 
 func nativeFeePrice(policy Policy, marketPrice uint64, provided []uint64) (uint64, error) {
 	if !usesSeparateNativePrice(policy) {

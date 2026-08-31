@@ -48,6 +48,30 @@ func TestMultiFeedPolicyAddsJUPWithoutChangingTheV1Contract(t *testing.T) {
 	}
 }
 
+func TestCanonicalUSDFeedNames(t *testing.T) {
+	if !ValidUSDFeed("WIF/USD") {
+		t.Fatal("canonical admitted feed rejected")
+	}
+	for _, feed := range []string{"wif/USD", "$WIF/USD", "WIF/USDC", "W/USD", "TOO-LONG-SYMBOL/USD"} {
+		if ValidUSDFeed(feed) {
+			t.Fatalf("invalid admitted feed %q was accepted", feed)
+		}
+	}
+}
+
+func TestAdmittedTriggerAcceptsOnlyCanonicalUSDFeeds(t *testing.T) {
+	policy := testPolicy()
+	policy.Version = AdmittedFeedVersion
+	policy.Feed = "WIF/USD"
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("admitted trigger = %v", err)
+	}
+	policy.Feed = "wif/USD"
+	if err := policy.Validate(); err == nil {
+		t.Fatal("non-canonical admitted feed was accepted")
+	}
+}
+
 func TestEvaluateRequiresConfidenceAdjustedThreshold(t *testing.T) {
 	now := time.Now().UTC()
 	policy := testPolicy()

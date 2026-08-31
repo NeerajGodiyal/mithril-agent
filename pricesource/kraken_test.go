@@ -90,6 +90,41 @@ func TestKrakenJUPUsesItsPinnedProductAndIdentity(t *testing.T) {
 	}
 }
 
+func TestKrakenReadsAnAdmissionBoundProduct(t *testing.T) {
+	now := time.Date(2026, 8, 31, 14, 25, 20, 0, time.UTC)
+	client := fixtureClient(t, func(request *http.Request) string {
+		if request.URL.Query().Get("symbol") != "WIF/USD" ||
+			request.URL.RawQuery != "symbol=WIF%2FUSD" {
+			t.Fatalf("request URL = %s", request.URL.String())
+		}
+		return `{"result":{"symbol":"WIF/USD","bids":[{"side":"BUY","price":"0.1940","publication_ts":"` +
+			now.Format(time.RFC3339Nano) + `"}],"asks":[{"side":"SELL","price":"0.1941","publication_ts":"` +
+			now.Format(time.RFC3339Nano) + `"}]},"error":[]}`
+	}, http.Header{"Date": []string{now.Format(http.TimeFormat)}})
+	source, err := NewKrakenFromSpec(client, KrakenSpec{Feed: "WIF/USD", Product: "WIF/USD"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.gate = testKrakenGate{}
+	sample, err := source.Latest(t.Context(), "WIF/USD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sample.PriceMicros != 194_050 || sample.Feed != "WIF/USD" ||
+		sample.SourceSHA256 != source.IdentitySHA256() ||
+		sample.SourceSHA256 == KrakenJUPIdentitySHA256() {
+		t.Fatalf("sample = %+v", sample)
+	}
+	for _, spec := range []KrakenSpec{
+		{Feed: "wif/USD", Product: "WIF/USD"},
+		{Feed: "WIF/USD", Product: "RAY/USD"},
+	} {
+		if _, err := NewKrakenFromSpec(client, spec); err == nil {
+			t.Fatalf("invalid spec was accepted: %+v", spec)
+		}
+	}
+}
+
 func TestKrakenRejectsMalformedMarketData(t *testing.T) {
 	for _, body := range []string{
 		`{"result":{"symbol":"USDC/USD","bids":[],"asks":[]},"error":[]}`,

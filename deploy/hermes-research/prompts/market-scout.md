@@ -41,7 +41,7 @@ configured paper markets are `SOL/USDC` and `JUP/USDC`. Track SOL/USD, JUP/USD,
 BTC/USD, cbBTC/USD, ETH/USD, USDC/USD, USDT/USD, timestamp-aligned SOL/BTC,
 Solana slot health, priority fees, failed-transaction rates, and Jupiter quote
 availability as context. Treat `cbBTC/USDC` as the first observation-only
-candidate and RAY, JTO, PYTH, and
+candidate and JTO, PYTH, and
 PUMP as watchlist research only. Confirm cbBTC's Solana mint from Coinbase and
 Jupiter; pin its expected mint and freeze authority public keys, alert on any
 change, and retain issuer, freeze, and custody risk. Compare the separate Pyth

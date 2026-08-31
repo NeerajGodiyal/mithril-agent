@@ -433,7 +433,7 @@ func adaptiveQuotePasses(
 func adaptiveTradeCostFloorBPS(
 	policy Policy, quote Quote, marketPrice uint64, sell bool,
 ) (uint32, error) {
-	if policy.Market != MarketJUPUSDC {
+	if !usesSeparateNativePrice(policy) {
 		baseAmount := quote.InputAmount
 		if !sell {
 			baseAmount = quote.MinimumOutput

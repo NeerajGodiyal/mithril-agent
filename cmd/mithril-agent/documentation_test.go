@@ -300,6 +300,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"plugins:\n  enabled: []", "telegram:\n    enabled: false",
 		"mithril_index", "mithril_paper", "solana_docs",
 		"mithril_index_transactions",
+		"--max-record-age", "- 15m",
 		"mithril_paper_create_challenger", "mithril_paper_challenge_status",
 		"/var/lib/mithril-agent-research/challenger/active.json",
 	} {
@@ -658,7 +659,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"/var/lib/mithril-agent-research/champion/active.json",
 		"toolsets=\"$toolsets,mithril_paper\"",
 		"/var/lib/mithril-agent-research/index/events.jsonl",
-		"index doctor",
+		"index doctor", "--max-record-age 15m",
 		"toolsets=\"$toolsets,mithril_index\"",
 		"export MITHRIL_HERMES_TOOLSETS=\"$toolsets\"",
 		"exec /usr/bin/docker compose run --rm --no-TTY hermes-research",
@@ -717,6 +718,18 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	} {
 		if !strings.Contains(telegramPaper, want) {
 			t.Errorf("paper Telegram opt-in is missing %q", want)
+		}
+	}
+	wifUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-market-wif.service")
+	for _, want := range []string{
+		"ConditionPathExists=/etc/mithril-agent/paper-wif.env",
+		"--market WIF/USDC --observe ${MITHRIL_AGENT_WIF_OBSERVE}",
+		"--journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl",
+		"ReadWritePaths=/var/lib/mithril-agent-research/market-admission-wif",
+		"ProtectSystem=strict", "UMask=0077",
+	} {
+		if !strings.Contains(wifUnit, want) {
+			t.Errorf("WIF admission collector is missing %q", want)
 		}
 	}
 	dashboardUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-dashboard.service")

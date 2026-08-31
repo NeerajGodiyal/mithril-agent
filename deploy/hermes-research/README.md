@@ -124,12 +124,15 @@ must pass before the wrapper exposes the index toolset:
 
 ```sh
 sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
-  index doctor --dir /var/lib/mithril-agent-research/index
+  index doctor --dir /var/lib/mithril-agent-research/index \
+  --max-record-age 15m
 ```
 
 An empty provisioned directory is not research evidence. The wrapper runs
 official-source research without the index until both `events.jsonl` exists and
-`index doctor` passes.
+`index doctor --max-record-age 15m` passes.
+Check the doctor's last recorded time as well as its ready result; stale rooted
+evidence must not be presented to Hermes as current market context.
 
 For rootful Docker, copy the reviewed deployment inputs into a root-owned
 directory before running Compose. Running root-equivalent Compose from a
@@ -451,6 +454,47 @@ pauses, period closes, and sustained market-data loss or recovery. JUP has its
 own journal, status directory, notional budget, and fee reserve; it does not
 enter the SOL champion/challenger lifecycle yet.
 
+### WIF/USDC admission collector
+
+WIF is not enabled as a paper market immediately. Its collector first records
+30 complete UTC days of minute-by-minute Pyth, Kraken, Jupiter route, mint,
+USDC-peg, and native-fee evidence. Missing buckets and provider failures count
+as unavailable. This prevents a newly discovered token from becoming a paper
+mandate on the strength of a ticker or a short favorable sample.
+
+Create a root-owned environment file containing only the public watch-only
+quote address, then install the collector. The address cannot sign or spend.
+
+```sh
+printf '%s\n' 'MITHRIL_AGENT_WIF_OBSERVE=WATCH_ONLY_ADDRESS' | \
+  sudo install -o root -g root -m 0600 /dev/stdin /etc/mithril-agent/paper-wif.env
+sudo install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
+  /var/lib/mithril-agent-research/market-admission-wif
+sudo install -o root -g root -m 0644 \
+  systemd/mithril-agent-market-wif.service /etc/systemd/system/
+sudo systemd-analyze verify /etc/systemd/system/mithril-agent-market-wif.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now mithril-agent-market-wif.service
+```
+
+After at least 30 complete days, stop the collector briefly and evaluate a new,
+date-named immutable artifact. Qualification proves current source and route
+quality only; it neither starts trading nor proves profit. A WIF paper policy
+must use that artifact's exact `$25` notional, `100` bps slippage, observer,
+source limits, and journal prefix. The admitted runner closes at the next UTC
+boundary and refuses another day until a newly reviewed rolling-window
+artifact and policy are supplied. Keep that handoff operator-reviewed; do not
+silently auto-promote a token because a timer ran.
+
+```sh
+sudo systemctl stop mithril-agent-market-wif.service
+sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
+  shadow market evaluate \
+  --journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl \
+  --out /var/lib/mithril-agent-research/market-admission-wif/wif-YYYY-MM-DD.json
+sudo systemctl start mithril-agent-market-wif.service
+```
+
 The initial deployment uses Hermes' keyless web ring for both search and
 single-URL extraction. It requires no Tavily key, but it is rate-limited and is
 not a production freshness SLA. Evidence failure or exhaustion must fail closed
@@ -596,7 +640,9 @@ create a fresh dedicated state directory instead of trusting its cache.
 The scheduled one-shot's explicit pre-champion registry must contain exactly
 four tools: web search/extraction and the two read-only Solana documentation
 tools. The wrapper adds the two paper tools only after a champion exists and
-the three index tools only after `index doctor` passes. Repeat the exact
+the three index tools only after `index doctor --max-record-age 15m` passes.
+The index MCP server repeats that same check at startup and before every tool
+call. Repeat the exact
 post-filter registry assertion after each gate opens. The static CLI, Telegram,
 and cron resolver assertions remain upgrade checks for the underlying profile;
 they are not proof of the one-shot's dynamic runtime registry. In Hermes
@@ -616,7 +662,8 @@ Only after that review should the systemd-owned one-shot start. Do not run
 orders every run after the egress boundary and requires the OAuth file and
 paper policy. The wrapper starts with only `web,solana_docs`, adds
 `mithril_paper` when the first champion pointer exists, and adds
-`mithril_index` only when the index file exists and `index doctor` passes.
+`mithril_index` only when the index file exists and the bounded-age doctor
+passes.
 
 ```sh
 sudo systemctl start mithril-hermes-research.service
@@ -665,12 +712,14 @@ sudo systemctl enable --now mithril-hermes-research.timer
 ## Freshness and recovery
 
 Do not equate `mithril_index_status.complete` with current data. It proves that
-the stored prefix is internally complete, not that ingestion is live. Before a
-brief can influence a challenger, require a healthy supervised rooted-event
-ingester, expose/check the index's last recorded time, compare its last rooted
-slot with the local node's current root, and fail closed on cursor gaps. Until
-that public Mithril prerequisite lands, treat rooted-index findings as bounded
-historical evidence and say so in every brief.
+the stored prefix is internally complete, not that ingestion is live. The
+profile now admits the index only when its complete, hash-verified journal has
+a record no more than 15 minutes old, and the MCP server repeats that check on
+every call. This proves recent local ingestion only: the timestamp comes from
+the index host and does not prove parity with the node's current root. Until a
+healthy supervised ingester and an independently trusted current-root check
+are both enforced, treat rooted-index findings as bounded historical evidence
+and say so in every brief.
 
 Monitor the base, champion, and challenger unit state and newest journal-record
 age against the policy tick interval. The bounded alert snapshot is event-driven

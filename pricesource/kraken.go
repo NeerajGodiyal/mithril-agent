@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
@@ -31,6 +33,33 @@ type Kraken struct {
 	product  string
 	identity string
 	gate     krakenRequestGate
+}
+
+// KrakenSpec binds an allowlisted candidate feed to one exact public PreTrade
+// product. Kraken's origin stays fixed in code.
+type KrakenSpec struct {
+	Feed    string `json:"feed"`
+	Product string `json:"product"`
+}
+
+func (spec KrakenSpec) Validate() error {
+	if !pricetrigger.ValidUSDFeed(spec.Feed) {
+		return errors.New("Kraken feed name is invalid")
+	}
+	base, ok := strings.CutSuffix(spec.Feed, "/USD")
+	if !ok || spec.Product != base+"/USD" {
+		return errors.New("Kraken product does not match its feed")
+	}
+	return nil
+}
+
+func (spec KrakenSpec) IdentitySHA256() (string, error) {
+	if err := spec.Validate(); err != nil {
+		return "", err
+	}
+	description := "mithril-agent/price-source-v2|kraken-spot|api.kraken.com|" +
+		spec.Product + "|pre-trade|best-bid-ask|http-date"
+	return sourceIdentity(description), nil
 }
 
 func KrakenIdentitySHA256() string {
@@ -72,6 +101,18 @@ func NewKrakenJUP(client *http.Client) *Kraken {
 	}
 }
 
+func NewKrakenFromSpec(client *http.Client, spec KrakenSpec) (*Kraken, error) {
+	identity, err := spec.IdentitySHA256()
+	if err != nil {
+		return nil, err
+	}
+	return &Kraken{
+		client: boundedClient(client), feed: spec.Feed, product: spec.Product,
+		identity: identity,
+		gate:     newKrakenRequestGate(os.Getenv(KrakenRateStateEnvironment)),
+	}, nil
+}
+
 func (source *Kraken) IdentitySHA256() string {
 	if source == nil {
 		return ""
@@ -86,8 +127,9 @@ func (source *Kraken) Latest(ctx context.Context, feed string) (pricetrigger.Sam
 	if err := source.gate.Wait(ctx); err != nil {
 		return pricetrigger.Sample{}, errors.New("Kraken price request was rate-limited locally")
 	}
+	query := url.Values{"symbol": []string{source.product}}
 	request, err := http.NewRequestWithContext(
-		ctx, http.MethodGet, KrakenOrigin+"/0/public/PreTrade?symbol="+source.product, nil,
+		ctx, http.MethodGet, KrakenOrigin+"/0/public/PreTrade?"+query.Encode(), nil,
 	)
 	if err != nil {
 		return pricetrigger.Sample{}, errors.New("create Kraken price request")

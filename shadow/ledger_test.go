@@ -329,6 +329,23 @@ func TestJUPSetupRentLocksCapitalOnlyAfterTheFirstSuccessfulBuy(t *testing.T) {
 	}
 }
 
+func TestAdmittedBuyNeverExceedsTheQualifiedNotional(t *testing.T) {
+	policy := jupBuyPolicy(t)
+	policy.Version = AdmittedVersion
+	ledger, err := NewLedger(jupBuyPolicy(t), 1_000_000, 200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	amount, _ := paperAttempt(policy, ledger, false, policy.InputAmount*2, nil)
+	if amount != policy.InputAmount {
+		t.Fatalf("admitted buy amount = %d, want %d", amount, policy.InputAmount)
+	}
+	amount, _ = paperAttempt(policy, ledger, true, policy.InputAmount*2, nil)
+	if amount != policy.InputAmount*2 {
+		t.Fatalf("risk-reducing sell amount = %d, want %d", amount, policy.InputAmount*2)
+	}
+}
+
 func TestSOLSetupRentLocksOnTheFirstSuccessfulJupiterSell(t *testing.T) {
 	policy := mainnetPolicy()
 	policy.OneTimeSetupRentLamports = 3_000_000

@@ -6,12 +6,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"math/bits"
+	"strings"
 	"time"
 )
 
 const (
 	Version               = uint32(1)
 	MultiFeedVersion      = uint32(2)
+	AdmittedFeedVersion   = uint32(3)
 	FeedSOLUSD            = "SOL/USD"
 	FeedJUPUSD            = "JUP/USD"
 	FeedUSDCUSD           = "USDC/USD"
@@ -47,7 +49,10 @@ func (p Policy) Validate() error {
 	if p.Version == MultiFeedVersion && p.Feed != FeedSOLUSD && p.Feed != FeedJUPUSD {
 		return errors.New("price trigger v2 feed is unsupported")
 	}
-	if p.Version != Version && p.Version != MultiFeedVersion {
+	if p.Version == AdmittedFeedVersion && !ValidUSDFeed(p.Feed) {
+		return errors.New("admitted price trigger feed is unsupported")
+	}
+	if p.Version != Version && p.Version != MultiFeedVersion && p.Version != AdmittedFeedVersion {
 		return errors.New("price trigger version is unsupported")
 	}
 	if p.Direction != SellAtOrAbove && p.Direction != BuyAtOrBelow {
@@ -70,6 +75,71 @@ func (p Policy) Validate() error {
 		return errors.New("price trigger sources must have distinct bound identities")
 	}
 	return nil
+}
+
+// ValidUSDFeed accepts the narrow canonical symbol form used by allowlisted
+// candidate markets. A ticker remains display metadata; admission pins the
+// exact mint, decimals, authorities, and source accounts.
+func ValidUSDFeed(feed string) bool {
+	base, ok := strings.CutSuffix(feed, "/USD")
+	if !ok || len(base) < 2 || len(base) > 12 {
+		return false
+	}
+	for _, character := range base {
+		if character < 'A' || character > 'Z' {
+			if character < '0' || character > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ObservationPolicy validates a canonical USD feed without widening the
+// funded trigger-policy versions accepted by existing runners.
+type ObservationPolicy struct {
+	Feed                  string
+	MaxAgeSeconds         uint64
+	MaxSourceSkewSeconds  uint64
+	MaxDeviationBPS       uint16
+	MaxConfidenceBPS      uint16
+	PrimarySourceSHA256   string
+	SecondarySourceSHA256 string
+}
+
+func (policy ObservationPolicy) Validate() error {
+	if !ValidUSDFeed(policy.Feed) || policy.MaxAgeSeconds == 0 ||
+		policy.MaxAgeSeconds > 120 || policy.MaxSourceSkewSeconds > policy.MaxAgeSeconds ||
+		policy.MaxDeviationBPS == 0 || policy.MaxDeviationBPS > 500 ||
+		policy.MaxConfidenceBPS == 0 || policy.MaxConfidenceBPS > 500 ||
+		!validDigest(policy.PrimarySourceSHA256) ||
+		!validDigest(policy.SecondarySourceSHA256) ||
+		policy.PrimarySourceSHA256 == policy.SecondarySourceSHA256 {
+		return errors.New("price observation policy is invalid")
+	}
+	return nil
+}
+
+// ValidateObservation applies two-source freshness, confidence, skew, and
+// deviation checks without evaluating a buy or sell threshold.
+func ValidateObservation(
+	policy ObservationPolicy,
+	primary, secondary Sample,
+	now time.Time,
+) error {
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	now = now.UTC()
+	if now.IsZero() {
+		return errors.New("price observation time is required")
+	}
+	return validatePair(
+		policy.Feed, policy.MaxAgeSeconds, policy.MaxSourceSkewSeconds,
+		policy.MaxDeviationBPS, policy.MaxConfidenceBPS,
+		policy.PrimarySourceSHA256, policy.SecondarySourceSHA256,
+		primary, secondary, now,
+	)
 }
 
 type Sample struct {

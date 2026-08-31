@@ -319,6 +319,9 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 	case "shadow":
 		// The subcommand form is the continuous keyless observer; the flag form
 		// is the older single-shot shadow, kept working for existing scripts.
+		if len(args) > 1 && args[1] == "market" {
+			return runShadowMarket(ctx, args[2:], output)
+		}
 		if len(args) > 1 && args[1] == "run" {
 			return runShadowRun(ctx, args[2:], output)
 		}
@@ -1789,6 +1792,11 @@ func runShadow(args []string, output io.Writer) error {
   mithril-agent shadow run --policy PATH --dir PATH
                                        watch a live market, record what the rule
                                        would have done. Holds no key.
+  mithril-agent shadow market collect --market NAME --observe ADDR --journal PATH
+                                       collect immutable market-admission evidence
+  mithril-agent shadow market evaluate --journal PATH --out PATH
+                                       evaluate the latest complete evidence
+                                       window; never starts a strategy
   mithril-agent shadow report --policy PATH --dir PATH [--day DATE] [--json]
                                        verify and score one recorded day
   mithril-agent shadow review --policy PATH --dir PATH --days N [--json]

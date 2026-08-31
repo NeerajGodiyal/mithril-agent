@@ -8,8 +8,10 @@ import (
 	"io"
 	"math"
 	"path/filepath"
+	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
+	"github.com/Overclock-Validator/mithril-agent/marketadmission"
 	"github.com/Overclock-Validator/mithril-agent/pricesource"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
@@ -32,7 +34,11 @@ you; everything else has a working default.
   --cluster NAME    mainnet-beta (default) or devnet
   --adaptive        derive actions from rolling trend, volatility, and range;
                     do not provide fixed buy or sell prices
-  --market NAME     paper mandate market: SOL/USDC or JUP/USDC
+  --market NAME     paper mandate market: SOL/USDC, JUP/USDC, or WIF/USDC
+	--admission-artifact PATH
+	                    qualified market-evidence artifact for WIF/USDC
+	--admission-journal PATH
+	                    exact journal bound by that artifact
   --budget-sol N    total simulated SOL budget, including fees and setup rent
   --budget-usdc N   simulated USDC budget for JUP/USDC
   --fee-reserve-sol N
@@ -73,6 +79,8 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	cluster := flags.String("cluster", shadow.Mainnet, "mainnet-beta or devnet")
 	adaptive := flags.Bool("adaptive", false, "use the adaptive paper strategy")
 	market := flags.String("market", "", "paper mandate market")
+	admissionArtifact := flags.String("admission-artifact", "", "qualified market evidence")
+	admissionJournal := flags.String("admission-journal", "", "market evidence journal")
 	budgetSOL := flags.String("budget-sol", "", "total simulated SOL budget")
 	budgetUSDC := flags.String("budget-usdc", "", "simulated USDC budget")
 	feeReserveSOL := flags.String(
@@ -126,6 +134,10 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	}
 	mandate := explicit["market"] || explicit["budget-sol"] || explicit["budget-usdc"] ||
 		explicit["fee-reserve-sol"] || explicit["setup-rent-sol"] || explicit["drawdown-stop-bps"]
+	if !mandate && (*admissionArtifact != "" || *admissionJournal != "") {
+		return errors.New("market admission flags require an admitted paper mandate")
+	}
+	var admission marketadmission.Artifact
 	if mandate && !explicit["fee-lamports"] {
 		*feeLamports = defaultPaperFeeLamports
 	}
@@ -137,8 +149,30 @@ func runShadowPolicy(args []string, output io.Writer) error {
 		if !*adaptive || *cluster != shadow.Mainnet {
 			return errors.New("paper mandate flags require --adaptive on mainnet-beta")
 		}
-		if *market != shadow.MarketSOLUSDC && *market != shadow.MarketJUPUSDC {
-			return errors.New("--market must be SOL/USDC or JUP/USDC")
+		if *market != shadow.MarketSOLUSDC && *market != shadow.MarketJUPUSDC &&
+			*market != shadow.MarketWIFUSDC {
+			return errors.New("--market must be SOL/USDC, JUP/USDC, or WIF/USDC")
+		}
+		admitted := *market == shadow.MarketWIFUSDC
+		if admitted {
+			var err error
+			admission, err = loadQualifiedMarketAdmission(
+				*admissionArtifact, *admissionJournal, time.Now(),
+			)
+			if err != nil {
+				return err
+			}
+			if admission.Candidate.Market != *market {
+				return errors.New("market admission artifact does not match --market")
+			}
+			if *observe != admission.Observe {
+				return errors.New("--observe must match the qualified market evidence")
+			}
+			if *slippageBPS != uint(admission.Candidate.QuoteSlippageBPS) {
+				return errors.New("--slippage-bps must match the qualified market evidence")
+			}
+		} else if *admissionArtifact != "" || *admissionJournal != "" {
+			return errors.New("market admission flags are only for WIF/USDC")
 		}
 		if !explicit["drawdown-stop-bps"] {
 			return errors.New("paper mandate requires --drawdown-stop-bps")
@@ -177,12 +211,15 @@ func runShadowPolicy(args []string, output io.Writer) error {
 			tradeAmount = budgetLamports - feeReserveLamports
 		} else {
 			if *budgetUSDC == "" || explicit["budget-sol"] {
-				return errors.New("JUP/USDC paper mandate requires --budget-usdc")
+				return errors.New("non-SOL paper mandate requires --budget-usdc")
 			}
 			var err error
 			tradeAmount, err = parseDecimalUnits(*budgetUSDC, "paper USDC budget", ^uint64(0))
 			if err != nil {
 				return err
+			}
+			if admitted && tradeAmount != admission.Candidate.QuoteNotionalUSDC {
+				return errors.New("WIF/USDC paper budget must match the qualified quote notional")
 			}
 			feeReserveLamports, err = parseDecimalUnits9(*feeReserveSOL, "paper SOL fee reserve")
 			if err != nil {
@@ -198,7 +235,7 @@ func runShadowPolicy(args []string, output io.Writer) error {
 				return errors.New("paper SOL reserve must fund token setup rent and at least two transaction fees")
 			}
 			if *pool != "" || *inputMint != "" || *outputMint != "" {
-				return errors.New("JUP/USDC uses its pinned Mainnet route; omit Devnet route flags")
+				return errors.New("Mainnet paper mandates use a pinned route; omit Devnet route flags")
 			}
 		}
 	}
@@ -206,12 +243,19 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	var policy shadow.Policy
 	var err error
 	if *adaptive {
-		if mandate && *market == shadow.MarketJUPUSDC {
-			policy, err = buildAdaptiveJUPPolicy(
-				tradeAmount, feeReserveLamports, setupRentLamports,
-				uint16(*slippageBPS), *feeLamports,
-				*observe, *tickSeconds,
-			)
+		if mandate && (*market == shadow.MarketJUPUSDC || *market == shadow.MarketWIFUSDC) {
+			if *market == shadow.MarketWIFUSDC {
+				policy, err = buildAdaptiveAdmittedPolicy(
+					admission, tradeAmount, feeReserveLamports, setupRentLamports,
+					uint16(*slippageBPS), *feeLamports, *observe, *tickSeconds,
+				)
+			} else {
+				policy, err = buildAdaptiveJUPPolicy(
+					tradeAmount, feeReserveLamports, setupRentLamports,
+					uint16(*slippageBPS), *feeLamports,
+					*observe, *tickSeconds,
+				)
+			}
 		} else {
 			policy, err = buildAdaptiveShadowPolicy(
 				*cluster, tradeAmount, uint16(*slippageBPS), *feeLamports,
@@ -247,7 +291,7 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	mandateSummary := ""
 	if mandate {
 		budgetText := formatShadowAmount(budgetLamports, 9) + " SOL"
-		if *market == shadow.MarketJUPUSDC {
+		if *market != shadow.MarketSOLUSDC {
 			budgetText = formatShadowAmount(tradeAmount, 6) + " USDC · native reserve " +
 				formatShadowAmount(feeReserveLamports, 9) + " SOL · setup locks " +
 				formatShadowAmount(setupRentLamports, 9) + " SOL"
@@ -264,7 +308,9 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	_, err = fmt.Fprintf(output, "Wrote %s\n\n%s%s\n\n"+
 		"It reads the market and writes down what the rule would have done.\n"+
 		"It holds no wallet signing key and cannot sign, submit, or spend anything.\n",
-		*outPath, mandateSummary, shadowRunHint(policy, *outPath))
+		*outPath, mandateSummary, shadowRunHint(
+			policy, *outPath, *admissionArtifact, *admissionJournal,
+		))
 	return err
 }
 
@@ -317,14 +363,66 @@ func buildAdaptiveJUPPolicy(
 	observe string,
 	tickSeconds uint64,
 ) (shadow.Policy, error) {
+	return buildAdaptiveQuoteMarketPolicy(
+		shadow.Version, shadow.MarketJUPUSDC, pricetrigger.FeedJUPUSD,
+		pricesource.PythPushJUPIdentitySHA256(), pricesource.KrakenJUPIdentitySHA256(), "",
+		quoteBudget, feeReserveLamports, setupRentLamports,
+		slippageBPS, feeLamports, observe, tickSeconds,
+	)
+}
+
+func buildAdaptiveAdmittedPolicy(
+	artifact marketadmission.Artifact,
+	quoteBudget, feeReserveLamports, setupRentLamports uint64,
+	slippageBPS uint16, feeLamports uint64,
+	observe string,
+	tickSeconds uint64,
+) (shadow.Policy, error) {
+	if !artifact.OperationallyQualified || artifact.Validate() != nil {
+		return shadow.Policy{}, errors.New("market admission artifact is not qualified")
+	}
+	if observe != artifact.Observe || quoteBudget != artifact.Candidate.QuoteNotionalUSDC ||
+		slippageBPS != artifact.Candidate.QuoteSlippageBPS {
+		return shadow.Policy{}, errors.New("admitted policy inputs do not match market evidence")
+	}
+	primary, err := artifact.Candidate.Pyth.IdentitySHA256()
+	if err != nil {
+		return shadow.Policy{}, err
+	}
+	secondary, err := artifact.Candidate.Kraken.IdentitySHA256()
+	if err != nil {
+		return shadow.Policy{}, err
+	}
+	return buildAdaptiveQuoteMarketPolicy(
+		shadow.AdmittedVersion, artifact.Candidate.Market, artifact.Candidate.Pyth.Feed,
+		primary, secondary, artifact.ContentSHA256,
+		quoteBudget, feeReserveLamports, setupRentLamports,
+		slippageBPS, feeLamports, observe, tickSeconds,
+	)
+}
+
+func buildAdaptiveQuoteMarketPolicy(
+	version uint32,
+	market, feed, primarySource, secondarySource, marketEvidence string,
+	quoteBudget, feeReserveLamports, setupRentLamports uint64,
+	slippageBPS uint16, feeLamports uint64,
+	observe string,
+	tickSeconds uint64,
+) (shadow.Policy, error) {
 	const nativeFeePriceCeilingMicros = uint64(1_000_000_000) // $1,000/SOL
+	triggerVersion := pricetrigger.MultiFeedVersion
+	if version == shadow.AdmittedVersion {
+		triggerVersion = pricetrigger.AdmittedFeedVersion
+	}
 	trigger := pricetrigger.Policy{
-		Version: pricetrigger.MultiFeedVersion, Feed: pricetrigger.FeedJUPUSD,
+		Version: triggerVersion, Feed: feed,
 		Direction: pricetrigger.BuyAtOrBelow, ThresholdMicros: 1,
 		MaxAgeSeconds: 120, MaxSourceSkewSeconds: 90,
 		MaxDeviationBPS: 200, MaxConfidenceBPS: 200,
-		PrimarySourceSHA256:   pricesource.PythPushJUPIdentitySHA256(),
-		SecondarySourceSHA256: pricesource.KrakenJUPIdentitySHA256(),
+		PrimarySourceSHA256: primarySource, SecondarySourceSHA256: secondarySource,
+	}
+	if version == shadow.AdmittedVersion {
+		trigger.MaxSourceSkewSeconds = 30
 	}
 	returnTrigger := trigger
 	returnTrigger.Direction = pricetrigger.SellAtOrAbove
@@ -337,6 +435,9 @@ func buildAdaptiveJUPPolicy(
 		PrimarySourceSHA256:   pricesource.PythPushIdentitySHA256(),
 		SecondarySourceSHA256: pricesource.KrakenSOLIdentitySHA256(),
 	}
+	if version == shadow.AdmittedVersion {
+		nativeFeePrice.MaxSourceSkewSeconds = 30
+	}
 	adaptive, err := shadow.DefaultAdaptiveQuotePolicy(
 		slippageBPS, feeLamports, nativeFeePriceCeilingMicros,
 		quoteBudget, 6, tickSeconds,
@@ -345,9 +446,10 @@ func buildAdaptiveJUPPolicy(
 		return shadow.Policy{}, err
 	}
 	policy := shadow.Policy{
-		Version: shadow.Version, Cluster: shadow.Mainnet, Market: shadow.MarketJUPUSDC,
-		Adaptive: &adaptive, Trigger: trigger, ReturnTrigger: &returnTrigger,
-		QuoteRoute:  shadow.MainnetMarketQuoteRoute(shadow.MarketJUPUSDC, false),
+		Version: version, Cluster: shadow.Mainnet, Market: market,
+		MarketEvidenceSHA256: marketEvidence,
+		Adaptive:             &adaptive, Trigger: trigger, ReturnTrigger: &returnTrigger,
+		QuoteRoute:  shadow.MainnetMarketQuoteRoute(market, false),
 		Observe:     observe,
 		InputAmount: quoteBudget, InputDecimals: 6, OutputDecimals: 6,
 		SlippageBPS: slippageBPS, FeeLamports: feeLamports,
@@ -366,18 +468,29 @@ func buildAdaptiveJUPPolicy(
 			SecondarySourceSHA256: pricesource.KrakenIdentitySHA256(),
 		},
 	}
+	if version == shadow.AdmittedVersion {
+		policy.QuotePeg.MaxSourceSkewSeconds = 30
+	}
 	if err := policy.Validate(); err != nil {
 		return shadow.Policy{}, err
 	}
 	return policy, nil
 }
 
-func shadowRunHint(policy shadow.Policy, path string) string {
+func shadowRunHint(
+	policy shadow.Policy,
+	path, admissionArtifact, admissionJournal string,
+) string {
 	if policy.Cluster == shadow.Mainnet {
-		return fmt.Sprintf("Run it with:\n  mithril-agent shadow run --policy %s --dir DIR\n\n"+
+		admission := ""
+		if policy.Version == shadow.AdmittedVersion {
+			admission = fmt.Sprintf(" --admission-artifact %s --admission-journal %s",
+				admissionArtifact, admissionJournal)
+		}
+		return fmt.Sprintf("Run it with:\n  mithril-agent shadow run --policy %s --dir DIR%s\n\n"+
 			"After N complete UTC days, verify them with:\n  mithril-agent shadow review --policy %s --dir DIR --days N\n\n"+
 			"Keyless Jupiter access needs no account and is suitable for testing. For continuous production operation, Jupiter recommends a free or paid API key; keep MITHRIL_AGENT_JUPITER_API_KEY scoped to this read-only service.",
-			path,
+			path, admission,
 			path)
 	}
 	return fmt.Sprintf("Run the Devnet Orca route stored in this policy:\n"+

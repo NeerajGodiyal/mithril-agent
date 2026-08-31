@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/internal/base58"
@@ -35,6 +36,7 @@ const (
 	LegacyVersion    = uint32(4)
 	NativeFeeVersion = uint32(5)
 	Version          = uint32(6)
+	AdmittedVersion  = uint32(7)
 )
 
 const (
@@ -43,10 +45,12 @@ const (
 
 	MarketSOLUSDC = "SOL/USDC"
 	MarketJUPUSDC = "JUP/USDC"
+	MarketWIFUSDC = "WIF/USDC"
 
 	wrappedSOLMint  = "So11111111111111111111111111111111111111112"
 	mainnetUSDCMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 	mainnetJUPMint  = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
+	mainnetWIFMint  = "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"
 )
 
 // JournalVersion identifies the run header written before the first tick. The
@@ -101,6 +105,8 @@ func MainnetMarketQuoteRoute(market string, sell bool) QuoteRoute {
 		baseMint = wrappedSOLMint
 	case MarketJUPUSDC:
 		baseMint = mainnetJUPMint
+	case MarketWIFUSDC:
+		baseMint = mainnetWIFMint
 	default:
 		return QuoteRoute{}
 	}
@@ -118,6 +124,10 @@ type Policy struct {
 	Version uint32 `json:"version"`
 	Cluster string `json:"cluster"`
 	Market  string `json:"market,omitempty"`
+	// MarketEvidenceSHA256 binds an admitted market to its verified, immutable
+	// source-and-route qualification artifact. Incumbent SOL/JUP policies leave
+	// it empty because their contracts are code-owned.
+	MarketEvidenceSHA256 string `json:"market_evidence_sha256,omitempty"`
 
 	// Adaptive replaces absolute entry prices with a rolling, price-relative
 	// decision model. Trigger and ReturnTrigger still bind the independently
@@ -232,7 +242,8 @@ const (
 // no slippage bound, or no settlement delay is worse than no shadow run at all,
 // because it produces a number somebody will believe.
 func (p Policy) Validate() error {
-	if p.Version != Version && p.Version != NativeFeeVersion && p.Version != LegacyVersion {
+	if p.Version != Version && p.Version != NativeFeeVersion && p.Version != LegacyVersion &&
+		p.Version != AdmittedVersion {
 		return errors.New("shadow policy version is not supported")
 	}
 	if p.Version == LegacyVersion &&
@@ -242,6 +253,9 @@ func (p Policy) Validate() error {
 	}
 	if p.Version == NativeFeeVersion && p.OneTimeSetupRentLamports != 0 {
 		return errors.New("v5 shadow policy cannot use v6 setup-rent accounting")
+	}
+	if p.Version != AdmittedVersion && p.MarketEvidenceSHA256 != "" {
+		return errors.New("only an admitted shadow policy can bind market evidence")
 	}
 	if p.Cluster != Mainnet && p.Cluster != Devnet {
 		return errors.New("shadow policy cluster must be mainnet-beta or devnet")
@@ -253,14 +267,28 @@ func (p Policy) Validate() error {
 	if p.Version == LegacyVersion && market == "" {
 		market = MarketSOLUSDC
 	}
-	if p.Cluster == Mainnet && market != MarketSOLUSDC && market != MarketJUPUSDC {
+	admitted := p.Version == AdmittedVersion
+	if admitted {
+		if p.Cluster != Mainnet || market != MarketWIFUSDC ||
+			!validPolicyDigest(p.MarketEvidenceSHA256) {
+			return errors.New("admitted shadow policy market evidence is invalid")
+		}
+		wantFeed := strings.TrimSuffix(market, "/USDC") + "/USD"
+		if p.Trigger.Version != pricetrigger.AdmittedFeedVersion || p.Trigger.Feed != wantFeed {
+			return errors.New("admitted shadow policy feed does not match its market")
+		}
+	} else if p.Cluster == Mainnet && market != MarketSOLUSDC && market != MarketJUPUSDC {
 		return errors.New("mainnet shadow policy market is unsupported")
 	}
-	if market == MarketJUPUSDC {
-		if p.Trigger.Version != pricetrigger.MultiFeedVersion ||
-			p.Trigger.Feed != pricetrigger.FeedJUPUSD || p.NativeFeePrice == nil ||
+	if market != MarketSOLUSDC && p.Cluster == Mainnet {
+		triggerVersion := pricetrigger.MultiFeedVersion
+		if admitted {
+			triggerVersion = pricetrigger.AdmittedFeedVersion
+		}
+		if p.Trigger.Version != triggerVersion ||
+			market == MarketJUPUSDC && p.Trigger.Feed != pricetrigger.FeedJUPUSD || p.NativeFeePrice == nil ||
 			p.StartingFeeReserveLamports == 0 {
-			return errors.New("JUP/USDC paper policy needs JUP/USD and native SOL/USD evidence")
+			return errors.New("non-SOL paper policy needs its market feed and native SOL/USD evidence")
 		}
 		if err := p.NativeFeePrice.Validate(); err != nil ||
 			p.NativeFeePrice.Feed != pricetrigger.FeedSOLUSD ||
@@ -269,14 +297,14 @@ func (p Policy) Validate() error {
 			p.NativeFeePrice.PrimarySourceSHA256 == p.Trigger.SecondarySourceSHA256 ||
 			p.NativeFeePrice.SecondarySourceSHA256 == p.Trigger.PrimarySourceSHA256 ||
 			p.NativeFeePrice.SecondarySourceSHA256 == p.Trigger.SecondarySourceSHA256 {
-			return errors.New("JUP/USDC native fee price policy is invalid")
+			return errors.New("non-SOL native fee price policy is invalid")
 		}
 		if p.NativeFeePriceCeilingMicros < 100_000_000 ||
 			p.NativeFeePriceCeilingMicros > pricetrigger.MaxPriceMicros {
-			return errors.New("JUP/USDC native fee price ceiling is invalid")
+			return errors.New("non-SOL native fee price ceiling is invalid")
 		}
-		if p.Version == Version && p.OneTimeSetupRentLamports == 0 {
-			return errors.New("JUP/USDC paper policy needs a conservative setup-rent reserve")
+		if (p.Version == Version || admitted) && p.OneTimeSetupRentLamports == 0 {
+			return errors.New("non-SOL paper policy needs a conservative setup-rent reserve")
 		}
 	} else if p.NativeFeePrice != nil || p.NativeFeePriceCeilingMicros != 0 {
 		return errors.New("SOL/USDC paper policy does not need separate native price evidence")
@@ -291,9 +319,9 @@ func (p Policy) Validate() error {
 		}
 		var costFloor uint32
 		var err error
-		if market == MarketJUPUSDC {
+		if market != MarketSOLUSDC && p.Cluster == Mainnet {
 			if p.IsSell() {
-				return errors.New("JUP/USDC adaptive paper policy must start from its USDC buy leg")
+				return errors.New("non-SOL adaptive paper policy must start from its USDC buy leg")
 			}
 			costFloor, err = adaptiveQuoteSignalCostFloorBPS(
 				p.Adaptive.Version, p.SlippageBPS, p.FeeLamports,
@@ -390,7 +418,7 @@ func (p Policy) Validate() error {
 		return errors.New("shadow policy opening input inventory is smaller than one trade")
 	}
 	feeReserve := p.FeeLamports
-	if p.RoundTrip() || p.Version == Version && market == MarketJUPUSDC {
+	if p.RoundTrip() || (p.Version == Version || p.Version == AdmittedVersion) && market != MarketSOLUSDC {
 		if p.FeeLamports > math.MaxUint64/2 {
 			return errors.New("shadow policy required fees are too large")
 		}
@@ -426,6 +454,14 @@ func (p Policy) Validate() error {
 		return errors.New("shadow policy opening SOL inventory does not fund its transaction fee")
 	}
 	return nil
+}
+
+func validPolicyDigest(value string) bool {
+	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func (p Policy) validateQuoteRoute() error {

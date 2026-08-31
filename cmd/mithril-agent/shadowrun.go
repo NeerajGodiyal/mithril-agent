@@ -16,8 +16,10 @@ import (
 
 	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
 	"github.com/Overclock-Validator/mithril-agent/jupiterquote"
+	"github.com/Overclock-Validator/mithril-agent/marketadmission"
 	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 	"github.com/Overclock-Validator/mithril-agent/pricesource"
+	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 	"github.com/Overclock-Validator/mithril-agent/swapbuilder"
 )
@@ -40,6 +42,10 @@ signed and nothing is submitted; no wallet signing key is loaded at any point.
   --candidate-pointer PATH
                         selected paper candidate; checked only at startup and
                         UTC-day boundaries
+  --admission-artifact PATH
+                        qualified market evidence required by WIF/USDC policies
+  --admission-journal PATH
+                        exact journal bound by that artifact
   --alert-status PATH   private bounded paper-event snapshot for Telegram
   --quote-provider NAME optional compatibility check; must match the policy
   --node-command PATH   Node.js runtime for the read-only quote adapter
@@ -69,17 +75,19 @@ const (
 )
 
 type shadowRunOptions struct {
-	policyPath       string
-	directory        string
-	candidatePointer string
-	alertStatus      string
-	quoteSource      string
-	nodeCommand      string
-	quoteScript      string
-	pool             string
-	inputMint        string
-	outputMint       string
-	once             bool
+	policyPath        string
+	directory         string
+	candidatePointer  string
+	admissionArtifact string
+	admissionJournal  string
+	alertStatus       string
+	quoteSource       string
+	nodeCommand       string
+	quoteScript       string
+	pool              string
+	inputMint         string
+	outputMint        string
+	once              bool
 }
 
 func runShadowRun(ctx context.Context, args []string, output io.Writer) error {
@@ -89,6 +97,8 @@ func runShadowRun(ctx context.Context, args []string, output io.Writer) error {
 	flags.StringVar(&options.policyPath, "policy", "", "shadow policy JSON")
 	flags.StringVar(&options.directory, "dir", "", "journal and report directory")
 	flags.StringVar(&options.candidatePointer, "candidate-pointer", "", "selected paper candidate")
+	flags.StringVar(&options.admissionArtifact, "admission-artifact", "", "qualified market evidence")
+	flags.StringVar(&options.admissionJournal, "admission-journal", "", "market evidence journal")
 	flags.StringVar(&options.alertStatus, "alert-status", "", "private paper-event snapshot")
 	flags.StringVar(&options.quoteSource, "quote-provider", "", "must match policy when set")
 	flags.StringVar(&options.nodeCommand, "node-command", "", "Node.js runtime")
@@ -191,6 +201,7 @@ type shadowRun struct {
 	lastPrice              uint64
 	consecutiveUnavailable uint8
 	dataUnavailable        bool
+	admissionThrough       time.Time
 }
 
 func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, error) {
@@ -216,6 +227,21 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 	if err := validateActiveShadowPolicy(policy); err != nil {
 		return nil, err
 	}
+	var admission *marketadmission.Artifact
+	if policy.Version == shadow.AdmittedVersion {
+		artifact, err := loadQualifiedMarketAdmission(
+			options.admissionArtifact, options.admissionJournal, now,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if !admittedPolicyMatchesArtifact(policy, artifact) {
+			return nil, errors.New("market admission evidence does not match the active policy")
+		}
+		admission = &artifact
+	} else if options.admissionArtifact != "" || options.admissionJournal != "" {
+		return nil, errors.New("market admission flags require an admitted WIF/USDC policy")
+	}
 	endpoint := os.Getenv(shadowEndpointEnvironment)
 	if err := validateShadowEndpoint(endpoint); err != nil {
 		return nil, err
@@ -223,7 +249,15 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 	reader := publicAccountReader(endpoint)
 	var primary shadow.PriceReader
 	var secondary shadow.PriceReader
-	if policy.Market == shadow.MarketJUPUSDC {
+	if admission != nil {
+		primary, err = pricesource.NewPythPushFromSpec(
+			reader, time.Now, admission.Candidate.Pyth,
+		)
+		if err != nil {
+			return nil, err
+		}
+		secondary, err = pricesource.NewKrakenFromSpec(nil, admission.Candidate.Kraken)
+	} else if policy.Market == shadow.MarketJUPUSDC {
 		primary, err = pricesource.NewPythPushJUP(reader, time.Now)
 		secondary = pricesource.NewKrakenJUP(nil)
 	} else {
@@ -285,6 +319,9 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 		nativePrimary: nativePrimary, nativeSecondary: nativeSecondary,
 		quoter: quoter, roll: roll, alerts: alerts,
 	}
+	if admission != nil {
+		run.admissionThrough = admission.Through
+	}
 	if err := run.reconcileMissingShadowReports(); err != nil {
 		roll.Close()
 		return nil, err
@@ -324,6 +361,51 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 		return nil, err
 	}
 	return run, nil
+}
+
+func admittedPolicyMatchesArtifact(policy shadow.Policy, artifact marketadmission.Artifact) bool {
+	primary, primaryErr := artifact.Candidate.Pyth.IdentitySHA256()
+	secondary, secondaryErr := artifact.Candidate.Kraken.IdentitySHA256()
+	limits := artifact.Thresholds
+	if primaryErr != nil || secondaryErr != nil || policy.Adaptive == nil ||
+		policy.ReturnTrigger == nil || policy.NativeFeePrice == nil || policy.QuotePeg == nil ||
+		artifact.Candidate.Market != policy.Market ||
+		artifact.ContentSHA256 != policy.MarketEvidenceSHA256 ||
+		artifact.Observe != policy.Observe ||
+		artifact.Candidate.Pyth.Feed != policy.Trigger.Feed ||
+		primary != policy.Trigger.PrimarySourceSHA256 ||
+		secondary != policy.Trigger.SecondarySourceSHA256 ||
+		artifact.Candidate.QuoteMint != policy.QuoteRoute.InputMint ||
+		artifact.Candidate.BaseMint != policy.QuoteRoute.OutputMint ||
+		artifact.Candidate.QuoteNotionalUSDC != policy.InputAmount ||
+		artifact.Candidate.QuoteSlippageBPS != policy.SlippageBPS ||
+		policy.Adaptive.MaxQuoteImpactBPS > limits.MaximumQuoteImpactBPS {
+		return false
+	}
+	return triggerWithinAdmission(policy.Trigger, limits) &&
+		triggerWithinAdmission(*policy.ReturnTrigger, limits) &&
+		triggerWithinAdmission(*policy.NativeFeePrice, limits) &&
+		bandWithinAdmission(*policy.QuotePeg, limits)
+}
+
+func triggerWithinAdmission(
+	policy pricetrigger.Policy,
+	limits marketadmission.Thresholds,
+) bool {
+	return policy.MaxAgeSeconds <= uint64(limits.MaximumSourceAgeSeconds) &&
+		policy.MaxSourceSkewSeconds <= uint64(limits.MaximumSourceSkewSeconds) &&
+		policy.MaxDeviationBPS <= limits.MaximumSourceDeviationBPS &&
+		policy.MaxConfidenceBPS <= limits.MaximumConfidenceBPS
+}
+
+func bandWithinAdmission(
+	policy pricetrigger.BandPolicy,
+	limits marketadmission.Thresholds,
+) bool {
+	return policy.MaxAgeSeconds <= uint64(limits.MaximumSourceAgeSeconds) &&
+		policy.MaxSourceSkewSeconds <= uint64(limits.MaximumSourceSkewSeconds) &&
+		policy.MaxDeviationBPS <= limits.MaximumSourceDeviationBPS &&
+		policy.MaxConfidenceBPS <= limits.MaximumConfidenceBPS
 }
 
 // resolveStartupShadowPolicy keeps a mid-day restart on the policy already
@@ -558,6 +640,10 @@ func (s *shadowRun) rollDay(now time.Time, output io.Writer) (bool, error) {
 	}
 	if err := s.finishDayAt(output, periodEnd); err != nil {
 		return false, err
+	}
+	if s.policy.Version == shadow.AdmittedVersion &&
+		!s.admissionThrough.Equal(now.UTC().Truncate(24*time.Hour)) {
+		return false, errors.New("market admission evidence must be refreshed before the next paper day")
 	}
 	previousPolicy := s.policySHA256
 	if err := s.refreshSelectedCandidate(now); err != nil {
