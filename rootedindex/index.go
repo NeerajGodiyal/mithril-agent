@@ -993,6 +993,9 @@ func validateTransaction(transaction Transaction, filter Filter) (TransactionVer
 		if groupIndex > 0 && group.Index <= lastGroup {
 			return "", errors.New("rooted transaction inner-instruction groups are not ordered")
 		}
+		if int(group.Index) >= len(decoded.Message.Instructions) {
+			return "", errors.New("rooted transaction inner-instruction parent outer index is invalid")
+		}
 		lastGroup = group.Index
 		for _, instruction := range group.Instructions {
 			innerCount++

@@ -10,7 +10,8 @@ In plain language, the workflow is:
 2. Fetch or pin one reviewed description of the program.
 3. Let Mithril export verified history into two local indexes, then run the
    doctors until both report ready.
-4. Decode state and events, or build and simulate an unsigned call.
+4. Decode state, instructions, and events, or build and simulate an unsigned
+   call.
 5. Optionally connect the same read-only tools to a local AI client through
    stdio MCP. The client receives no wallet, signing, or submission capability.
 
@@ -456,6 +457,29 @@ mithril-agent program decode-instruction \
   --instruction '<IDL_INSTRUCTION>' --data '/absolute/path/to/instruction.bin'
 ```
 
+Decode one signed outer instruction from an exact rooted transaction. The
+result includes its success or failure, transaction version, message hash,
+resolved account addresses, cursor, provenance, and finality. For v0, static
+addresses and lookup descriptors are signed; lookup-loaded address values come
+from the rooted replay record:
+
+```sh
+mithril-agent program decode-instruction \
+  --workspace "$WORKSPACE" --sha256 "$IDL_SHA256" \
+  --instruction '<IDL_INSTRUCTION>' --index-dir "$ACTIVITY_INDEX" \
+  --signature '<TRANSACTION_SIGNATURE>' --outer-index 0
+```
+
+Decode one recorded inner instruction (CPI) by its parent outer-instruction
+group and its position inside that group:
+
+```sh
+mithril-agent program decode-instruction \
+  --workspace "$WORKSPACE" --sha256 "$IDL_SHA256" \
+  --instruction '<IDL_INSTRUCTION>' --index-dir "$ACTIVITY_INDEX" \
+  --signature '<TRANSACTION_SIGNATURE>' --inner-group 0 --inner-index 0
+```
+
 Decode one indexed owner-history account:
 
 ```sh
@@ -474,9 +498,14 @@ mithril-agent program decode-event \
   --index-dir "$ACTIVITY_INDEX" --signature '<TRANSACTION_SIGNATURE>'
 ```
 
-Decoded account and event output carries provenance and finality explicitly.
-Index-backed values are rooted. Owner-history account output is historical and
-does not claim current state; raw local data files are labelled unverified.
+Decoded account, instruction, and event output carries provenance and finality
+explicitly. Index-backed values are rooted. Owner-history account output is
+historical and does not claim current state; raw local data files are labelled
+unverified. Rooted event decoding accepts only successful transactions because
+failed transaction logs describe reverted execution. Rooted instruction output
+keeps the transaction outcome so failed attempts remain distinguishable. Outer
+instructions are marked `signed: true`; CPI is rooted runtime evidence and is
+marked `signed: false` because it is not part of the signed outer message.
 
 ## 5. Build or simulate without a key
 
@@ -513,11 +542,12 @@ submission remain disabled.
 
 ## 6. Use the same checks through local MCP
 
-A workspace with both verified rooted indexes exposes seven bounded tools:
+A workspace with both verified rooted indexes exposes nine bounded tools:
 interface summary, unsigned build, walletless simulation, live account read,
-local instruction decode, rooted owner-history account decode, and rooted event decode. A
-workspace created without an AccountsDB root is deliberately simulation-only:
-it exposes the first five and does not advertise rooted tools. Neither profile
+local instruction decode, rooted outer-instruction decode, rooted CPI decode,
+rooted owner-history account decode, and rooted event decode. A workspace
+created without an AccountsDB root is deliberately simulation-only: it exposes
+the first five and does not advertise rooted tools. Neither profile
 accepts a caller-supplied file or RPC path. Live read and simulation are
 restricted to the workspace's literal-loopback Mithril node and label results
 `processed`; index decoders use only the workspace's verified rooted query

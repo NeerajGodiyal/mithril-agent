@@ -75,7 +75,7 @@ func TestProgramMCPBindsOneWorkspaceAndPinnedInterface(t *testing.T) {
 		t.Fatalf("MCP protocol version = %q, want current 2026-07-28", got)
 	}
 	tools, err := session.ListTools(ctx, nil)
-	if err != nil || len(tools.Tools) != 7 {
+	if err != nil || len(tools.Tools) != 9 {
 		t.Fatalf("tools = %+v, %v", tools, err)
 	}
 	liveTools := map[string]bool{
@@ -218,6 +218,80 @@ func TestProgramMCPBindsOneWorkspaceAndPinnedInterface(t *testing.T) {
 	if decodedInstruction.Provenance != programLocalProvenance ||
 		decodedInstruction.Finality != programLocalFinality || decodedInstruction.Name != "increment" {
 		t.Fatalf("decoded instruction = %+v", decodedInstruction)
+	}
+	result, err = session.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name: "mithril_program_decode_instruction",
+		Arguments: map[string]any{
+			"instruction": "increment",
+			"data_base64": base64.StdEncoding.EncodeToString(make([]byte, programinterface.MaxInstructionDataBytes+1)),
+		},
+	})
+	if err != nil || !result.IsError {
+		t.Fatalf("oversized instruction = %+v, %v", result, err)
+	}
+
+	result, err = session.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name: "mithril_program_decode_rooted_instruction",
+		Arguments: map[string]any{
+			"instruction": "increment", "signature": rootedSignature, "outer_index": 0,
+		},
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("decode rooted instruction = %+v, %v", result, err)
+	}
+	encoded, err = json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rootedInstruction decodedProgramInstruction
+	if err := json.Unmarshal(encoded, &rootedInstruction); err != nil {
+		t.Fatal(err)
+	}
+	if rootedInstruction.Provenance != rootedindex.AlpenglowRootedProvenance ||
+		rootedInstruction.Finality != rootedindex.RootedFinality ||
+		rootedInstruction.Scope != "rooted_outer_instruction" || rootedInstruction.Current ||
+		!rootedInstruction.Succeeded || rootedInstruction.Signature != rootedSignature ||
+		rootedInstruction.Location != "outer" || !rootedInstruction.Signed ||
+		rootedInstruction.OuterIndex != 0 || rootedInstruction.InnerIndex != nil ||
+		rootedInstruction.Name != "increment" ||
+		len(rootedInstruction.Accounts) != 1 {
+		t.Fatalf("rooted instruction = %+v", rootedInstruction)
+	}
+	result, err = session.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name: "mithril_program_decode_rooted_instruction",
+		Arguments: map[string]any{
+			"instruction": "increment", "signature": rootedSignature, "outer_index": 1,
+		},
+	})
+	if err != nil || !result.IsError {
+		t.Fatalf("out-of-range rooted instruction = %+v, %v", result, err)
+	}
+	result, err = session.CallTool(ctx, &mcpsdk.CallToolParams{
+		Name: "mithril_program_decode_rooted_inner_instruction",
+		Arguments: map[string]any{
+			"instruction": "increment", "signature": rootedSignature,
+			"inner_group": 0, "inner_index": 0,
+		},
+	})
+	if err != nil || result.IsError {
+		t.Fatalf("decode rooted inner instruction = %+v, %v", result, err)
+	}
+	encoded, err = json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rootedInnerInstruction decodedProgramInstruction
+	if err := json.Unmarshal(encoded, &rootedInnerInstruction); err != nil {
+		t.Fatal(err)
+	}
+	if rootedInnerInstruction.Scope != "rooted_inner_instruction" ||
+		rootedInnerInstruction.Provenance != rootedindex.AlpenglowRootedProvenance ||
+		rootedInnerInstruction.Finality != rootedindex.RootedFinality ||
+		rootedInnerInstruction.Location != "inner" || rootedInnerInstruction.Signed ||
+		rootedInnerInstruction.OuterIndex != 0 || rootedInnerInstruction.InnerIndex == nil ||
+		*rootedInnerInstruction.InnerIndex != 0 || rootedInnerInstruction.Name != "increment" ||
+		len(rootedInnerInstruction.Accounts) != 1 {
+		t.Fatalf("rooted inner instruction = %+v", rootedInnerInstruction)
 	}
 
 	result, err = session.CallTool(ctx, &mcpsdk.CallToolParams{
@@ -363,7 +437,7 @@ func TestProgramMCPClassicWorkspaceWithIndexesExposesRootedTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	tools, err := session.ListTools(ctx, nil)
-	if err != nil || len(tools.Tools) != 7 {
+	if err != nil || len(tools.Tools) != 9 {
 		t.Fatalf("tools = %+v, %v", tools, err)
 	}
 	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
@@ -667,11 +741,17 @@ func seedProgramMCPIndexesFromSource(
 	}
 
 	eventData := binary.LittleEndian.AppendUint64([]byte{9, 10, 11, 12, 13, 14, 15, 16}, 7)
-	transaction := testRootedTransaction(t, programCommandAddress, []string{
+	instructionData := binary.LittleEndian.AppendUint64([]byte{11, 18, 104, 9, 104, 174, 59, 33}, 513)
+	transaction := testRootedTransactionWithInstruction(t, programCommandAddress, instructionData, []string{
 		"Program " + programCommandAddress + " invoke [1]",
 		"Program data: " + base64.StdEncoding.EncodeToString(eventData),
 		"Program " + programCommandAddress + " success",
 	})
+	transaction.Inner = []rootedindex.InnerInstructions{{
+		Index: 0, Instructions: []rootedindex.CompiledInstruction{{
+			ProgramIDIndex: 1, Accounts: []uint16{0}, Data: instructionData,
+		}},
+	}}
 	signature := transaction.Signature
 	activity, err := rootedindex.Open(view.ActivityIndex, source, rootedindex.Filter{Mention: programCommandAddress})
 	if err != nil {

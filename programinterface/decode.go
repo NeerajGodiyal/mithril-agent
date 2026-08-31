@@ -21,8 +21,12 @@ import (
 const (
 	// MaxAccountDataBytes is Solana's account-data limit.
 	MaxAccountDataBytes = 10 << 20
-	// MaxInstructionDataBytes is the Solana transaction packet limit.
-	MaxInstructionDataBytes = 1232
+	// MaxInstructionDataBytes is the transaction-v1 wire-size limit. The full
+	// transaction framing makes the effective instruction limit smaller.
+	MaxInstructionDataBytes = 4096
+	// MaxCPIInstructionDataBytes is Solana's runtime limit for instruction data
+	// passed through cross-program invocation.
+	MaxCPIInstructionDataBytes = 10 << 10
 )
 
 // DecodedData is a local, content-bound interpretation of one account or
@@ -48,8 +52,18 @@ func DecodeEvent(report Report, name string, data []byte) (DecodedData, error) {
 // DecodeInstruction decodes exact instruction data with the pinned
 // discriminator and argument types.
 func DecodeInstruction(report Report, name string, data []byte) (DecodedData, error) {
-	if len(data) == 0 || len(data) > MaxInstructionDataBytes {
-		return DecodedData{}, errors.New("instruction data is empty or exceeds 1232 bytes")
+	return decodeInstruction(report, name, data, MaxInstructionDataBytes, "4096 bytes")
+}
+
+// DecodeCPIInstruction decodes rooted runtime CPI data, whose size limit is
+// independent of the signed transaction wire limit.
+func DecodeCPIInstruction(report Report, name string, data []byte) (DecodedData, error) {
+	return decodeInstruction(report, name, data, MaxCPIInstructionDataBytes, "10 KiB")
+}
+
+func decodeInstruction(report Report, name string, data []byte, maxBytes int, limit string) (DecodedData, error) {
+	if len(data) == 0 || len(data) > maxBytes {
+		return DecodedData{}, errors.New("instruction data is empty or exceeds " + limit)
 	}
 	var selected *Instruction
 	for index := range report.Instructions {

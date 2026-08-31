@@ -49,6 +49,20 @@ func testRootedSlot(source rootedindex.SourceDescriptor, parent uint64, transact
 }
 
 func testRootedTransaction(t *testing.T, program string, logs []string) *rootedindex.Transaction {
+	return testRootedTransactionWithInstructionVersion(t, program, []byte{1}, logs, solanago.MessageVersionLegacy)
+}
+
+func testRootedTransactionWithInstruction(t *testing.T, program string, data []byte, logs []string) *rootedindex.Transaction {
+	return testRootedTransactionWithInstructionVersion(t, program, data, logs, solanago.MessageVersionLegacy)
+}
+
+func testRootedTransactionWithInstructionVersion(
+	t *testing.T,
+	program string,
+	data []byte,
+	logs []string,
+	version solanago.MessageVersion,
+) *rootedindex.Transaction {
 	t.Helper()
 	privateKey := solanago.PrivateKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize)))
 	payer := privateKey.PublicKey()
@@ -60,13 +74,17 @@ func testRootedTransaction(t *testing.T, program string, logs []string) *rootedi
 	if err != nil {
 		t.Fatal(err)
 	}
-	transaction := &solanago.Transaction{Message: solanago.Message{
+	message := solanago.Message{
 		Header: solanago.MessageHeader{
 			NumRequiredSignatures: 1, NumReadonlyUnsignedAccounts: 1,
 		},
 		AccountKeys: solanago.PublicKeySlice{payer, programKey}, RecentBlockhash: blockhash,
-		Instructions: []solanago.CompiledInstruction{{ProgramIDIndex: 1, Accounts: []uint16{0}, Data: []byte{1}}},
-	}}
+		Instructions: []solanago.CompiledInstruction{{ProgramIDIndex: 1, Accounts: []uint16{0}, Data: data}},
+	}
+	if _, err := message.SetVersion(version); err != nil {
+		t.Fatal(err)
+	}
+	transaction := &solanago.Transaction{Message: message}
 	if _, err := transaction.Sign(func(key solanago.PublicKey) *solanago.PrivateKey {
 		if key == payer {
 			return &privateKey
@@ -79,18 +97,75 @@ func testRootedTransaction(t *testing.T, program string, logs []string) *rootedi
 	if err != nil {
 		t.Fatal(err)
 	}
-	message, err := transaction.Message.MarshalBinary()
+	messageBytes, err := transaction.Message.MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
 	}
 	hasher := blake3.New()
 	_, _ = hasher.Write([]byte("solana-tx-message-v1"))
-	_, _ = hasher.Write(message)
+	_, _ = hasher.Write(messageBytes)
 	var messageHash solanago.Hash
 	hasher.Sum(messageHash[:0])
 	return &rootedindex.Transaction{
 		Signature: transaction.Signatures[0].String(), Transaction: wire, MessageHash: messageHash.String(),
 		AccountKeys: []string{payer.String(), program}, Succeeded: true, Logs: logs,
+	}
+}
+
+func testRootedV0LookupTransaction(t *testing.T, program, loadedAddress string, data []byte) *rootedindex.Transaction {
+	t.Helper()
+	privateKey := solanago.PrivateKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize)))
+	payer := privateKey.PublicKey()
+	programKey, err := solanago.PublicKeyFromBase58(program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := solanago.PublicKeyFromBase58(loadedAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	table, err := solanago.PublicKeyFromBase58(testRootedSource().GenesisHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := solanago.Message{
+		Header:      solanago.MessageHeader{NumRequiredSignatures: 1, NumReadonlyUnsignedAccounts: 1},
+		AccountKeys: solanago.PublicKeySlice{payer, programKey},
+		Instructions: []solanago.CompiledInstruction{{
+			ProgramIDIndex: 1, Accounts: []uint16{2}, Data: data,
+		}},
+	}
+	if _, err := message.SetVersion(solanago.MessageVersionV0); err != nil {
+		t.Fatal(err)
+	}
+	message.SetAddressTableLookups([]solanago.MessageAddressTableLookup{{
+		AccountKey: table, WritableIndexes: []byte{0},
+	}})
+	transaction := &solanago.Transaction{Message: message}
+	if _, err := transaction.Sign(func(key solanago.PublicKey) *solanago.PrivateKey {
+		if key == payer {
+			return &privateKey
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wire, err := transaction.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageBytes, err := transaction.Message.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasher := blake3.New()
+	_, _ = hasher.Write([]byte("solana-tx-message-v1"))
+	_, _ = hasher.Write(messageBytes)
+	var messageHash solanago.Hash
+	hasher.Sum(messageHash[:0])
+	return &rootedindex.Transaction{
+		Signature: transaction.Signatures[0].String(), Transaction: wire, MessageHash: messageHash.String(),
+		AccountKeys: []string{payer.String(), program, loaded.String()}, Succeeded: true,
 	}
 }
 

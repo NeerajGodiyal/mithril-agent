@@ -551,6 +551,11 @@ func TestTransactionRejectsWireIdentityAndAccountMismatches(t *testing.T) {
 			tx.AccountKeys = append([]string(nil), tx.AccountKeys...)
 			tx.AccountKeys[0] = testAccount
 		}, want: "static account"},
+		{name: "inner parent", edit: func(tx *Transaction) {
+			tx.Inner = []InnerInstructions{{Index: 1, Instructions: []CompiledInstruction{{
+				ProgramIDIndex: 1, Accounts: []uint16{0}, Data: []byte{1},
+			}}}}
+		}, want: "parent outer index"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			transaction := cloneTransaction(valid)
