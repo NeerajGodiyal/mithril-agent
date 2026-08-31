@@ -2,11 +2,9 @@ module github.com/Overclock-Validator/mithril-agent
 
 go 1.26.6
 
-replace github.com/gagliardetto/solana-go => github.com/solana-foundation/solana-go v1.23.0
-
 require (
-	github.com/gagliardetto/solana-go v1.23.0
 	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/solana-foundation/solana-go/v2 v2.0.0
 	github.com/tkhq/go-sdk/v2 v2.0.0
 	github.com/zeebo/blake3 v0.2.3
 	golang.org/x/crypto v0.54.0

@@ -146,7 +146,20 @@ type programMCPReadAccountInput struct {
 
 type programMCPDecodeInstructionInput struct {
 	Instruction string `json:"instruction" jsonschema:"Exact instruction name from the pinned interface"`
-	DataBase64  string `json:"data_base64" jsonschema:"Base64-encoded instruction data, at most 1232 decoded bytes"`
+	DataBase64  string `json:"data_base64" jsonschema:"Base64-encoded instruction data, at most 4096 decoded bytes"`
+}
+
+type programMCPDecodeRootedInstructionInput struct {
+	Instruction string `json:"instruction" jsonschema:"Exact instruction name from the pinned interface"`
+	Signature   string `json:"signature" jsonschema:"Exact transaction signature in the workspace rooted activity index"`
+	OuterIndex  int    `json:"outer_index" jsonschema:"Zero-based outer instruction index in the signed transaction"`
+}
+
+type programMCPDecodeRootedInnerInstructionInput struct {
+	Instruction string `json:"instruction" jsonschema:"Exact instruction name from the pinned interface"`
+	Signature   string `json:"signature" jsonschema:"Exact transaction signature in the workspace rooted activity index"`
+	InnerGroup  int    `json:"inner_group" jsonschema:"Zero-based parent outer instruction index for the CPI group"`
+	InnerIndex  int    `json:"inner_index" jsonschema:"Zero-based instruction index inside the CPI group"`
 }
 
 type programMCPDecodeAccountInput struct {
@@ -308,6 +321,9 @@ func serveProgramMCP(
 		Name: "mithril_program_decode_instruction", Title: "Decode Instruction Data",
 		Description: "Decode bounded base64 instruction data locally with the exact pinned interface.", Annotations: local,
 	}, func(_ context.Context, _ *mcpsdk.CallToolRequest, input programMCPDecodeInstructionInput) (*mcpsdk.CallToolResult, programDecodedOutput, error) {
+		if len(input.DataBase64) > base64.StdEncoding.EncodedLen(programinterface.MaxInstructionDataBytes) {
+			return nil, programDecodedOutput{}, errors.New("instruction data exceeds 4096 decoded bytes")
+		}
 		data, err := base64.StdEncoding.Strict().DecodeString(input.DataBase64)
 		if err != nil {
 			return nil, programDecodedOutput{}, errors.New("instruction data is not canonical base64")
@@ -326,6 +342,33 @@ func serveProgramMCP(
 		return nil, result, nil
 	})
 	if rootedProvenance != "" {
+		mcpsdk.AddTool(server, &mcpsdk.Tool{
+			Name: "mithril_program_decode_rooted_instruction", Title: "Decode Rooted Program Instruction",
+			Description: "Decode one exact outer instruction from a rooted indexed transaction. Returns the transaction outcome and rooted provenance.", Annotations: local,
+		}, func(_ context.Context, _ *mcpsdk.CallToolRequest, input programMCPDecodeRootedInstructionInput) (*mcpsdk.CallToolResult, decodedProgramInstruction, error) {
+			decoded, err := runBoundedProgramJSON[decodedProgramInstruction](func(out io.Writer) error {
+				return runProgramDecodeInstruction([]string{
+					"--workspace", workspacePath, "--sha256", interfaceSHA256,
+					"--instruction", input.Instruction, "--index-dir", workspaceView.ActivityIndex,
+					"--signature", input.Signature, "--outer-index", fmt.Sprint(input.OuterIndex), "--json",
+				}, out)
+			})
+			return nil, decoded, err
+		})
+		mcpsdk.AddTool(server, &mcpsdk.Tool{
+			Name: "mithril_program_decode_rooted_inner_instruction", Title: "Decode Rooted Inner Program Instruction",
+			Description: "Decode one recorded CPI from a rooted transaction. This is rooted runtime evidence, not part of the signed outer message.", Annotations: local,
+		}, func(_ context.Context, _ *mcpsdk.CallToolRequest, input programMCPDecodeRootedInnerInstructionInput) (*mcpsdk.CallToolResult, decodedProgramInstruction, error) {
+			decoded, err := runBoundedProgramJSON[decodedProgramInstruction](func(out io.Writer) error {
+				return runProgramDecodeInstruction([]string{
+					"--workspace", workspacePath, "--sha256", interfaceSHA256,
+					"--instruction", input.Instruction, "--index-dir", workspaceView.ActivityIndex,
+					"--signature", input.Signature, "--inner-group", fmt.Sprint(input.InnerGroup),
+					"--inner-index", fmt.Sprint(input.InnerIndex), "--json",
+				}, out)
+			})
+			return nil, decoded, err
+		})
 		mcpsdk.AddTool(server, &mcpsdk.Tool{
 			Name: "mithril_program_decode_rooted_account", Title: "Decode Rooted Owner-History Account",
 			Description: "Decode the newest rooted record whose post-state owner matched this program. The result is historical evidence and current=false; use read_account for current processed state.", Annotations: local,

@@ -62,6 +62,48 @@ func TestDecodeInstructionUsesPinnedDiscriminatorAndArguments(t *testing.T) {
 	}
 }
 
+func TestDecodeInstructionAcceptsTransactionV1PayloadSize(t *testing.T) {
+	report, err := Inspect([]byte(`{
+  "address":"11111111111111111111111111111111",
+  "metadata":{"name":"large","version":"0.1.0","spec":"0.1.0"},
+  "instructions":[{"name":"write","discriminator":[1],"accounts":[],"args":[{"name":"data","type":"bytes"}]}]
+}`), testProgram)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, 1300)
+	payload[0] = 1
+	binary.LittleEndian.PutUint32(payload[1:5], uint32(len(payload)-5))
+	if _, err := DecodeInstruction(report, "write", payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeInstruction(report, "write", make([]byte, MaxInstructionDataBytes+1)); err == nil ||
+		!strings.Contains(err.Error(), "4096") {
+		t.Fatalf("oversized instruction error = %v", err)
+	}
+}
+
+func TestDecodeCPIInstructionUsesRuntimeLimit(t *testing.T) {
+	report, err := Inspect([]byte(`{
+  "address":"11111111111111111111111111111111",
+  "metadata":{"name":"large","version":"0.1.0","spec":"0.1.0"},
+  "instructions":[{"name":"write","discriminator":[1],"accounts":[],"args":[{"name":"data","type":"bytes"}]}]
+}`), testProgram)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, 5000)
+	payload[0] = 1
+	binary.LittleEndian.PutUint32(payload[1:5], uint32(len(payload)-5))
+	if _, err := DecodeCPIInstruction(report, "write", payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeCPIInstruction(report, "write", make([]byte, MaxCPIInstructionDataBytes+1)); err == nil ||
+		!strings.Contains(err.Error(), "10 KiB") {
+		t.Fatalf("oversized CPI instruction error = %v", err)
+	}
+}
+
 func TestDecodeAccountUsesPinnedDiscriminatorAndBorshTypes(t *testing.T) {
 	report, err := Inspect(decoderIDL(), testProgram)
 	if err != nil {

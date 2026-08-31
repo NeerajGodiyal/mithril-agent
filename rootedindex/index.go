@@ -23,7 +23,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
 	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/solana"
-	solanago "github.com/gagliardetto/solana-go"
+	solanago "github.com/solana-foundation/solana-go/v2"
 	"github.com/zeebo/blake3"
 )
 
@@ -65,6 +65,19 @@ var (
 	errV4Index         = errors.New("rooted index schema v4 lacks transaction-v1 identity and full root lineage; preserve it for audit and rebuild a private v5 index from Mithril's event-schema-v3 framed rooted feed")
 	errSourceLessIndex = errors.New("rooted index schema lacks the current event, source, or stream-start binding; preserve it for audit and rebuild a private v5 index from Mithril's event-schema-v3 framed rooted feed")
 )
+
+// SchemaMigrationReason returns only the bounded migration guidance emitted by
+// this package, never a raw filesystem or journal error.
+func SchemaMigrationReason(err error) (string, bool) {
+	switch {
+	case errors.Is(err, errV4Index):
+		return errV4Index.Error(), true
+	case errors.Is(err, errSourceLessIndex):
+		return errSourceLessIndex.Error(), true
+	default:
+		return "", false
+	}
+}
 
 type TransactionVersion string
 
@@ -993,6 +1006,9 @@ func validateTransaction(transaction Transaction, filter Filter) (TransactionVer
 	for groupIndex, group := range transaction.Inner {
 		if groupIndex > 0 && group.Index <= lastGroup {
 			return "", errors.New("rooted transaction inner-instruction groups are not ordered")
+		}
+		if int(group.Index) >= len(decoded.Message.Instructions) {
+			return "", errors.New("rooted transaction inner-instruction parent outer index is invalid")
 		}
 		lastGroup = group.Index
 		for _, instruction := range group.Instructions {

@@ -13,9 +13,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/rootedindex"
 	"github.com/Overclock-Validator/mithril-agent/solana"
-	solanago "github.com/gagliardetto/solana-go"
+	solanago "github.com/solana-foundation/solana-go/v2"
 	"github.com/zeebo/blake3"
 )
 
@@ -50,6 +51,20 @@ func testRootedSlot(source rootedindex.SourceDescriptor, parent uint64, transact
 }
 
 func testRootedTransaction(t *testing.T, program string, logs []string) *rootedindex.Transaction {
+	return testRootedTransactionWithInstructionVersion(t, program, []byte{1}, logs, solanago.MessageVersionLegacy)
+}
+
+func testRootedTransactionWithInstruction(t *testing.T, program string, data []byte, logs []string) *rootedindex.Transaction {
+	return testRootedTransactionWithInstructionVersion(t, program, data, logs, solanago.MessageVersionLegacy)
+}
+
+func testRootedTransactionWithInstructionVersion(
+	t *testing.T,
+	program string,
+	data []byte,
+	logs []string,
+	version solanago.MessageVersion,
+) *rootedindex.Transaction {
 	t.Helper()
 	privateKey := solanago.PrivateKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize)))
 	payer := privateKey.PublicKey()
@@ -61,13 +76,17 @@ func testRootedTransaction(t *testing.T, program string, logs []string) *rootedi
 	if err != nil {
 		t.Fatal(err)
 	}
-	transaction := &solanago.Transaction{Message: solanago.Message{
+	message := solanago.Message{
 		Header: solanago.MessageHeader{
 			NumRequiredSignatures: 1, NumReadonlyUnsignedAccounts: 1,
 		},
 		AccountKeys: solanago.PublicKeySlice{payer, programKey}, RecentBlockhash: blockhash,
-		Instructions: []solanago.CompiledInstruction{{ProgramIDIndex: 1, Accounts: []uint16{0}, Data: []byte{1}}},
-	}}
+		Instructions: []solanago.CompiledInstruction{{ProgramIDIndex: 1, Accounts: []uint16{0}, Data: data}},
+	}
+	if _, err := message.SetVersion(version); err != nil {
+		t.Fatal(err)
+	}
+	transaction := &solanago.Transaction{Message: message}
 	if _, err := transaction.Sign(func(key solanago.PublicKey) *solanago.PrivateKey {
 		if key == payer {
 			return &privateKey
@@ -80,18 +99,75 @@ func testRootedTransaction(t *testing.T, program string, logs []string) *rootedi
 	if err != nil {
 		t.Fatal(err)
 	}
-	message, err := transaction.Message.MarshalBinary()
+	messageBytes, err := transaction.Message.MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
 	}
 	hasher := blake3.New()
 	_, _ = hasher.Write([]byte("solana-tx-message-v1"))
-	_, _ = hasher.Write(message)
+	_, _ = hasher.Write(messageBytes)
 	var messageHash solanago.Hash
 	hasher.Sum(messageHash[:0])
 	return &rootedindex.Transaction{
 		Signature: transaction.Signatures[0].String(), Transaction: wire, MessageHash: messageHash.String(),
 		AccountKeys: []string{payer.String(), program}, Succeeded: true, Logs: logs,
+	}
+}
+
+func testRootedV0LookupTransaction(t *testing.T, program, loadedAddress string, data []byte) *rootedindex.Transaction {
+	t.Helper()
+	privateKey := solanago.PrivateKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize)))
+	payer := privateKey.PublicKey()
+	programKey, err := solanago.PublicKeyFromBase58(program)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := solanago.PublicKeyFromBase58(loadedAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	table, err := solanago.PublicKeyFromBase58(testRootedSource().GenesisHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := solanago.Message{
+		Header:      solanago.MessageHeader{NumRequiredSignatures: 1, NumReadonlyUnsignedAccounts: 1},
+		AccountKeys: solanago.PublicKeySlice{payer, programKey},
+		Instructions: []solanago.CompiledInstruction{{
+			ProgramIDIndex: 1, Accounts: []uint16{2}, Data: data,
+		}},
+	}
+	if _, err := message.SetVersion(solanago.MessageVersionV0); err != nil {
+		t.Fatal(err)
+	}
+	message.SetAddressTableLookups([]solanago.MessageAddressTableLookup{{
+		AccountKey: table, WritableIndexes: []byte{0},
+	}})
+	transaction := &solanago.Transaction{Message: message}
+	if _, err := transaction.Sign(func(key solanago.PublicKey) *solanago.PrivateKey {
+		if key == payer {
+			return &privateKey
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wire, err := transaction.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageBytes, err := transaction.Message.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasher := blake3.New()
+	_, _ = hasher.Write([]byte("solana-tx-message-v1"))
+	_, _ = hasher.Write(messageBytes)
+	var messageHash solanago.Hash
+	hasher.Sum(messageHash[:0])
+	return &rootedindex.Transaction{
+		Signature: transaction.Signatures[0].String(), Transaction: wire, MessageHash: messageHash.String(),
+		AccountKeys: []string{payer.String(), program, loaded.String()}, Succeeded: true,
 	}
 }
 
@@ -350,6 +426,49 @@ func TestIndexDoctorReadyAndFailedRecoveryIsReadOnly(t *testing.T) {
 	}
 	if !bytes.Equal(after, tampered) {
 		t.Fatal("doctor changed the failed index")
+	}
+}
+
+func TestIndexDoctorExplainsSchemaMigration(t *testing.T) {
+	dir := t.TempDir()
+	store, err := journal.OpenRotating(filepath.Join(dir, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(time.Now().UTC(), "rooted_index.header", "", map[string]any{
+		"index_schema_version": uint32(4), "source": testRootedSource(), "filter": rootedindex.Filter{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(dir, "events.jsonl")
+	before, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err = runIndex(context.Background(), []string{"doctor", "--dir", dir, "--json"}, strings.NewReader(""), &output)
+	if !errors.Is(err, errIndexNeedsAttention) {
+		t.Fatalf("migration doctor error = %v", err)
+	}
+	var result indexDoctorResult
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	steps := strings.Join(result.NextSteps, " ")
+	if result.Ready || !strings.Contains(result.Reason, "schema v4") ||
+		!strings.Contains(steps, "existing index unchanged") ||
+		!strings.Contains(steps, "event-schema-v3") || len(result.NextSteps) != 3 {
+		t.Fatalf("migration doctor = %+v", result)
+	}
+	after, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("migration doctor changed the old index")
 	}
 }
 

@@ -64,8 +64,16 @@ order.
   slot is never silently promoted into a rooted claim.
 - Rooted transactions, logs, CPI, return data, and slot boundaries can be
   persisted and queried by exact signature, mentioned address, or cursor.
+- Signed outer instructions can be decoded from one exact rooted transaction,
+  including transaction-v1 payloads, outcome, cursor, message hash,
+  provenance, and finality. Static account addresses, lookup descriptors, and
+  instruction indices are signed; v0 lookup-loaded addresses are separately
+  preserved as rooted replay evidence and are not bytes in the signed message.
+- Recorded inner instructions can be decoded as rooted runtime evidence and
+  are explicitly marked as not part of the signed outer message.
 - Pinned program events can be decoded from one exact rooted transaction
-  without an explorer, external RPC, or signing key.
+  without an explorer, external RPC, or signing key; failed transactions are
+  rejected because their logs describe reverted execution.
 - Hash-chained journals and Prometheus metrics preserve operational evidence
   and make failures visible.
 - Mainnet shadow mode records hypothetical decisions for evaluation; it holds

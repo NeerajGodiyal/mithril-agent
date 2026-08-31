@@ -50,7 +50,8 @@ RPC or MCP.
 - canonical Program Metadata interface discovery and content-addressed pinning;
 - reviewed program evidence bound to genesis, processed bank, and deployment;
 - deterministic unsigned version-0 construction and Mithril simulation;
-- decoded current accounts, rooted account history, and program events;
+- decoded current accounts, rooted account history, signed rooted outer
+  instructions, rooted CPI evidence, and successful rooted program events;
 - bounded Devnet strategy, signer, submitter, recovery, Telegram, and metrics;
 - keyless Mainnet shadow observation with policy-bound route and price evidence;
 - bounded paper research that can write only an immutable challenger and its
