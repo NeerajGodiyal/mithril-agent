@@ -497,7 +497,7 @@ func createSwapSetup(ctx context.Context, options swapSetupOptions) (swapSetupRe
 			// is the default so no paid data subscription is required. An
 			// operator with a Hermes key can substitute that adapter's identity.
 			PrimarySourceSHA256:   pricesource.PythPushIdentitySHA256(),
-			SecondarySourceSHA256: pricesource.CoinbaseIdentitySHA256(),
+			SecondarySourceSHA256: pricesource.KrakenSOLIdentitySHA256(),
 		}
 	}
 	return finishSwapSetup(

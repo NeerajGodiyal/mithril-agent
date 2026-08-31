@@ -1,0 +1,20 @@
+[Unit]
+Description=Mithril bounded Hermes market research
+Requires=docker.service mithril-hermes-research-egress.service
+BindsTo=docker.service mithril-hermes-research-egress.service
+After=docker.service mithril-hermes-research-egress.service network-online.target
+Wants=network-online.target
+PartOf=docker.service
+ConditionPathExists=/opt/mithril-hermes-research/state/auth.json
+ConditionPathExists=/var/lib/mithril-agent-research/policy/policy.json
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mithril-hermes-research
+UMask=0077
+ExecStartPre=/opt/mithril-hermes-research/check-network.sh
+ExecStartPre=/usr/sbin/iptables -C DOCKER-USER -s 172.30.77.0/28 -j MITHRIL_HERMES
+ExecStartPre=/usr/sbin/iptables -C INPUT -s 172.30.77.0/28 -j REJECT
+ExecStart=/opt/mithril-hermes-research/run-market-scout.sh
+TimeoutStartSec=6min
+TimeoutStopSec=1min

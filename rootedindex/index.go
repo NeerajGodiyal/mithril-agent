@@ -23,11 +23,13 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
 	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/solana"
+	solanago "github.com/solana-foundation/solana-go/v2"
+	"github.com/zeebo/blake3"
 )
 
 const (
-	EventSchemaVersion = 2
-	IndexSchemaVersion = 4
+	EventSchemaVersion = 3
+	IndexSchemaVersion = 5
 	// SchemaVersion remains the rooted-event wire version for callers that
 	// construct events. Index journals have their own, independently versioned
 	// schema because source binding does not change Mithril's event payloads.
@@ -36,20 +38,20 @@ const (
 	ClassicFinalizedRootedProvenance = "mithril_classic_finalized_feed"
 	// RootedProvenance remains the native Alpenglow label for compatibility.
 	// New output must derive provenance from the bound source cluster.
-	RootedProvenance        = AlpenglowRootedProvenance
-	RootedFinality          = "rooted"
-	SourceRecordType        = "mithril.rooted_source"
-	StartRecordType         = "mithril.rooted_start"
-	BatchRecordType         = "mithril.rooted_batch"
-	SupportedSidecarVersion = 2
-	maxAccountDataBytes     = 10 << 20
-	maxEventBytes           = 16 << 20
-	maxMessageBytes         = 1232
-	maxLogBytes             = 10_064
-	maxReturnDataBytes      = 1024
-	querySnapshotVersion    = 1
-	maxQuerySnapshotBytes   = 4 << 10
-	querySnapshotName       = "query-snapshot.json"
+	RootedProvenance          = AlpenglowRootedProvenance
+	RootedFinality            = "rooted"
+	SourceRecordType          = "mithril.rooted_source"
+	StartRecordType           = "mithril.rooted_start"
+	BatchRecordType           = "mithril.rooted_batch"
+	SupportedSidecarVersion   = 2
+	maxAccountDataBytes       = 10 << 20
+	maxEventBytes             = 16 << 20
+	maxLegacyTransactionBytes = 1232
+	maxLogBytes               = 10_064
+	maxReturnDataBytes        = 1024
+	querySnapshotVersion      = 1
+	maxQuerySnapshotBytes     = 4 << 10
+	querySnapshotName         = "query-snapshot.json"
 
 	eventHeader      = "rooted_index.header"
 	eventStart       = "rooted_index.start"
@@ -59,7 +61,39 @@ const (
 	eventRoot        = "rooted_index.root"
 )
 
-var errSourceLessIndex = errors.New("rooted index schema lacks the current source or stream-start binding; preserve it for audit and rebuild a private v4 index from Mithril's framed rooted feed")
+var (
+	errV4Index         = errors.New("rooted index schema v4 lacks transaction-v1 identity and full root lineage; preserve it for audit and rebuild a private v5 index from Mithril's event-schema-v3 framed rooted feed")
+	errSourceLessIndex = errors.New("rooted index schema lacks the current event, source, or stream-start binding; preserve it for audit and rebuild a private v5 index from Mithril's event-schema-v3 framed rooted feed")
+)
+
+// SchemaMigrationReason returns only the bounded migration guidance emitted by
+// this package, never a raw filesystem or journal error.
+func SchemaMigrationReason(err error) (string, bool) {
+	switch {
+	case errors.Is(err, errV4Index):
+		return errV4Index.Error(), true
+	case errors.Is(err, errSourceLessIndex):
+		return errSourceLessIndex.Error(), true
+	default:
+		return "", false
+	}
+}
+
+type TransactionVersion string
+
+const (
+	TransactionVersionLegacy TransactionVersion = "legacy"
+	TransactionVersionV0     TransactionVersion = "v0"
+	TransactionVersionV1     TransactionVersion = "v1"
+)
+
+type FinalitySource string
+
+const (
+	FinalityAlpenglowCertificate FinalitySource = "alpenglow_certificate"
+	FinalityAlpenglowDelegated   FinalitySource = "alpenglow_delegated"
+	FinalityRPCFinalized         FinalitySource = "rpc_finalized"
+)
 
 type SourceDescriptor struct {
 	Cluster             string `json:"cluster"`
@@ -136,7 +170,8 @@ type ReturnData struct {
 type Transaction struct {
 	Index         uint32              `json:"index"`
 	Signature     string              `json:"signature"`
-	Message       []byte              `json:"message"`
+	Transaction   []byte              `json:"transaction"`
+	MessageHash   string              `json:"message_hash"`
 	AccountKeys   []string            `json:"account_keys"`
 	Succeeded     bool                `json:"succeeded"`
 	Failure       string              `json:"failure,omitempty"`
@@ -148,10 +183,15 @@ type Transaction struct {
 }
 
 type RootedSlot struct {
-	ParentSlot       uint64 `json:"parent_slot"`
-	Bankhash         string `json:"bankhash"`
-	TransactionCount uint32 `json:"transaction_count"`
-	AccountCount     uint32 `json:"account_count"`
+	ParentSlot       uint64         `json:"parent_slot"`
+	Blockhash        string         `json:"blockhash"`
+	ParentBlockhash  string         `json:"parent_blockhash"`
+	Bankhash         string         `json:"bankhash"`
+	BlockID          string         `json:"block_id,omitempty"`
+	ParentBlockID    string         `json:"parent_block_id,omitempty"`
+	FinalitySource   FinalitySource `json:"finality_source"`
+	TransactionCount uint32         `json:"transaction_count"`
+	AccountCount     uint32         `json:"account_count"`
 }
 
 type Event struct {
@@ -163,10 +203,13 @@ type Event struct {
 	Root          *RootedSlot    `json:"root,omitempty"`
 }
 
+type indexedTransaction Transaction
+
 type transactionRecord struct {
 	Cursor Cursor `json:"cursor"`
-	Transaction
-	SourceSHA256 string `json:"source_sha256"`
+	indexedTransaction
+	Version      TransactionVersion `json:"version"`
+	SourceSHA256 string             `json:"source_sha256"`
 }
 
 type accountRecord struct {
@@ -183,16 +226,14 @@ type accountRecord struct {
 }
 
 type rootRecord struct {
-	Cursor           Cursor `json:"cursor"`
-	ParentSlot       uint64 `json:"parent_slot"`
-	Bankhash         string `json:"bankhash"`
-	TransactionCount uint32 `json:"transaction_count"`
-	AccountCount     uint32 `json:"account_count"`
-	SourceSHA256     string `json:"source_sha256"`
+	Cursor Cursor `json:"cursor"`
+	RootedSlot
+	SourceSHA256 string `json:"source_sha256"`
 }
 
 type header struct {
 	IndexSchemaVersion uint32           `json:"index_schema_version"`
+	EventSchemaVersion uint32           `json:"event_schema_version"`
 	Source             SourceDescriptor `json:"source"`
 	Filter             Filter           `json:"filter"`
 }
@@ -217,6 +258,9 @@ type Index struct {
 	lastRecordAt         time.Time
 	last                 *Cursor
 	lastRoot             *Cursor
+	lastRootBlockhash    string
+	lastRootBlockID      string
+	lastRootHasBlockID   bool
 	lastTransactionSlot  uint64
 	lastTransactionIndex uint32
 	haveTransactionIndex bool
@@ -226,23 +270,25 @@ type Index struct {
 }
 
 type Status struct {
-	SchemaVersion uint32           `json:"schema_version"`
-	Provenance    string           `json:"provenance"`
-	Finality      string           `json:"finality"`
-	Complete      bool             `json:"complete"`
-	Source        SourceDescriptor `json:"source"`
-	Filter        Filter           `json:"filter"`
-	Start         *StartDescriptor `json:"start,omitempty"`
-	Batches       int              `json:"batches"`
-	FirstBatch    *BatchDescriptor `json:"first_batch,omitempty"`
-	LastBatch     *BatchDescriptor `json:"last_batch,omitempty"`
-	Records       int              `json:"records"`
-	Transactions  int              `json:"transactions"`
-	Accounts      int              `json:"account_updates"`
-	Roots         int              `json:"rooted_slots"`
-	LastCursor    *Cursor          `json:"last_cursor,omitempty"`
-	LastRoot      *Cursor          `json:"last_root,omitempty"`
-	ChainHead     string           `json:"chain_head_sha256"`
+	SchemaVersion      uint32           `json:"schema_version"`
+	EventSchemaVersion uint32           `json:"event_schema_version"`
+	Provenance         string           `json:"provenance"`
+	Finality           string           `json:"finality"`
+	Complete           bool             `json:"complete"`
+	Source             SourceDescriptor `json:"source"`
+	Filter             Filter           `json:"filter"`
+	Start              *StartDescriptor `json:"start,omitempty"`
+	Batches            int              `json:"batches"`
+	FirstBatch         *BatchDescriptor `json:"first_batch,omitempty"`
+	LastBatch          *BatchDescriptor `json:"last_batch,omitempty"`
+	Records            int              `json:"records"`
+	Transactions       int              `json:"transactions"`
+	Accounts           int              `json:"account_updates"`
+	Roots              int              `json:"rooted_slots"`
+	LastCursor         *Cursor          `json:"last_cursor,omitempty"`
+	LastRoot           *Cursor          `json:"last_root,omitempty"`
+	LastRecordedAt     *time.Time       `json:"last_recorded_at,omitempty"`
+	ChainHead          string           `json:"chain_head_sha256"`
 }
 
 type Query struct {
@@ -281,12 +327,15 @@ type TransactionResult struct {
 	Cursor        Cursor              `json:"cursor"`
 	Index         uint32              `json:"index"`
 	Signature     string              `json:"signature"`
+	Version       TransactionVersion  `json:"version"`
+	MessageHash   string              `json:"message_hash"`
 	AccountKeys   []string            `json:"account_keys"`
 	Succeeded     bool                `json:"succeeded"`
 	Failure       string              `json:"failure,omitempty"`
 	ComputeUnits  uint64              `json:"compute_units"`
 	LogsTruncated bool                `json:"logs_truncated,omitempty"`
 	Message       []byte              `json:"message,omitempty"`
+	Transaction   []byte              `json:"transaction,omitempty"`
 	Logs          []string            `json:"logs,omitempty"`
 	Inner         []InnerInstructions `json:"inner_instructions,omitempty"`
 	ReturnData    *ReturnData         `json:"return_data,omitempty"`
@@ -308,7 +357,8 @@ func Open(dir string, source SourceDescriptor, filter Filter) (*Index, error) {
 	records := store.Records()
 	if len(records) == 0 {
 		record, err := store.Append(time.Now().UTC(), eventHeader, "", header{
-			IndexSchemaVersion: IndexSchemaVersion, Source: source, Filter: filter,
+			IndexSchemaVersion: IndexSchemaVersion, EventSchemaVersion: EventSchemaVersion,
+			Source: source, Filter: filter,
 		})
 		if err != nil {
 			_ = store.Close()
@@ -423,13 +473,13 @@ func (i *Index) recover(records []journal.Record) error {
 	}
 	var stored header
 	if err := decodeHeader(records[0].Payload, &stored); err != nil {
-		if errors.Is(err, errSourceLessIndex) {
+		if errors.Is(err, errSourceLessIndex) || errors.Is(err, errV4Index) {
 			return err
 		}
 		return errors.New("rooted index header is invalid")
 	}
-	if stored.IndexSchemaVersion != IndexSchemaVersion {
-		return errSourceLessIndex
+	if err := validateHeaderVersions(stored); err != nil {
+		return err
 	}
 	if stored.Source != i.source || stored.Filter != i.filter {
 		return errors.New("rooted index header does not match the requested source and filter")
@@ -464,13 +514,17 @@ func (i *Index) recover(records []journal.Record) error {
 			if err := strictjson.Decode(record.Payload, &payload); err != nil {
 				return errors.New("rooted index transaction record is invalid")
 			}
-			if err := validateTransaction(payload.Transaction, i.filter); err != nil {
+			version, err := validateTransaction(Transaction(payload.indexedTransaction), i.filter)
+			if err != nil {
 				return fmt.Errorf("rooted index transaction record: %w", err)
+			}
+			if payload.Version != version {
+				return errors.New("rooted index transaction record has an invalid derived version")
 			}
 			if err := i.validateTransactionOrder(payload.Cursor, payload.Index); err != nil {
 				return err
 			}
-			if err := i.acceptRecovered(payload.Cursor, payload.SourceSHA256, false, 0); err != nil {
+			if err := i.acceptRecovered(payload.Cursor, payload.SourceSHA256, nil); err != nil {
 				return err
 			}
 			i.lastTransactionSlot, i.lastTransactionIndex, i.haveTransactionIndex =
@@ -484,7 +538,7 @@ func (i *Index) recover(records []journal.Record) error {
 			if err != nil {
 				return err
 			}
-			if err := i.acceptRecovered(payload.Cursor, payload.SourceSHA256, false, 0); err != nil {
+			if err := i.acceptRecovered(payload.Cursor, payload.SourceSHA256, nil); err != nil {
 				return err
 			}
 			i.lastAccountSlot, i.lastAccountKey, i.haveAccountKey = payload.Cursor.Slot, key, true
@@ -493,10 +547,11 @@ func (i *Index) recover(records []journal.Record) error {
 			if err := strictjson.Decode(record.Payload, &payload); err != nil {
 				return errors.New("rooted index root record is invalid")
 			}
-			if err := validateRootRecord(payload); err != nil {
+			if err := validateRootRecord(payload, i.source.Cluster); err != nil {
 				return err
 			}
-			if err := i.acceptRecovered(payload.Cursor, payload.SourceSHA256, true, payload.ParentSlot); err != nil {
+			root := payload.RootedSlot
+			if err := i.acceptRecovered(payload.Cursor, payload.SourceSHA256, &root); err != nil {
 				return err
 			}
 		default:
@@ -522,7 +577,17 @@ func decodeHeader(payload json.RawMessage, target *header) error {
 	return errors.New("invalid rooted index header")
 }
 
-func (i *Index) acceptRecovered(cursor Cursor, source string, root bool, parent uint64) error {
+func validateHeaderVersions(stored header) error {
+	if stored.IndexSchemaVersion == 4 {
+		return errV4Index
+	}
+	if stored.IndexSchemaVersion != IndexSchemaVersion || stored.EventSchemaVersion != EventSchemaVersion {
+		return errSourceLessIndex
+	}
+	return nil
+}
+
+func (i *Index) acceptRecovered(cursor Cursor, source string, root *RootedSlot) error {
 	if i.activeBatch == nil {
 		return errors.New("rooted index event has no batch descriptor")
 	}
@@ -535,13 +600,23 @@ func (i *Index) acceptRecovered(cursor Cursor, source string, root bool, parent 
 	if !validSHA256(source) {
 		return errors.New("rooted index contains an invalid source hash")
 	}
-	if err := i.validateNext(cursor, root, parent); err != nil {
+	isRoot := root != nil
+	parent := uint64(0)
+	if isRoot {
+		parent = root.ParentSlot
+	}
+	if err := i.validateNext(cursor, isRoot, parent); err != nil {
 		return fmt.Errorf("rooted index history: %w", err)
+	}
+	if isRoot {
+		if err := i.validateRootLineage(*root); err != nil {
+			return fmt.Errorf("rooted index history: %w", err)
+		}
 	}
 	i.seen[cursor] = source
 	i.last = cloneCursor(cursor)
-	if root {
-		i.lastRoot = cloneCursor(cursor)
+	if isRoot {
+		i.rememberRoot(cursor, *root)
 		if cursor.Slot == i.activeBatch.ThroughSlot {
 			i.activeBatchComplete = true
 		}
@@ -658,7 +733,7 @@ func (i *Index) append(event Event, syncRecord bool) (bool, error) {
 	if event.Cursor.Slot < i.activeBatch.FromSlot || event.Cursor.Slot > i.activeBatch.ThroughSlot {
 		return false, errors.New("rooted event is outside its declared batch")
 	}
-	source, err := validateEvent(event, i.filter)
+	source, transactionVersion, err := validateEvent(event, i.filter, i.source.Cluster)
 	if err != nil {
 		return false, err
 	}
@@ -682,6 +757,11 @@ func (i *Index) append(event Event, syncRecord bool) (bool, error) {
 	if err := i.validateNext(event.Cursor, isRoot, parent); err != nil {
 		return false, err
 	}
+	if isRoot {
+		if err := i.validateRootLineage(*event.Root); err != nil {
+			return false, err
+		}
+	}
 	if event.Transaction != nil {
 		if err := i.validateTransactionOrder(event.Cursor, event.Transaction.Index); err != nil {
 			return false, err
@@ -699,7 +779,8 @@ func (i *Index) append(event Event, syncRecord bool) (bool, error) {
 	switch {
 	case event.Transaction != nil:
 		payload = transactionRecord{
-			Cursor: event.Cursor, Transaction: *event.Transaction, SourceSHA256: source,
+			Cursor: event.Cursor, indexedTransaction: indexedTransaction(*event.Transaction),
+			Version: transactionVersion, SourceSHA256: source,
 		}
 	case event.Account != nil:
 		dataHash := sha256.Sum256(event.Account.Data)
@@ -717,9 +798,7 @@ func (i *Index) append(event Event, syncRecord bool) (bool, error) {
 		}
 	default:
 		payload = rootRecord{
-			Cursor: event.Cursor, ParentSlot: event.Root.ParentSlot, Bankhash: event.Root.Bankhash,
-			TransactionCount: event.Root.TransactionCount,
-			AccountCount:     event.Root.AccountCount, SourceSHA256: source,
+			Cursor: event.Cursor, RootedSlot: *event.Root, SourceSHA256: source,
 		}
 	}
 	at := time.Now().UTC()
@@ -751,7 +830,7 @@ func (i *Index) append(event Event, syncRecord bool) (bool, error) {
 		i.lastAccountSlot, i.lastAccountKey, i.haveAccountKey = event.Cursor.Slot, accountKey, true
 	}
 	if isRoot {
-		i.lastRoot = cloneCursor(event.Cursor)
+		i.rememberRoot(event.Cursor, *event.Root)
 		if event.Cursor.Slot == i.activeBatch.ThroughSlot {
 			i.activeBatchComplete = true
 		}
@@ -792,117 +871,155 @@ func (i *Index) publishQuerySnapshot() error {
 	return nil
 }
 
-func validateEvent(event Event, filter Filter) (string, error) {
+func validateEvent(event Event, filter Filter, cluster string) (string, TransactionVersion, error) {
 	if event.SchemaVersion != SchemaVersion {
-		return "", errors.New("rooted event schema version is unsupported")
+		return "", "", errors.New("rooted event schema version is unsupported")
 	}
+	var version TransactionVersion
 	switch event.Kind {
 	case "transaction_executed":
 		if event.Transaction == nil || event.Account != nil || event.Root != nil {
-			return "", errors.New("transaction event must contain only transaction data")
+			return "", "", errors.New("transaction event must contain only transaction data")
 		}
-		if err := validateTransaction(*event.Transaction, filter); err != nil {
-			return "", err
+		var err error
+		version, err = validateTransaction(*event.Transaction, filter)
+		if err != nil {
+			return "", "", err
 		}
 	case "account_updated":
 		if event.Account == nil || event.Transaction != nil || event.Root != nil {
-			return "", errors.New("account event must contain only account data")
+			return "", "", errors.New("account event must contain only account data")
 		}
 		if _, err := solana.Decode32(event.Account.Pubkey); err != nil {
-			return "", errors.New("rooted event account address is invalid")
+			return "", "", errors.New("rooted event account address is invalid")
 		}
 		if _, err := solana.Decode32(event.Account.Owner); err != nil {
-			return "", errors.New("rooted event owner address is invalid")
+			return "", "", errors.New("rooted event owner address is invalid")
 		}
 		if len(event.Account.Data) > maxAccountDataBytes {
-			return "", errors.New("rooted event account data exceeds Solana's 10 MiB limit")
+			return "", "", errors.New("rooted event account data exceeds Solana's 10 MiB limit")
 		}
 		if event.Account.Tombstone != (event.Account.Lamports == 0) {
-			return "", errors.New("rooted event tombstone does not match its lamport balance")
+			return "", "", errors.New("rooted event tombstone does not match its lamport balance")
 		}
 		if filter.Owner != "" && event.Account.Owner != filter.Owner ||
 			filter.Account != "" && event.Account.Pubkey != filter.Account {
-			return "", errors.New("rooted event does not match the index filter")
+			return "", "", errors.New("rooted event does not match the index filter")
 		}
 		if filter.Mention != "" {
-			return "", errors.New("account event does not match the transaction mention filter")
+			return "", "", errors.New("account event does not match the transaction mention filter")
 		}
 	case "slot_rooted":
-		if event.Root == nil || event.Transaction != nil || event.Account != nil || event.Root.Bankhash == "" {
-			return "", errors.New("root event must contain only complete root data")
+		if event.Root == nil || event.Transaction != nil || event.Account != nil {
+			return "", "", errors.New("root event must contain only complete root data")
 		}
-		if uint64(event.Root.TransactionCount)+uint64(event.Root.AccountCount) != uint64(event.Cursor.Ordinal) {
-			return "", errors.New("root event cursor does not match its transaction and account counts")
-		}
-		bankhash, err := solana.Decode32(event.Root.Bankhash)
-		if err != nil || bankhash == ([32]byte{}) {
-			return "", errors.New("root event bankhash is invalid")
-		}
-		if event.Cursor.Slot == 0 && event.Root.ParentSlot != 0 ||
-			event.Cursor.Slot > 0 && event.Root.ParentSlot >= event.Cursor.Slot {
-			return "", errors.New("root event parent slot is invalid")
+		if err := validateRootedSlot(event.Cursor, *event.Root, cluster); err != nil {
+			return "", "", err
 		}
 	default:
-		return "", errors.New("rooted event kind is unsupported")
+		return "", "", errors.New("rooted event kind is unsupported")
 	}
 	canonical, err := json.Marshal(event)
 	if err != nil {
-		return "", errors.New("encode rooted event")
+		return "", "", errors.New("encode rooted event")
 	}
 	sum := sha256.Sum256(canonical)
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:]), version, nil
 }
 
-func validateTransaction(transaction Transaction, filter Filter) error {
+func validateTransaction(transaction Transaction, filter Filter) (TransactionVersion, error) {
 	if _, err := solana.Decode64(transaction.Signature); err != nil {
-		return errors.New("rooted transaction signature is invalid")
+		return "", errors.New("rooted transaction signature is invalid")
 	}
-	if len(transaction.Message) == 0 || len(transaction.Message) > maxMessageBytes {
-		return errors.New("rooted transaction message size is invalid")
+	if len(transaction.Transaction) == 0 || len(transaction.Transaction) > solanago.MaxTransactionSizeV1 {
+		return "", fmt.Errorf("rooted transaction wire size is outside allowed range 1..%d", solanago.MaxTransactionSizeV1)
+	}
+	decoded, err := solanago.TransactionFromBytes(transaction.Transaction)
+	if err != nil {
+		return "", errors.New("rooted transaction wire is invalid")
+	}
+	canonical, err := decoded.MarshalBinary()
+	if err != nil || !bytes.Equal(canonical, transaction.Transaction) {
+		return "", errors.New("rooted transaction wire is not canonical")
+	}
+	if err := decoded.Sanitize(); err != nil {
+		return "", errors.New("rooted transaction wire failed structural validation")
+	}
+	if err := decoded.VerifySignatures(); err != nil {
+		return "", errors.New("rooted transaction signature verification failed")
+	}
+	version, err := transactionVersion(decoded.Message.GetVersion())
+	if err != nil {
+		return "", err
+	}
+	if version != TransactionVersionV1 && len(transaction.Transaction) > maxLegacyTransactionBytes {
+		return "", fmt.Errorf("rooted transaction legacy/v0 wire exceeds %d bytes", maxLegacyTransactionBytes)
+	}
+	if len(decoded.Signatures) == 0 || decoded.Signatures[0].String() != transaction.Signature {
+		return "", errors.New("rooted transaction signature does not match wire")
+	}
+	messageHash, err := transactionMessageHash(decoded)
+	if err != nil || solanago.Hash(messageHash).String() != transaction.MessageHash {
+		return "", errors.New("rooted transaction message hash does not match wire")
 	}
 	if len(transaction.AccountKeys) == 0 || len(transaction.AccountKeys) > 256 {
-		return errors.New("rooted transaction account count is invalid")
+		return "", errors.New("rooted transaction account count is invalid")
 	}
 	mentioned := filter.Mention == ""
 	for _, value := range transaction.AccountKeys {
 		if _, err := solana.Decode32(value); err != nil {
-			return errors.New("rooted transaction account address is invalid")
+			return "", errors.New("rooted transaction account address is invalid")
 		}
 		mentioned = mentioned || value == filter.Mention
 	}
+	wantAccounts := len(decoded.Message.AccountKeys)
+	if version == TransactionVersionV0 {
+		wantAccounts += decoded.Message.GetAddressTableLookups().NumLookups()
+	}
+	if len(transaction.AccountKeys) != wantAccounts {
+		return "", errors.New("rooted transaction account keys do not match wire")
+	}
+	for index, key := range decoded.Message.AccountKeys {
+		if transaction.AccountKeys[index] != key.String() {
+			return "", errors.New("rooted transaction static account does not match wire")
+		}
+	}
 	if filter.Owner != "" || filter.Account != "" || !mentioned {
-		return errors.New("rooted transaction does not match the index filter")
+		return "", errors.New("rooted transaction does not match the index filter")
 	}
 	if transaction.Succeeded == (transaction.Failure != "") {
-		return errors.New("rooted transaction result is inconsistent")
+		return "", errors.New("rooted transaction result is inconsistent")
 	}
 	logBytes := 0
 	for _, log := range transaction.Logs {
 		logBytes += len(log)
 		if logBytes > maxLogBytes {
-			return errors.New("rooted transaction logs exceed the bounded recorder limit")
+			return "", errors.New("rooted transaction logs exceed the bounded recorder limit")
 		}
 	}
 	if transaction.LogsTruncated &&
 		(len(transaction.Logs) == 0 || transaction.Logs[len(transaction.Logs)-1] != "Log truncated") {
-		return errors.New("rooted transaction truncated-log marker is invalid")
+		return "", errors.New("rooted transaction truncated-log marker is invalid")
 	}
 	innerCount := 0
 	var lastGroup uint8
 	for groupIndex, group := range transaction.Inner {
 		if groupIndex > 0 && group.Index <= lastGroup {
-			return errors.New("rooted transaction inner-instruction groups are not ordered")
+			return "", errors.New("rooted transaction inner-instruction groups are not ordered")
+		}
+		if int(group.Index) >= len(decoded.Message.Instructions) {
+			return "", errors.New("rooted transaction inner-instruction parent outer index is invalid")
 		}
 		lastGroup = group.Index
 		for _, instruction := range group.Instructions {
 			innerCount++
 			if innerCount > 64 || int(instruction.ProgramIDIndex) >= len(transaction.AccountKeys) ||
 				len(instruction.Accounts) > 255 || len(instruction.Data) > 10<<10 {
-				return errors.New("rooted transaction inner instruction exceeds runtime bounds")
+				return "", errors.New("rooted transaction inner instruction exceeds runtime bounds")
 			}
 			for _, account := range instruction.Accounts {
 				if int(account) >= len(transaction.AccountKeys) {
-					return errors.New("rooted transaction inner-instruction account index is invalid")
+					return "", errors.New("rooted transaction inner-instruction account index is invalid")
 				}
 			}
 		}
@@ -910,10 +1027,36 @@ func validateTransaction(transaction Transaction, filter Filter) error {
 	if transaction.ReturnData != nil {
 		if _, err := solana.Decode32(transaction.ReturnData.ProgramID); err != nil ||
 			len(transaction.ReturnData.Data) > maxReturnDataBytes {
-			return errors.New("rooted transaction return data is invalid")
+			return "", errors.New("rooted transaction return data is invalid")
 		}
 	}
-	return nil
+	return version, nil
+}
+
+func transactionVersion(version solanago.MessageVersion) (TransactionVersion, error) {
+	switch version {
+	case solanago.MessageVersionLegacy:
+		return TransactionVersionLegacy, nil
+	case solanago.MessageVersionV0:
+		return TransactionVersionV0, nil
+	case solanago.MessageVersionV1:
+		return TransactionVersionV1, nil
+	default:
+		return "", errors.New("rooted transaction version is unsupported")
+	}
+}
+
+func transactionMessageHash(transaction *solanago.Transaction) ([32]byte, error) {
+	message, err := transaction.Message.MarshalBinary()
+	if err != nil {
+		return [32]byte{}, err
+	}
+	hasher := blake3.New()
+	_, _ = hasher.Write([]byte("solana-tx-message-v1"))
+	_, _ = hasher.Write(message)
+	var hash [32]byte
+	hasher.Sum(hash[:0])
+	return hash, nil
 }
 
 func (i *Index) validateAccountRecord(payload accountRecord) ([32]byte, error) {
@@ -943,19 +1086,88 @@ func (i *Index) validateAccountRecord(payload accountRecord) ([32]byte, error) {
 	return key, nil
 }
 
-func validateRootRecord(payload rootRecord) error {
-	if uint64(payload.TransactionCount)+uint64(payload.AccountCount) != uint64(payload.Cursor.Ordinal) {
-		return errors.New("rooted index root cursor does not match its transaction and account counts")
-	}
-	bankhash, err := solana.Decode32(payload.Bankhash)
-	if err != nil || bankhash == ([32]byte{}) {
-		return errors.New("rooted index contains an invalid bankhash")
-	}
-	if payload.Cursor.Slot == 0 && payload.ParentSlot != 0 ||
-		payload.Cursor.Slot > 0 && payload.ParentSlot >= payload.Cursor.Slot {
-		return errors.New("rooted index contains an invalid parent slot")
+func validateRootRecord(payload rootRecord, cluster string) error {
+	if err := validateRootedSlot(payload.Cursor, payload.RootedSlot, cluster); err != nil {
+		return fmt.Errorf("rooted index root record: %w", err)
 	}
 	return nil
+}
+
+func validateRootedSlot(cursor Cursor, root RootedSlot, cluster string) error {
+	if uint64(root.TransactionCount)+uint64(root.AccountCount) != uint64(cursor.Ordinal) {
+		return errors.New("root event cursor does not match its transaction and account counts")
+	}
+	if cursor.Slot == 0 && root.ParentSlot != 0 || cursor.Slot > 0 && root.ParentSlot >= cursor.Slot {
+		return errors.New("root event parent slot is invalid")
+	}
+	if value, err := solana.Decode32(root.Bankhash); err != nil || value == ([32]byte{}) {
+		return errors.New("root event bankhash is invalid")
+	}
+	if value, err := solana.Decode32(root.Blockhash); err != nil || value == ([32]byte{}) {
+		return errors.New("root event blockhash is invalid")
+	}
+	if value, err := solana.Decode32(root.ParentBlockhash); err != nil || cursor.Slot > 0 && value == ([32]byte{}) {
+		return errors.New("root event parent blockhash is invalid")
+	}
+	hasBlockID := root.BlockID != "" || root.ParentBlockID != ""
+	if hasBlockID {
+		if root.BlockID == "" || root.ParentBlockID == "" {
+			return errors.New("root event has incomplete Alpenglow block identity")
+		}
+		if value, err := solana.Decode32(root.BlockID); err != nil || value == ([32]byte{}) {
+			return errors.New("root event Alpenglow block ID is invalid")
+		}
+		if value, err := solana.Decode32(root.ParentBlockID); err != nil || value == ([32]byte{}) {
+			return errors.New("root event Alpenglow parent block ID is invalid")
+		}
+	}
+	switch root.FinalitySource {
+	case FinalityAlpenglowCertificate, FinalityAlpenglowDelegated:
+		if !hasBlockID {
+			return errors.New("root event Alpenglow finality has no block identity")
+		}
+	case FinalityRPCFinalized:
+		if hasBlockID {
+			return errors.New("root event RPC finality unexpectedly carries Alpenglow block identity")
+		}
+	default:
+		return errors.New("root event finality source is invalid")
+	}
+	switch cluster {
+	case "alpenglow":
+		if root.FinalitySource != FinalityAlpenglowCertificate &&
+			root.FinalitySource != FinalityAlpenglowDelegated {
+			return errors.New("root event finality source does not match the bound Alpenglow cluster")
+		}
+	case "devnet", "testnet", "mainnet-beta":
+		if root.FinalitySource != FinalityRPCFinalized {
+			return errors.New("root event finality source does not match the bound classic cluster")
+		}
+	default:
+		return errors.New("root event cluster is unsupported")
+	}
+	return nil
+}
+
+func (i *Index) validateRootLineage(root RootedSlot) error {
+	if i.lastRoot == nil {
+		return nil
+	}
+	if root.ParentBlockhash != i.lastRootBlockhash {
+		return errors.New("rooted slot parent blockhash does not match the previous rooted slot")
+	}
+	hasBlockID := root.BlockID != ""
+	if hasBlockID != i.lastRootHasBlockID || hasBlockID && root.ParentBlockID != i.lastRootBlockID {
+		return errors.New("rooted slot parent block ID does not match the previous rooted slot")
+	}
+	return nil
+}
+
+func (i *Index) rememberRoot(cursor Cursor, root RootedSlot) {
+	i.lastRoot = cloneCursor(cursor)
+	i.lastRootBlockhash = root.Blockhash
+	i.lastRootBlockID = root.BlockID
+	i.lastRootHasBlockID = root.BlockID != ""
 }
 
 func (i *Index) validateNext(cursor Cursor, root bool, parent uint64) error {
@@ -1228,6 +1440,8 @@ func ReadStatus(dir string) (Status, error) {
 	}
 	if len(records) > 0 {
 		status.ChainHead = records[len(records)-1].Hash
+		recordedAt := records[len(records)-1].At.UTC()
+		status.LastRecordedAt = &recordedAt
 	}
 	return status, nil
 }
@@ -1240,6 +1454,25 @@ func ReadCompleteStatus(dir string) (Status, error) {
 		return Status{}, err
 	}
 	return status, requireComplete(status)
+}
+
+// RequireFresh verifies the age of the latest record in an already-verified
+// index status. It proves recent local ingestion, not parity with a node root.
+func RequireFresh(status Status, now time.Time, maxAge time.Duration) error {
+	if maxAge <= 0 {
+		return errors.New("maximum rooted index record age must be positive")
+	}
+	if status.LastRecordedAt == nil {
+		return errors.New("rooted index has no last-recorded time")
+	}
+	age := now.Sub(*status.LastRecordedAt)
+	if age < 0 {
+		return errors.New("rooted index last-recorded time is in the future")
+	}
+	if age > maxAge {
+		return fmt.Errorf("rooted index is stale: last record age %s exceeds %s", age, maxAge)
+	}
+	return nil
 }
 
 func QueryAccounts(dir string, query Query) ([]Result, error) {
@@ -1342,13 +1575,23 @@ func QueryTransactions(dir string, query TransactionQuery) ([]TransactionResult,
 		}
 		result := TransactionResult{
 			Cursor: transaction.Cursor, Index: transaction.Index,
-			Signature:   transaction.Signature,
+			Signature: transaction.Signature, Version: transaction.Version,
+			MessageHash: transaction.MessageHash,
 			AccountKeys: append([]string(nil), transaction.AccountKeys...),
 			Succeeded:   transaction.Succeeded, Failure: transaction.Failure,
 			ComputeUnits: transaction.ComputeUnits, LogsTruncated: transaction.LogsTruncated,
 		}
 		if query.IncludePayload {
-			result.Message = append([]byte(nil), transaction.Message...)
+			decoded, err := solanago.TransactionFromBytes(transaction.Transaction)
+			if err != nil {
+				return nil, errors.New("rooted index transaction wire is invalid")
+			}
+			message, err := decoded.Message.MarshalBinary()
+			if err != nil {
+				return nil, errors.New("rooted index transaction message is invalid")
+			}
+			result.Message = message
+			result.Transaction = append([]byte(nil), transaction.Transaction...)
 			result.Logs = append([]string(nil), transaction.Logs...)
 			result.Inner = cloneInner(transaction.Inner)
 			result.ReturnData = cloneReturnData(transaction.ReturnData)
@@ -1414,13 +1657,13 @@ func parseRecords(dir string, records []journal.Record) (Status, []accountRecord
 	}
 	var stored header
 	if err := decodeHeader(records[0].Payload, &stored); err != nil {
-		if errors.Is(err, errSourceLessIndex) {
+		if errors.Is(err, errSourceLessIndex) || errors.Is(err, errV4Index) {
 			return Status{}, nil, nil, err
 		}
 		return Status{}, nil, nil, errors.New("rooted index header is invalid")
 	}
-	if stored.IndexSchemaVersion != IndexSchemaVersion {
-		return Status{}, nil, nil, errSourceLessIndex
+	if err := validateHeaderVersions(stored); err != nil {
+		return Status{}, nil, nil, err
 	}
 	if err := validateFilter(stored.Filter); err != nil {
 		return Status{}, nil, nil, errors.New("rooted index header filter is invalid")
@@ -1437,7 +1680,7 @@ func parseRecords(dir string, records []journal.Record) (Status, []accountRecord
 		return Status{}, nil, nil, errors.New("rooted index header source is invalid")
 	}
 	status := Status{
-		SchemaVersion: IndexSchemaVersion, Provenance: provenance,
+		SchemaVersion: IndexSchemaVersion, EventSchemaVersion: EventSchemaVersion, Provenance: provenance,
 		Finality: RootedFinality, Source: stored.Source, Filter: stored.Filter, Records: len(records),
 	}
 	accounts := make([]accountRecord, 0)

@@ -3,9 +3,11 @@ package rootedindex
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,7 +16,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/journal"
-	"github.com/Overclock-Validator/mithril-agent/solana"
+	solanago "github.com/solana-foundation/solana-go/v2"
 )
 
 const (
@@ -74,7 +76,10 @@ func TestClassicIndexUsesDistinctProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	beginTestBatch(t, index, 1, 1, 1)
-	if _, err := index.Append(rootEvent(1, 0, 0)); err != nil {
+	root := rootEvent(1, 0, 0)
+	root.Root.BlockID, root.Root.ParentBlockID = "", ""
+	root.Root.FinalitySource = FinalityRPCFinalized
+	if _, err := index.Append(root); err != nil {
 		t.Fatal(err)
 	}
 	dir := index.dir
@@ -87,6 +92,36 @@ func TestClassicIndexUsesDistinctProvenance(t *testing.T) {
 	}
 	if status.Provenance != ClassicFinalizedRootedProvenance || status.Finality != RootedFinality {
 		t.Fatalf("classic status = %+v", status)
+	}
+}
+
+func TestIndexRejectsRootFinalityFromAnotherClusterMode(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		cluster string
+		classic bool
+	}{
+		{name: "classic root on Alpenglow", cluster: "alpenglow", classic: true},
+		{name: "Alpenglow root on classic", cluster: "devnet"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := testSource()
+			source.Cluster = test.cluster
+			index, err := Open(t.TempDir(), source, Filter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer index.Close()
+			beginTestBatch(t, index, 1, 1, 1)
+			root := rootEvent(1, 0, 0)
+			if test.classic {
+				root.Root.FinalitySource = FinalityRPCFinalized
+				root.Root.BlockID, root.Root.ParentBlockID = "", ""
+			}
+			if _, err := index.Append(root); err == nil || !strings.Contains(err.Error(), "bound") {
+				t.Fatalf("cross-mode root error = %v", err)
+			}
+		})
 	}
 }
 
@@ -134,7 +169,8 @@ func TestIndexRestartQueryAndIdempotence(t *testing.T) {
 		t.Fatal(err)
 	}
 	if status.Provenance != "mithril_alpenglow_rooted_feed" || status.Finality != "rooted" ||
-		status.Accounts != 2 || status.Roots != 2 || status.LastRoot == nil || status.LastRoot.Slot != 11 {
+		status.Accounts != 2 || status.Roots != 2 || status.LastRoot == nil || status.LastRoot.Slot != 11 ||
+		status.LastRecordedAt == nil || status.LastRecordedAt.IsZero() {
 		t.Fatalf("status = %+v", status)
 	}
 	results, err := QueryAccounts(dir, Query{Owner: testOwner, Limit: 10, IncludeData: true})
@@ -163,6 +199,26 @@ func TestIndexRestartQueryAndIdempotence(t *testing.T) {
 	}
 	if _, err := Open(dir, testSource(), Filter{Owner: otherOwner}); err == nil {
 		t.Fatal("filter mismatch was accepted")
+	}
+}
+
+func TestRequireFreshUsesVerifiedRecordTime(t *testing.T) {
+	recordedAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	status := Status{LastRecordedAt: &recordedAt}
+	if err := RequireFresh(status, recordedAt.Add(15*time.Minute), 15*time.Minute); err != nil {
+		t.Fatalf("fresh status = %v", err)
+	}
+	if err := RequireFresh(status, recordedAt.Add(15*time.Minute+time.Nanosecond), 15*time.Minute); err == nil ||
+		!strings.Contains(err.Error(), "stale") {
+		t.Fatalf("stale status = %v", err)
+	}
+	if err := RequireFresh(status, recordedAt.Add(-time.Nanosecond), 15*time.Minute); err == nil ||
+		!strings.Contains(err.Error(), "future") {
+		t.Fatalf("future status = %v", err)
+	}
+	if err := RequireFresh(Status{}, recordedAt, 15*time.Minute); err == nil ||
+		!strings.Contains(err.Error(), "last-recorded") {
+		t.Fatalf("missing timestamp = %v", err)
 	}
 }
 
@@ -315,15 +371,9 @@ func TestIndexTransactionRestartQueryAndValidation(t *testing.T) {
 	if added, err := index.Append(first); err != nil || !added {
 		t.Fatalf("append transaction = %v, %v", added, err)
 	}
-	if added, err := index.Append(Event{
-		SchemaVersion: SchemaVersion,
-		Cursor:        Cursor{Slot: 60, Ordinal: 5},
-		Kind:          "slot_rooted",
-		Root: &RootedSlot{
-			ParentSlot: 59, Bankhash: testBankhash,
-			TransactionCount: 3, AccountCount: 2,
-		},
-	}); err != nil || !added {
+	root := rootEvent(60, 5, 59)
+	root.Root.TransactionCount, root.Root.AccountCount = 3, 2
+	if added, err := index.Append(root); err != nil || !added {
 		t.Fatalf("append transaction root = %v, %v", added, err)
 	}
 	if err := index.Close(); err != nil {
@@ -337,7 +387,8 @@ func TestIndexTransactionRestartQueryAndValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(results) != 1 || results[0].Signature != first.Transaction.Signature ||
-		len(results[0].Logs) != 1 || string(results[0].Message) != "message" {
+		results[0].Version != TransactionVersionLegacy || results[0].MessageHash != first.Transaction.MessageHash ||
+		len(results[0].Logs) != 1 || !bytes.Equal(results[0].Transaction, first.Transaction.Transaction) {
 		t.Fatalf("transaction results = %+v", results)
 	}
 	status, err := ReadStatus(dir)
@@ -360,6 +411,310 @@ func TestIndexTransactionRestartQueryAndValidation(t *testing.T) {
 	beginTestBatch(t, reopened, 2, 61, 61)
 	if _, err := reopened.Append(malformed); err == nil || !strings.Contains(err.Error(), "truncated-log") {
 		t.Fatalf("malformed truncated logs error = %v", err)
+	}
+}
+
+func TestTransactionVersionsValidationAndPayloadGate(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		version solanago.MessageVersion
+		want    TransactionVersion
+		data    int
+	}{
+		{name: "legacy", version: solanago.MessageVersionLegacy, want: TransactionVersionLegacy, data: 1},
+		{name: "v0", version: solanago.MessageVersionV0, want: TransactionVersionV0, data: 1},
+		{name: "v1_over_legacy_limit", version: solanago.MessageVersionV1, want: TransactionVersionV1, data: 1300},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			event := transactionEventVersion(80, 0, test.version, test.data)
+			got, err := validateTransaction(*event.Transaction, Filter{})
+			if err != nil || got != test.want {
+				t.Fatalf("validate version = %q, %v; want %q", got, err, test.want)
+			}
+			if test.version == solanago.MessageVersionV1 && len(event.Transaction.Transaction) <= maxLegacyTransactionBytes {
+				t.Fatalf("v1 fixture has only %d bytes", len(event.Transaction.Transaction))
+			}
+		})
+	}
+
+	oversizedV0 := transactionEventVersion(80, 0, solanago.MessageVersionV0, 1300)
+	if _, err := validateTransaction(*oversizedV0.Transaction, Filter{}); err == nil ||
+		!strings.Contains(err.Error(), "legacy/v0") {
+		t.Fatalf("oversized v0 error = %v", err)
+	}
+	dataBytes := 1
+	var maximum Event
+	for range 4 {
+		maximum = transactionEventVersion(80, 0, solanago.MessageVersionV1, dataBytes)
+		delta := solanago.MaxTransactionSizeV1 - len(maximum.Transaction.Transaction)
+		if delta == 0 {
+			break
+		}
+		dataBytes += delta
+	}
+	if len(maximum.Transaction.Transaction) != solanago.MaxTransactionSizeV1 {
+		t.Fatalf("maximum v1 fixture has %d bytes", len(maximum.Transaction.Transaction))
+	}
+	if got, err := validateTransaction(*maximum.Transaction, Filter{}); err != nil || got != TransactionVersionV1 {
+		t.Fatalf("maximum v1 validation = %q, %v", got, err)
+	}
+	overMaximum := cloneTransaction(maximum.Transaction)
+	overMaximum.Transaction = append(overMaximum.Transaction, 0)
+	if _, err := validateTransaction(overMaximum, Filter{}); err == nil ||
+		!strings.Contains(err.Error(), "allowed range") {
+		t.Fatalf("over-maximum v1 error = %v", err)
+	}
+
+	dir := t.TempDir()
+	index, err := Open(dir, testSource(), Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beginTestBatch(t, index, 1, 80, 80)
+	v1 := transactionEventVersion(80, 0, solanago.MessageVersionV1, 1300)
+	if _, err := index.Append(v1); err != nil {
+		t.Fatal(err)
+	}
+	root := rootEvent(80, 1, 79)
+	root.Root.TransactionCount, root.Root.AccountCount = 1, 0
+	if _, err := index.Append(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Close(); err != nil {
+		t.Fatal(err)
+	}
+	metadata, err := QueryTransactions(dir, TransactionQuery{Limit: 1})
+	if err != nil || len(metadata) != 1 || metadata[0].Version != TransactionVersionV1 ||
+		metadata[0].MessageHash != v1.Transaction.MessageHash || metadata[0].Transaction != nil ||
+		metadata[0].Message != nil ||
+		metadata[0].Logs != nil || metadata[0].Inner != nil || metadata[0].ReturnData != nil {
+		t.Fatalf("metadata-only transaction = %+v, %v", metadata, err)
+	}
+	payload, err := QueryTransactions(dir, TransactionQuery{Limit: 1, IncludePayload: true})
+	decoded, decodeErr := solanago.TransactionFromBytes(v1.Transaction.Transaction)
+	if decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	wantMessage, messageErr := decoded.Message.MarshalBinary()
+	if err != nil || messageErr != nil || len(payload) != 1 ||
+		!bytes.Equal(payload[0].Message, wantMessage) ||
+		!bytes.Equal(payload[0].Transaction, v1.Transaction.Transaction) ||
+		!slices.Equal(payload[0].Logs, v1.Transaction.Logs) {
+		t.Fatalf("payload transaction = %+v, %v", payload, err)
+	}
+}
+
+func TestTransactionPayloadPreservesMessageForEveryVersion(t *testing.T) {
+	for _, version := range []solanago.MessageVersion{
+		solanago.MessageVersionLegacy,
+		solanago.MessageVersionV0,
+		solanago.MessageVersionV1,
+	} {
+		t.Run(fmt.Sprintf("version_%d", version), func(t *testing.T) {
+			dir := t.TempDir()
+			index, err := Open(dir, testSource(), Filter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			beginTestBatch(t, index, 1, 90, 90)
+			event := transactionEventVersion(90, 0, version, 1)
+			if _, err := index.Append(event); err != nil {
+				t.Fatal(err)
+			}
+			root := rootEvent(90, 1, 89)
+			root.Root.TransactionCount, root.Root.AccountCount = 1, 0
+			if _, err := index.Append(root); err != nil {
+				t.Fatal(err)
+			}
+			if err := index.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			metadata, err := QueryTransactions(dir, TransactionQuery{Limit: 1})
+			if err != nil || len(metadata) != 1 || metadata[0].Message != nil || metadata[0].Transaction != nil {
+				t.Fatalf("metadata-only result = %+v, %v", metadata, err)
+			}
+			payload, err := QueryTransactions(dir, TransactionQuery{Limit: 1, IncludePayload: true})
+			if err != nil || len(payload) != 1 {
+				t.Fatalf("payload result = %+v, %v", payload, err)
+			}
+			decoded, err := solanago.TransactionFromBytes(event.Transaction.Transaction)
+			if err != nil {
+				t.Fatal(err)
+			}
+			message, err := decoded.Message.MarshalBinary()
+			if err != nil || !bytes.Equal(payload[0].Message, message) ||
+				!bytes.Equal(payload[0].Transaction, event.Transaction.Transaction) {
+				t.Fatalf("payload message/transaction mismatch: %+v, %v", payload[0], err)
+			}
+		})
+	}
+}
+
+func TestTransactionRejectsWireIdentityAndAccountMismatches(t *testing.T) {
+	valid := transactionEvent(81, 0).Transaction
+	for _, test := range []struct {
+		name string
+		edit func(*Transaction)
+		want string
+	}{
+		{name: "trailing bytes", edit: func(tx *Transaction) {
+			tx.Transaction = append(tx.Transaction, 0)
+		}, want: "canonical"},
+		{name: "invalid signature", edit: func(tx *Transaction) {
+			tx.Transaction = bytes.Clone(tx.Transaction)
+			tx.Transaction[1] ^= 1
+		}, want: "signature verification"},
+		{name: "message hash", edit: func(tx *Transaction) {
+			tx.MessageHash = testBankhash
+		}, want: "message hash"},
+		{name: "static account", edit: func(tx *Transaction) {
+			tx.AccountKeys = append([]string(nil), tx.AccountKeys...)
+			tx.AccountKeys[0] = testAccount
+		}, want: "static account"},
+		{name: "inner parent", edit: func(tx *Transaction) {
+			tx.Inner = []InnerInstructions{{Index: 1, Instructions: []CompiledInstruction{{
+				ProgramIDIndex: 1, Accounts: []uint16{0}, Data: []byte{1},
+			}}}}
+		}, want: "parent outer index"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			transaction := cloneTransaction(valid)
+			test.edit(&transaction)
+			if _, err := validateTransaction(transaction, Filter{}); err == nil ||
+				!strings.Contains(err.Error(), test.want) {
+				t.Fatalf("mismatch error = %v", err)
+			}
+		})
+	}
+}
+
+func TestTransactionV0BindsResolvedAccountCountAndStaticPrefix(t *testing.T) {
+	privateKey := solanago.PrivateKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{8}, ed25519.SeedSize)))
+	payer := privateKey.PublicKey()
+	program, err := solanago.PublicKeyFromBase58(testOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	table, err := solanago.PublicKeyFromBase58(testBankhash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := solanago.PublicKeyFromBase58(testAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := solanago.Message{
+		Header:       solanago.MessageHeader{NumRequiredSignatures: 1, NumReadonlyUnsignedAccounts: 1},
+		AccountKeys:  solanago.PublicKeySlice{payer, program},
+		Instructions: []solanago.CompiledInstruction{{ProgramIDIndex: 1, Accounts: []uint16{0}, Data: []byte{1}}},
+	}
+	if _, err := message.SetVersion(solanago.MessageVersionV0); err != nil {
+		t.Fatal(err)
+	}
+	message.SetAddressTableLookups([]solanago.MessageAddressTableLookup{{
+		AccountKey: table, WritableIndexes: []byte{0},
+	}})
+	transaction := &solanago.Transaction{Message: message}
+	if _, err := transaction.Sign(func(key solanago.PublicKey) *solanago.PrivateKey {
+		if key == payer {
+			return &privateKey
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wire, err := transaction.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageHash, err := transactionMessageHash(transaction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := Transaction{
+		Signature: transaction.Signatures[0].String(), Transaction: wire,
+		MessageHash: solanago.Hash(messageHash).String(),
+		AccountKeys: []string{payer.String(), program.String(), loaded.String()}, Succeeded: true,
+	}
+	if version, err := validateTransaction(record, Filter{}); err != nil || version != TransactionVersionV0 {
+		t.Fatalf("valid v0 resolved accounts = %q, %v", version, err)
+	}
+	missingLoaded := cloneTransaction(&record)
+	missingLoaded.AccountKeys = missingLoaded.AccountKeys[:2]
+	if _, err := validateTransaction(missingLoaded, Filter{}); err == nil || !strings.Contains(err.Error(), "account keys") {
+		t.Fatalf("missing resolved account error = %v", err)
+	}
+	wrongStatic := cloneTransaction(&record)
+	wrongStatic.AccountKeys[0] = testAccount
+	if _, err := validateTransaction(wrongStatic, Filter{}); err == nil || !strings.Contains(err.Error(), "static account") {
+		t.Fatalf("wrong static prefix error = %v", err)
+	}
+}
+
+func TestTransactionRejectsUnsanitizedV1Wire(t *testing.T) {
+	event := transactionEventVersion(82, 0, solanago.MessageVersionV1, 1)
+	transaction, err := solanago.TransactionFromBytes(event.Transaction.Transaction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transaction.Message.Header.NumReadonlySignedAccounts = 1
+	privateKey := solanago.PrivateKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize)))
+	if _, err := transaction.Sign(func(key solanago.PublicKey) *solanago.PrivateKey {
+		if key == privateKey.PublicKey() {
+			return &privateKey
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wire, err := transaction.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageHash, err := transactionMessageHash(transaction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := cloneTransaction(event.Transaction)
+	bad.Signature = transaction.Signatures[0].String()
+	bad.Transaction = wire
+	bad.MessageHash = solanago.Hash(messageHash).String()
+	if _, err := validateTransaction(bad, Filter{}); err == nil || !strings.Contains(err.Error(), "structural validation") {
+		t.Fatalf("unsanitized v1 error = %v", err)
+	}
+}
+
+func TestIndexRejectsRootHashAndBlockIDLineageBreaks(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		edit func(*RootedSlot)
+		want string
+	}{
+		{name: "parent blockhash", edit: func(root *RootedSlot) {
+			root.ParentBlockhash = testOwner
+		}, want: "parent blockhash"},
+		{name: "parent block ID", edit: func(root *RootedSlot) {
+			root.ParentBlockID = testOwner
+		}, want: "parent block ID"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			index, err := Open(t.TempDir(), testSource(), Filter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer index.Close()
+			beginTestBatch(t, index, 1, 90, 90)
+			if _, err := index.Append(rootEvent(90, 0, 89)); err != nil {
+				t.Fatal(err)
+			}
+			beginTestBatch(t, index, 2, 91, 91)
+			second := rootEvent(91, 0, 90)
+			test.edit(second.Root)
+			if _, err := index.Append(second); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("lineage error = %v", err)
+			}
+		})
 	}
 }
 
@@ -1006,7 +1361,8 @@ func TestReadStatusRejectsSemanticallyInvalidHashChainedRecord(t *testing.T) {
 	}
 	at := time.Now().UTC()
 	if _, err := store.Append(at, eventHeader, "", header{
-		IndexSchemaVersion: IndexSchemaVersion, Source: testSource(),
+		IndexSchemaVersion: IndexSchemaVersion, EventSchemaVersion: EventSchemaVersion,
+		Source: testSource(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1030,6 +1386,144 @@ func TestReadStatusRejectsSemanticallyInvalidHashChainedRecord(t *testing.T) {
 	}
 	if _, err := ReadStatus(dir); err == nil || !strings.Contains(err.Error(), "account address") {
 		t.Fatalf("semantically invalid record error = %v", err)
+	}
+}
+
+func TestReadStatusRejectsRecoveredRootFinalityFromAnotherClusterMode(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		cluster string
+		classic bool
+	}{
+		{name: "classic root on Alpenglow", cluster: "alpenglow", classic: true},
+		{name: "Alpenglow root on classic", cluster: "devnet"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := journal.OpenRotating(filepath.Join(dir, "events.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			at := time.Now().UTC()
+			source := testSource()
+			source.Cluster = test.cluster
+			for _, record := range []struct {
+				typ, key string
+				payload  any
+			}{
+				{eventHeader, "", header{IndexSchemaVersion: IndexSchemaVersion, EventSchemaVersion: EventSchemaVersion, Source: source}},
+				{eventStart, "", StartDescriptor{}},
+				{eventBatch, "1", BatchDescriptor{ManifestSequence: 1, SidecarVersion: SupportedSidecarVersion, FromSlot: 1, ThroughSlot: 1, SHA256: strings.Repeat("a", 64)}},
+			} {
+				if _, err := store.Append(at, record.typ, record.key, record.payload); err != nil {
+					t.Fatal(err)
+				}
+			}
+			root := rootEvent(1, 0, 0)
+			if test.classic {
+				root.Root.FinalitySource = FinalityRPCFinalized
+				root.Root.BlockID, root.Root.ParentBlockID = "", ""
+			}
+			if _, err := store.Append(at, eventRoot, "1:0", rootRecord{
+				Cursor: root.Cursor, RootedSlot: *root.Root, SourceSHA256: strings.Repeat("b", 64),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadStatus(dir); err == nil || !strings.Contains(err.Error(), "bound") {
+				t.Fatalf("recovered cross-mode root error = %v", err)
+			}
+		})
+	}
+}
+
+func TestReadStatusRejectsRecoveredDerivedTransactionVersion(t *testing.T) {
+	dir := t.TempDir()
+	store, err := journal.OpenRotating(filepath.Join(dir, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC()
+	event := transactionEvent(80, 0)
+	sourceHash, version, err := validateEvent(event, Filter{}, "alpenglow")
+	if err != nil || version != TransactionVersionLegacy {
+		t.Fatalf("validate fixture = %q, %v", version, err)
+	}
+	for _, record := range []struct {
+		typ, key string
+		payload  any
+	}{
+		{eventHeader, "", header{IndexSchemaVersion: IndexSchemaVersion, EventSchemaVersion: EventSchemaVersion, Source: testSource()}},
+		{eventStart, "", StartDescriptor{}},
+		{eventBatch, "1", BatchDescriptor{ManifestSequence: 1, SidecarVersion: SupportedSidecarVersion, FromSlot: 80, ThroughSlot: 80, SHA256: strings.Repeat("a", 64)}},
+		{eventTransaction, event.Cursor.String(), transactionRecord{
+			Cursor: event.Cursor, indexedTransaction: indexedTransaction(*event.Transaction),
+			Version: TransactionVersionV0, SourceSHA256: sourceHash,
+		}},
+	} {
+		if _, err := store.Append(at, record.typ, record.key, record.payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadStatus(dir); err == nil || !strings.Contains(err.Error(), "derived version") {
+		t.Fatalf("derived transaction version error = %v", err)
+	}
+}
+
+func TestReadStatusRejectsRecoveredRootLineageBreaks(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		edit func(*RootedSlot)
+		want string
+	}{
+		{name: "parent blockhash", edit: func(root *RootedSlot) {
+			root.ParentBlockhash = testOwner
+		}, want: "parent blockhash"},
+		{name: "parent block ID", edit: func(root *RootedSlot) {
+			root.ParentBlockID = testOwner
+		}, want: "parent block ID"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store, err := journal.OpenRotating(filepath.Join(dir, "events.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			at := time.Now().UTC()
+			for _, record := range []struct {
+				typ, key string
+				payload  any
+			}{
+				{eventHeader, "", header{IndexSchemaVersion: IndexSchemaVersion, EventSchemaVersion: EventSchemaVersion, Source: testSource()}},
+				{eventStart, "", StartDescriptor{}},
+				{eventBatch, "1", BatchDescriptor{ManifestSequence: 1, SidecarVersion: SupportedSidecarVersion, FromSlot: 90, ThroughSlot: 91, SHA256: strings.Repeat("a", 64)}},
+			} {
+				if _, err := store.Append(at, record.typ, record.key, record.payload); err != nil {
+					t.Fatal(err)
+				}
+			}
+			first := rootEvent(90, 0, 89)
+			second := rootEvent(91, 0, 90)
+			test.edit(second.Root)
+			for _, event := range []Event{first, second} {
+				if _, err := store.Append(at, eventRoot, event.Cursor.String(), rootRecord{
+					Cursor: event.Cursor, RootedSlot: *event.Root, SourceSHA256: strings.Repeat("b", 64),
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadStatus(dir); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("recovered lineage error = %v", err)
+			}
+		})
 	}
 }
 
@@ -1067,8 +1561,53 @@ func TestReadStatusRejectsV3WithoutStreamStartBinding(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadStatus(dir); err == nil || !strings.Contains(err.Error(), "private v4 index") {
+	if _, err := ReadStatus(dir); err == nil || !strings.Contains(err.Error(), "private v5 index") {
 		t.Fatalf("v3 migration error = %v", err)
+	}
+}
+
+func TestReadStatusExplainsV4Rebuild(t *testing.T) {
+	dir := t.TempDir()
+	store, err := journal.OpenRotating(filepath.Join(dir, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(time.Now().UTC(), eventHeader, "", map[string]any{
+		"index_schema_version": uint32(4), "source": testSource(), "filter": Filter{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadStatus(dir); err == nil || !strings.Contains(err.Error(), "schema v4") ||
+		!strings.Contains(err.Error(), "preserve it for audit") ||
+		!strings.Contains(err.Error(), "event-schema-v3") {
+		t.Fatalf("v4 migration error = %v", err)
+	}
+}
+
+func TestHeaderAndEventVersionsFailClosed(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		header header
+	}{
+		{name: "old index", header: header{IndexSchemaVersion: IndexSchemaVersion - 1, EventSchemaVersion: EventSchemaVersion}},
+		{name: "future index", header: header{IndexSchemaVersion: IndexSchemaVersion + 1, EventSchemaVersion: EventSchemaVersion}},
+		{name: "old event", header: header{IndexSchemaVersion: IndexSchemaVersion, EventSchemaVersion: EventSchemaVersion - 1}},
+		{name: "future event", header: header{IndexSchemaVersion: IndexSchemaVersion, EventSchemaVersion: EventSchemaVersion + 1}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateHeaderVersions(test.header); err == nil {
+				t.Fatal("unsupported header versions were accepted")
+			}
+		})
+	}
+	for _, schema := range []uint32{EventSchemaVersion - 1, EventSchemaVersion + 1} {
+		if _, _, err := validateEvent(Event{SchemaVersion: schema}, Filter{}, "alpenglow"); err == nil ||
+			!strings.Contains(err.Error(), "schema version") {
+			t.Fatalf("event schema %d error = %v", schema, err)
+		}
 	}
 }
 
@@ -1101,19 +1640,68 @@ func rootEvent(slot uint64, ordinal uint32, parent uint64) Event {
 		SchemaVersion: SchemaVersion,
 		Cursor:        Cursor{Slot: slot, Ordinal: ordinal},
 		Kind:          "slot_rooted",
-		Root:          &RootedSlot{ParentSlot: parent, Bankhash: testBankhash, AccountCount: ordinal},
+		Root: &RootedSlot{
+			ParentSlot: parent, Blockhash: testBankhash, ParentBlockhash: testBankhash,
+			Bankhash: testBankhash, BlockID: testBankhash, ParentBlockID: testBankhash,
+			FinalitySource: FinalityAlpenglowCertificate, AccountCount: ordinal,
+		},
 	}
 }
 
 func transactionEvent(slot uint64, index uint32) Event {
+	return transactionEventVersion(slot, index, solanago.MessageVersionLegacy, 1)
+}
+
+func transactionEventVersion(slot uint64, index uint32, version solanago.MessageVersion, dataBytes int) Event {
+	privateKey := solanago.PrivateKey(ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize)))
+	payer := privateKey.PublicKey()
+	program, err := solanago.PublicKeyFromBase58(testOwner)
+	if err != nil {
+		panic(err)
+	}
+	recentBlockhash, err := solanago.HashFromBase58(testBankhash)
+	if err != nil {
+		panic(err)
+	}
+	message := solanago.Message{
+		Header: solanago.MessageHeader{
+			NumRequiredSignatures: 1, NumReadonlyUnsignedAccounts: 1,
+		},
+		AccountKeys:     solanago.PublicKeySlice{payer, program},
+		RecentBlockhash: recentBlockhash,
+		Instructions: []solanago.CompiledInstruction{{
+			ProgramIDIndex: 1, Accounts: []uint16{0}, Data: bytes.Repeat([]byte{1}, dataBytes),
+		}},
+	}
+	if _, err := message.SetVersion(version); err != nil {
+		panic(err)
+	}
+	transaction := &solanago.Transaction{Message: message}
+	if _, err := transaction.Sign(func(key solanago.PublicKey) *solanago.PrivateKey {
+		if key == payer {
+			return &privateKey
+		}
+		return nil
+	}); err != nil {
+		panic(err)
+	}
+	wire, err := transaction.MarshalBinary()
+	if err != nil {
+		panic(err)
+	}
+	messageHash, err := transactionMessageHash(transaction)
+	if err != nil {
+		panic(err)
+	}
 	return Event{
 		SchemaVersion: SchemaVersion,
 		Cursor:        Cursor{Slot: slot, Ordinal: index},
 		Kind:          "transaction_executed",
 		Transaction: &Transaction{
-			Index: index, Signature: solana.Encode(make([]byte, 64)),
-			Message: []byte("message"), AccountKeys: []string{testOwner},
-			Succeeded: true, ComputeUnits: 12, Logs: []string{"Program success"},
+			Index: index, Signature: transaction.Signatures[0].String(),
+			Transaction: wire, MessageHash: solanago.Hash(messageHash).String(),
+			AccountKeys: []string{payer.String(), testOwner},
+			Succeeded:   true, ComputeUnits: 12, Logs: []string{"Program success"},
 		},
 	}
 }
@@ -1122,4 +1710,14 @@ func cloneAccount(value *AccountUpdate) *AccountUpdate {
 	copy := *value
 	copy.Data = bytes.Clone(value.Data)
 	return &copy
+}
+
+func cloneTransaction(value *Transaction) Transaction {
+	copy := *value
+	copy.Transaction = bytes.Clone(value.Transaction)
+	copy.AccountKeys = append([]string(nil), value.AccountKeys...)
+	copy.Logs = append([]string(nil), value.Logs...)
+	copy.Inner = cloneInner(value.Inner)
+	copy.ReturnData = cloneReturnData(value.ReturnData)
+	return copy
 }

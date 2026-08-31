@@ -15,13 +15,13 @@ running, first verify the checkout without installing or authorising anything:
 
 ```sh
 make prereqs-trading # walletless plus the optional trading runtime
-make build       # seven binaries into ./bin
+make build       # nine binaries into ./bin
 make adapter     # the Orca quote adapter (checks your Node version first)
 make test        # format, vet, tests, race, isolation and private-file checks
 make walkthrough # read-only prices plus a local audit-integrity walkthrough
 ```
 
-Keep all seven files produced by `make build` together. `mithril-agent` starts
+Keep all nine files produced by `make build` together. `mithril-agent` starts
 the policy, signer, submitter, quote, status and Telegram helpers from beside
 its own executable; copying only the main binary creates an incomplete runtime
 that setup correctly refuses.
@@ -291,8 +291,9 @@ path instead requires an API key, wallet authentication, a signed upfront
 deposit, and a provider-managed vault, so it remains a separate unqualified
 Mainnet custody boundary. An agent may propose parameters and use `shadow
 backtest`, `shadow search`, `shadow run`, and `shadow review`, but it cannot turn
-a result into authority. `shadow search` chooses thresholds on one hash-chained
-day and reports the exact result on a later untouched day; pool fills remain
+a result into authority. `shadow search` chooses bounded parameters on one
+hash-chained day—fixed thresholds or adaptive windows and a signal hurdle—and
+reports the exact result on a later untouched day; pool fills remain
 explicitly modelled. Unlimited “trade the wallet” behavior remains unsupported: future
 execution still needs a dedicated limited-balance account, venue and asset
 allowlists, hard action, daily, total and loss caps, an expiring operator grant,
@@ -319,7 +320,7 @@ Mithril MCP: node identity, health, wallet balance
                     |
           two healthy observations
                     |
- Pyth + Coinbase -> optional one-shot SOL/USD trigger
+ Pyth + Kraken -> optional one-shot SOL/USD trigger
                     |
 external quote -> independent instruction and deployment validator
                     |
@@ -355,9 +356,20 @@ not asked to verify itself.
 
 The Devnet pilot can monitor SOL/USD and start the sells or buys its grant allows only
 after an operator-set target is reached. It requires fresh, agreeing observations
-from Pyth and Coinbase, applies each source's uncertainty conservatively, and
+from Pyth and Kraken, applies each source's uncertainty conservatively, and
 uses integer arithmetic. An ordinary price miss is a waiting state, creates no
 journal growth, and consumes no action allowance.
+
+Legacy Coinbase-bound price policies are refused for active runs rather than
+silently mapped to Kraken. Historical report, review, and backtest commands can
+still decode their journals for audit. Regenerate an active policy so its new
+source identity, journal, and evidence lineage are explicit. The existing
+Coinbase adapter remains available for API compatibility, but new paper policies
+do not select it. Coinbase's
+[Market Data Terms](https://www.coinbase.com/legal/market_data), updated August
+7, 2026, restrict using its market data for an automated system in section 3.5
+without written consent; deployments must evaluate and comply with those terms
+independently.
 
 The market rule is checked before signing and again immediately before send.
 The sell quote's minimum devUSDC-per-SOL rate must meet its floor; for a buy,
@@ -387,11 +399,12 @@ node. It needs no credential, so an ordinary price rule costs nothing extra.
 
 Only the optional Hermes adapter requires `MITHRIL_AGENT_PYTH_API_KEY`. Pyth's
 [migration guide](https://docs.pyth.network/price-feeds/core/upgrade/preparing)
-says every Hermes user needs an API key from August 18, 2026; an integration
-that only reads on-chain push feeds does not. The default adapter pins and reads
-both Pyth's current and early-upgrade SOL/USD accounts through your Mithril
-node, verifies each account's exact owner, and needs no operator-side address
-switch at cutover.
+says the Pyth Core upgrade completed on August 26, 2026 and every Hermes user
+now needs an API key; an integration that only reads on-chain push feeds does
+not. The default adapter pins and probes both Pyth SOL/USD account generations
+through your Mithril node, verifies each available account's exact owner, and
+requires agreement while both are live. The completed upgrade required no
+operator-side address switch.
 
 `NewPyth` already refuses an empty key, so a Hermes-configured agent fails
 closed rather than trading on a feed it cannot read. If you select that source,
@@ -506,12 +519,14 @@ go build -o ./bin/mithril-agent-submitter ./cmd/mithril-agent-submitter
 go build -o ./bin/mithril-agent-quote ./cmd/mithril-agent-quote
 go build -o ./bin/mithril-agent-telegram ./cmd/mithril-agent-telegram
 go build -o ./bin/mithril-agent-status-bridge ./cmd/mithril-agent-status-bridge
+go build -o ./bin/mithril-agent-paper-status-bridge ./cmd/mithril-agent-paper-status-bridge
+go build -o ./bin/mithril-agent-paper-dashboard ./cmd/mithril-agent-paper-dashboard
 
 npm --prefix ./adapters/orca ci --ignore-scripts
 sha256sum ./bin/* > /absolute/private/validation/binaries.sha256
 ```
 
-After assembling the complete candidate runtime (the seven binaries, pinned
+After assembling the complete candidate runtime (the nine binaries, pinned
 Node.js, `quote.mjs`, and `node_modules`), create one manifest for every file
 and symlink target. The Mithril executable is a separate prerequisite and must
 also be installed at the path passed to setup. Keep the manifest outside the
@@ -546,6 +561,9 @@ candidate is not ready for cutover if any manifest check or comparison fails.
 ```sh
 sha256sum \
   deploy/sysusers/mithril-agent-status.conf \
+  deploy/sysusers/mithril-agent-dashboard.conf \
+  deploy/systemd/mithril-agent-paper-dashboard.service \
+  deploy/systemd/mithril-agent-paper-dashboard.socket \
   deploy/systemd/mithril-agent-quote.service \
   deploy/timesyncd/90-mithril-agent.conf \
   deploy/prometheus/mithril-agent.rules.yml \
@@ -585,9 +603,22 @@ Use this upgrade sequence:
    old binary, restart the old runner in stopped mode, wait for a fresh status,
    and drain again. Do not use this path for `halted`.
 3. Stop the runner, risk-authority sockets, signer sockets, quote, Telegram,
-   status-socket, and bridge units. Verify each unit has `MainPID=0` and that no
-   process remains in any of their control groups. The short-lived authority
-   instances and submitter child must also be absent.
+   status-socket, bridge, and paper-dashboard service and socket units. Verify
+   each unit has `MainPID=0` and that no process remains in any of their control
+   groups. The short-lived authority instances and submitter child must also be
+   absent.
+
+   Stop paper activators before paper processes so they cannot recreate an old
+   observer during the cutover. This includes
+   `mithril-hermes-research.timer`, `mithril-agent-paper-auto-select.timer`,
+   `mithril-agent-paper-bootstrap.timer`,
+   `mithril-agent-paper-champion.path`, and
+   `mithril-agent-paper-challenger.path`. Then stop every installed paper
+   observer (`paper-base`, `paper-jup`, `paper-champion`, and
+   `paper-challenger`), its status bridge and socket, Hermes research, Telegram,
+   and the dashboard service and socket. Record which conditional paper units
+   were active; do not substitute a generic runner name or leave an old paper
+   process publishing the prior status schema.
 4. Preserve a private rollback bundle containing the old runtime, units,
    configs, environment files, policies, keys, journal, control state, signer
    ledger, Telegram cursor, and recorded ownership and mode metadata. Keep it
@@ -606,7 +637,15 @@ Use this upgrade sequence:
    and Prometheus rule while services remain stopped. Run `systemd-analyze
    verify`, `promtool check rules`, and `promtool check config`, then run
    `systemd-sysusers`, `systemctl daemon-reload`, and restart
-   `systemd-timesyncd`. Require `mithril-agent clock-check` to pass, then
+   `systemd-timesyncd`. If the private paper dashboard was enabled before the
+   cutover, restore the previously active paper status sockets and paper
+   observers first, then their bridges, Telegram, paths, and timers. Restart
+   the dashboard socket last and require `curl --fail --unix-socket
+   /run/mithril-agent-paper-dashboard.sock http://localhost/healthz` to succeed
+   before accepting it. Dashboard health is successful only after both
+   configured market sockets publish fresh current-day status from the
+   candidate binary; an `Updating`, stale, or mixed-version market is a failed
+   upgrade. Require `mithril-agent clock-check` to pass, then
    activate Prometheus and Alertmanager through the pinned monitoring
    deployment's documented reload or restart procedure. Keep the old matching
    assets in the rollback bundle and restore them together with the old
@@ -851,7 +890,7 @@ checks the corresponding public identity.
 
 ## Fresh supervised Linux installation
 
-Use a dedicated full-node or RPC host, not a voting validator. Build the seven
+Use a dedicated full-node or RPC host, not a voting validator. Build the nine
 Go binaries and install the pinned Orca dependencies as described above. The
 commands below are for a new host only; they are not an upgrade or rolling
 replacement procedure. An upgrade may reuse the later setup and validation
@@ -860,7 +899,10 @@ requirements, but must use the staged cutover above for runtime files.
 ```sh
 sudo install -m 0644 deploy/sysusers/mithril-agent-status.conf \
   /usr/lib/sysusers.d/mithril-agent-status.conf
+sudo install -m 0644 deploy/sysusers/mithril-agent-dashboard.conf \
+  /usr/lib/sysusers.d/mithril-agent-dashboard.conf
 sudo systemd-sysusers /usr/lib/sysusers.d/mithril-agent-status.conf
+sudo systemd-sysusers /usr/lib/sysusers.d/mithril-agent-dashboard.conf
 
 sudo install -d -o root -g root -m 0755 /usr/local/libexec/mithril-agent
 sudo install -d -o root -g root -m 0755 /usr/local/share/doc/mithril-agent
@@ -875,6 +917,8 @@ sudo install -o root -g root -m 0755 \
   ./bin/mithril-agent-quote \
   ./bin/mithril-agent-telegram \
   ./bin/mithril-agent-status-bridge \
+  ./bin/mithril-agent-paper-status-bridge \
+  ./bin/mithril-agent-paper-dashboard \
   /usr/local/libexec/mithril-agent/
 sudo install -o root -g root -m 0755 /absolute/pinned/node \
   /usr/local/libexec/mithril-agent/node
@@ -1627,7 +1671,7 @@ Use this ownership layout for the service templates:
 
 ```text
 /usr/local/libexec/mithril-agent/   root:root, not writable by the service
-  seven Go binaries, pinned Node.js, quote.mjs, node_modules/
+  nine Go binaries, pinned Node.js, quote.mjs, node_modules/
 /etc/mithril-agent/                 root:root
   rpc.env, quote.env, mcp.env, price.env, telegram-operator.env  mode 0600
 /var/lib/mithril-agent/             mithril-agent:mithril-agent, mode 0700
@@ -2240,7 +2284,7 @@ unfunded test identities and makes no RPC, hosted-custody, or broadcast call.
 Passing it proves the local implementation; it cannot prove that an external
 provider applies an equivalent policy. The second target reads the sponsored
 Pyth SOL/USD and USDC/USD accounts plus
-Coinbase and Kraken public market data. It needs no API key or wallet and
+Kraken SOL/USD and USDC/USD public market data. It needs no API key or wallet and
 cannot sign or submit; passing proves current reachability and agreement, not
 production capacity or an SLA.
 The third target forces keyless Jupiter access, uses only a fixed watch address,
@@ -3025,7 +3069,7 @@ operator workflows.
 The Devnet pilot does not choose these on behalf of an operator:
 
 - two independently funded and rate-limited production evidence RPCs;
-- production SLAs for the keyless Pyth-on-Mithril, Coinbase, and Kraken market
+- production SLAs for the keyless Pyth-on-Mithril and Kraken market
   evidence paths, or explicitly approved authenticated replacements;
 - an external deadman receiver and an off-host append-only audit destination;
 - separate signer, submitter, risk-authority, and runner identities;
@@ -3174,9 +3218,11 @@ pool quotes, runs the same deterministic decision pipeline, and writes down the
 trade it would have made — without ever being able to make one.
 
 Create the policy with `mithril-agent shadow policy`; its output prints the
-correct run command for that policy's cluster and direction. For Mainnet it
-uses Jupiter and fixes the pair to SOL/USDC. A sell spends wrapped SOL and
-receives the canonical classic-SPL USDC mint; a buy reverses those two mints.
+correct run command for that policy's cluster and direction. Mainnet supports
+two pinned Jupiter paper pairs: SOL/USDC and JUP/USDC. A SOL sell spends wrapped
+SOL and receives canonical classic-SPL USDC; its buy reverses those mints. JUP
+uses the verified six-decimal classic-SPL JUP mint and starts from a USDC buy
+leg.
 For Devnet, provide `--pool`, `--input-mint`, and `--output-mint` while creating
 the policy; it prints the Orca adapter form instead. The quote provider, pool,
 and pair are part of the policy fingerprint. Optional route flags on `shadow
@@ -3184,8 +3230,12 @@ run` can only repeat those values and cannot replace them.
 
 The endpoint comes from `MITHRIL_AGENT_SHADOW_RPC_URL` and is never printed,
 logged, or journalled. The default price pair — the sponsored Pyth push
-accounts read through an RPC, cross-checked against Coinbase — needs no
-credential on either side.
+accounts read through an RPC, cross-checked against the matching Kraken
+pre-trade best bid/ask — needs no credential on either side. JUP/USDC adds a
+separate SOL/USD pair to value native lamport fees; it never values fees at the
+JUP price. Kraken is used only for the
+operator's own paper evidence; do not assume its terms grant redistribution or
+a public derived-data service.
 
 Mainnet accounting has a second, separate evidence pair. USDC proceeds are
 labelled as USD only while Pyth's sponsored USDC/USD account read through that
@@ -3209,10 +3259,12 @@ check without copying provider errors, endpoints, credentials, or response
 payloads into terminal output or the shareable journal. A later `shadow report`
 with no observable tick repeats the latest bounded reason.
 
-Shadow policy version 3 binds the quote provider, pool, and token pair in
-addition to the Mainnet accounting evidence introduced by version 2. Older
-policies are intentionally refused; generate a new policy and start a new
-evidence directory rather than relabelling old results.
+Shadow policy version 6 additionally models one-time token setup rent as locked,
+recoverable native capital and timestamps venue-quote receipt before starting
+the settlement delay. Journal version 4 records that evidence. Version 5 and
+journal version 3 remain readable for earlier non-SOL runs; version 4 SOL-only
+policies and journal version 2 also remain reviewable. Start each new policy
+version in a new evidence directory rather than mixing accounting contracts.
 
 `adapters/orca/quote.mjs` serves the trading path and is pinned to Devnet.
 Mainnet shadow mode uses the separate keyless Jupiter reader in Go; it does not
@@ -3232,17 +3284,74 @@ round trip to clear its own costs" — cannot be answered by running the legs
 separately, because the second leg spends exactly what the first produced and
 the spread plus two fees comes out of one book.
 
-For live evidence, generate a continuous round trip by giving both thresholds:
+For live evidence, generate a round trip within each independent UTC trial by
+giving both thresholds:
 
 ```bash
 mithril-agent shadow policy --out POLICY --observe WATCH_ONLY_ADDRESS \
   --sell-at-usd 240 --buy-at-usd 200 --amount 1000000
 ```
 
-`shadow run` starts with the sell leg, switches to the buy-back leg only after
-a filled sell, and sizes that return leg from what the sell actually received.
-After a filled buy it switches back, never spending more than that leg returned
-or the shadow book holds. It still cannot sign or submit anything.
+Or create a bounded adaptive paper mandate with no absolute buy or sell price:
+
+```bash
+mithril-agent shadow policy --out POLICY --observe WATCH_ONLY_ADDRESS \
+  --adaptive --market SOL/USDC --budget-sol 0.25 \
+  --drawdown-stop-bps 300
+```
+
+Or add the isolated JUP/USDC observer with a USDC trading budget and native fee
+reserve:
+
+```bash
+mithril-agent shadow policy --out JUP_POLICY --observe WATCH_ONLY_ADDRESS \
+  --adaptive --market JUP/USDC --budget-usdc 250 \
+  --fee-reserve-sol 0.004 --setup-rent-sol 0.003 \
+  --drawdown-stop-bps 300 --fee-lamports 100000
+```
+
+The SOL mandate keeps a conservative 0.004 SOL native reserve by default; the
+JUP budget is USDC and its SOL reserve is separate. Both reserve 0.003 SOL as
+locked setup capital on the first successful Jupiter route, covering the case
+where the observed owner still needs its output token account.
+`--fee-lamports` is a conservative recurring all-in modeled attempt cap, not a
+live fee quote. The first successful JUP buy moves `--setup-rent-sol` from the
+liquid reserve into locked capital; it remains in equity and is not reported as
+a fee. A refused attempt pays the recurring fee but locks no setup rent. Funded
+execution still has to use `proposalcheck` to simulate the built transaction,
+calculate its exact fee, inspect its actual account-rent requirements, and
+verify blockheight expiry. The drawdown stop pauses new trading for that UTC day; it is not a
+guaranteed maximum loss because a delayed quote can cross the boundary. The
+paper book and its stop reset at 00:00 UTC. Low-level test scripts may still
+use `--amount` for the first lot instead of the mandate aliases.
+
+The adaptive runner uses the same independently validated price evidence,
+Jupiter quotes, settlement delay, ledger, fees, and replay checks. Its fixed,
+deterministic regime controller selects momentum in a trend, range reversion in
+a range, a bounded drawdown exit, or no action during warm-up, cooldown,
+excessive volatility, or when the raw signal does not clear the current cost
+hurdle. New adaptive policies use schema version 2: the configured maximum
+slippage stays a hard fill-refusal boundary instead of being counted as a
+certain cost on both legs. The expected signal hurdle still covers both modeled
+fees and a margin and expands with observed volatility and adverse quote impact.
+It does not guarantee a profitable fill: a later settlement may still move
+against the decision, and the paper ledger records that later executable quote.
+Version 1 policies retain their original cost math for exact historical replay
+and must be regenerated explicitly to use version 2. The controller rewarms
+after a data gap and remains risk-off after a filled drawdown exit. `shadow
+backtest` uses the policy directly; do not pass `--buy-at-usd` for
+an adaptive policy. Search and Hermes candidate generation may tune only the
+fast/slow windows or raise the minimum signal hurdle; starting inventory and all
+risk, quote, source, timing, and fee boundaries stay unchanged. `InputAmount`
+is the first lot. Each later leg spends only the previous simulated proceeds,
+so gains and losses resize the paper lot within one reset-daily UTC run; no
+outside funds, leverage, or shorts are introduced. A drawdown risk exit sells
+the full simulated base-asset inventory to reduce exposure.
+
+`shadow run` starts from the policy's configured inventory leg, switches sides
+only after a fill, and sizes the return leg from what the prior leg actually
+received. It never spends more than that leg returned or the shadow book holds.
+It still cannot sign or submit anything.
 
 The offline replay below is useful for testing different thresholds against an
 already-recorded price series without waiting for another live period:
@@ -3257,9 +3366,9 @@ on one set of books, with the same ledger and report the live run uses — so a
 round-trip result is directly comparable with a one-directional one and with the
 hold benchmark.
 
-**It models the pool, and says so.** A recorded tick carries the price, not the
-quote that was available at the time, so the fill is derived from `--spread-bps`
-rather than observed. The report states that in its own output and in its JSON
+**It models the pool, and says so.** Recorded quotes exist only for decisions
+the original policy made, not every hypothetical threshold. Changed-threshold
+fills are therefore derived from `--spread-bps`. The report states that in its own output and in its JSON
 (`"pool_modelled": true`), because a modelled number presented as an observed
 one is worse than no backtest — somebody will size a real position on it. Read
 the pool's real spread with `swap discover` and set the flag from what you see.
@@ -3283,19 +3392,61 @@ How it avoids flattering itself:
   too.
 - Every fill pays the transaction fee.
 - One decision is in flight at a time, matching the real engine.
-- Each UTC day is an independent trial with its own opening mark and its own
-  hold benchmark, so a run of daily reports is a walk-forward, not a backtest.
+- Each UTC day is a reset-daily operational canary with its own opening mark
+  and same-day hold benchmark. It is forward evidence for that day, not a
+  continuous portfolio or a statistically independent profitability trial;
+  values from separate days must not be compounded.
 - The report states how much of the period was actually observable and how many
   signals could not be acted on, counts scheduled observations missed while the
   runner was down, and leads with a caveat when coverage was poor.
 - Mainnet USD figures are emitted only while two independent USDC/USD sources
   keep the quote token inside the policy's recorded peg band.
-- Every settled record carries its exact read-only decision quote. Replay rejects
-  a fill without a mature prior decision or whose quote, amounts, direction,
+- Every settled record carries its exact read-only decision and settlement quotes. Replay rejects
+  a fill without a mature prior decision or whose quotes, amounts, direction,
   timing, trigger state, or equity cannot be reproduced.
 
 Every report ends by stating that nothing was traded, no wallet signing key was loaded, and
 nothing was signed.
+
+Telegram keeps the paper stream deliberately quiet. It pushes only settled
+paper fills, risk pauses, strategy lifecycle changes, and one short period
+result with P&L versus the opening book and versus holding. Raw signals,
+refused or missed attempts, warm-up, and ordinary waiting remain in the
+hash-chained journal and the on-demand `/paper` view; they do not interrupt the
+operator.
+
+The optional dashboard shows the same bounded paper projection without reading
+the journal, strategy files, research output, Telegram configuration, wallet,
+or signing services. It is read-only and served from a private Unix socket; it
+does not open a TCP port on the host. Install and enable the supplied dashboard
+service and socket after the two paper status sockets are available. Add only
+the intended SSH login user to `mithril-agent-dashboard`, then reconnect that
+SSH session so the new group applies:
+
+```bash
+sudo install -m 0644 deploy/sysusers/mithril-agent-dashboard.conf \
+  /usr/lib/sysusers.d/mithril-agent-dashboard.conf
+sudo systemd-sysusers /usr/lib/sysusers.d/mithril-agent-dashboard.conf
+sudo install -o root -g root -m 0644 \
+  deploy/systemd/mithril-agent-paper-dashboard.service \
+  deploy/systemd/mithril-agent-paper-dashboard.socket \
+  /etc/systemd/system/
+sudo systemd-analyze verify \
+  /etc/systemd/system/mithril-agent-paper-dashboard.service \
+  /etc/systemd/system/mithril-agent-paper-dashboard.socket
+sudo systemctl daemon-reload
+sudo usermod -aG mithril-agent-dashboard ubuntu
+sudo systemctl enable --now mithril-agent-paper-dashboard.socket
+ssh -N -L 127.0.0.1:8787:/run/mithril-agent-paper-dashboard.sock ubuntu@HOST
+```
+
+Open `http://127.0.0.1:8787/` locally. The page labels simulation, stale or
+unavailable markets, paper value, daily P&L, comparison with holding, fills,
+signal counts, current and worst drawdown, a bounded gap-aware current-day
+paper-versus-holding chart, current strategy, and retained activity. It has no
+trade or configuration buttons. Candidate evaluation and selection remain in
+the existing immutable, next-UTC paper lifecycle rather than a browser control
+surface.
 
 The report is not something you take on trust. It is derived by replaying the
 day's hash-chained journal, and it can be recomputed independently at any time:
@@ -3312,14 +3463,104 @@ chain, so recomputation never guesses that a partial current day ran until a
 future midnight. The day's report covers the whole journal rather than one
 process's counters, so a runner that restarts mid-day still reports the whole
 recorded period. The first journal record binds the exact policy to that day.
-On restart the runner restores its books, completed
-round-trip direction, and next amount from the verified record. An in-flight
-quote is never reconstructed: it is recorded as missed on the first fresh
-observation, then the rule continues. A different policy or the older
+On restart the runner restores its books, completed round-trip direction, next
+amount, and any unsettled decision from the verified record. A restart before
+the settlement deadline keeps that decision pending; a restart after the
+deadline records it as missed on the first fresh observation. A different policy or the older
 non-resumable journal format is refused instead of being mixed into the day.
 
+To test researched strategy parameters without restarting the observer, write
+and select an immutable paper candidate:
+
+```bash
+mithril-agent shadow search --policy PATH --dir PATH \
+  --train-day YYYY-MM-DD --validation-day YYYY-MM-DD \
+  --candidate-out /absolute/private/candidate.json
+mithril-agent shadow select --policy PATH \
+  --candidate /absolute/private/candidate.json \
+  --pointer /absolute/private/selected-candidate \
+  --lifecycle-lock /absolute/private/lifecycle.lock
+mithril-agent shadow run --policy PATH --dir /absolute/private/runs \
+  --alert-status /absolute/private/status/champion/alerts.json \
+  --candidate-pointer /absolute/private/selected-candidate
+```
+
+For a fixed policy, selection changes only the searched sell and buy thresholds.
+For an adaptive policy, it may change only the fast/slow windows or raise the
+minimum signal hurdle; starting inventory and every risk/evidence boundary stay fixed. A process with no
+journal for the current UTC day loads it at startup; a mid-day restart resumes
+the one policy already pinned by today's journal. A running process checks the
+pointer after closing the UTC day and before its next observation. The lifecycle lock serializes automated
+challenger publication and paper selection. The pointer binds both the candidate file
+and policy SHA-256, so replacing the selected artifact is refused. Each policy writes beneath its own SHA-256
+directory, so evidence from two candidates cannot be mixed. Missing, malformed,
+permissive, or base-policy-mismatched files stop the observer. The candidate is
+paper-only, not promotable, and carries no signer, submitter, key, or authority.
+The runner stores a private `policy.json` beside that candidate's journals; use
+that exact file and fingerprinted directory with `shadow report` or `shadow review`.
+For the next generation, pass that saved file as `--policy` and the original
+startup policy as `--base-policy`; this keeps every candidate bound to one
+immutable route, size, sources, timing, and fee configuration across iterations.
+
+Run the selected champion and challenger as separate paper observers with
+separate run roots. The manual command below is a retrospective rolling
+comparison only: without a challenger pointer that predates the evidence it
+cannot emit a forward qualification.
+
+```bash
+mithril-agent shadow challenge --policy PATH \
+  --champion-pointer /absolute/private/selected-candidate \
+  --challenger /absolute/private/challenger.json \
+  --champion-dir /absolute/private/champion-run \
+  --challenger-dir /absolute/private/challenger-run \
+  --days 7
+```
+
+The fixed forward paper canary requires zero missed decisions, sufficient complete round
+trips, positive aggregate performance versus holding, a strict majority of
+daily wins, at least ten basis points of capital-days advantage, and no worse
+maximum daily drawdown. A qualified result still has `authorized: false`,
+`promotable: false`, `paper_only: true`, and `pointer_updated: false`. An
+operator may use `shadow select`, or the separately confined `shadow auto-select`
+timer may preserve the old pointer and select the exact qualified artifact for
+the next UTC day. Seven days is an
+operational canary, not statistical proof of a profitable strategy; use a much
+longer precommitted window before drawing a performance conclusion.
+
+The pinned Hermes research profile can automate only challenger preparation:
+
+```bash
+mithril-agent shadow research-mcp --policy /var/lib/mithril-agent-research/policy/policy.json \
+  --journal-dir /var/lib/mithril-agent-research/journals \
+  --candidate-dir /var/lib/mithril-agent-research/challenger/candidates \
+  --challenger-pointer /var/lib/mithril-agent-research/challenger/active.json \
+  --champion-pointer /var/lib/mithril-agent-research/champion/active.json \
+  --champion-dir /var/lib/mithril-agent-research/runs/champion \
+  --challenger-dir /var/lib/mithril-agent-research/runs/challenger \
+  --challenge-days 7
+```
+
+Its input contains cited prose plus yesterday and the day before as a date
+anchor, never paths, policy parameters, keys, or grants. The server derives and
+requires the full eight-day completed window, runs seven chronological
+train/out-of-sample folds, writes a content-addressed paper candidate only when
+that admission gate passes, and updates only the
+dedicated challenger pointer. The pointer binds `selected_at`, the next UTC day
+as `eligible_from`, the fixed challenge duration, and the evaluator version, so
+reports created before selection or a changed gate cannot qualify it.
+Automated status always evaluates the first configured number of complete UTC
+days beginning at `eligible_from`; later days cannot rewrite that decision. A
+pending or qualified challenger is retained. After the fixed cutoff, missing or
+invalid paired evidence becomes a terminal non-qualification rather than
+remaining pending forever, so a later research cycle may rotate safely. If the
+operator or paper-only auto-selector copies the exact
+qualified artifact into the champion tree and selects that copy, the matching
+digest is recognized as paper selection and the next challenger may be prepared without deleting a pointer.
+The paper champion tree and both run trees remain read-only to
+Hermes, and the Telegram platform does not receive this paper write tool.
+
 Once the observer has run for the period the operator chose in advance, verify
-the whole walk-forward rather than selecting favourable days:
+the whole consecutive observation period rather than selecting favourable days:
 
 ```bash
 mithril-agent shadow review --policy PATH --dir PATH --days N

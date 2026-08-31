@@ -1,0 +1,41 @@
+[Unit]
+Description=Select the first Mithril paper champion from completed evidence
+After=time-sync.target mithril-agent-paper-base.service
+ConditionPathExists=/var/lib/mithril-agent-research/policy/policy.json
+ConditionPathExists=!/var/lib/mithril-agent-research/champion/active.json
+
+[Service]
+Type=oneshot
+User=mithril-agent-research
+Group=mithril-agent-research
+UMask=0077
+ExecStart=/opt/mithril-hermes-research/bootstrap-first-champion.sh
+ReadOnlyPaths=/var/lib/mithril-agent-research/policy /var/lib/mithril-agent-research/journals
+ReadWritePaths=/var/lib/mithril-agent-research/champion /var/lib/mithril-agent-research/challenger
+InaccessiblePaths=/proc
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+TasksMax=32
+LimitNOFILE=128

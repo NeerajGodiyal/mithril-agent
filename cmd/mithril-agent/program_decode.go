@@ -9,6 +9,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril-agent/programinterface"
 	"github.com/Overclock-Validator/mithril-agent/rootedindex"
+	solanago "github.com/solana-foundation/solana-go/v2"
 )
 
 const (
@@ -22,6 +23,25 @@ type programDecodedOutput struct {
 	Scope      string              `json:"scope"`
 	Current    bool                `json:"current"`
 	Cursor     *rootedindex.Cursor `json:"cursor,omitempty"`
+	programinterface.DecodedData
+}
+
+type decodedProgramInstruction struct {
+	Signature   string                         `json:"signature"`
+	Cursor      rootedindex.Cursor             `json:"cursor"`
+	Version     rootedindex.TransactionVersion `json:"version"`
+	MessageHash string                         `json:"message_hash"`
+	Location    string                         `json:"location"`
+	OuterIndex  int                            `json:"outer_index"`
+	InnerIndex  *int                           `json:"inner_index,omitempty"`
+	Signed      bool                           `json:"signed"`
+	Accounts    []string                       `json:"accounts"`
+	Succeeded   bool                           `json:"succeeded"`
+	Failure     string                         `json:"failure,omitempty"`
+	Provenance  string                         `json:"provenance"`
+	Finality    string                         `json:"finality"`
+	Scope       string                         `json:"scope"`
+	Current     bool                           `json:"current"`
 	programinterface.DecodedData
 }
 
@@ -143,6 +163,11 @@ func runProgramDecodeInstruction(args []string, output io.Writer) error {
 	sha256 := flags.String("sha256", "", "pinned interface SHA-256")
 	instruction := flags.String("instruction", "", "exact pinned instruction name")
 	dataPath := flags.String("data", "", "raw instruction data file")
+	indexDir := flags.String("index-dir", "", "private rooted activity index directory")
+	signature := flags.String("signature", "", "exact rooted transaction signature")
+	outerIndex := flags.Int("outer-index", -1, "zero-based outer instruction index")
+	innerGroup := flags.Int("inner-group", -1, "zero-based parent outer instruction index for a CPI")
+	innerIndex := flags.Int("inner-index", -1, "zero-based instruction index inside the CPI group")
 	jsonOutput := flags.Bool("json", false, "print JSON")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -155,12 +180,70 @@ func runProgramDecodeInstruction(args []string, output io.Writer) error {
 		return fmt.Errorf("program decode-instruction: %w", err)
 	}
 	if flags.NArg() != 0 || *registry == "" || *program == "" || *sha256 == "" ||
-		*instruction == "" || *dataPath == "" {
-		return errors.New("program decode-instruction requires the registry, program, interface SHA-256, instruction, and data file")
+		*instruction == "" {
+		return errors.New("program decode-instruction requires the registry, program, interface SHA-256, and instruction")
+	}
+	fromFile := *dataPath != "" && *indexDir == "" && *signature == "" &&
+		*outerIndex == -1 && *innerGroup == -1 && *innerIndex == -1
+	fromOuter := *dataPath == "" && *indexDir != "" && *signature != "" &&
+		*outerIndex >= 0 && *innerGroup == -1 && *innerIndex == -1
+	fromInner := *dataPath == "" && *indexDir != "" && *signature != "" &&
+		*outerIndex == -1 && *innerGroup >= 0 && *innerIndex >= 0
+	fromIndex := fromOuter || fromInner
+	if !fromFile && !fromIndex {
+		return errors.New("program decode-instruction requires either --data, a rooted --outer-index, or rooted --inner-group and --inner-index")
 	}
 	report, _, err := programinterface.Load(*registry, *program, *sha256)
 	if err != nil {
 		return err
+	}
+	if fromIndex {
+		transaction, status, err := readExactRootedTransaction(*workspacePath, *indexDir, *signature)
+		if err != nil {
+			return err
+		}
+		var decoded decodedProgramInstruction
+		if fromOuter {
+			decoded, err = decodeRootedProgramInstruction(report, *instruction, transaction, *outerIndex, status.Provenance, status.Finality)
+		} else {
+			decoded, err = decodeRootedProgramInnerInstruction(report, *instruction, transaction, *innerGroup, *innerIndex, status.Provenance, status.Finality)
+		}
+		if err != nil {
+			return err
+		}
+		if *jsonOutput {
+			return json.NewEncoder(output).Encode(decoded)
+		}
+		outcome := "succeeded"
+		if !decoded.Succeeded {
+			outcome = "failed"
+			if decoded.Failure != "" {
+				outcome = fmt.Sprintf("failed: %q", decoded.Failure)
+			}
+		}
+		path := fmt.Sprintf("outer %d", decoded.OuterIndex)
+		if decoded.InnerIndex != nil {
+			path = fmt.Sprintf("CPI group %d, inner %d", decoded.OuterIndex, *decoded.InnerIndex)
+		}
+		if _, err := fmt.Fprintf(output,
+			"Rooted instruction decoded\nProgram: %s\nInterface SHA-256: %s\nTransaction: %s\nVersion: %s\nMessage hash: %s\nOutcome: %s\nRooted cursor: %s\nLocation: %s\nSigned outer message: %t\nProvenance: %s\nFinality: %s\nInstruction: %s\nData SHA-256: %s\nBytes: %d\nAccounts:\n",
+			report.Program, report.SHA256, decoded.Signature, decoded.Version,
+			decoded.MessageHash, outcome, decoded.Cursor, path, decoded.Signed,
+			decoded.Provenance, decoded.Finality, decoded.Name, decoded.SHA256,
+			decoded.Bytes); err != nil {
+			return err
+		}
+		for _, account := range decoded.Accounts {
+			if _, err := fmt.Fprintf(output, "  - %s\n", account); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintln(output, "Arguments:"); err != nil {
+			return err
+		}
+		encoder := json.NewEncoder(output)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(decoded.Value)
 	}
 	data, err := programinterface.ReadInstructionData(*dataPath)
 	if err != nil {
@@ -186,4 +269,93 @@ func runProgramDecodeInstruction(args []string, output io.Writer) error {
 	encoder := json.NewEncoder(output)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(decoded.Value)
+}
+
+func decodeRootedProgramInstruction(
+	report programinterface.Report,
+	name string,
+	transaction rootedindex.TransactionResult,
+	outerIndex int,
+	provenance, finality string,
+) (decodedProgramInstruction, error) {
+	decodedTransaction, err := solanago.TransactionFromBytes(transaction.Transaction)
+	if err != nil {
+		return decodedProgramInstruction{}, errors.New("rooted transaction wire is invalid")
+	}
+	if outerIndex < 0 || outerIndex >= len(decodedTransaction.Message.Instructions) {
+		return decodedProgramInstruction{}, errors.New("rooted outer instruction index is out of range")
+	}
+	instruction := decodedTransaction.Message.Instructions[outerIndex]
+	return decodeRootedCompiledInstruction(
+		report, name, transaction, "outer", outerIndex, nil, true,
+		instruction.ProgramIDIndex, instruction.Accounts, []byte(instruction.Data), provenance, finality,
+	)
+}
+
+func decodeRootedProgramInnerInstruction(
+	report programinterface.Report,
+	name string,
+	transaction rootedindex.TransactionResult,
+	innerGroup, innerIndex int,
+	provenance, finality string,
+) (decodedProgramInstruction, error) {
+	if innerGroup < 0 || innerGroup > 255 || innerIndex < 0 {
+		return decodedProgramInstruction{}, errors.New("rooted inner instruction index is out of range")
+	}
+	for _, group := range transaction.Inner {
+		if int(group.Index) != innerGroup {
+			continue
+		}
+		if innerIndex >= len(group.Instructions) {
+			return decodedProgramInstruction{}, errors.New("rooted inner instruction index is out of range")
+		}
+		instruction := group.Instructions[innerIndex]
+		return decodeRootedCompiledInstruction(
+			report, name, transaction, "inner", innerGroup, &innerIndex, false,
+			instruction.ProgramIDIndex, instruction.Accounts, instruction.Data, provenance, finality,
+		)
+	}
+	return decodedProgramInstruction{}, errors.New("rooted inner instruction group is absent")
+}
+
+func decodeRootedCompiledInstruction(
+	report programinterface.Report,
+	name string,
+	transaction rootedindex.TransactionResult,
+	location string,
+	outerIndex int,
+	innerIndex *int,
+	signed bool,
+	programIDIndex uint16,
+	accountIndexes []uint16,
+	data []byte,
+	provenance, finality string,
+) (decodedProgramInstruction, error) {
+	if int(programIDIndex) >= len(transaction.AccountKeys) ||
+		transaction.AccountKeys[programIDIndex] != report.Program {
+		return decodedProgramInstruction{}, errors.New("rooted instruction does not invoke the pinned program")
+	}
+	accounts := make([]string, len(accountIndexes))
+	for index, accountIndex := range accountIndexes {
+		if int(accountIndex) >= len(transaction.AccountKeys) {
+			return decodedProgramInstruction{}, errors.New("rooted instruction account index is invalid")
+		}
+		accounts[index] = transaction.AccountKeys[accountIndex]
+	}
+	decode := programinterface.DecodeInstruction
+	if innerIndex != nil {
+		decode = programinterface.DecodeCPIInstruction
+	}
+	decoded, err := decode(report, name, data)
+	if err != nil {
+		return decodedProgramInstruction{}, err
+	}
+	return decodedProgramInstruction{
+		Signature: transaction.Signature, Cursor: transaction.Cursor, Version: transaction.Version,
+		MessageHash: transaction.MessageHash, Location: location, OuterIndex: outerIndex,
+		InnerIndex: innerIndex, Signed: signed, Accounts: accounts,
+		Succeeded: transaction.Succeeded, Failure: transaction.Failure,
+		Provenance: provenance, Finality: finality, Scope: "rooted_" + location + "_instruction",
+		DecodedData: decoded,
+	}, nil
 }

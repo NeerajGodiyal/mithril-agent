@@ -1,0 +1,41 @@
+[Unit]
+Description=Mithril qualified paper challenger selector
+After=time-sync.target mithril-agent-paper-champion.service mithril-agent-paper-challenger.service
+ConditionPathExists=/var/lib/mithril-agent-research/champion/active.json
+ConditionPathExists=/var/lib/mithril-agent-research/challenger/active.json
+
+[Service]
+Type=oneshot
+User=mithril-agent-research
+Group=mithril-agent-research
+UMask=0077
+ExecStart=/usr/local/libexec/mithril-agent/mithril-agent shadow auto-select --policy /var/lib/mithril-agent-research/policy/policy.json --champion-pointer /var/lib/mithril-agent-research/champion/active.json --challenger-pointer /var/lib/mithril-agent-research/challenger/active.json --champion-dir /var/lib/mithril-agent-research/runs/champion --challenger-dir /var/lib/mithril-agent-research/runs/challenger --days 7 --rollback-pointer /var/lib/mithril-agent-research/champion/previous.json --lifecycle-lock /var/lib/mithril-agent-research/challenger/lifecycle.lock
+ReadOnlyPaths=/var/lib/mithril-agent-research/policy /var/lib/mithril-agent-research/runs
+ReadWritePaths=/var/lib/mithril-agent-research/champion /var/lib/mithril-agent-research/challenger
+InaccessiblePaths=/proc
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+TasksMax=32
+LimitNOFILE=128

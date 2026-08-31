@@ -31,18 +31,23 @@ func TestRunBuildsReadOnlyTelegramServiceWithoutExposingInputs(t *testing.T) {
 	var output bytes.Buffer
 	err := run(t.Context(), []string{
 		"--status-socket", "/private/operator-status.sock",
+		"--paper-status-socket", "SOL/USDC=/private/paper-status.sock",
 		"--cursor", "/private/telegram-cursor.json",
 	}, &output, func(key string) string { return environment[key] })
 	if err != nil {
 		t.Fatal(err)
 	}
 	if captured.Bot == nil || captured.Cursor == nil || len(captured.Sources) == 0 ||
+		len(captured.PaperSources) != 1 ||
 		captured.Explainer != nil || captured.ExplanationBudget != nil ||
 		len(captured.AllowedChatIDs) != 2 {
 		t.Fatalf("config = %+v", captured)
 	}
+	if labeled, ok := captured.PaperSources[0].(interface{ SourceLabel() string }); !ok || labeled.SourceLabel() != "SOL/USDC" {
+		t.Fatalf("paper source label = %T", captured.PaperSources[0])
+	}
 	text := output.String()
-	if !strings.Contains(text, "read-only, 2 allowed chat(s), explanations off") ||
+	if !strings.Contains(text, "read-only, 2 allowed chat(s), 1 paper source(s), explanations off") ||
 		strings.Contains(text, commandTestToken) || strings.Contains(text, "123") ||
 		strings.Contains(text, "/private/") {
 		t.Fatalf("startup output = %q", text)
@@ -98,6 +103,13 @@ func TestRunRejectsAmbiguousOrUnsafeConfiguration(t *testing.T) {
 	}{
 		{name: "relative status", args: []string{"--status-socket", "status.sock", "--cursor", "/private/cursor.json"}},
 		{name: "same path", args: []string{"--status-socket", "/private/state.sock", "--cursor", "/private/state.sock"}},
+		{name: "paper aliases live", args: []string{"--status-socket", "/private/state.sock", "--paper-status-socket", "/private/state.sock", "--cursor", "/private/cursor.json"}},
+		{name: "paper aliases cursor", args: []string{"--status-socket", "/private/status.sock", "--paper-status-socket", "/private/cursor.json", "--cursor", "/private/cursor.json"}},
+		{name: "cursor aliases action dedup", args: []string{"--status-socket", "/private/status.sock", "--cursor", "/private/announced-actions.json"}},
+		{name: "cursor aliases paper dedup", args: []string{"--status-socket", "/private/status.sock", "--cursor", "/private/announced-paper-events.json"}},
+		{name: "status aliases action dedup", args: []string{"--status-socket", "/private/announced-actions.json", "--cursor", "/private/cursor.json"}},
+		{name: "paper aliases paper dedup", args: []string{"--status-socket", "/private/status.sock", "--paper-status-socket", "/private/announced-paper-events.json", "--cursor", "/private/cursor.json"}},
+		{name: "invalid paper label", args: []string{"--status-socket", "/private/status.sock", "--paper-status-socket", "bad label=/private/paper.sock", "--cursor", "/private/cursor.json"}},
 		{name: "unknown mode", args: []string{"--status-socket", "/private/status.sock", "--cursor", "/private/cursor.json", "--explanations", "other"}},
 		{name: "custom remote", args: []string{"--status-socket", "/private/status.sock", "--cursor", "/private/cursor.json", "--explanations", "local"}, env: map[string]string{
 			openAIKeyEnvironment: "test-api-key", openAIModelEnvironment: "gpt-test",
@@ -111,6 +123,12 @@ func TestRunRejectsAmbiguousOrUnsafeConfiguration(t *testing.T) {
 			dailyExplanationRequestsEnvironment: "1",
 		}},
 		{name: "budget aliases cursor", args: []string{"--status-socket", "/private/status.sock", "--cursor", "/private/cursor.json", "--explanations", "openai", "--explanation-budget", "/private/cursor.json"}, env: map[string]string{
+			openAIKeyEnvironment: "test-api-key", openAIModelEnvironment: "gpt-test",
+		}},
+		{name: "budget aliases action dedup", args: []string{"--status-socket", "/private/status.sock", "--cursor", "/private/cursor.json", "--explanations", "openai", "--explanation-budget", "/private/announced-actions.json"}, env: map[string]string{
+			openAIKeyEnvironment: "test-api-key", openAIModelEnvironment: "gpt-test",
+		}},
+		{name: "budget aliases paper dedup", args: []string{"--status-socket", "/private/status.sock", "--cursor", "/private/cursor.json", "--explanations", "openai", "--explanation-budget", "/private/announced-paper-events.json"}, env: map[string]string{
 			openAIKeyEnvironment: "test-api-key", openAIModelEnvironment: "gpt-test",
 		}},
 		{name: "invalid daily limit", args: []string{"--status-socket", "/private/status.sock", "--cursor", "/private/cursor.json", "--explanations", "openai", "--explanation-budget", "/private/budget.json"}, env: map[string]string{

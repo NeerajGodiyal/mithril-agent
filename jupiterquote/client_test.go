@@ -2,12 +2,16 @@ package jupiterquote
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
 	"github.com/Overclock-Validator/mithril-agent/solana"
@@ -21,6 +25,18 @@ const (
 )
 
 func TestQuoteValidatesTheJupiterResponseAgainstTheRequest(t *testing.T) {
+	responseBody := []byte(`{
+          "inputMint":"` + testInputMint + `",
+          "outputMint":"` + testOutputMint + `",
+          "inAmount":"1000000",
+          "outAmount":"150000",
+          "otherAmountThreshold":"149250",
+          "swapMode":"ExactIn",
+          "slippageBps":50,
+          "routePlan":[{"bps":10000}],
+          "blockhashWithMetadata":{"lastValidBlockHeight":123},
+          "swapInstruction":{"programId":"ignored-by-read-only-client"}
+        }`)
 	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.Header.Get("x-api-key") != "test-key" {
 			t.Error("API key was not sent in the required header")
@@ -36,21 +52,10 @@ func TestQuoteValidatesTheJupiterResponseAgainstTheRequest(t *testing.T) {
 				t.Errorf("%s = %q, want %q", name, got, want)
 			}
 		}
-		body := []byte(`{
-          "inputMint":"` + testInputMint + `",
-          "outputMint":"` + testOutputMint + `",
-          "inAmount":"1000000",
-          "outAmount":"150000",
-          "otherAmountThreshold":"149250",
-          "swapMode":"ExactIn",
-          "slippageBps":50,
-          "routePlan":[{"bps":10000}],
-          "swapInstruction":{"programId":"ignored-by-read-only-client"}
-        }`)
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
-			Body:       io.NopCloser(bytes.NewReader(body)),
+			Body:       io.NopCloser(bytes.NewReader(responseBody)),
 			Request:    request,
 		}, nil
 	})}
@@ -66,8 +71,26 @@ func TestQuoteValidatesTheJupiterResponseAgainstTheRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.InputAmount != 1_000_000 || result.EstimatedOutput != 150_000 || result.MinimumOutput != 149_250 {
+	wantHash := sha256.Sum256(responseBody)
+	if result.InputAmount != 1_000_000 || result.EstimatedOutput != 150_000 ||
+		result.MinimumOutput != 149_250 || result.ReceivedAt.IsZero() ||
+		result.ResponseSHA256 != hex.EncodeToString(wantHash[:]) {
 		t.Fatalf("quote = %+v", result)
+	}
+}
+
+func TestRuntimeQuoteProvenanceDoesNotChangePortableJSON(t *testing.T) {
+	encoded, err := json.Marshal(Result{
+		InputAmount: 1, EstimatedOutput: 2, MinimumOutput: 1,
+		ReceivedAt:     time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC),
+		ResponseSHA256: strings.Repeat("a", 64),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("received_at")) ||
+		bytes.Contains(encoded, []byte("response_sha256")) {
+		t.Fatalf("runtime provenance leaked into portable JSON: %s", encoded)
 	}
 }
 

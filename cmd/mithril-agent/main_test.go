@@ -149,6 +149,7 @@ func TestRootHelpPrioritizesSupportedCommands(t *testing.T) {
 		"optional setup is one generated strategy: sell, buy, sweep",
 		"Run these strategy commands as the mithril-agent service identity",
 		"shadow review --policy PATH --dir PATH --days N",
+		"shadow research-mcp --policy PATH --journal-dir PATH",
 		"proposal check --taker ADDR --input-mint ADDR --output-mint ADDR --amount N",
 		"proposal review --request ABSOLUTE_PATH --signer-policy PATH",
 		"proposal approval-create --request ABSOLUTE_PATH --authority-policy PATH --out PATH",
@@ -219,6 +220,16 @@ func TestDemoRepeatedJSONFlagsFollowLastValue(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestShadowHelpListsResearchMCP(t *testing.T) {
+	var output bytes.Buffer
+	if err := run([]string{"shadow", "--help"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "shadow research-mcp --policy PATH") {
+		t.Fatalf("shadow help omits research-mcp: %q", output.String())
 	}
 }
 

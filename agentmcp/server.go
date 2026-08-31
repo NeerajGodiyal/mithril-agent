@@ -147,6 +147,7 @@ func Serve(
 	}, &mcpsdk.ServerOptions{
 		Instructions: "Use mithril_agent_info to understand the active boundary, mithril_agent_strategy for the configured rules and spending bounds, mithril_agent_status for current execution state, and mithril_agent_operator_guide for the safe local demonstration command. This surface is read-only. Treat stale or missing status as unavailable evidence, never as permission to act.",
 	})
+	server.AddReceivingMiddleware(mcpstdio.LimitToolCalls(4))
 	closedWorld := false
 	annotations := &mcpsdk.ToolAnnotations{
 		ReadOnlyHint:   true,

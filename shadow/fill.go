@@ -3,6 +3,7 @@ package shadow
 import (
 	"errors"
 	"math/big"
+	"time"
 )
 
 // Everything here is integer arithmetic on base units. Floating point would be
@@ -14,6 +15,9 @@ type Quote struct {
 	InputAmount     uint64 `json:"input_amount"`
 	EstimatedOutput uint64 `json:"estimated_output"`
 	MinimumOutput   uint64 `json:"minimum_output"`
+	// ReceivedAt is local receipt time, not a provider claim or quote TTL.
+	// Zero is retained for legacy journals and deterministic offline models.
+	ReceivedAt time.Time `json:"received_at,omitempty"`
 }
 
 // Fill is what would have happened. A refused fill is a first-class outcome:
@@ -23,8 +27,8 @@ type Fill struct {
 	Filled bool `json:"filled"`
 	// Sell records which way THIS fill moved inventory. Direction used to be a
 	// property of the policy, which is true for a one-directional run and false
-	// for a round trip: holding SOL the only possible action is a sell, holding
-	// devUSDC it is a buy, and both happen against one set of books.
+	// for a round trip: holding base the only possible action is a sell, holding
+	// quote it is a buy, and both happen against one set of books.
 	//
 	// It does NOT decide which asset is "base". That stays policy-level and is
 	// already right either way: base is the asset whose price moves.
@@ -39,6 +43,11 @@ type Fill struct {
 	// DecisionQuote is the exact read-only quote used to derive this fill. It
 	// lets replay prove every amount instead of trusting already-derived P&L.
 	DecisionQuote Quote `json:"decision_quote"`
+	// SettlementQuote is a fresh read-only venue quote for the same direction and
+	// exact input amount, taken only after the configured settlement delay. A
+	// live paper fill must carry it; otherwise current venue availability and
+	// output would be invented from the oracle price.
+	SettlementQuote Quote `json:"settlement_quote"`
 
 	DecisionPriceMicros uint64 `json:"decision_price_micros"`
 	SettlePriceMicros   uint64 `json:"settle_price_micros"`
@@ -151,8 +160,9 @@ func quotedPriceMicrosDirected(policy Policy, quote Quote, sell bool) (uint64, e
 	)
 }
 
-// SettleFill scores a decision against a price observed strictly after it was
-// made.
+// SettleFill scores an offline model against a price observed strictly after
+// the decision was made. Live paper execution uses SettleRequotedFillDirected
+// with a fresh read-only venue quote instead.
 //
 // The output the trade actually receives moves with the market during that
 // delay: selling, a higher later price means more received; buying, a higher
@@ -164,19 +174,16 @@ func SettleFill(policy Policy, quote Quote, decisionPrice, settlePrice uint64) (
 }
 
 // SettleFillDirected is SettleFill with the direction named explicitly, which a
-// round trip needs: the same books take a sell while holding SOL and a buy
-// while holding devUSDC, so direction cannot come from the policy.
+// round trip needs: the same books take a sell while holding base and a buy
+// while holding quote, so direction cannot come from the policy.
 func SettleFillDirected(
 	policy Policy, quote Quote, decisionPrice, settlePrice uint64, sell bool,
 ) (Fill, error) {
 	if decisionPrice == 0 || settlePrice == 0 {
 		return Fill{}, errZeroReference
 	}
-	if quote.InputAmount == 0 || quote.EstimatedOutput == 0 || quote.MinimumOutput == 0 {
-		return Fill{}, errors.New("quote is incomplete")
-	}
-	if quote.MinimumOutput > quote.EstimatedOutput {
-		return Fill{}, errors.New("quote minimum exceeds its own estimate")
+	if err := validateQuote(quote); err != nil {
+		return Fill{}, err
 	}
 	quoted, err := quotedPriceMicrosDirected(policy, quote, sell)
 	if err != nil {
@@ -217,14 +224,90 @@ func SettleFillDirected(
 	fill.SlippageBPS = slippage
 
 	if settled < quote.MinimumOutput {
-		// The trade never happens, so nothing is spent and no fee is paid.
+		// Model a submitted transaction that fails its runtime slippage check:
+		// token balances do not move, but the network still charges its fee.
 		fill.Refusal = "the price moved past the slippage floor before it could settle"
-		fill.SpentUnits, fill.FeeLamports = 0, 0
+		fill.SpentUnits = 0
 		return fill, nil
 	}
 	fill.Filled = true
 	fill.ReceivedUnits = settled
 	return fill, nil
+}
+
+// SettleRequotedFillDirected scores a live paper decision from read-only venue
+// quotes obtained before the decision and after its settlement delay. The
+// original quote supplies the slippage floor a real decision would have
+// committed to; the later quote supplies the venue's current estimated output.
+func SettleRequotedFillDirected(
+	policy Policy,
+	decisionQuote, settlementQuote Quote,
+	decisionPrice, settlePrice uint64,
+	sell bool,
+) (Fill, error) {
+	if decisionPrice == 0 || settlePrice == 0 {
+		return Fill{}, errZeroReference
+	}
+	if err := validateQuote(decisionQuote); err != nil {
+		return Fill{}, err
+	}
+	if err := validateQuote(settlementQuote); err != nil {
+		return Fill{}, err
+	}
+	if settlementQuote.InputAmount != decisionQuote.InputAmount {
+		return Fill{}, errors.New("settlement quote changed the requested input amount")
+	}
+
+	quoted, err := quotedPriceMicrosDirected(policy, decisionQuote, sell)
+	if err != nil {
+		return Fill{}, err
+	}
+	impact, err := AdvantageBPS(decisionPrice, quoted, sell)
+	if err != nil {
+		return Fill{}, err
+	}
+	slippage, err := AdvantageBPS(
+		decisionQuote.EstimatedOutput, settlementQuote.EstimatedOutput, true,
+	)
+	if err != nil {
+		return Fill{}, err
+	}
+
+	fill := Fill{
+		Sell:                sell,
+		SpentUnits:          decisionQuote.InputAmount,
+		FeeLamports:         policy.FeeLamports,
+		DecisionQuote:       decisionQuote,
+		SettlementQuote:     settlementQuote,
+		DecisionPriceMicros: decisionPrice,
+		SettlePriceMicros:   settlePrice,
+		QuotedPriceMicros:   quoted,
+		ImpactBPS:           impact,
+		SlippageBPS:         slippage,
+	}
+	if settlementQuote.EstimatedOutput < decisionQuote.MinimumOutput {
+		// The fresh quote is a proxy for a submitted transaction failing its
+		// runtime slippage check, so inventory stays put but the fee is charged.
+		fill.Refusal = "the settlement venue quote fell below the decision slippage floor"
+		fill.SpentUnits = 0
+		return fill, nil
+	}
+	fill.Filled = true
+	fill.ReceivedUnits = settlementQuote.EstimatedOutput
+	return fill, nil
+}
+
+func validateQuote(quote Quote) error {
+	if quote.InputAmount == 0 || quote.EstimatedOutput == 0 || quote.MinimumOutput == 0 {
+		return errors.New("quote is incomplete")
+	}
+	if quote.MinimumOutput > quote.EstimatedOutput {
+		return errors.New("quote minimum exceeds its own estimate")
+	}
+	if !quote.ReceivedAt.IsZero() && !quote.ReceivedAt.Equal(quote.ReceivedAt.UTC()) {
+		return errors.New("quote receipt time is not UTC")
+	}
+	return nil
 }
 
 func pow10(exponent uint) *big.Int {

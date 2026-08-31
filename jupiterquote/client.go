@@ -4,7 +4,9 @@ package jupiterquote
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -39,9 +41,11 @@ type Request struct {
 }
 
 type Result struct {
-	InputAmount     uint64 `json:"input_amount"`
-	EstimatedOutput uint64 `json:"estimated_output"`
-	MinimumOutput   uint64 `json:"minimum_output"`
+	InputAmount     uint64    `json:"input_amount"`
+	EstimatedOutput uint64    `json:"estimated_output"`
+	MinimumOutput   uint64    `json:"minimum_output"`
+	ReceivedAt      time.Time `json:"-"`
+	ResponseSHA256  string    `json:"-"`
 }
 
 // Validate requires the quote values to be the exact deterministic result of
@@ -161,7 +165,11 @@ func (c *Client) Quote(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	return decodeResult(data, request)
+	result, err := decodeResult(data, request)
+	if err != nil {
+		return Result{}, err
+	}
+	return stampResult(result, data), nil
 }
 
 // Build fetches and bounds a Jupiter transaction proposal without compiling,
@@ -171,7 +179,12 @@ func (c *Client) Build(ctx context.Context, request Request) (BuildResult, error
 	if err != nil {
 		return BuildResult{}, err
 	}
-	return decodeBuildResult(data, request)
+	result, err := decodeBuildResult(data, request)
+	if err != nil {
+		return BuildResult{}, err
+	}
+	result.Quote = stampResult(result.Quote, data)
+	return result, nil
 }
 
 func (c *Client) fetch(ctx context.Context, request Request) ([]byte, error) {
@@ -317,6 +330,13 @@ func decodeResult(data []byte, request Request) (Result, error) {
 		return Result{}, err
 	}
 	return result, nil
+}
+
+func stampResult(result Result, data []byte) Result {
+	hash := sha256.Sum256(data)
+	result.ReceivedAt = time.Now().UTC()
+	result.ResponseSHA256 = hex.EncodeToString(hash[:])
+	return result
 }
 
 func decodeBuildResult(data []byte, request Request) (BuildResult, error) {

@@ -64,8 +64,16 @@ order.
   slot is never silently promoted into a rooted claim.
 - Rooted transactions, logs, CPI, return data, and slot boundaries can be
   persisted and queried by exact signature, mentioned address, or cursor.
+- Signed outer instructions can be decoded from one exact rooted transaction,
+  including transaction-v1 payloads, outcome, cursor, message hash,
+  provenance, and finality. Static account addresses, lookup descriptors, and
+  instruction indices are signed; v0 lookup-loaded addresses are separately
+  preserved as rooted replay evidence and are not bytes in the signed message.
+- Recorded inner instructions can be decoded as rooted runtime evidence and
+  are explicitly marked as not part of the signed outer message.
 - Pinned program events can be decoded from one exact rooted transaction
-  without an explorer, external RPC, or signing key.
+  without an explorer, external RPC, or signing key; failed transactions are
+  rejected because their logs describe reverted execution.
 - Hash-chained journals and Prometheus metrics preserve operational evidence
   and make failures visible.
 - Mainnet shadow mode records hypothetical decisions for evaluation; it holds
@@ -157,24 +165,16 @@ The project is split on purpose.
 
 Repository: <https://github.com/NeerajGodiyal/mithril>
 
-The node prerequisites are being reviewed as focused branches:
+The node prerequisites are reviewed as focused branches. Their current complete
+dependency order is maintained in [ROADMAP.md](ROADMAP.md#node-prerequisites).
+The old all-in-one integration branch remains comparison material and should
+not be merged or used for a new deployment.
 
-- [`feature/mcp`](https://github.com/NeerajGodiyal/mithril/tree/feature/mcp) —
-  read-only MCP monitoring, diagnostics, and local or SSH stdio setup;
-- [`koro/rpc`](https://github.com/NeerajGodiyal/mithril/tree/koro/rpc) — the
-  transaction and verification RPC support used by the agent; and
-- [`koro/node-monitoring`](https://github.com/NeerajGodiyal/mithril/tree/koro/node-monitoring) —
-  node monitoring, alerts, and notifier support.
-
-Land them in order, then add the focused replay/rooting and rooted-feed work.
-The old `koro/agent-node-integration-wip` branch is useful for comparison and
-test extraction, but should not be merged or used for a new deployment.
-
-The Alpenglow rooted-event feed and the corresponding walletless program and
-index commands are newer than that published trading-pilot revision. Until a
-matched revision is authorized and published, they must be reviewed from the
-operator-supplied source bundle; cloning the older integration branch does not
-provide them.
+Mithril Agent v0.1.0 published the agent-side walletless program and index
+commands. The matching public-node producer and later Solana-v1 consumer work
+remain separately reviewed focused revisions. Until a matched set is authorized
+and published, verify the operator-supplied revisions and cross-repository
+contract together; an older integration branch is not a substitute.
 
 ### 2. Mithril Agent
 
@@ -190,18 +190,19 @@ local stdio MCP surfaces expose the workspace-pinned program workflow and
 metadata-only index queries under the operator's OS identity and
 private-directory permissions; concurrent network serving is not implemented.
 
-Agent frameworks are replaceable clients. Codex, Claude, Hermes, OpenClaw, or
-another MCP-capable client can use the same read-only surfaces; none needs to
-be built into the signer.
+Agent frameworks are replaceable clients. The program, index, and status MCP
+surfaces are read-only. The dedicated research MCP may write only an immutable
+paper challenger and its pointer; none of these surfaces belongs in the signer.
 
 ## What this does not claim yet
 
 - No Mainnet signing or autonomous Mainnet execution is enabled.
-- Solana v1 transactions are not decoded or signed; supported execution stays
-  on the existing bounded legacy and v0 paths.
+- Rooted Solana v1 transactions are decoded and identity-checked for the local
+  index. They are not signed or executed; supported execution stays on the
+  existing bounded legacy and v0 paths.
 - The demonstrated live route is one fixed Devnet SOL/devUSDC route, not an
   arbitrary-token trading system.
-- Telegram and MCP cannot approve or initiate trades.
+- Telegram and MCP cannot approve, sign, submit, or initiate real trades.
 - An LLM cannot bypass policy or directly access the signing key.
 - A newly generated supervised service isolates the submitter key, policy, and
   writable activation state behind a narrow runtime socket. A root-owned `0600`

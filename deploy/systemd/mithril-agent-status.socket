@@ -3,7 +3,7 @@ Description=Mithril bounded operator status socket
 
 [Socket]
 ListenStream=/run/mithril-agent-status.sock
-SocketUser=mithril-agent
+SocketUser=root
 SocketGroup=mithril-agent-status
 SocketMode=0660
 FileDescriptorName=operator-status

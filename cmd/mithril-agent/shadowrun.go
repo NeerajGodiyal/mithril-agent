@@ -11,11 +11,15 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
 	"github.com/Overclock-Validator/mithril-agent/jupiterquote"
+	"github.com/Overclock-Validator/mithril-agent/marketadmission"
+	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 	"github.com/Overclock-Validator/mithril-agent/pricesource"
+	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 	"github.com/Overclock-Validator/mithril-agent/swapbuilder"
 )
@@ -24,11 +28,10 @@ import (
 // package has no signer, no submitter, and no way to name a key. This command
 // wires it to real data and nothing else.
 //
-// Each UTC day is an independent trial. The books open at the day's first
-// observed price and close with that day's report, so one lucky day cannot be
-// carried into the next and every period is scored out of sample against a hold
-// benchmark that opened at the same moment. That is what makes a run of daily
-// reports a walk-forward rather than a backtest.
+// Each UTC day is a reset-daily operational canary. The books open at the
+// day's first observed price and close with that day's report, so gains are not
+// compounded across days. Each report compares the rule with holding from the
+// same opening mark; separate days are not independent statistical trials.
 const shadowRunUsage = `Usage: mithril-agent shadow run --policy PATH --dir PATH [options]
 
 Watches a live market and records what the rule would have done. Nothing is
@@ -36,6 +39,14 @@ signed and nothing is submitted; no wallet signing key is loaded at any point.
 
   --policy PATH         shadow policy JSON
   --dir PATH            directory for the daily journals and reports
+  --candidate-pointer PATH
+                        selected paper candidate; checked only at startup and
+                        UTC-day boundaries
+  --admission-artifact PATH
+                        qualified market evidence required by WIF/USDC policies
+  --admission-journal PATH
+                        exact journal bound by that artifact
+  --alert-status PATH   private bounded paper-event snapshot for Telegram
   --quote-provider NAME optional compatibility check; must match the policy
   --node-command PATH   Node.js runtime for the read-only quote adapter
   --quote-script PATH   read-only quote adapter
@@ -51,7 +62,10 @@ to the journal:
                                  loopback IP so it can read your own node
   MITHRIL_AGENT_QUOTE_RPC_URL    the Orca quote adapter; https only
   MITHRIL_AGENT_JUPITER_API_KEY  optional for tests; Jupiter recommends an API
-                                 key for continuous production use`
+                                 key for continuous production use
+  MITHRIL_AGENT_KRAKEN_RATE_STATE
+                                 private host-shared request gate for multiple
+                                 supervised paper observers`
 
 const (
 	shadowEndpointEnvironment = "MITHRIL_AGENT_SHADOW_RPC_URL"
@@ -61,15 +75,19 @@ const (
 )
 
 type shadowRunOptions struct {
-	policyPath  string
-	directory   string
-	quoteSource string
-	nodeCommand string
-	quoteScript string
-	pool        string
-	inputMint   string
-	outputMint  string
-	once        bool
+	policyPath        string
+	directory         string
+	candidatePointer  string
+	admissionArtifact string
+	admissionJournal  string
+	alertStatus       string
+	quoteSource       string
+	nodeCommand       string
+	quoteScript       string
+	pool              string
+	inputMint         string
+	outputMint        string
+	once              bool
 }
 
 func runShadowRun(ctx context.Context, args []string, output io.Writer) error {
@@ -78,6 +96,10 @@ func runShadowRun(ctx context.Context, args []string, output io.Writer) error {
 	options := shadowRunOptions{}
 	flags.StringVar(&options.policyPath, "policy", "", "shadow policy JSON")
 	flags.StringVar(&options.directory, "dir", "", "journal and report directory")
+	flags.StringVar(&options.candidatePointer, "candidate-pointer", "", "selected paper candidate")
+	flags.StringVar(&options.admissionArtifact, "admission-artifact", "", "qualified market evidence")
+	flags.StringVar(&options.admissionJournal, "admission-journal", "", "market evidence journal")
+	flags.StringVar(&options.alertStatus, "alert-status", "", "private paper-event snapshot")
 	flags.StringVar(&options.quoteSource, "quote-provider", "", "must match policy when set")
 	flags.StringVar(&options.nodeCommand, "node-command", "", "Node.js runtime")
 	flags.StringVar(&options.quoteScript, "quote-script", "", "read-only quote adapter")
@@ -95,7 +117,7 @@ func runShadowRun(ctx context.Context, args []string, output io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New("shadow run takes no positional arguments")
 	}
-	policy, err := loadShadowPolicy(options.policyPath)
+	policy, err := loadActiveShadowPolicy(options.policyPath)
 	if err != nil {
 		return err
 	}
@@ -103,7 +125,7 @@ func runShadowRun(ctx context.Context, args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer run.roll.Close()
+	defer func() { _ = run.roll.Close() }()
 	return run.drive(ctx, options.once, output)
 }
 
@@ -130,55 +152,181 @@ func loadShadowPolicy(path string) (shadow.Policy, error) {
 	return policy, nil
 }
 
+func loadActiveShadowPolicy(path string) (shadow.Policy, error) {
+	policy, err := loadShadowPolicy(path)
+	if err != nil {
+		return shadow.Policy{}, err
+	}
+	if err := validateActiveShadowPolicy(policy); err != nil {
+		return shadow.Policy{}, err
+	}
+	return policy, nil
+}
+
+func validateActiveShadowPolicy(policy shadow.Policy) error {
+	if policy.Trigger.SecondarySourceSHA256 == pricesource.CoinbaseIdentitySHA256() ||
+		policy.ReturnTrigger != nil &&
+			policy.ReturnTrigger.SecondarySourceSHA256 == pricesource.CoinbaseIdentitySHA256() {
+		return errors.New("legacy Coinbase-bound shadow policy is unsupported for active use; regenerate the policy with the current market sources")
+	}
+	return nil
+}
+
 // shadowRun holds the wiring for the whole run. A day boundary rebuilds the
 // runner from exactly these dependencies, so crossing midnight cannot silently
 // change what is being read or where it is recorded.
 type shadowRun struct {
-	policy         shadow.Policy
-	primary        shadow.PriceReader
-	secondary      shadow.PriceReader
-	quotePrimary   shadow.PriceReader
-	quoteSecondary shadow.PriceReader
-	quoter         shadow.Quoter
-	roll           *dailyJournal
-	runner         *shadow.Runner
+	basePolicy        shadow.Policy
+	policy            shadow.Policy
+	journalRoot       string
+	candidatePointer  string
+	policySHA256      string
+	primary           shadow.PriceReader
+	secondary         shadow.PriceReader
+	quotePrimary      shadow.PriceReader
+	quoteSecondary    shadow.PriceReader
+	nativePrimary     shadow.PriceReader
+	nativeSecondary   shadow.PriceReader
+	quoter            shadow.Quoter
+	roll              *dailyJournal
+	runner            *shadow.Runner
+	alerts            *paperstatus.Writer
+	reconcilingAlerts bool
+	// activationSequence counts durable period-close records in today's
+	// journal. A crash restart reuses the same sequence and stays deduplicated;
+	// a restart after a clean stop announces that the strategy resumed.
+	activationSequence uint64
 	// lastPrice is the most recent price actually observed. The report closes
 	// on it rather than on a cost basis, which would not be a market price.
-	lastPrice uint64
+	lastPrice              uint64
+	consecutiveUnavailable uint8
+	dataUnavailable        bool
+	admissionThrough       time.Time
 }
 
 func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, error) {
+	now := time.Now().UTC()
+	basePolicy := policy
+	policyFingerprint, err := policy.Fingerprint()
+	if err != nil {
+		return nil, err
+	}
+	if options.candidatePointer != "" {
+		candidate, _, err := loadSelectedShadowCandidate(options.candidatePointer, policy)
+		if err != nil {
+			return nil, err
+		}
+		policy, policyFingerprint = candidate.Policy, candidate.CandidatePolicySHA256
+		policy, policyFingerprint, err = resolveStartupShadowPolicy(
+			basePolicy, policy, policyFingerprint, options.directory, now,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := validateActiveShadowPolicy(policy); err != nil {
+		return nil, err
+	}
+	var admission *marketadmission.Artifact
+	if policy.Version == shadow.AdmittedVersion {
+		artifact, err := loadQualifiedMarketAdmission(
+			options.admissionArtifact, options.admissionJournal, now,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if !admittedPolicyMatchesArtifact(policy, artifact) {
+			return nil, errors.New("market admission evidence does not match the active policy")
+		}
+		admission = &artifact
+	} else if options.admissionArtifact != "" || options.admissionJournal != "" {
+		return nil, errors.New("market admission flags require an admitted WIF/USDC policy")
+	}
 	endpoint := os.Getenv(shadowEndpointEnvironment)
 	if err := validateShadowEndpoint(endpoint); err != nil {
 		return nil, err
 	}
-	primary, err := pricesource.NewPythPush(publicAccountReader(endpoint), time.Now)
+	reader := publicAccountReader(endpoint)
+	var primary shadow.PriceReader
+	var secondary shadow.PriceReader
+	if admission != nil {
+		primary, err = pricesource.NewPythPushFromSpec(
+			reader, time.Now, admission.Candidate.Pyth,
+		)
+		if err != nil {
+			return nil, err
+		}
+		secondary, err = pricesource.NewKrakenFromSpec(nil, admission.Candidate.Kraken)
+	} else if policy.Market == shadow.MarketJUPUSDC {
+		primary, err = pricesource.NewPythPushJUP(reader, time.Now)
+		secondary = pricesource.NewKrakenJUP(nil)
+	} else {
+		primary, err = pricesource.NewPythPush(reader, time.Now)
+		secondary = pricesource.NewKrakenSOL(nil)
+	}
 	if err != nil {
 		return nil, err
 	}
 	var quotePrimary shadow.PriceReader
 	var quoteSecondary shadow.PriceReader
 	if policy.QuotePeg != nil {
-		quotePrimary, err = pricesource.NewPythPushUSDC(publicAccountReader(endpoint), time.Now)
+		quotePrimary, err = pricesource.NewPythPushUSDC(reader, time.Now)
 		if err != nil {
 			return nil, err
 		}
 		quoteSecondary = pricesource.NewKraken(nil)
 	}
+	var nativePrimary shadow.PriceReader
+	var nativeSecondary shadow.PriceReader
+	if policy.NativeFeePrice != nil {
+		nativePrimary, err = pricesource.NewPythPush(reader, time.Now)
+		if err != nil {
+			return nil, err
+		}
+		nativeSecondary = pricesource.NewKrakenSOL(nil)
+	}
 	quoter, err := newShadowQuoter(policy, options)
 	if err != nil {
 		return nil, err
 	}
-	roll, err := newDailyJournal(options.directory)
+	var alerts *paperstatus.Writer
+	if options.alertStatus != "" {
+		alerts, err = paperstatus.OpenWriter(options.alertStatus)
+		if err != nil {
+			return nil, err
+		}
+	}
+	journalDirectory := options.directory
+	if options.candidatePointer != "" {
+		journalDirectory = filepath.Join(options.directory, policyFingerprint)
+	}
+	roll, err := newDailyJournal(journalDirectory)
 	if err != nil {
 		return nil, err
 	}
-	run := &shadowRun{
-		policy: policy, primary: primary, secondary: pricesource.NewCoinbase(nil),
-		quotePrimary: quotePrimary, quoteSecondary: quoteSecondary,
-		quoter: quoter, roll: roll,
+	if options.candidatePointer != "" {
+		if err := ensureShadowPolicySnapshot(journalDirectory, policy); err != nil {
+			roll.Close()
+			return nil, err
+		}
 	}
-	if err := roll.openFor(time.Now().UTC()); err != nil {
+	run := &shadowRun{
+		basePolicy: basePolicy, policy: policy, journalRoot: options.directory,
+		candidatePointer: options.candidatePointer,
+		policySHA256:     policyFingerprint,
+		primary:          primary, secondary: secondary,
+		quotePrimary: quotePrimary, quoteSecondary: quoteSecondary,
+		nativePrimary: nativePrimary, nativeSecondary: nativeSecondary,
+		quoter: quoter, roll: roll, alerts: alerts,
+	}
+	if admission != nil {
+		run.admissionThrough = admission.Through
+	}
+	if err := run.reconcileMissingShadowReports(); err != nil {
+		roll.Close()
+		return nil, err
+	}
+	if err := roll.openFor(now); err != nil {
 		roll.Close()
 		return nil, err
 	}
@@ -186,23 +334,121 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 	if len(records) == 0 {
 		run.runner, err = run.newRunner()
 	} else {
-		var ticks []shadow.Tick
-		ticks, err = shadowTicksFrom(records, policy, true)
-		if err == nil {
-			run.runner, err = shadow.ResumeRunner(
-				policy, run.primary, run.secondary, run.quoter, run.roll, ticks,
-				run.quoteReaders()...,
-			)
-		}
-		for index := len(ticks) - 1; index >= 0 && run.lastPrice == 0; index-- {
-			run.lastPrice = ticks[index].PriceMicros
-		}
+		run.runner, run.lastPrice, err = run.resumeRunner(policy, roll)
 	}
 	if err != nil {
 		roll.Close()
 		return nil, err
 	}
+	if len(records) != 0 {
+		ticks, decodeErr := shadowTicksFrom(records, policy, true)
+		if decodeErr != nil {
+			roll.Close()
+			return nil, decodeErr
+		}
+		if err := run.reconcileAlertTicks(ticks); err != nil {
+			roll.Close()
+			return nil, err
+		}
+		run.activationSequence = periodCloseCount(ticks)
+	}
+	if err := run.reconcileStoredShadowReports(); err != nil {
+		roll.Close()
+		return nil, err
+	}
+	if err := run.alertStrategy(now, paperstatus.KindStrategyActive); err != nil {
+		roll.Close()
+		return nil, err
+	}
 	return run, nil
+}
+
+func admittedPolicyMatchesArtifact(policy shadow.Policy, artifact marketadmission.Artifact) bool {
+	primary, primaryErr := artifact.Candidate.Pyth.IdentitySHA256()
+	secondary, secondaryErr := artifact.Candidate.Kraken.IdentitySHA256()
+	limits := artifact.Thresholds
+	if primaryErr != nil || secondaryErr != nil || policy.Adaptive == nil ||
+		policy.ReturnTrigger == nil || policy.NativeFeePrice == nil || policy.QuotePeg == nil ||
+		artifact.Candidate.Market != policy.Market ||
+		artifact.ContentSHA256 != policy.MarketEvidenceSHA256 ||
+		artifact.Observe != policy.Observe ||
+		artifact.Candidate.Pyth.Feed != policy.Trigger.Feed ||
+		primary != policy.Trigger.PrimarySourceSHA256 ||
+		secondary != policy.Trigger.SecondarySourceSHA256 ||
+		artifact.Candidate.QuoteMint != policy.QuoteRoute.InputMint ||
+		artifact.Candidate.BaseMint != policy.QuoteRoute.OutputMint ||
+		artifact.Candidate.QuoteNotionalUSDC != policy.InputAmount ||
+		artifact.Candidate.QuoteSlippageBPS != policy.SlippageBPS ||
+		policy.Adaptive.MaxQuoteImpactBPS > limits.MaximumQuoteImpactBPS {
+		return false
+	}
+	return triggerWithinAdmission(policy.Trigger, limits) &&
+		triggerWithinAdmission(*policy.ReturnTrigger, limits) &&
+		triggerWithinAdmission(*policy.NativeFeePrice, limits) &&
+		bandWithinAdmission(*policy.QuotePeg, limits)
+}
+
+func triggerWithinAdmission(
+	policy pricetrigger.Policy,
+	limits marketadmission.Thresholds,
+) bool {
+	return policy.MaxAgeSeconds <= uint64(limits.MaximumSourceAgeSeconds) &&
+		policy.MaxSourceSkewSeconds <= uint64(limits.MaximumSourceSkewSeconds) &&
+		policy.MaxDeviationBPS <= limits.MaximumSourceDeviationBPS &&
+		policy.MaxConfidenceBPS <= limits.MaximumConfidenceBPS
+}
+
+func bandWithinAdmission(
+	policy pricetrigger.BandPolicy,
+	limits marketadmission.Thresholds,
+) bool {
+	return policy.MaxAgeSeconds <= uint64(limits.MaximumSourceAgeSeconds) &&
+		policy.MaxSourceSkewSeconds <= uint64(limits.MaximumSourceSkewSeconds) &&
+		policy.MaxDeviationBPS <= limits.MaximumSourceDeviationBPS &&
+		policy.MaxConfidenceBPS <= limits.MaximumConfidenceBPS
+}
+
+// resolveStartupShadowPolicy keeps a mid-day restart on the policy already
+// pinned by today's journal. A new pointer becomes active only when no candidate
+// has begun the current UTC day, matching the running process's boundary rule.
+func resolveStartupShadowPolicy(
+	base, selected shadow.Policy,
+	selectedSHA256, root string,
+	now time.Time,
+) (shadow.Policy, string, error) {
+	pattern := filepath.Join(
+		root, strings.Repeat("?", 64), "shadow-"+dayKey(now)+".jsonl",
+	)
+	paths, err := filepath.Glob(pattern)
+	if err != nil {
+		return shadow.Policy{}, "", errors.New("could not inspect current shadow candidate journals")
+	}
+	if len(paths) == 0 {
+		return selected, selectedSHA256, nil
+	}
+	if len(paths) != 1 {
+		return shadow.Policy{}, "", errors.New("multiple shadow candidates already have journals for this UTC day")
+	}
+	journalInfo, err := os.Lstat(paths[0])
+	if err != nil || !journalInfo.Mode().IsRegular() || journalInfo.Mode()&os.ModeSymlink != 0 {
+		return shadow.Policy{}, "", errors.New("current shadow candidate journal is not a regular file")
+	}
+	directory := filepath.Dir(paths[0])
+	if err := validatePrivateDirectory(directory); err != nil {
+		return shadow.Policy{}, "", errors.New("current shadow candidate directory is not private")
+	}
+	stored, err := loadActiveShadowPolicy(filepath.Join(directory, "policy.json"))
+	if err != nil {
+		return shadow.Policy{}, "", errors.New("current shadow candidate policy snapshot is invalid")
+	}
+	if err := validateShadowSearchLineage(base, stored); err != nil {
+		return shadow.Policy{}, "", err
+	}
+	fingerprint, err := stored.Fingerprint()
+	if err != nil || fingerprint != filepath.Base(directory) {
+		return shadow.Policy{}, "", errors.New("current shadow candidate policy does not match its directory")
+	}
+	return stored, fingerprint, nil
 }
 
 // validateShadowEndpoint requires TLS for anything off-box, and permits plain
@@ -244,47 +490,210 @@ func isLoopbackHost(host string) bool {
 }
 
 func (s *shadowRun) newRunner() (*shadow.Runner, error) {
+	return s.newRunnerFor(s.policy, s.roll)
+}
+
+func (s *shadowRun) newRunnerFor(policy shadow.Policy, roll *dailyJournal) (*shadow.Runner, error) {
 	return shadow.NewRunner(
-		s.policy, s.primary, s.secondary, s.quoter, s.roll, s.quoteReaders()...,
+		policy, s.primary, s.secondary, s.quoter, roll, s.quoteReadersFor(policy)...,
 	)
 }
 
-func (s *shadowRun) quoteReaders() []shadow.PriceReader {
-	if s.policy.QuotePeg == nil {
-		return nil
+func (s *shadowRun) quoteReadersFor(policy shadow.Policy) []shadow.PriceReader {
+	var readers []shadow.PriceReader
+	if policy.QuotePeg != nil {
+		readers = append(readers, s.quotePrimary, s.quoteSecondary)
 	}
-	return []shadow.PriceReader{s.quotePrimary, s.quoteSecondary}
+	if policy.NativeFeePrice != nil {
+		readers = append(readers, s.nativePrimary, s.nativeSecondary)
+	}
+	return readers
 }
 
-// drive is the only place that knows about wall-clock time. Every decision is
-// made by Step, which takes the time as an argument, so the same logic a test
-// drives in a millisecond is what runs here for months.
+func (s *shadowRun) resumeRunner(
+	policy shadow.Policy, roll *dailyJournal,
+) (*shadow.Runner, uint64, error) {
+	if len(roll.Records()) == 0 {
+		runner, err := s.newRunnerFor(policy, roll)
+		return runner, 0, err
+	}
+	ticks, err := shadowTicksFrom(roll.Records(), policy, true)
+	if err != nil {
+		return nil, 0, err
+	}
+	runner, err := shadow.ResumeRunner(
+		policy, s.primary, s.secondary, s.quoter, roll, ticks,
+		s.quoteReadersFor(policy)...,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	return runner, lastShadowPrice(ticks), nil
+}
+
+func lastShadowPrice(ticks []shadow.Tick) uint64 {
+	for index := len(ticks) - 1; index >= 0; index-- {
+		if ticks[index].PriceMicros != 0 {
+			return ticks[index].PriceMicros
+		}
+	}
+	return 0
+}
+
+func ensureShadowPolicySnapshot(directory string, policy shadow.Policy) error {
+	path := filepath.Join(directory, "policy.json")
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		encoded, marshalErr := json.MarshalIndent(policy, "", "  ")
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if err := securefile.CreatePrivate(path, append(encoded, '\n'), maxInputBytes); err != nil {
+			return errors.New("could not write the selected shadow policy snapshot")
+		}
+		return nil
+	} else if err != nil {
+		return errors.New("could not inspect the selected shadow policy snapshot")
+	}
+	stored, err := loadShadowPolicy(path)
+	if err != nil {
+		return errors.New("could not verify the selected shadow policy snapshot")
+	}
+	want, err := policy.Fingerprint()
+	if err != nil {
+		return err
+	}
+	got, err := stored.Fingerprint()
+	if err != nil || got != want {
+		return errors.New("selected shadow policy snapshot does not match its directory")
+	}
+	return nil
+}
+
+// refreshSelectedCandidate is called only between complete UTC trials. It
+// refuses an invalid pointer and keeps each policy's evidence in a separate
+// fingerprinted directory, so a dynamic selection cannot rewrite or mix the
+// journal that justified it.
+func (s *shadowRun) refreshSelectedCandidate(now time.Time) error {
+	if s.candidatePointer == "" {
+		return nil
+	}
+	candidate, _, err := loadSelectedShadowCandidate(s.candidatePointer, s.basePolicy)
+	if err != nil {
+		return err
+	}
+	if err := validateActiveShadowPolicy(candidate.Policy); err != nil {
+		return err
+	}
+	if candidate.CandidatePolicySHA256 == s.policySHA256 {
+		return ensureShadowPolicySnapshot(s.roll.directory, candidate.Policy)
+	}
+	roll, err := newDailyJournal(filepath.Join(s.journalRoot, candidate.CandidatePolicySHA256))
+	if err != nil {
+		return err
+	}
+	if err := ensureShadowPolicySnapshot(roll.directory, candidate.Policy); err != nil {
+		roll.Close()
+		return err
+	}
+	if err := roll.openFor(now); err != nil {
+		roll.Close()
+		return err
+	}
+	runner, lastPrice, err := s.resumeRunner(candidate.Policy, roll)
+	if err != nil {
+		roll.Close()
+		return err
+	}
+	if err := s.roll.Close(); err != nil {
+		roll.Close()
+		return err
+	}
+	s.policy, s.policySHA256 = candidate.Policy, candidate.CandidatePolicySHA256
+	s.roll, s.runner, s.lastPrice = roll, runner, lastPrice
+	s.consecutiveUnavailable, s.dataUnavailable = 0, false
+	if len(roll.Records()) != 0 {
+		ticks, err := shadowTicksFrom(roll.Records(), s.policy, true)
+		if err != nil {
+			return err
+		}
+		if err := s.reconcileAlertTicks(ticks); err != nil {
+			return err
+		}
+	}
+	if err := s.reconcileStoredShadowReports(); err != nil {
+		return err
+	}
+	return s.alertStrategy(now, paperstatus.KindStrategyChanged)
+}
+
+func (s *shadowRun) rollDay(now time.Time, output io.Writer) (bool, error) {
+	if !s.roll.RolledOver(now) {
+		return false, nil
+	}
+	from, err := time.Parse("2006-01-02", s.roll.Day())
+	if err != nil {
+		return false, err
+	}
+	periodEnd := from.Add(24 * time.Hour)
+	if err := s.runner.ClosePeriod(periodEnd.Add(-time.Nanosecond), s.lastPrice); err != nil {
+		return false, err
+	}
+	if err := s.finishDayAt(output, periodEnd); err != nil {
+		return false, err
+	}
+	if s.policy.Version == shadow.AdmittedVersion &&
+		!s.admissionThrough.Equal(now.UTC().Truncate(24*time.Hour)) {
+		return false, errors.New("market admission evidence must be refreshed before the next paper day")
+	}
+	previousPolicy := s.policySHA256
+	if err := s.refreshSelectedCandidate(now); err != nil {
+		return false, err
+	}
+	strategyChanged := s.policySHA256 != previousPolicy
+	// A new day resets the operational canary with its own opening mark.
+	if s.roll.Day() != dayKey(now) {
+		if err := s.roll.advanceTo(now); err != nil {
+			return false, err
+		}
+		fresh, err := s.newRunner()
+		if err != nil {
+			return false, err
+		}
+		s.runner, s.lastPrice = fresh, 0
+	}
+	s.activationSequence = 0
+	if !strategyChanged {
+		if err := s.alertStrategy(now, paperstatus.KindStrategyActive); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// drive is the only place that knows about wall-clock time. It reads every
+// source first, then establishes one event time for validation, decisions, and
+// the journal. A UTC rollover discards the old runner's prepared observation
+// before it can mutate or write the new day's evidence.
 func (s *shadowRun) drive(ctx context.Context, once bool, output io.Writer) error {
 	ticker := time.NewTicker(s.policy.Tick())
 	defer ticker.Stop()
 
 	for {
 		now := time.Now().UTC()
-		if s.roll.RolledOver(now) {
-			from, err := time.Parse("2006-01-02", s.roll.Day())
-			if err != nil {
-				return err
-			}
-			periodEnd := from.Add(24 * time.Hour)
-			if err := s.runner.ClosePeriod(periodEnd.Add(-time.Nanosecond), s.lastPrice); err != nil {
-				return err
-			}
-			if err := s.finishDayAt(output, periodEnd); err != nil {
-				return err
-			}
-			// A new day is a new independent trial, with its own opening mark.
-			fresh, err := s.newRunner()
-			if err != nil {
-				return err
-			}
-			s.runner, s.lastPrice = fresh, 0
+		if _, err := s.rollDay(now, output); err != nil {
+			return err
 		}
-		tick, err := s.runner.Step(ctx, now)
+		observation := s.runner.Observe(ctx)
+		now = time.Now().UTC()
+		rolled, err := s.rollDay(now, output)
+		if err != nil {
+			return err
+		}
+		if rolled {
+			continue
+		}
+		nextSell := s.runner.NextSell()
+		tick, err := s.runner.StepObservation(ctx, now, observation)
 		if err != nil {
 			return err
 		}
@@ -294,6 +703,12 @@ func (s *shadowRun) drive(ctx context.Context, once bool, output io.Writer) erro
 		if err := printShadowTick(output, tick); err != nil {
 			return err
 		}
+		if err := s.alertTick(tick, nextSell); err != nil {
+			return err
+		}
+		if err := s.updatePaperCurrent(tick, s.runner.NextSell()); err != nil {
+			return err
+		}
 		if once {
 			return nil
 		}
@@ -301,10 +716,10 @@ func (s *shadowRun) drive(ctx context.Context, once bool, output io.Writer) erro
 		case <-ctx.Done():
 			// A clean stop still produces the day's report, so an interrupted
 			// run is not a silently discarded one.
-			if err := s.runner.ClosePeriod(now, s.lastPrice); err != nil {
+			if err := s.runner.ClosePeriod(tick.At, s.lastPrice); err != nil {
 				return err
 			}
-			return s.finishDayAt(output, now)
+			return s.finishDayAt(output, tick.At)
 		case <-ticker.C:
 		}
 	}
@@ -334,9 +749,7 @@ func (s *shadowRun) finishDay(output io.Writer) error {
 
 func (s *shadowRun) finishDayAt(output io.Writer, periodEnd time.Time) error {
 	day := s.roll.Day()
-	if day == "" || s.lastPrice == 0 {
-		// Nothing was ever observed, so there is nothing to report. Writing a
-		// report full of zeroes would read as a flat, uneventful day.
+	if day == "" {
 		return nil
 	}
 	from, err := time.Parse("2006-01-02", day)
@@ -346,6 +759,11 @@ func (s *shadowRun) finishDayAt(output io.Writer, periodEnd time.Time) error {
 	if !periodEnd.After(from) || periodEnd.After(from.Add(24*time.Hour)) {
 		return errors.New("shadow report end is outside its UTC day")
 	}
+	if s.lastPrice == 0 {
+		// No price means there is no honest P&L report, but silence would leave
+		// Telegram claiming the strategy is still active after a clean stop.
+		return s.alertUnavailableReport(from, periodEnd)
+	}
 	// Derived by replaying the day's whole journal, not from this process's
 	// counters. A runner that restarted mid-day would otherwise report only
 	// its own share of the day, and the stored report would not match the
@@ -354,20 +772,9 @@ func (s *shadowRun) finishDayAt(output io.Writer, periodEnd time.Time) error {
 	if err != nil {
 		return err
 	}
-	replayed, err := shadow.Replay(s.policy, ticks)
-	if err != nil {
-		return err
-	}
-	recordedEnd, err := shadowReportEnd(from, replayed.PeriodEnd)
-	if err != nil || !recordedEnd.Equal(periodEnd) {
+	report, err := buildShadowReport(s.policy, day, ticks)
+	if err != nil || !report.To.Equal(periodEnd) {
 		return errors.New("shadow journal does not contain the report period end")
-	}
-	report, err := shadow.BuildReport(
-		s.policy, replayed.Ledger, replayed.Counts, replayed.Stats,
-		replayed.ClosingPrice, from, recordedEnd,
-	)
-	if err != nil {
-		return err
 	}
 	encoded, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
@@ -377,7 +784,172 @@ func (s *shadowRun) finishDayAt(output io.Writer, periodEnd time.Time) error {
 	if err := securefile.ReplacePrivate(path, append(encoded, '\n'), maxInputBytes); err != nil {
 		return errors.New("could not write the shadow report")
 	}
+	if err := s.alertReport(report); err != nil {
+		return err
+	}
 	return report.Render(output)
+}
+
+func periodCloseCount(ticks []shadow.Tick) uint64 {
+	var count uint64
+	for _, tick := range ticks {
+		if tick.PeriodClose {
+			count++
+		}
+	}
+	return count
+}
+
+// reconcileMissingShadowReports closes the journal-to-report crash window. A
+// period-close record is the durable fact; this rebuilds only a missing
+// derived report and never changes the journal.
+func (s *shadowRun) reconcileMissingShadowReports() error {
+	paths, err := filepath.Glob(filepath.Join(s.roll.directory, "shadow-*.jsonl"))
+	if err != nil {
+		return errors.New("could not list shadow journals")
+	}
+	if len(paths) > paperstatus.MaxEvents {
+		paths = paths[len(paths)-paperstatus.MaxEvents:]
+	}
+	for _, path := range paths {
+		name := filepath.Base(path)
+		day := name[len("shadow-") : len(name)-len(".jsonl")]
+		from, err := time.Parse("2006-01-02", day)
+		if err != nil {
+			return errors.New("shadow journal filename has an invalid UTC day")
+		}
+		reportPath := filepath.Join(s.roll.directory, "report-"+day+".json")
+		if _, err := os.Lstat(reportPath); err == nil {
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return errors.New("could not inspect the shadow report")
+		}
+		ticks, err := readShadowTicks(path, s.policy)
+		if err != nil {
+			return err
+		}
+		if len(ticks) == 0 || !ticks[len(ticks)-1].PeriodClose {
+			continue
+		}
+		if lastShadowPrice(ticks) == 0 {
+			periodEnd, err := shadowReportEnd(from, ticks[len(ticks)-1].At)
+			if err != nil {
+				return err
+			}
+			previous := s.reconcilingAlerts
+			s.reconcilingAlerts = true
+			alertErr := s.alertUnavailableReport(from, periodEnd)
+			s.reconcilingAlerts = previous
+			if alertErr != nil {
+				return alertErr
+			}
+			continue
+		}
+		report, err := buildShadowReport(s.policy, day, ticks)
+		if err != nil {
+			return err
+		}
+		encoded, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := securefile.CreatePrivate(reportPath, append(encoded, '\n'), maxInputBytes); err != nil {
+			return errors.New("could not recover the shadow report")
+		}
+		previous := s.reconcilingAlerts
+		s.reconcilingAlerts = true
+		alertErr := s.alertReport(report)
+		s.reconcilingAlerts = previous
+		if alertErr != nil {
+			return alertErr
+		}
+	}
+	return nil
+}
+
+func buildShadowReport(policy shadow.Policy, day string, ticks []shadow.Tick) (shadow.Report, error) {
+	from, err := time.Parse("2006-01-02", day)
+	if err != nil {
+		return shadow.Report{}, err
+	}
+	replayed, err := shadow.Replay(policy, ticks)
+	if err != nil {
+		return shadow.Report{}, err
+	}
+	periodEnd, err := shadowReportEnd(from, replayed.PeriodEnd)
+	if err != nil {
+		return shadow.Report{}, err
+	}
+	return shadow.BuildReport(
+		policy, replayed.Ledger, replayed.Counts, replayed.Stats,
+		replayed.ClosingPrice, from, periodEnd,
+	)
+}
+
+// reconcileStoredShadowReports recovers the second journal-to-alert crash
+// window, including a report written just before a UTC rollover. Only the
+// retained alert capacity is scanned; older periods are already represented by
+// the bounded projection's dropped-event warning.
+func (s *shadowRun) reconcileStoredShadowReports() error {
+	if s.alerts == nil {
+		return nil
+	}
+	paths, err := filepath.Glob(filepath.Join(s.roll.directory, "report-*.json"))
+	if err != nil {
+		return errors.New("could not list stored shadow reports")
+	}
+	if len(paths) > paperstatus.MaxEvents {
+		paths = paths[len(paths)-paperstatus.MaxEvents:]
+	}
+	for _, path := range paths {
+		name := filepath.Base(path)
+		day := name[len("report-") : len(name)-len(".json")]
+		var ticks []shadow.Tick
+		if day == s.roll.Day() {
+			ticks, err = shadowTicksFrom(s.roll.Records(), s.policy, false)
+		} else {
+			ticks, err = readShadowTicks(filepath.Join(s.roll.directory, "shadow-"+day+".jsonl"), s.policy)
+		}
+		if err != nil {
+			return err
+		}
+		if err := s.reconcileStoredShadowReport(path, day, ticks); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reconcileStoredShadowReport derives one stored report from the hash-chained
+// journal prefix that existed at its recorded end. A later restart may have
+// appended more observations to the same day's journal.
+func (s *shadowRun) reconcileStoredShadowReport(path, day string, ticks []shadow.Tick) error {
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return errors.New("could not inspect the stored shadow report")
+	}
+	var stored shadow.Report
+	if err := readStrictJSON(path, &stored); err != nil {
+		return errors.New("the stored shadow report is invalid")
+	}
+	prefix := make([]shadow.Tick, 0, len(ticks))
+	for _, tick := range ticks {
+		if !tick.At.After(stored.To) {
+			prefix = append(prefix, tick)
+		}
+	}
+	recomputed, err := buildShadowReport(s.policy, day, prefix)
+	if err != nil {
+		return errors.New("the stored shadow report has no valid journaled period end")
+	}
+	if len(shadow.Compare(stored, recomputed)) != 0 {
+		return errors.New("the stored shadow report disagrees with the journal")
+	}
+	previous := s.reconcilingAlerts
+	s.reconcilingAlerts = true
+	defer func() { s.reconcilingAlerts = previous }()
+	return s.alertReport(recomputed)
 }
 
 // shadowReportEnd converts the last nanosecond of a UTC day back to the
@@ -491,6 +1063,7 @@ func (q *shadowQuoter) Quote(
 		InputAmount:     result.TokenIn,
 		EstimatedOutput: result.TokenEstOut,
 		MinimumOutput:   result.TokenMinOut,
+		ReceivedAt:      time.Now().UTC(),
 	}, nil
 }
 
@@ -525,5 +1098,6 @@ func (q *jupiterShadowQuoter) Quote(
 		InputAmount:     result.InputAmount,
 		EstimatedOutput: result.EstimatedOutput,
 		MinimumOutput:   result.MinimumOutput,
+		ReceivedAt:      time.Now().UTC(),
 	}, nil
 }

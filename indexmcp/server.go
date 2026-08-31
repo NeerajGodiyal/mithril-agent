@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/internal/mcpstdio"
 	"github.com/Overclock-Validator/mithril-agent/internal/secureexec"
@@ -62,32 +63,45 @@ type transactionResults struct {
 }
 
 type transactionResult struct {
-	Cursor        rootedindex.Cursor `json:"cursor"`
-	Index         uint32             `json:"index"`
-	Signature     string             `json:"signature"`
-	AccountKeys   []string           `json:"account_keys"`
-	Succeeded     bool               `json:"succeeded"`
-	Failure       string             `json:"failure,omitempty"`
-	ComputeUnits  uint64             `json:"compute_units"`
-	LogsTruncated bool               `json:"logs_truncated,omitempty"`
+	Cursor        rootedindex.Cursor             `json:"cursor"`
+	Index         uint32                         `json:"index"`
+	Signature     string                         `json:"signature"`
+	Version       rootedindex.TransactionVersion `json:"version"`
+	MessageHash   string                         `json:"message_hash"`
+	AccountKeys   []string                       `json:"account_keys"`
+	Succeeded     bool                           `json:"succeeded"`
+	Failure       string                         `json:"failure,omitempty"`
+	ComputeUnits  uint64                         `json:"compute_units"`
+	LogsTruncated bool                           `json:"logs_truncated,omitempty"`
 }
 
 // Serve runs one local, read-only MCP server bound to one private index.
 func Serve(ctx context.Context, dir string, input io.ReadCloser, output io.Writer) error {
+	return ServeWithMaxRecordAge(ctx, dir, input, output, 0)
+}
+
+// ServeWithMaxRecordAge runs Serve and, when maxRecordAge is positive,
+// rechecks the verified journal timestamp before startup and every tool call.
+func ServeWithMaxRecordAge(
+	ctx context.Context,
+	dir string,
+	input io.ReadCloser,
+	output io.Writer,
+	maxRecordAge time.Duration,
+) error {
 	if input == nil || output == nil {
 		return errors.New("index MCP stdio is required")
 	}
 	if err := ValidateDirectory(dir); err != nil {
 		return err
 	}
-	status, err := rootedindex.ReadCompleteStatus(dir)
-	if err != nil {
+	if _, err := readStatus(dir, maxRecordAge); err != nil {
 		return err
 	}
 	server := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name: "mithril-rooted-index", Title: "Mithril rooted program index", Version: "0.1.0",
 	}, &mcpsdk.ServerOptions{
-		Instructions: "Read one operator-authorized local Mithril rooted index. Tools are bounded and omit raw account data, messages, logs, CPI, and return data. No tool loads a wallet, signs, submits, or contacts a network.",
+		Instructions: "Read one operator-authorized local Mithril rooted index. Tools are bounded and omit raw account data, signed transactions, logs, CPI, and return data. No tool loads a wallet, signs, submits, or contacts a network.",
 	})
 	server.AddReceivingMiddleware(mcpstdio.LimitToolCalls(4))
 	closedWorld := false
@@ -99,7 +113,7 @@ func Serve(ctx context.Context, dir string, input io.ReadCloser, output io.Write
 		Description: "Verify the local index chain and return its filter, counts, last rooted cursor, and chain-head hash.",
 		Annotations: annotations,
 	}, func(context.Context, *mcpsdk.CallToolRequest, noInput) (*mcpsdk.CallToolResult, rootedindex.Status, error) {
-		status, err := rootedindex.ReadCompleteStatus(dir)
+		status, err := readStatus(dir, maxRecordAge)
 		return nil, status, err
 	})
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
@@ -107,6 +121,10 @@ func Serve(ctx context.Context, dir string, input io.ReadCloser, output io.Write
 		Description: "Query bounded rooted account metadata. Without after it is newest-first; with after it is oldest-unseen-first and returns next_after for lossless burst paging. Raw account bytes are never returned.",
 		Annotations: annotations,
 	}, func(_ context.Context, _ *mcpsdk.CallToolRequest, input accountQuery) (*mcpsdk.CallToolResult, accountResults, error) {
+		status, err := readStatus(dir, maxRecordAge)
+		if err != nil {
+			return nil, accountResults{}, err
+		}
 		query, err := buildAccountQuery(input)
 		if err != nil {
 			return nil, accountResults{}, err
@@ -124,9 +142,13 @@ func Serve(ctx context.Context, dir string, input io.ReadCloser, output io.Write
 	})
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name: "mithril_index_transactions", Title: "Rooted Transactions",
-		Description: "Query bounded rooted transaction metadata. Without after it is newest-first; with after it is oldest-unseen-first and returns next_after for lossless burst paging. Messages, logs, CPI, and return data are never returned.",
+		Description: "Query bounded rooted transaction metadata. Without after it is newest-first; with after it is oldest-unseen-first and returns next_after for lossless burst paging. Signed transactions, logs, CPI, and return data are never returned.",
 		Annotations: annotations,
 	}, func(_ context.Context, _ *mcpsdk.CallToolRequest, input transactionQuery) (*mcpsdk.CallToolResult, transactionResults, error) {
+		status, err := readStatus(dir, maxRecordAge)
+		if err != nil {
+			return nil, transactionResults{}, err
+		}
 		query, err := buildTransactionQuery(input)
 		if err != nil {
 			return nil, transactionResults{}, err
@@ -142,7 +164,7 @@ func Serve(ctx context.Context, dir string, input io.ReadCloser, output io.Write
 			Order: order, NextAfter: nextAfter, Results: transactionMetadata(results),
 		}, err
 	})
-	err = server.Run(ctx, &mcpsdk.IOTransport{
+	err := server.Run(ctx, &mcpsdk.IOTransport{
 		Reader: mcpstdio.NewReader(input), Writer: mcpstdio.WriteCloser{Writer: output},
 	})
 	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) ||
@@ -151,6 +173,14 @@ func Serve(ctx context.Context, dir string, input io.ReadCloser, output io.Write
 		return nil
 	}
 	return err
+}
+
+func readStatus(dir string, maxRecordAge time.Duration) (rootedindex.Status, error) {
+	status, err := rootedindex.ReadCompleteStatus(dir)
+	if err != nil || maxRecordAge <= 0 {
+		return status, err
+	}
+	return status, rootedindex.RequireFresh(status, time.Now().UTC(), maxRecordAge)
 }
 
 func indexMCPPage(
@@ -247,6 +277,7 @@ func transactionMetadata(results []rootedindex.TransactionResult) []transactionR
 	for index, result := range results {
 		metadata[index] = transactionResult{
 			Cursor: result.Cursor, Index: result.Index, Signature: result.Signature,
+			Version: result.Version, MessageHash: result.MessageHash,
 			AccountKeys: append([]string(nil), result.AccountKeys...),
 			Succeeded:   result.Succeeded, Failure: result.Failure,
 			ComputeUnits: result.ComputeUnits, LogsTruncated: result.LogsTruncated,

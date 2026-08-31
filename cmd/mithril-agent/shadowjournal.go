@@ -59,6 +59,14 @@ func (d *dailyJournal) RolledOver(at time.Time) bool {
 	return d.day != "" && dayKey(at) != d.day
 }
 
+func (d *dailyJournal) advanceTo(at time.Time) error {
+	if err := d.Close(); err != nil {
+		return err
+	}
+	d.day = dayKey(at)
+	return nil
+}
+
 func (d *dailyJournal) openFor(at time.Time) error {
 	key := dayKey(at)
 	if d.store != nil && key == d.day {
@@ -67,8 +75,13 @@ func (d *dailyJournal) openFor(at time.Time) error {
 	if err := d.Close(); err != nil {
 		return err
 	}
-	store, err := journal.Open(filepath.Join(d.directory, "shadow-"+key+".jsonl"))
+	path := filepath.Join(d.directory, "shadow-"+key+".jsonl")
+	store, err := journal.Open(path)
 	if err != nil {
+		return err
+	}
+	if err := validateShadowJournalDay(path, store.Records()); err != nil {
+		_ = store.Close()
 		return err
 	}
 	d.store, d.day = store, key

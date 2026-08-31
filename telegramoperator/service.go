@@ -4,10 +4,13 @@ package telegramoperator
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log"
 	"math"
+	"math/bits"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +22,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/agent"
 	"github.com/Overclock-Validator/mithril-agent/internal/operatorstatus"
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
+	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 )
 
@@ -26,14 +30,19 @@ const (
 	BotTokenEnvironment   = "MITHRIL_AGENT_TELEGRAM_BOT_TOKEN"
 	AllowedIDsEnvironment = "MITHRIL_AGENT_TELEGRAM_CHAT_IDS"
 
-	maxInputBytes       = 1024
-	maxQuestionBytes    = 512
-	maxExplanationBytes = 1600
-	maxOutputBytes      = 3500
-	defaultPollTimeout  = 25 * time.Second
-	defaultMinInterval  = time.Second
-	defaultExplainTime  = 5 * time.Second
-	statusSource        = "local bounded operator status"
+	maxInputBytes          = 1024
+	maxQuestionBytes       = 512
+	maxExplanationBytes    = 1600
+	maxOutputBytes         = 3500
+	defaultPollTimeout     = 25 * time.Second
+	defaultMinInterval     = time.Second
+	defaultExplainTime     = 5 * time.Second
+	statusSource           = "local bounded operator status"
+	maxPaperSources        = 4
+	maxPaperAlertChats     = 8
+	maxPaperAnnounced      = 2304
+	maxPaperAnnouncedBytes = 192 << 10
+	maxPaperReportBytes    = 800
 )
 
 // Update is the only Telegram update shape consumed by Service.
@@ -62,6 +71,13 @@ type StatusReader interface {
 	Read() (operatorstatus.Snapshot, error)
 }
 
+// PaperStatusReader returns only the bounded simulation-event projection. It
+// cannot read a journal, select a strategy, sign, or submit.
+type PaperStatusReader interface {
+	Read() (paperstatus.Snapshot, error)
+	SourceID() string
+}
+
 // ExplanationRequest is the complete optional model boundary. It contains a
 // bounded question and deterministic text derived from operatorstatus only.
 // There is intentionally no action, tool, key, configuration, or endpoint API.
@@ -82,6 +98,8 @@ type Config struct {
 	Bot     Bot
 	Cursor  Cursor
 	Sources []StatusReader
+	// PaperSources are optional, read-only simulation alert sockets.
+	PaperSources []PaperStatusReader
 	// AnnouncedPath persists which actions have been announced so a restart
 	// does not repeat them. Empty keeps dedup in memory only.
 	AnnouncedPath     string
@@ -109,6 +127,7 @@ type Service struct {
 	bot               Bot
 	cursor            Cursor
 	sources           []StatusReader
+	paperSources      []PaperStatusReader
 	allowed           map[int64]struct{}
 	explainer         Explainer
 	explanationBudget ExplanationBudget
@@ -130,13 +149,41 @@ type Service struct {
 	// should not hear about it again because the process bounced.
 	announcedAction map[string]string
 	announceSeeded  map[string]bool
-	// announced survives restarts; announcedAction does not.
-	announced *announcedStore
+	// The independent stores keep a busy live strategy from evicting paper
+	// delivery IDs that are still present in a bounded paper snapshot.
+	announced       *announcedStore
+	paperAnnounced  *announcedStore
+	paperHealthSeen map[string]bool
+	paperHealthy    map[string]bool
+	startedAt       time.Time
 }
 
 func New(config Config) (*Service, error) {
 	if config.Bot == nil || config.Cursor == nil || len(config.Sources) == 0 {
 		return nil, errors.New("Telegram bot, cursor, and operator status reader are required")
+	}
+	paperSourceIDs := make(map[string]struct{}, len(config.PaperSources))
+	paperSourceLabels := make(map[string]struct{}, len(config.PaperSources))
+	for _, source := range config.PaperSources {
+		if source == nil {
+			return nil, errors.New("paper status readers must not be nil")
+		}
+		identity := source.SourceID()
+		if identity == "" || len(identity) > 512 {
+			return nil, errors.New("paper status readers need a bounded stable identity")
+		}
+		if _, duplicate := paperSourceIDs[identity]; duplicate {
+			return nil, errors.New("paper status reader identities must be unique")
+		}
+		paperSourceIDs[identity] = struct{}{}
+		label := paperReaderLabel(source)
+		if _, duplicate := paperSourceLabels[label]; duplicate {
+			return nil, errors.New("paper status reader identities have colliding display tags")
+		}
+		paperSourceLabels[label] = struct{}{}
+	}
+	if len(config.PaperSources) > maxPaperSources {
+		return nil, fmt.Errorf("at most %d paper status readers are supported", maxPaperSources)
 	}
 	allowed := make(map[int64]struct{}, len(config.AllowedChatIDs))
 	for _, id := range config.AllowedChatIDs {
@@ -151,12 +198,16 @@ func New(config Config) (*Service, error) {
 	if len(allowed) == 0 {
 		return nil, errors.New("at least one allowed Telegram chat ID is required")
 	}
+	if len(config.PaperSources) != 0 && len(allowed) > maxPaperAlertChats {
+		return nil, fmt.Errorf("paper alerts support at most %d Telegram chats", maxPaperAlertChats)
+	}
 	if (config.Explainer == nil) != (config.ExplanationBudget == nil) {
 		return nil, errors.New("explanation provider and budget must be configured together")
 	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
+	startedAt := config.Now().UTC()
 	if config.PollTimeout == 0 {
 		config.PollTimeout = defaultPollTimeout
 	}
@@ -175,11 +226,23 @@ func New(config Config) (*Service, error) {
 	if config.ExplanationLimit < 100*time.Millisecond || config.ExplanationLimit > 15*time.Second {
 		return nil, errors.New("explanation timeout must be between 100 milliseconds and 15 seconds")
 	}
+	paperAnnouncedPath := ""
+	if config.AnnouncedPath != "" {
+		paperAnnouncedPath = filepath.Join(
+			filepath.Dir(config.AnnouncedPath), "announced-paper-events.json",
+		)
+	}
 	return &Service{
-		bot: config.Bot, cursor: config.Cursor, sources: config.Sources, allowed: allowed,
+		bot: config.Bot, cursor: config.Cursor, sources: config.Sources,
+		paperSources: config.PaperSources, allowed: allowed,
 		announcedAction: map[string]string{}, announceSeeded: map[string]bool{},
 		announced: loadAnnouncedStore(config.AnnouncedPath),
+		paperAnnounced: loadBoundedAnnouncedStore(
+			paperAnnouncedPath, maxPaperAnnounced, maxPaperAnnouncedBytes,
+		),
+		paperHealthSeen: map[string]bool{}, paperHealthy: map[string]bool{},
 		explainer: config.Explainer, explanationBudget: config.ExplanationBudget, now: config.Now,
+		startedAt:   startedAt,
 		pollTimeout: config.PollTimeout, minInterval: config.MinimumInterval,
 		pollRetryDelay: defaultPollRetryDelay,
 		explainTimeout: config.ExplanationLimit, next: make(map[int64]time.Time),
@@ -303,13 +366,365 @@ func (s *Service) Run(ctx context.Context) error {
 // unprompted message the operator sends, and it still cannot authorize
 // anything: it reads the same bounded status the read-only commands read.
 //
-// Only settled outcomes are announced. Waiting, stopped, and degraded are the
-// steady state of a healthy agent that has nothing to do, and narrating them
-// would train the operator to ignore the channel that carries the real events.
+// Routine waiting stays quiet. Meaningful paper events are announced; failures
+// of the bounded status projection stay in local logs and /paper reports its
+// current state. None of these messages can authorize an action.
 func (s *Service) announce(ctx context.Context) {
 	for index, source := range s.sources {
 		s.announceSource(ctx, index, source)
 	}
+	snapshots := make([]paperstatus.Snapshot, len(s.paperSources))
+	errorsBySource := make([]error, len(s.paperSources))
+	summaries := make([]paperstatus.CurrentSummary, 0, len(s.paperSources))
+	now := s.now()
+	for index, source := range s.paperSources {
+		snapshots[index], errorsBySource[index] = source.Read()
+		if errorsBySource[index] == nil && paperstatus.ValidateSnapshot(snapshots[index]) == nil &&
+			paperSnapshotMatchesReader(source, snapshots[index]) &&
+			paperSnapshotFresh(snapshots[index], now) && snapshots[index].Summary != nil &&
+			snapshots[index].Summary.Day == now.UTC().Format("2006-01-02") {
+			summaries = append(summaries, *snapshots[index].Summary)
+		}
+	}
+	portfolio := ""
+	if len(summaries) == len(s.paperSources) {
+		portfolio = paperPortfolioAlertSummary(summaries)
+	}
+	for index, source := range s.paperSources {
+		s.announcePaperSource(
+			ctx, index, source, snapshots[index], errorsBySource[index], portfolio,
+		)
+	}
+}
+
+func (s *Service) announcePaperSource(
+	ctx context.Context,
+	index int,
+	source PaperStatusReader,
+	snapshot paperstatus.Snapshot,
+	readErr error,
+	portfolio string,
+) {
+	sourceID := source.SourceID()
+	if readErr != nil || paperstatus.ValidateSnapshot(snapshot) != nil ||
+		!paperSnapshotMatchesReader(source, snapshot) {
+		s.recordPaperHealth(index, sourceID, false)
+		return
+	}
+	s.recordPaperHealth(index, sourceID, true)
+	events := snapshot.Events
+	if gap, ok := paperstatus.TruncationEvent(snapshot); ok {
+		events = append([]paperstatus.Event{gap}, events...)
+	}
+	blocked := make(map[int64]bool)
+	for _, event := range events {
+		if !paperAnnounceWorthy(event) {
+			continue
+		}
+		// An opened order is a timely heads-up, not durable history. On an
+		// upgrade or restart, retained opens may already have filled or expired;
+		// replaying them creates a burst of obsolete Telegram messages. Fills,
+		// safety events, and daily results remain durably replayable.
+		if event.Kind == paperstatus.KindOrderOpened && !event.At.After(s.startedAt) {
+			continue
+		}
+		delivered := 0
+		for chatID := range s.allowed {
+			if blocked[chatID] {
+				continue
+			}
+			deliveryID := paperDeliveryID(sourceID, event.ID, chatID)
+			if s.paperAnnounced.announced(deliveryID) {
+				continue
+			}
+			// Version 1 keyed delivery only by list position, which cannot be
+			// rebound safely when several sources exist. Migrate the unambiguous
+			// one-source case; multi-source upgrades may replay retained alerts
+			// once rather than silently suppressing the wrong source.
+			if len(s.paperSources) == 1 {
+				legacyID := legacyPaperDeliveryID(index, event.ID, chatID)
+				if s.paperAnnounced.announced(legacyID) {
+					if err := s.paperAnnounced.record(deliveryID); err != nil {
+						log.Printf("telegram: %v", err)
+					}
+					continue
+				}
+			}
+			label := ""
+			if len(s.paperSources) > 1 {
+				label = paperReaderLabel(source)
+			}
+			message := paperAnnouncement(event, label)
+			if event.Kind == paperstatus.KindOrderFilled {
+				if portfolio != "" {
+					message = omitPaperLine(message, "Market value:")
+				}
+				message += portfolio
+			}
+			if err := s.bot.Send(ctx, chatID, bounded(message)); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("telegram: paper announcement to chat %d failed: %v", chatID, err)
+				blocked[chatID] = true
+				continue
+			}
+			delivered++
+			if err := s.paperAnnounced.record(deliveryID); err != nil {
+				log.Printf("telegram: %v", err)
+			}
+		}
+		if delivered > 0 {
+			log.Printf("telegram: announced paper event %s to %d chat(s)", shortActionID(event.ID), delivered)
+		}
+	}
+}
+
+func paperAnnounceWorthy(event paperstatus.Event) bool {
+	switch event.Kind {
+	case paperstatus.KindStrategyChanged, paperstatus.KindOrderOpened,
+		paperstatus.KindOrderFilled, paperstatus.KindRiskHalted,
+		paperstatus.KindDataUnavailable, paperstatus.KindDataRestored,
+		"history_truncated":
+		return true
+	case paperstatus.KindPeriodClosed:
+		at := event.At.UTC()
+		return at.Hour() == 0 && at.Minute() == 0 && at.Second() == 0 && at.Nanosecond() == 0
+	default:
+		return false
+	}
+}
+
+func paperAnnouncement(event paperstatus.Event, label string) string {
+	message := readablePaperMessage(event.Message)
+	if label != "" {
+		message = paperMarketMessage(message)
+	}
+	return stackPaperMessage(message, paperMarketName(label))
+}
+
+func paperCurrentAge(message string, fresh bool) string {
+	message = readablePaperMessage(message)
+	if fresh {
+		return message
+	}
+	header := "PAPER · ⚠️ LATEST UPDATE DELAYED"
+	if strings.HasPrefix(message, "PAPER · ⚠️ WAITING FOR PRICES") {
+		header = "PAPER · ⚠️ PRICE DATA DELAYED"
+	}
+	for _, current := range []string{
+		"\nPaper gain/loss today:",
+		"\nGain/loss today:",
+		"\nToday's estimated paper value:",
+		"\nToday's result:",
+	} {
+		message = strings.Replace(message, current, "\nLast recorded gain/loss:", 1)
+	}
+	_, details, found := strings.Cut(
+		strings.Replace(message, "\nToday ", "\nLast result ", 1), "\n",
+	)
+	if !found {
+		return header
+	}
+	return header + "\n" + details
+}
+
+// readablePaperMessage upgrades retained display text without changing the
+// immutable event or its ID in the evidence snapshot.
+func readablePaperMessage(message string) string {
+	lines := strings.Split(message, "\n")
+	if len(lines) == 0 {
+		return message
+	}
+	lines[0] = strings.ReplaceAll(lines[0], "SELL filled", "SOLD")
+	lines[0] = strings.ReplaceAll(lines[0], "BUY filled", "BOUGHT")
+	for index := 1; index < len(lines); index++ {
+		lines[index] = strings.ReplaceAll(lines[index], "Practice account:", "Paper account:")
+		lines[index] = strings.ReplaceAll(lines[index], "Total paper account:", "Paper account:")
+		lines[index] = strings.ReplaceAll(lines[index], "Equity $", "Paper account: $")
+		lines[index] = strings.Replace(lines[index], "Result:", "Paper gain/loss:", 1)
+		lines[index] = strings.ReplaceAll(lines[index], "Today's estimated paper value:", "Gain/loss today:")
+		lines[index] = strings.ReplaceAll(lines[index], "Today's result:", "Gain/loss today:")
+		lines[index] = strings.ReplaceAll(lines[index], "Compared with no trading:", "Compared with holding:")
+		lines[index] = strings.ReplaceAll(lines[index], "Versus no trading:", "Compared with holding:")
+		lines[index] = strings.ReplaceAll(lines[index], "better than no trading", "better than holding")
+		lines[index] = strings.ReplaceAll(lines[index], "worse than no trading", "worse than holding")
+		lines[index] = strings.ReplaceAll(lines[index], "same as no trading", "same as holding")
+		lines[index] = readablePaperTradeCount(lines[index])
+		lines[index] = shortenPaperUSD(lines[index])
+		for _, action := range []string{"Sold", "Received", "Paid", "Bought"} {
+			lines[index] = strings.Replace(lines[index], action+" ", action+": ", 1)
+		}
+	}
+	if len(lines) < 2 {
+		return paperDisplayResultLines(strings.Join(lines, "\n"))
+	}
+	movement, extra, _ := strings.Cut(lines[1], " · ")
+	from, to, arrow := strings.Cut(movement, " → ")
+	if !arrow {
+		return paperDisplayResultLines(strings.Join(lines, "\n"))
+	}
+	sell := strings.Contains(lines[0], "SOLD")
+	replacement := []string{"Paid: " + from, "Bought: " + to}
+	if sell {
+		replacement = []string{"Sold: " + from, "Received: " + to}
+	}
+	if extra != "" {
+		replacement = append(replacement, extra)
+	}
+	lines = append(lines[:1], append(replacement, lines[2:]...)...)
+	return paperDisplayResultLines(strings.Join(lines, "\n"))
+}
+
+func paperDisplayResultLines(message string) string {
+	lines := strings.Split(message, "\n")
+	for index, line := range lines {
+		for _, label := range []string{
+			"Paper gain/loss:", "Gain/loss today:", "This market today:",
+			"All markets today:", "Last recorded gain/loss:",
+		} {
+			if result, found := strings.CutPrefix(line, label+" "); found {
+				lines[index] = label + " " + paperResultDisplay(result)
+				break
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func paperResultDisplay(result string) string {
+	if amount, found := strings.CutPrefix(result, "up "); found {
+		return paperResultAmount("🟢 ▲ ", amount, "profit")
+	}
+	if amount, found := strings.CutPrefix(result, "down "); found {
+		return paperResultAmount("🔴 ▼ ", amount, "loss")
+	}
+	if result == "unchanged" {
+		return "⚪ → unchanged"
+	}
+	return result
+}
+
+func paperResultAmount(icon, result, word string) string {
+	amount, detail, found := strings.Cut(result, " · ")
+	display := icon + amount + " (" + word + ")"
+	if found {
+		display += " · " + detail
+	}
+	return display
+}
+
+func shortenPaperUSD(line string) string {
+	for offset := 0; offset < len(line); {
+		relative := strings.IndexByte(line[offset:], '$')
+		if relative < 0 {
+			break
+		}
+		start := offset + relative
+		end := start + 1
+		for end < len(line) && (line[end] == '.' || line[end] >= '0' && line[end] <= '9') {
+			end++
+		}
+		whole, fraction, found := strings.Cut(line[start+1:end], ".")
+		if !found {
+			fraction = ""
+		}
+		if len(fraction) > 6 {
+			return line
+		}
+		fraction += strings.Repeat("0", 6-len(fraction))
+		wholeValue, wholeErr := strconv.ParseUint(whole, 10, 64)
+		fractionValue, fractionErr := strconv.ParseUint(fraction, 10, 64)
+		if wholeErr != nil || fractionErr != nil ||
+			wholeValue > (math.MaxUint64-fractionValue)/1_000_000 {
+			return line
+		}
+		formatted := formatPaperUSD(wholeValue*1_000_000 + fractionValue)
+		line = line[:start] + formatted + line[end:]
+		offset = start + len(formatted)
+	}
+	return line
+}
+
+func readablePaperTradeCount(line string) string {
+	marker := " · "
+	index := strings.LastIndex(line, marker)
+	if index < 0 {
+		return line
+	}
+	tail := line[index+len(marker):]
+	number, found := strings.CutSuffix(tail, " trades")
+	if !found {
+		number, found = strings.CutSuffix(tail, " trade")
+	}
+	if !found {
+		return line
+	}
+	count, err := strconv.ParseUint(number, 10, 64)
+	if err != nil {
+		return line
+	}
+	label := fmt.Sprintf("%d filled paper orders", count)
+	if count == 1 {
+		label = "1 filled paper order"
+	}
+	return line[:index+len(marker)] + label
+}
+
+func paperSnapshotFresh(snapshot paperstatus.Snapshot, now time.Time) bool {
+	if snapshot.Summary != nil && snapshot.Summary.State == "waiting for data" {
+		return false
+	}
+	if snapshot.ObservedAt.After(now.Add(5*time.Second)) ||
+		snapshot.ObservedAt.UTC().Format("2006-01-02") != now.UTC().Format("2006-01-02") {
+		return false
+	}
+	staleAfter := 5 * time.Minute
+	if snapshot.Summary != nil {
+		staleAfter = max(2*time.Minute, 3*time.Duration(snapshot.Summary.TickSeconds)*time.Second)
+	}
+	return now.Sub(snapshot.ObservedAt) <= staleAfter
+}
+
+func (s *Service) recordPaperHealth(index int, sourceID string, healthy bool) {
+	seen, previous := s.paperHealthSeen[sourceID], s.paperHealthy[sourceID]
+	s.paperHealthSeen[sourceID], s.paperHealthy[sourceID] = true, healthy
+	if !healthy && (!seen || previous) {
+		log.Printf("telegram: paper status source %d unavailable", index+1)
+	}
+	if healthy && seen && !previous {
+		log.Printf("telegram: paper status source %d available again", index+1)
+	}
+}
+
+func paperDeliveryID(sourceID, eventID string, chatID int64) string {
+	digest := sha256.Sum256([]byte(
+		"mithril-agent/paper-telegram-delivery/v2\x00" + sourceID + "\x00" +
+			eventID + "\x00" + strconv.FormatInt(chatID, 10),
+	))
+	return fmt.Sprintf("%x", digest)
+}
+
+func legacyPaperDeliveryID(source int, eventID string, chatID int64) string {
+	digest := sha256.Sum256([]byte(
+		"mithril-agent/paper-telegram-delivery/v1\x00" + strconv.Itoa(source) + "\x00" +
+			eventID + "\x00" + strconv.FormatInt(chatID, 10),
+	))
+	return fmt.Sprintf("%x", digest)
+}
+
+func paperSourceLabel(sourceID string) string {
+	digest := sha256.Sum256([]byte("mithril-agent/paper-source-label/v1\x00" + sourceID))
+	return fmt.Sprintf("SRC %X", digest[:3])
+}
+
+func paperReaderLabel(source PaperStatusReader) string {
+	if labeled, ok := source.(interface{ SourceLabel() string }); ok {
+		if label := labeled.SourceLabel(); label != "" {
+			return label
+		}
+	}
+	return paperSourceLabel(source.SourceID())
 }
 
 // announceSource reports one leg. The dedup state is per SOURCE, so a restart
@@ -499,6 +914,11 @@ func (s *Service) Reply(ctx context.Context, chatID int64, text string) (string,
 			return bounded("Usage: /status\n" + footer(now)), true
 		}
 		return bounded(s.statusReports(now)), true
+	case "/paper":
+		if argument != "" {
+			return bounded("Usage: /paper"), true
+		}
+		return bounded(s.paperReports()), true
 	case "/last_trade":
 		if argument != "" {
 			return bounded("Usage: /last_trade\n" + footer(now)), true
@@ -526,16 +946,355 @@ func (s *Service) allowAt(chatID int64, now time.Time) bool {
 	return true
 }
 
-func (s *Service) help(now time.Time) string {
-	commands := "/help — show this read-only command list\n/status — current status for every configured leg\n/price — current price rule and observation for every leg\n/last_trade — most recent recorded action for every leg"
+func (s *Service) help(_ time.Time) string {
+	commands := "/help — commands\n/status — live strategy status\n/price — live price rule\n/last_trade — latest live action"
+	if len(s.paperSources) > 0 {
+		commands += "\n/paper — practice trading results"
+	}
 	if s.explainer != nil {
-		commands += "\n/explain QUESTION — optional explanation of the same bounded status"
+		commands += "\n/explain QUESTION — explain live status"
 	}
 	return "Mithril operator — read only\n" + commands +
-		"\nUnprompted messages arrive when a trade settles: completed, failed," +
-		"\nor halted. Restarts, price targets, and a waiting agent are not sent;" +
-		"\nask with the commands above.\n" +
-		"This process cannot enable, sign, submit, stop, or configure actions.\n" + footer(now)
+		"\nAlerts: settled live outcomes and meaningful paper events." +
+		"\nWaiting updates stay quiet. This bot cannot trade or change settings."
+}
+
+func (s *Service) paperReports() string {
+	if len(s.paperSources) == 0 {
+		return "Paper: not configured"
+	}
+	reports := make([]string, 0, len(s.paperSources))
+	summaries := make([]paperstatus.CurrentSummary, 0, len(s.paperSources))
+	now := s.now()
+	var oldestSummary time.Time
+	for _, source := range s.paperSources {
+		snapshot, err := source.Read()
+		label := ""
+		if len(s.paperSources) > 1 {
+			label = paperReaderLabel(source)
+		}
+		if err != nil || paperstatus.ValidateSnapshot(snapshot) != nil ||
+			!paperSnapshotMatchesReader(source, snapshot) {
+			report := "PAPER ALERTS · ⚠️ Unavailable"
+			if label != "" {
+				report = "PAPER ALERTS · " + label + " · ⚠️ Unavailable"
+			}
+			reports = append(reports, report)
+			continue
+		}
+		fresh := paperSnapshotFresh(snapshot, now)
+		if fresh && snapshot.Summary != nil && snapshot.Summary.Day == now.UTC().Format("2006-01-02") {
+			summaries = append(summaries, *snapshot.Summary)
+			if oldestSummary.IsZero() || snapshot.ObservedAt.Before(oldestSummary) {
+				oldestSummary = snapshot.ObservedAt
+			}
+		}
+		if len(snapshot.Events) == 0 {
+			report := paperCurrentAge(snapshot.Current, fresh)
+			if report == "" {
+				report = "PAPER · No events yet"
+			}
+			if label != "" {
+				report = labelPaperMessage(report, label)
+			}
+			reports = append(reports, report)
+			continue
+		}
+		if snapshot.Current != "" {
+			report := labelPaperMessage(paperCurrentAge(snapshot.Current, fresh), label)
+			reports = append(reports, paperReportExcerpt(report))
+			continue
+		}
+		reports = append(reports, paperReportExcerpt(
+			paperAnnouncement(snapshot.Events[len(snapshot.Events)-1], label),
+		))
+	}
+	if len(summaries) == len(s.paperSources) {
+		if aggregate := paperPortfolioSummary(summaries, oldestSummary); aggregate != "" {
+			return aggregate
+		}
+	}
+	return strings.Join(reports, "\n\n")
+}
+
+func paperSummaryMatchesReader(source PaperStatusReader, summary paperstatus.CurrentSummary) bool {
+	labeled, ok := source.(interface{ SourceLabel() string })
+	return !ok || labeled.SourceLabel() == "" || summary.Market == labeled.SourceLabel()
+}
+
+func paperSnapshotMatchesReader(source PaperStatusReader, snapshot paperstatus.Snapshot) bool {
+	return snapshot.Summary == nil || paperSummaryMatchesReader(source, *snapshot.Summary)
+}
+
+func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, _ time.Time) string {
+	if len(summaries) < 2 {
+		return ""
+	}
+	var opening, equity, hold, trades, signals uint64
+	paused := 0
+	valueUnit := ""
+	strategiesReady := true
+	strategies := make(map[string]struct{}, 2)
+	minimumCoverageBPS, coverageReady := uint64(10_000), true
+	for _, summary := range summaries {
+		if summary.ValueUnit == "" || valueUnit != "" && valueUnit != summary.ValueUnit {
+			return ""
+		}
+		valueUnit = summary.ValueUnit
+		if summary.OpeningEquityMicros > math.MaxUint64-opening ||
+			summary.EquityMicros > math.MaxUint64-equity ||
+			summary.HoldBenchmarkMicros > math.MaxUint64-hold ||
+			summary.Trades > math.MaxUint64-trades ||
+			summary.Signals > math.MaxUint64-signals {
+			return ""
+		}
+		opening += summary.OpeningEquityMicros
+		equity += summary.EquityMicros
+		hold += summary.HoldBenchmarkMicros
+		trades += summary.Trades
+		signals += summary.Signals
+		coverageBPS, ok := paperDataCoverageBPS(summary.Checks, summary.Unobservable)
+		if !ok {
+			coverageReady = false
+		} else if coverageBPS < minimumCoverageBPS {
+			minimumCoverageBPS = coverageBPS
+		}
+		if summary.Strategy == "" {
+			strategiesReady = false
+		} else {
+			strategies[summary.Strategy] = struct{}{}
+		}
+		if summary.RiskHalted {
+			paused++
+		}
+	}
+	var report strings.Builder
+	fmt.Fprintf(&report, "PAPER\n\n📊 ACCOUNT TODAY\nTotal paper value: %s\nToday's total result: %s\nCompared with just holding: %s",
+		paperAbsoluteValue(equity, valueUnit),
+		paperResultDisplay(paperResultChange(opening, equity, valueUnit)),
+		paperResultComparison(hold, equity, valueUnit))
+	for _, summary := range summaries {
+		fmt.Fprintf(&report, "\n\n%s", paperMarketName(summary.Market))
+		if summary.PriceMicros != 0 {
+			fmt.Fprintf(&report, "\nMarket price: %s", formatUSDMicros(summary.PriceMicros))
+		}
+		fmt.Fprintf(&report, "\nPlan: %s\nThis market's result today: %s", paperMarketState(summary),
+			paperResultDisplay(paperResultChange(
+				summary.OpeningEquityMicros, summary.EquityMicros, valueUnit,
+			)))
+	}
+	coverage := "warming"
+	if coverageReady {
+		coverage = fmt.Sprintf("%d.%02d%%", minimumCoverageBPS/100, minimumCoverageBPS%100)
+	}
+	line := fmt.Sprintf("%s · %s", paperTradeCount(trades), paperSignalCount(signals))
+	if coverage != "100.00%" {
+		line += " · price data " + coverage
+	}
+	if paused != 0 {
+		line += fmt.Sprintf(" · %d paused", paused)
+	}
+	if strategiesReady && len(strategies) == 1 {
+		if _, adaptive := strategies["adaptive"]; adaptive {
+			line += "\nPlan · follows strong moves and rebounds · daily safety limit"
+		} else if _, fixed := strategies["fixed"]; fixed {
+			line += "\nPlan · trades at saved buy and sell prices"
+		}
+	}
+	return report.String() + "\n" + line
+}
+
+func paperPortfolioAlertSummary(summaries []paperstatus.CurrentSummary) string {
+	if len(summaries) < 2 {
+		return ""
+	}
+	var opening, equity uint64
+	valueUnit := ""
+	for _, summary := range summaries {
+		if summary.ValueUnit == "" || valueUnit != "" && valueUnit != summary.ValueUnit ||
+			summary.OpeningEquityMicros > math.MaxUint64-opening ||
+			summary.EquityMicros > math.MaxUint64-equity {
+			return ""
+		}
+		valueUnit = summary.ValueUnit
+		opening += summary.OpeningEquityMicros
+		equity += summary.EquityMicros
+	}
+	return "\n\nTOTAL PAPER ACCOUNT\n" + paperAbsoluteValue(equity, valueUnit) +
+		"\n\nTODAY'S TOTAL RESULT\n" +
+		paperResultDisplay(paperResultChange(opening, equity, valueUnit))
+}
+
+func paperTradeCount(trades uint64) string {
+	if trades == 1 {
+		return "1 filled paper order"
+	}
+	return fmt.Sprintf("%d filled paper orders", trades)
+}
+
+func paperSignalCount(signals uint64) string {
+	if signals == 1 {
+		return "the plan tried to trade once"
+	}
+	return fmt.Sprintf("the plan tried to trade %d times", signals)
+}
+
+func paperMarketState(summary paperstatus.CurrentSummary) string {
+	if summary.RiskHalted {
+		return "paused"
+	}
+	switch summary.State {
+	case "warming":
+		return "learning prices"
+	case "volatile":
+		return "waiting for calmer prices"
+	case "waiting for data":
+		return "waiting for prices"
+	case "paused":
+		return "paused"
+	case "order pending":
+		if summary.NextAction != "" {
+			return summary.NextAction + " order open"
+		}
+	}
+	if summary.NextAction != "" {
+		return "waiting to " + summary.NextAction
+	}
+	return paperStateLabel(summary.State)
+}
+
+func paperStateLabel(state string) string {
+	switch state {
+	case "":
+		return "watching"
+	case "warming":
+		return "warming up"
+	case "uptrend":
+		return "rising"
+	case "downtrend":
+		return "falling"
+	case "range":
+		return "sideways"
+	case "volatile":
+		return "too volatile"
+	case "order pending":
+		return "order pending"
+	case "waiting for data":
+		return "data delayed"
+	case "paused":
+		return "paused"
+	default:
+		return "watching"
+	}
+}
+
+func paperMarketName(market string) string {
+	return market
+}
+
+func paperDataCoverage(checks, unobservable uint64) string {
+	bps, ok := paperDataCoverageBPS(checks, unobservable)
+	if !ok {
+		return "warming"
+	}
+	return fmt.Sprintf("%d.%02d%%", bps/100, bps%100)
+}
+
+func paperDataCoverageBPS(checks, unobservable uint64) (uint64, bool) {
+	if checks == 0 || unobservable > checks {
+		return 0, false
+	}
+	observable := checks - unobservable
+	high, low := bits.Mul64(observable, 10_000)
+	bps, _ := bits.Div64(high, low, checks)
+	return bps, true
+}
+
+func paperResultChange(reference, current uint64, unit string) string {
+	if current == reference {
+		return "unchanged"
+	}
+	if current > reference {
+		return "up " + paperAbsoluteValue(current-reference, unit)
+	}
+	return "down " + paperAbsoluteValue(reference-current, unit)
+}
+
+func paperResultComparison(reference, current uint64, unit string) string {
+	if current == reference {
+		return "the same"
+	}
+	if current > reference {
+		return paperAbsoluteValue(current-reference, unit) + " better"
+	}
+	return paperAbsoluteValue(reference-current, unit) + " worse"
+}
+
+func paperAbsoluteValue(value uint64, unit string) string {
+	if unit == "USD" {
+		return formatPaperUSD(value)
+	}
+	return formatMicroUnits(value) + " " + unit
+}
+
+func formatPaperUSD(value uint64) string {
+	if value != 0 && value < 10_000 {
+		return "<$0.01"
+	}
+	cents := value / 10_000
+	if value%10_000 >= 5_000 && cents != math.MaxUint64 {
+		cents++
+	}
+	return fmt.Sprintf("$%d.%02d", cents/100, cents%100)
+}
+
+func labelPaperMessage(message, label string) string {
+	if label != "" {
+		message = paperMarketMessage(message)
+	}
+	return stackPaperMessage(message, paperMarketName(label))
+}
+
+func paperMarketMessage(message string) string {
+	message = strings.Replace(message, "\nPaper account:", "\nMarket value:", 1)
+	return omitPaperLine(message, "Gain/loss today:")
+}
+
+func stackPaperMessage(message, market string) string {
+	header, details, found := strings.Cut(message, "\n")
+	action, paper := strings.CutPrefix(header, "PAPER · ")
+	if !paper {
+		if market != "" {
+			return strings.Replace(message, "PAPER SIMULATION —", "PAPER SIMULATION · "+market+" ·", 1)
+		}
+		return message
+	}
+	stacked := "PAPER\n\n" + action
+	if market != "" {
+		stacked += "\nMarket: " + market
+	}
+	if found {
+		stacked += "\n" + details
+	}
+	return stacked
+}
+
+func omitPaperLine(message, prefix string) string {
+	lines := strings.Split(message, "\n")
+	for index, line := range lines {
+		if strings.HasPrefix(line, prefix) {
+			return strings.Join(append(lines[:index], lines[index+1:]...), "\n")
+		}
+	}
+	return message
+}
+
+func paperReportExcerpt(message string) string {
+	const suffix = "\n…truncated; full alert retained locally"
+	if len(message) <= maxPaperReportBytes {
+		return message
+	}
+	return truncateUTF8(message, maxPaperReportBytes-len(suffix)) + suffix
 }
 
 func (s *Service) statusReport(now time.Time) (string, operatorstatus.Snapshot, bool, bool) {

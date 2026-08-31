@@ -42,6 +42,11 @@ const programUsage = `Usage:
     --account-type NAME (--data PATH | --index-dir PATH --account ADDRESS) [--json]
   mithril-agent program decode-instruction --registry PATH --program ADDRESS --sha256 HEX \
     --instruction NAME --data PATH [--json]
+  mithril-agent program decode-instruction --registry PATH --program ADDRESS --sha256 HEX \
+    --instruction NAME --index-dir PATH --signature SIGNATURE --outer-index N [--json]
+  mithril-agent program decode-instruction --registry PATH --program ADDRESS --sha256 HEX \
+    --instruction NAME --index-dir PATH --signature SIGNATURE \
+    --inner-group N --inner-index N [--json]
   mithril-agent program decode-event --registry PATH --program ADDRESS --sha256 HEX \
     --event-type NAME --index-dir PATH --signature SIGNATURE [--json]
   mithril-agent program read-account (--workspace PATH | --registry PATH --program ADDRESS \
@@ -70,7 +75,13 @@ a pin.
 Decode-account decodes raw account bytes locally using the pinned Borsh type.
 Read-account does the same from a fresh loopback Mithril read. Decode-event
 reads one exact rooted transaction from the local index and decodes matching
-program-data logs with the pinned Borsh event type.
+program-data logs with the pinned Borsh event type. Decode-instruction accepts
+either a local data file or one exact outer instruction from a rooted indexed
+transaction. It can also decode one recorded CPI using its parent outer group
+and inner index. Rooted results include the transaction outcome and provenance;
+only outer instructions are part of the signed message.
+Event decoding is limited to successful rooted transactions because failed
+transaction logs describe reverted execution.
 No program command loads a wallet, signs, or submits a transaction.
 
 Legacy pre-0.30 Anchor IDLs must be converted to the current Solana IDL shape

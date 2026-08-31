@@ -1,0 +1,32 @@
+[Unit]
+Description=Block private-network egress from Mithril Hermes research
+Requires=docker.service
+BindsTo=docker.service
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/opt/mithril-hermes-research/check-network.sh
+ExecStartPre=-/usr/sbin/iptables -D DOCKER-USER -s 172.30.77.0/28 -j MITHRIL_HERMES
+ExecStartPre=-/usr/sbin/iptables -D INPUT -s 172.30.77.0/28 -j REJECT
+ExecStartPre=-/usr/sbin/iptables -F MITHRIL_HERMES
+ExecStartPre=-/usr/sbin/iptables -X MITHRIL_HERMES
+ExecStart=/usr/sbin/iptables -N MITHRIL_HERMES
+ExecStart=/usr/sbin/iptables -A MITHRIL_HERMES -d 10.0.0.0/8 -j REJECT
+ExecStart=/usr/sbin/iptables -A MITHRIL_HERMES -d 100.64.0.0/10 -j REJECT
+ExecStart=/usr/sbin/iptables -A MITHRIL_HERMES -d 127.0.0.0/8 -j REJECT
+ExecStart=/usr/sbin/iptables -A MITHRIL_HERMES -d 169.254.0.0/16 -j REJECT
+ExecStart=/usr/sbin/iptables -A MITHRIL_HERMES -d 172.16.0.0/12 -j REJECT
+ExecStart=/usr/sbin/iptables -A MITHRIL_HERMES -d 192.168.0.0/16 -j REJECT
+ExecStart=/usr/sbin/iptables -A MITHRIL_HERMES -j RETURN
+ExecStart=/usr/sbin/iptables -I DOCKER-USER 1 -s 172.30.77.0/28 -j MITHRIL_HERMES
+ExecStart=/usr/sbin/iptables -I INPUT 1 -s 172.30.77.0/28 -j REJECT
+ExecStop=-/usr/sbin/iptables -D INPUT -s 172.30.77.0/28 -j REJECT
+ExecStop=-/usr/sbin/iptables -D DOCKER-USER -s 172.30.77.0/28 -j MITHRIL_HERMES
+ExecStop=-/usr/sbin/iptables -F MITHRIL_HERMES
+ExecStop=-/usr/sbin/iptables -X MITHRIL_HERMES
+
+[Install]
+WantedBy=docker.service

@@ -76,6 +76,19 @@ func TestCompareChecksTheMainnetAccountingBand(t *testing.T) {
 	}
 }
 
+func TestCompareTreatsAnUnlabelledV4ReportAsResetDaily(t *testing.T) {
+	replayed := testReport(t)
+	stored := replayed
+	stored.EvaluationMode = ""
+	if found := Compare(stored, replayed); len(found) != 0 {
+		t.Fatalf("legacy reset-daily report disagreed only on its missing label: %+v", found)
+	}
+	stored.EvaluationMode = "unknown_mode"
+	if found := Compare(stored, replayed); len(found) != 1 || found[0].Field != "evaluation_mode" {
+		t.Fatalf("unknown evaluation mode was accepted: %+v", found)
+	}
+}
+
 func TestCompareReallyChecksMetadataAndCoverage(t *testing.T) {
 	stored := testReport(t)
 	replayed := stored
@@ -122,7 +135,7 @@ func TestReportRefusesToLookTrustworthyWhenMostlyBlind(t *testing.T) {
 	if !strings.Contains(out.String(), "Read this with care") {
 		t.Errorf("the caveat is missing from the rendered report:\n%s", out.String())
 	}
-	if !strings.HasPrefix(strings.Split(out.String(), "Read this with care")[0], "Shadow report") {
+	if !strings.HasPrefix(strings.Split(out.String(), "Read this with care")[0], "Reset-daily paper canary report") {
 		t.Error("the caveat is buried below the numbers instead of above them")
 	}
 }
@@ -291,6 +304,30 @@ func TestBuildReportRefusesADifferentPolicyThanTheLedger(t *testing.T) {
 	}
 }
 
+func TestReportBindsTheRemainingNativeFeeReserve(t *testing.T) {
+	policy := separateFeePolicy(t)
+	ledger, err := NewLedger(policy, 20_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := time.Unix(1_700_000_000, 0).UTC()
+	report, err := BuildReport(
+		policy, ledger, Counts{Ticks: 1}, Stats{}, 20_000_000, from, from.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.FeeReserveLamports != policy.StartingFeeReserveLamports {
+		t.Fatalf("report fee reserve = %d", report.FeeReserveLamports)
+	}
+	tampered := report
+	tampered.FeeReserveLamports--
+	if differences := Compare(tampered, report); len(differences) != 1 ||
+		differences[0].Field != "fee_reserve_lamports" {
+		t.Fatalf("fee reserve tamper differences = %+v", differences)
+	}
+}
+
 // The averages must divide by the number of decisions actually reached, and an
 // empty period must not divide by zero.
 func TestStatsAveragesAreSafeAndCorrect(t *testing.T) {
@@ -316,6 +353,12 @@ func TestCoverageNeverClaimsEverythingOnBadCounts(t *testing.T) {
 	}
 	if got := actionable(Counts{Signals: 2, Deferred: 9}); got != 0 {
 		t.Errorf("actionable = %d with more deferred than signals, want 0", got)
+	}
+	if got := actionable(Counts{Signals: 2, Filtered: 9}); got != 0 {
+		t.Errorf("actionable = %d with more filtered than signals, want 0", got)
+	}
+	if got := actionable(Counts{Signals: 10, Deferred: 2, Filtered: 3}); got != 5 {
+		t.Errorf("actionable = %d, want 5 after deferred and filtered signals", got)
 	}
 	policy := sellPolicy()
 	policy.StartingInputUnits = 1_000_000_000

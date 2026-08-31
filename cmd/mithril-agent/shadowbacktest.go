@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/big"
 	"math/bits"
 	"path/filepath"
 
@@ -19,13 +20,13 @@ import (
 // second leg spends exactly what the first produced and the spread plus two
 // fees comes out of one book.
 //
-// One thing it does NOT do is pretend to know the pool. A recorded tick carries
-// the price, not the quote that was available at the time, so the fill has to be
-// modelled from a spread the operator supplies — and the report says so on its
-// own face rather than leaving the reader to assume the number came from a real
-// quote. A backtest that hides its assumptions is worse than no backtest.
+// One thing it does NOT do is pretend to know the pool. The recorded quotes
+// belong only to decisions the original policy actually made; hypothetical
+// thresholds have no venue quote at every tick. Their fills therefore have to
+// be modelled from a spread the operator supplies — and the report says so on
+// its own face. A backtest that hides its assumptions is worse than no backtest.
 const shadowBacktestUsage = `Usage: mithril-agent shadow backtest --policy PATH --dir PATH
-                              --buy-at-usd PRICE [--spread-bps N] [--day YYYY-MM-DD] [--json]
+                              [--buy-at-usd PRICE] [--spread-bps N] [--day YYYY-MM-DD] [--json]
 
 Scores a sell-then-buy-back round trip against the prices a shadow run already
 recorded, on ONE set of books, with the same ledger and report the live observer
@@ -33,8 +34,8 @@ uses.
 
   --policy PATH     the shadow policy whose sell rule and sizing to reuse
   --dir PATH        the directory holding recorded shadow journals
-  --buy-at-usd P    buy back at or below this price; must be BELOW the policy's
-                    sell price, or one reading could satisfy both legs
+  --buy-at-usd P    fixed policies only: buy back at or below this price;
+                    adaptive policies derive both directions from the market
   --spread-bps N    how much worse than the oracle the pool is assumed to fill,
                     each way (default 100 = 1%). This is a MODEL, not a quote.
   --day DATE        which recorded UTC day to score (default: the latest)
@@ -59,34 +60,39 @@ func runShadowBacktest(args []string, output io.Writer) error {
 		}
 		return err
 	}
-	if flags.NArg() != 0 || *policyPath == "" || *directory == "" || *buyAtUSD == "" {
-		return errors.New("shadow backtest requires --policy, --dir and --buy-at-usd")
+	if flags.NArg() != 0 || *policyPath == "" || *directory == "" {
+		return errors.New("shadow backtest requires --policy and --dir")
 	}
 	// A pool that costs nothing is the single easiest way to make a paper
 	// result flatter itself, and 100% would consume every trade.
 	if *spreadBPS == 0 || *spreadBPS >= 10_000 {
 		return errors.New("--spread-bps must be between 1 and 9999")
 	}
-	buyAtMicros, err := parseUSDThreshold(*buyAtUSD, "buy price")
-	if err != nil {
-		return err
-	}
-
 	policy, err := loadShadowPolicy(*policyPath)
 	if err != nil {
 		return err
 	}
 	journalPolicy := policy
-	// The return leg is the policy's own rule with the direction flipped, so a
-	// round trip cannot silently read a different feed or a different source
-	// pair than the sell it is paired with.
-	returnLeg := policy.Trigger
-	returnLeg.Direction = pricetrigger.BuyAtOrBelow
-	returnLeg.ThresholdMicros = buyAtMicros
-	if !policy.IsSell() {
-		returnLeg.Direction = pricetrigger.SellAtOrAbove
+	if policy.Adaptive == nil {
+		if *buyAtUSD == "" {
+			return errors.New("a fixed shadow policy requires --buy-at-usd")
+		}
+		buyAtMicros, parseErr := parseUSDThreshold(*buyAtUSD, "buy price")
+		if parseErr != nil {
+			return parseErr
+		}
+		// The return leg is the policy's own rule with the direction flipped, so a
+		// round trip cannot silently read a different feed or source pair.
+		returnLeg := policy.Trigger
+		returnLeg.Direction = pricetrigger.BuyAtOrBelow
+		returnLeg.ThresholdMicros = buyAtMicros
+		if !policy.IsSell() {
+			returnLeg.Direction = pricetrigger.SellAtOrAbove
+		}
+		policy.ReturnTrigger = &returnLeg
+	} else if *buyAtUSD != "" {
+		return errors.New("an adaptive shadow policy does not accept --buy-at-usd")
 	}
-	policy.ReturnTrigger = &returnLeg
 
 	chosen, err := chooseShadowDay(*directory, *day)
 	if err != nil {
@@ -98,12 +104,17 @@ func runShadowBacktest(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if _, err := shadow.Replay(journalPolicy, ticks); err != nil {
+		return fmt.Errorf("replay source shadow journal: %w", err)
+	}
 	prices := observedPrices(ticks)
 	if len(prices) < 2 {
 		return errors.New("that day recorded fewer than two observable prices to score")
 	}
 
-	result, err := shadow.ReplayRoundTrip(policy, prices, modelledPool(uint64(*spreadBPS)))
+	result, err := shadow.ReplayRoundTripTicks(
+		policy, ticks, modelledPool(policy, uint64(*spreadBPS), policy.SlippageBPS),
+	)
 	if err != nil {
 		return err
 	}
@@ -123,7 +134,7 @@ func runShadowBacktest(args []string, output io.Writer) error {
 func observedPrices(ticks []shadow.Tick) []uint64 {
 	prices := make([]uint64, 0, len(ticks))
 	for _, tick := range ticks {
-		if tick.PriceMicros != 0 {
+		if tick.PriceMicros != 0 && !tick.PeriodClose {
 			prices = append(prices, tick.PriceMicros)
 		}
 	}
@@ -132,30 +143,51 @@ func observedPrices(ticks []shadow.Tick) []uint64 {
 
 // modelledPool turns an oracle price into the quote a pool is ASSUMED to give,
 // worse than the oracle by spreadBPS in whichever direction the trade goes.
-//
-// SOL carries 9 decimals and devUSDC 6, and a price is USD micros per whole
-// SOL, so one lot of lamports yields lot*price/1e9 devUSDC units, and spending
-// u devUSDC units yields u*1e9/price lamports.
-func modelledPool(spreadBPS uint64) func(uint64, bool, uint64) (shadow.Quote, error) {
+func modelledPool(
+	policy shadow.Policy, spreadBPS uint64, slippageBPS uint16,
+) func(uint64, bool, uint64) (shadow.Quote, error) {
+	baseDecimals, quoteDecimals := policy.InputDecimals, policy.OutputDecimals
+	if !policy.IsSell() {
+		baseDecimals, quoteDecimals = quoteDecimals, baseDecimals
+	}
 	return func(price uint64, sell bool, input uint64) (shadow.Quote, error) {
 		if price == 0 || input == 0 {
 			return shadow.Quote{}, errors.New("cannot model a fill at a zero price")
 		}
-		multiplier, divisor := price, uint64(lamportsPerSOL)
-		if sell {
-			multiplier, divisor = price, lamportsPerSOL
-		} else {
-			multiplier, divisor = lamportsPerSOL, price
+		if spreadBPS >= 10_000 || slippageBPS == 0 || slippageBPS >= 10_000 ||
+			baseDecimals > 18 || quoteDecimals > 18 {
+			return shadow.Quote{}, errors.New("cannot model a fill with invalid slippage")
 		}
-		out, ok := boundedMulDiv(input, multiplier, divisor)
-		if !ok {
+		numerator := new(big.Int).SetUint64(input)
+		denominator := new(big.Int)
+		baseScale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(baseDecimals)), nil)
+		quoteScale := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(quoteDecimals)), nil)
+		if sell {
+			numerator.Mul(numerator, new(big.Int).SetUint64(price))
+			numerator.Mul(numerator, quoteScale)
+			denominator.Mul(baseScale, big.NewInt(1_000_000))
+		} else {
+			numerator.Mul(numerator, baseScale)
+			numerator.Mul(numerator, big.NewInt(1_000_000))
+			denominator.Mul(new(big.Int).SetUint64(price), quoteScale)
+		}
+		numerator.Div(numerator, denominator)
+		if !numerator.IsUint64() {
 			return shadow.Quote{}, errors.New("the modelled fill is out of range")
 		}
+		out := numerator.Uint64()
+		var ok bool
 		out, ok = boundedMulDiv(out, 10_000-spreadBPS, 10_000)
 		if !ok || out == 0 {
 			return shadow.Quote{}, errors.New("the modelled fill rounds to nothing at this price")
 		}
-		return shadow.Quote{InputAmount: input, EstimatedOutput: out, MinimumOutput: out}, nil
+		minimum, ok := boundedMulDivCeil(out, 10_000-uint64(slippageBPS), 10_000)
+		if !ok || minimum == 0 {
+			return shadow.Quote{}, errors.New("the modelled slippage floor is out of range")
+		}
+		return shadow.Quote{
+			InputAmount: input, EstimatedOutput: out, MinimumOutput: minimum,
+		}, nil
 	}
 }
 
@@ -165,6 +197,21 @@ func boundedMulDiv(value, multiplier, divisor uint64) (uint64, bool) {
 		return 0, false
 	}
 	result, _ := bits.Div64(high, low, divisor)
+	return result, true
+}
+
+func boundedMulDivCeil(value, multiplier, divisor uint64) (uint64, bool) {
+	high, low := bits.Mul64(value, multiplier)
+	if divisor == 0 || high >= divisor {
+		return 0, false
+	}
+	result, remainder := bits.Div64(high, low, divisor)
+	if remainder != 0 {
+		if result == ^uint64(0) {
+			return 0, false
+		}
+		result++
+	}
 	return result, true
 }
 
@@ -199,8 +246,8 @@ func writeBacktest(
 	}
 	w := func(format string, args ...any) { fmt.Fprintf(output, format, args...) }
 	w("\nRound trip over recorded prices — %s\n", day)
-	w("  legs       %d sell(s), %d buy(s), %d refused\n",
-		result.Counts.Sells, result.Counts.Buys, result.Counts.Refused)
+	w("  legs       %d sell(s), %d buy(s), %d refused, %d filtered\n",
+		result.Counts.Sells, result.Counts.Buys, result.Counts.Refused, result.Counts.Filtered)
 	w("  signals    %d sell, %d buy\n",
 		result.Counts.SellSignals, result.Counts.BuySignals)
 	w("  realized   $%s\n", formatSignedMicros(report.RealizedMicros))

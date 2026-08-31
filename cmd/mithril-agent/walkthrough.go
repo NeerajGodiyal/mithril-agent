@@ -159,15 +159,15 @@ func walkthroughPrices(ctx context.Context, step *walkthroughStep, offline bool)
 		microsToUSD(onChain.PriceMicros), time.Since(onChain.PublishedAt).Round(time.Second))
 
 	step.start(2, "Comparing two independent sources")
-	coinbase, err := pricesource.NewCoinbase(nil).Latest(readCtx, pricetrigger.FeedSOLUSD)
+	kraken, err := pricesource.NewKrakenSOL(nil).Latest(readCtx, pricetrigger.FeedSOLUSD)
 	if err != nil {
-		step.sayf("could not read Coinbase: %v", err)
+		step.sayf("could not read Kraken: %v", err)
 		step.sayf("One source is never enough, so the agent would refuse to act.")
 		return false, nil
 	}
-	step.sayf("Coinbase      : $%s", microsToUSD(coinbase.PriceMicros))
+	step.sayf("Kraken        : $%s", microsToUSD(kraken.PriceMicros))
 
-	gapBPS := priceGapBPS(onChain.PriceMicros, coinbase.PriceMicros)
+	gapBPS := priceGapBPS(onChain.PriceMicros, kraken.PriceMicros)
 	step.sayf("difference    : %d basis points (limit 200)", gapBPS)
 	if gapBPS > 200 {
 		step.sayf("BEYOND the limit — the agent would refuse to act on this.")
@@ -179,8 +179,8 @@ func walkthroughPrices(ctx context.Context, step *walkthroughStep, offline bool)
 	// A threshold just under the live price, so the reviewer sees a real
 	// decision rather than a canned one.
 	conservative := onChain.PriceMicros
-	if coinbase.PriceMicros < conservative {
-		conservative = coinbase.PriceMicros
+	if kraken.PriceMicros < conservative {
+		conservative = kraken.PriceMicros
 	}
 	step.sayf("Rule: sell if SOL is at or above $%s", microsToUSD(conservative-1_000_000))
 	step.sayf("Conservative price used: $%s — the LOWER of the two sources, never",

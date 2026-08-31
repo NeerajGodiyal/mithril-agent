@@ -32,6 +32,46 @@ func TestEvaluateUsesConservativePrice(t *testing.T) {
 	}
 }
 
+func TestMultiFeedPolicyAddsJUPWithoutChangingTheV1Contract(t *testing.T) {
+	policy := testPolicy()
+	policy.Feed = FeedJUPUSD
+	if err := policy.Validate(); err == nil {
+		t.Fatal("the SOL-only v1 contract accepted JUP/USD")
+	}
+	policy.Version = MultiFeedVersion
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("the multi-feed contract rejected JUP/USD: %v", err)
+	}
+	policy.Feed = FeedUSDCUSD
+	if err := policy.Validate(); err == nil {
+		t.Fatal("the trigger contract accepted the stablecoin guard feed")
+	}
+}
+
+func TestCanonicalUSDFeedNames(t *testing.T) {
+	if !ValidUSDFeed("WIF/USD") {
+		t.Fatal("canonical admitted feed rejected")
+	}
+	for _, feed := range []string{"wif/USD", "$WIF/USD", "WIF/USDC", "W/USD", "TOO-LONG-SYMBOL/USD"} {
+		if ValidUSDFeed(feed) {
+			t.Fatalf("invalid admitted feed %q was accepted", feed)
+		}
+	}
+}
+
+func TestAdmittedTriggerAcceptsOnlyCanonicalUSDFeeds(t *testing.T) {
+	policy := testPolicy()
+	policy.Version = AdmittedFeedVersion
+	policy.Feed = "WIF/USD"
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("admitted trigger = %v", err)
+	}
+	policy.Feed = "wif/USD"
+	if err := policy.Validate(); err == nil {
+		t.Fatal("non-canonical admitted feed was accepted")
+	}
+}
+
 func TestEvaluateRequiresConfidenceAdjustedThreshold(t *testing.T) {
 	now := time.Now().UTC()
 	policy := testPolicy()

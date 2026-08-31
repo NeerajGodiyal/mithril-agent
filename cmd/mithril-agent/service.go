@@ -42,6 +42,7 @@ import (
 // particular host is baked in, because a unit that names one deployment's paths
 // is a unit that silently supervises the wrong thing on the next one.
 const serviceUsage = `Usage: mithril-agent service install [--output PATH]
+       [--paper-alert-status PATH]
 
 Writes a systemd unit that keeps the runner alive, so it survives closed
 terminals, dropped connections and reboots.
@@ -91,6 +92,9 @@ const (
 	submitterSocketPrefix = "/run/mithril-agent-submitter-"
 	operatorSocketPrefix  = "/run/mithril-agent-submitter-operator-"
 	defaultOperatorSocket = operatorSocketPrefix + "agent.sock"
+	paperStatusUnitName   = "mithril-agent-paper-status"
+	paperStatusSocketPath = "/run/mithril-agent-paper-status.sock"
+	paperStatusCredential = "paper-status"
 )
 
 // serviceLeg is one leg's share of the alert wiring: the status file the runner
@@ -172,6 +176,9 @@ func runServiceInstall(args []string, output io.Writer) error {
 	unitPath := flags.String("output", "", "write the unit here instead of printing it")
 	basePort := flags.Int("metrics-base-port", defaultMetricsBasePort,
 		"first metrics port for the runner; one port per leg from here")
+	paperAlertStatus := flags.String(
+		"paper-alert-status", "", "private bounded paper alert snapshot",
+	)
 	var envFiles stringList
 	flags.Var(&envFiles, "env-file",
 		"environment file for the runner; repeatable, replaces the documented defaults")
@@ -208,6 +215,25 @@ func runServiceInstall(args []string, output io.Writer) error {
 	plan, err := buildServicePlan(*basePort)
 	if err != nil {
 		return err
+	}
+	if *paperAlertStatus != "" {
+		if !filepath.IsAbs(*paperAlertStatus) || filepath.Clean(*paperAlertStatus) != *paperAlertStatus ||
+			!systemdAtom(*paperAlertStatus) {
+			return errors.New("--paper-alert-status must be a clean absolute path safe for systemd")
+		}
+		if !plan.Telegram {
+			return errors.New("--paper-alert-status requires Telegram alerts enabled in the strategy")
+		}
+		for _, leg := range plan.Legs {
+			if leg.StatusFile == *paperAlertStatus {
+				return errors.New("--paper-alert-status must differ from every live status file")
+			}
+		}
+		plan.PaperStatusFile = *paperAlertStatus
+		plan, err = plan.checked()
+		if err != nil {
+			return err
+		}
 	}
 	// A runner binds one metrics port per leg. If any of them is already taken,
 	// the runner exits at startup — and because the unit restarts forever by
@@ -461,11 +487,14 @@ func metricsPortSpan(legs []serviceLeg) int {
 // their services are socket-activated, so enabling those too would start a
 // bridge with no reader.
 func statusSocketUnits(plan servicePlan) []string {
-	names := make([]string, 0, len(plan.Legs))
+	names := make([]string, 0, len(plan.Legs)+1)
 	for _, leg := range plan.Legs {
 		if leg.StatusFile != "" {
 			names = append(names, leg.unit()+".socket")
 		}
+	}
+	if plan.PaperStatusFile != "" {
+		names = append(names, paperStatusUnitName+".socket")
 	}
 	return names
 }
@@ -589,20 +618,21 @@ func sortedKeys(units map[string]string) []string {
 // state rather than supplied by the operator. Anything an operator has to
 // retype is something they can get wrong.
 type servicePlan struct {
-	Binary         string
-	Home           string
-	User           string
-	Group          string
-	RunArgs        string
-	StopArgs       string
-	ReadOnly       []string
-	ReadWrite      []string
-	Inaccessible   []string
-	SignerTraverse []string
-	EnvFiles       []string
-	ArmCommand     string
-	Legs           []serviceLeg
-	Telegram       bool
+	Binary          string
+	Home            string
+	User            string
+	Group           string
+	RunArgs         string
+	StopArgs        string
+	ReadOnly        []string
+	ReadWrite       []string
+	Inaccessible    []string
+	SignerTraverse  []string
+	EnvFiles        []string
+	ArmCommand      string
+	Legs            []serviceLeg
+	Telegram        bool
+	PaperStatusFile string
 }
 
 // stringList collects a repeatable flag.
@@ -742,6 +772,9 @@ func (p servicePlan) checked() (servicePlan, error) {
 				return servicePlan{}, errors.New("a leg path contains characters that are unsafe in a systemd unit")
 			}
 		}
+	}
+	if p.PaperStatusFile != "" && !systemdAtom(p.PaperStatusFile) {
+		return servicePlan{}, errors.New("the paper status path is unsafe for a systemd unit")
 	}
 	return p.deduplicated(), nil
 }
@@ -1253,8 +1286,8 @@ func renderStatusSocket(plan servicePlan, leg serviceLeg) string {
 	fmt.Fprintf(&unit, "[Socket]\nListenStream=%s\n", leg.socket())
 	fmt.Fprintf(&unit, "SocketUser=%s\nSocketGroup=%s\nSocketMode=0660\n", plan.User, statusGroupName)
 	fmt.Fprintf(&unit, "FileDescriptorName=%s\nService=%s.service\n", statusCredential, leg.unit())
-	// Accept=no hands the listening socket to one short-lived reader. FlushPending
-	// keeps a stale queued connection from being answered with an old status.
+	// Accept=no hands the listening socket to one short-lived reader. Pending
+	// readers survive its exit; the next activation reloads the status credential.
 	unit.WriteString("Accept=no\nBacklog=8\nFlushPending=no\n\n")
 	unit.WriteString("[Install]\nWantedBy=sockets.target\n")
 	return unit.String()
@@ -1290,13 +1323,51 @@ func renderStatusService(plan servicePlan, leg serviceLeg) string {
 	return unit.String()
 }
 
+func renderPaperStatusSocket() string {
+	var unit strings.Builder
+	unit.WriteString("[Unit]\nDescription=Mithril agent bounded paper simulation status socket\n\n")
+	fmt.Fprintf(&unit, "[Socket]\nListenStream=%s\n", paperStatusSocketPath)
+	fmt.Fprintf(&unit, "SocketUser=root\nSocketGroup=%s\nSocketMode=0660\n", statusGroupName)
+	fmt.Fprintf(&unit, "FileDescriptorName=%s\nService=%s.service\n", paperStatusCredential, paperStatusUnitName)
+	unit.WriteString("Accept=no\nBacklog=8\nFlushPending=no\nRemoveOnStop=yes\n\n")
+	unit.WriteString("[Install]\nWantedBy=sockets.target\n")
+	return unit.String()
+}
+
+func renderPaperStatusService(plan servicePlan) string {
+	var unit strings.Builder
+	unit.WriteString("[Unit]\nDescription=Mithril agent bounded paper simulation status bridge\n")
+	fmt.Fprintf(&unit, "Requires=%s.socket\nStartLimitIntervalSec=30s\nStartLimitBurst=12\n\n", paperStatusUnitName)
+	unit.WriteString("[Service]\nType=simple\nDynamicUser=yes\nUMask=0077\n")
+	fmt.Fprintf(&unit, "LoadCredential=%s:%s\n", paperStatusCredential, plan.PaperStatusFile)
+	fmt.Fprintf(&unit, "ExecStart=%s --credential %s\n",
+		filepath.Join(filepath.Dir(plan.Binary), "mithril-agent-paper-status-bridge"), paperStatusCredential)
+	fmt.Fprintf(&unit, "InaccessiblePaths=%s\n", filepath.Dir(plan.PaperStatusFile))
+	unit.WriteString("RuntimeMaxSec=5s\nRestart=on-failure\nRestartSec=1s\n")
+	unit.WriteString("NoNewPrivileges=yes\nCapabilityBoundingSet=\nAmbientCapabilities=\n")
+	unit.WriteString("PrivateDevices=yes\nPrivateMounts=yes\nPrivateNetwork=yes\nPrivateTmp=yes\n")
+	unit.WriteString("ProtectHome=yes\nProtectSystem=strict\n")
+	unit.WriteString("ProtectKernelLogs=yes\nProtectKernelModules=yes\nProtectKernelTunables=yes\n")
+	unit.WriteString("MemoryDenyWriteExecute=yes\nRestrictAddressFamilies=AF_UNIX\n")
+	unit.WriteString("RestrictNamespaces=yes\nRestrictSUIDSGID=yes\n")
+	return unit.String()
+}
+
 // renderAlertsUnit is the bot itself. It runs as its own account so the bot
 // token is not readable by the agent, and it reaches every leg through the
 // read-only sockets above — it is given no config, no key, and no journal.
 func renderAlertsUnit(plan servicePlan) string {
 	var unit strings.Builder
 	unit.WriteString("[Unit]\nDescription=Mithril agent Telegram alerts\n")
-	unit.WriteString("After=network-online.target\nWants=network-online.target\n")
+	unit.WriteString("After=network-online.target")
+	if plan.PaperStatusFile != "" {
+		fmt.Fprintf(&unit, " %s.socket", paperStatusUnitName)
+	}
+	unit.WriteString("\nWants=network-online.target")
+	if plan.PaperStatusFile != "" {
+		fmt.Fprintf(&unit, " %s.socket", paperStatusUnitName)
+	}
+	unit.WriteString("\n")
 	unit.WriteString("StartLimitIntervalSec=0\n\n")
 	unit.WriteString("[Service]\nType=simple\n")
 	fmt.Fprintf(&unit, "User=%s\nGroup=%s\n", alertsAccountName, alertsAccountName)
@@ -1307,6 +1378,9 @@ func renderAlertsUnit(plan servicePlan) string {
 		if leg.StatusFile != "" {
 			fmt.Fprintf(&unit, " \\\n  --status-socket %s", leg.socket())
 		}
+	}
+	if plan.PaperStatusFile != "" {
+		fmt.Fprintf(&unit, " \\\n  --paper-status-socket %s", paperStatusSocketPath)
 	}
 	fmt.Fprintf(&unit, " \\\n  --cursor %s\n", alertsCursorPath)
 	unit.WriteString("Restart=on-failure\nRestartSec=10s\n")
@@ -1351,6 +1425,10 @@ func supportUnits(plan servicePlan) map[string]string {
 		}
 	}
 	if plan.Telegram && len(statusSocketUnits(plan)) != 0 {
+		if plan.PaperStatusFile != "" {
+			units[paperStatusUnitName+".socket"] = renderPaperStatusSocket()
+			units[paperStatusUnitName+".service"] = renderPaperStatusService(plan)
+		}
 		units[alertsUnitName] = renderAlertsUnit(plan)
 	}
 	return units

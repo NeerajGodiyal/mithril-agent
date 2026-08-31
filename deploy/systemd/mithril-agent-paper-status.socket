@@ -1,0 +1,17 @@
+[Unit]
+Description=Mithril bounded paper simulation status socket
+
+[Socket]
+ListenStream=/run/mithril-agent-paper-status.sock
+SocketUser=root
+SocketGroup=mithril-agent-status
+SocketMode=0660
+FileDescriptorName=paper-status
+Service=mithril-agent-paper-status-bridge.service
+Accept=no
+Backlog=8
+FlushPending=no
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

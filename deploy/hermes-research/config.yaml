@@ -1,0 +1,199 @@
+_config_version: 39
+
+model:
+  provider: openai-codex
+  default: gpt-5.6-terra
+
+web:
+  keyless_fallback: true
+  keyless_rescue: true
+
+tool_loop_guardrails:
+  hard_stop_enabled: true
+  hard_stop_after:
+    exact_failure: 5
+    idempotent_no_progress: 5
+
+approvals:
+  mode: manual
+  timeout: 300
+  cron_mode: deny
+  single_query_mode: deny
+  mcp_reload_confirm: true
+  destructive_slash_confirm: true
+
+auxiliary:
+  background_review:
+    enabled: false
+
+memory:
+  memory_enabled: false
+  user_profile_enabled: false
+  write_approval: true
+  nudge_interval: 0
+
+skills:
+  creation_nudge_interval: 0
+  guard_agent_created: true
+  write_approval: true
+
+agent:
+  max_turns: 60
+  disabled_toolsets:
+    - terminal
+    - file
+    - code_execution
+    - skills
+    - memory
+    - session_search
+    - delegation
+    - cronjob
+    - kanban
+    - computer_use
+    - project
+    - desktop_ui
+    - homeassistant
+    - spotify
+    - discord
+    - discord_admin
+    - yuanbao
+    - image_gen
+    - video_gen
+    - tts
+
+security:
+  allow_private_urls: false
+  redact_secrets: true
+  allow_lazy_installs: false
+  # No model-visible command tool exists in this profile. Disabling Tirith also
+  # prevents Hermes from downloading an unpinned scanner at runtime.
+  tirith_enabled: false
+  tirith_fail_open: false
+  website_blocklist:
+    enabled: true
+    domains:
+      - "*.local"
+      - "*.internal"
+      - localhost
+    shared_files: []
+
+cron:
+  allow_agent_scheduling: false
+
+group_sessions_per_user: true
+unauthorized_dm_behavior: ignore
+
+platforms:
+  telegram:
+    enabled: false
+
+platform_toolsets:
+  cli:
+    - web
+    - mithril_index
+    - mithril_paper
+    - solana_docs
+  telegram:
+    - web
+    - mithril_index
+    - solana_docs
+  cron:
+    - web
+    - mithril_index
+    - mithril_paper
+    - solana_docs
+
+mcp_servers:
+  # Keep Hermes external secret sources disabled for this profile. In v2026.8.27,
+  # their variables are forwarded to every stdio MCP child.
+  # Full trust is intentional for these three exact include-filtered servers:
+  # pinned Hermes misclassifies MCP read-only annotations, and the paper server's
+  # bounded challenger creation must run unattended. Re-audit on every upgrade.
+  mithril_index:
+    command: /opt/mithril/bin/mithril-agent
+    args:
+      - index
+      - mcp
+      - --dir
+      - /var/lib/mithril-agent/index
+      - --max-record-age
+      - 15m
+    enabled: true
+    trust: full
+    timeout: 30
+    connect_timeout: 15
+    tools:
+      include:
+        - mithril_index_status
+        - mithril_index_accounts
+        - mithril_index_transactions
+      resources: false
+      prompts: false
+    sampling:
+      enabled: false
+    elicitation:
+      enabled: false
+
+  mithril_paper:
+    command: /opt/mithril/bin/mithril-agent
+    args:
+      - shadow
+      - research-mcp
+      - --policy
+      - /var/lib/mithril-agent-research/policy/policy.json
+      - --journal-dir
+      - /var/lib/mithril-agent-research/journals
+      - --candidate-dir
+      - /var/lib/mithril-agent-research/challenger/candidates
+      - --challenger-pointer
+      - /var/lib/mithril-agent-research/challenger/active.json
+      - --champion-pointer
+      - /var/lib/mithril-agent-research/champion/active.json
+      - --champion-dir
+      - /var/lib/mithril-agent-research/runs/champion
+      - --challenger-dir
+      - /var/lib/mithril-agent-research/runs/challenger
+      - --challenge-days
+      - "7"
+      - --spread-bps
+      - "100"
+      - --max-candidates
+      - "64"
+    enabled: true
+    trust: full
+    timeout: 60
+    connect_timeout: 15
+    tools:
+      include:
+        - mithril_paper_create_challenger
+        - mithril_paper_challenge_status
+      resources: false
+      prompts: false
+    sampling:
+      enabled: false
+    elicitation:
+      enabled: false
+
+  solana_docs:
+    url: https://mcp.solana.com/mcp
+    enabled: true
+    trust: full
+    timeout: 60
+    connect_timeout: 30
+    tools:
+      include:
+        - list_sections
+        - get_documentation
+      resources: false
+      prompts: false
+    sampling:
+      enabled: false
+    elicitation:
+      enabled: false
+
+telemetry:
+  shared_metrics:
+    enabled: false
+
+plugins:
+  enabled: []

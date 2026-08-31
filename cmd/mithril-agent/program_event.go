@@ -53,29 +53,12 @@ func runProgramDecodeEvent(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	var indexStatus rootedindex.Status
-	if *workspacePath != "" {
-		indexStatus, err = validateProgramWorkspaceIndex(*workspacePath, *indexDir, "activity")
-		if err != nil {
-			return err
-		}
-	} else {
-		indexStatus, err = rootedindex.ReadCompleteStatus(*indexDir)
-		if err != nil {
-			return err
-		}
-	}
-	transactions, err := rootedindex.QueryTransactions(*indexDir, rootedindex.TransactionQuery{
-		Signature: *signature, Limit: 2, IncludePayload: true,
-	})
+	transaction, indexStatus, err := readExactRootedTransaction(*workspacePath, *indexDir, *signature)
 	if err != nil {
 		return err
 	}
-	if len(transactions) != 1 {
-		return errors.New("rooted index must contain exactly one transaction with that signature")
-	}
 	decoded, err := decodeProgramEvents(
-		report, *eventType, transactions[0], indexStatus.Provenance, indexStatus.Finality,
+		report, *eventType, transaction, indexStatus.Provenance, indexStatus.Finality,
 	)
 	if err != nil {
 		return err
@@ -85,7 +68,7 @@ func runProgramDecodeEvent(args []string, output io.Writer) error {
 	}
 	if _, err := fmt.Fprintf(output,
 		"Program events decoded: %d\nProgram: %s\nInterface SHA-256: %s\nTransaction: %s\nRooted cursor: %s\n",
-		len(decoded), report.Program, report.SHA256, transactions[0].Signature, transactions[0].Cursor); err != nil {
+		len(decoded), report.Program, report.SHA256, transaction.Signature, transaction.Cursor); err != nil {
 		return err
 	}
 	encoder := json.NewEncoder(output)
@@ -101,12 +84,38 @@ func runProgramDecodeEvent(args []string, output io.Writer) error {
 	return nil
 }
 
+func readExactRootedTransaction(workspacePath, indexDir, signature string) (rootedindex.TransactionResult, rootedindex.Status, error) {
+	var status rootedindex.Status
+	var err error
+	if workspacePath != "" {
+		status, err = validateProgramWorkspaceIndex(workspacePath, indexDir, "activity")
+	} else {
+		status, err = rootedindex.ReadCompleteStatus(indexDir)
+	}
+	if err != nil {
+		return rootedindex.TransactionResult{}, rootedindex.Status{}, err
+	}
+	transactions, err := rootedindex.QueryTransactions(indexDir, rootedindex.TransactionQuery{
+		Signature: signature, Limit: 2, IncludePayload: true,
+	})
+	if err != nil {
+		return rootedindex.TransactionResult{}, rootedindex.Status{}, err
+	}
+	if len(transactions) != 1 {
+		return rootedindex.TransactionResult{}, rootedindex.Status{}, errors.New("rooted index must contain exactly one transaction with that signature")
+	}
+	return transactions[0], status, nil
+}
+
 func decodeProgramEvents(
 	report programinterface.Report,
 	eventType string,
 	transaction rootedindex.TransactionResult,
 	provenance, finality string,
 ) ([]decodedProgramEvent, error) {
+	if !transaction.Succeeded {
+		return nil, errors.New("rooted transaction failed; event decoding refuses reverted execution")
+	}
 	discriminator, err := eventDiscriminator(report, eventType)
 	if err != nil {
 		return nil, err

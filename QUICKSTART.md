@@ -15,7 +15,7 @@ The result is deliberately limited:
 
 - Devnet only;
 - one fixed SOL/devUSDC route;
-- Telegram and MCP are read-only;
+- Telegram and the execution/status MCP are read-only;
 - the agent uses a dedicated limited-balance account, not your main wallet;
 - every trading grant expires and has an action limit; and
 - the first sell is a one-time bootstrap before the buy leg can be created.
@@ -26,8 +26,8 @@ Use a full-node/RPC host, not a voting validator host.
 ## 1. Use a matching Mithril build
 
 Do not use the old `koro/agent-node-integration-wip` branch for a new setup.
-Build the reviewed focused branches in order: `feature/mcp`, `koro/rpc`,
-`koro/node-monitoring`, replay/rooting, then rooted RPC/feed. Until those are
+Build the reviewed focused branches in the dependency order listed under
+[node prerequisites](ROADMAP.md#node-prerequisites). Until those revisions are
 published together, treat this guide as a local integration review rather than
 a production deployment.
 
@@ -63,8 +63,8 @@ make build
 make adapter
 ```
 
-Do not continue if any command fails. `make build` produces seven Go binaries;
-all seven must be installed together. The quote adapter also needs the pinned
+Do not continue if any command fails. `make build` produces nine Go binaries;
+all nine must be installed together. The quote adapter also needs the pinned
 Node.js runtime and its installed `node_modules`. At this early step,
 `make prereqs-trading` may also say that RPC variables are not set. That is expected;
 step 4 puts them in protected service files instead of your login shell.
@@ -76,7 +76,10 @@ Install the service accounts first:
 ```sh
 sudo install -m 0644 deploy/sysusers/mithril-agent-status.conf \
   /usr/lib/sysusers.d/mithril-agent-status.conf
+sudo install -m 0644 deploy/sysusers/mithril-agent-dashboard.conf \
+  /usr/lib/sysusers.d/mithril-agent-dashboard.conf
 sudo systemd-sysusers /usr/lib/sysusers.d/mithril-agent-status.conf
+sudo systemd-sysusers /usr/lib/sysusers.d/mithril-agent-dashboard.conf
 ```
 
 Install the verified runtime:
@@ -95,6 +98,8 @@ sudo install -o root -g root -m 0755 \
   ./bin/mithril-agent-quote \
   ./bin/mithril-agent-telegram \
   ./bin/mithril-agent-status-bridge \
+  ./bin/mithril-agent-paper-status-bridge \
+  ./bin/mithril-agent-paper-dashboard \
   /usr/local/libexec/mithril-agent/
 sudo install -o root -g root -m 0755 "$(command -v node)" \
   /usr/local/libexec/mithril-agent/node
@@ -116,7 +121,8 @@ Check that the installed command can find every sibling helper:
 /usr/local/bin/mithril-agent version
 for name in mithril-agent mithril-agent-policy mithril-agent-signer \
   mithril-agent-submitter mithril-agent-quote mithril-agent-telegram \
-  mithril-agent-status-bridge; do
+  mithril-agent-status-bridge mithril-agent-paper-status-bridge \
+  mithril-agent-paper-dashboard; do
   test -x "/usr/local/libexec/mithril-agent/$name" || exit 1
 done
 ```

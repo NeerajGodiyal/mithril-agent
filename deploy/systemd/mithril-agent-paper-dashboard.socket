@@ -1,0 +1,17 @@
+[Unit]
+Description=Mithril private paper dashboard socket
+
+[Socket]
+ListenStream=/run/mithril-agent-paper-dashboard.sock
+SocketUser=root
+SocketGroup=mithril-agent-dashboard
+SocketMode=0660
+FileDescriptorName=paper-dashboard
+Service=mithril-agent-paper-dashboard.service
+Accept=no
+Backlog=8
+FlushPending=no
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

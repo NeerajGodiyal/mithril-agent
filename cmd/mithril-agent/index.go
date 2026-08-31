@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/indexmcp"
 	"github.com/Overclock-Validator/mithril-agent/rootedindex"
@@ -20,13 +21,13 @@ const indexUsage = `Usage:
   mithril-agent index ingest --dir ABSOLUTE_PATH --cluster NAME --genesis-hash HASH \
     [--owner ADDRESS] [--account ADDRESS] [--mention ADDRESS] [--json]
   mithril-agent index ingest --workspace ABSOLUTE_WORKSPACE_JSON --kind state|activity [--json]
-  mithril-agent index doctor --dir ABSOLUTE_PATH [--json]
+  mithril-agent index doctor --dir ABSOLUTE_PATH [--max-record-age DURATION] [--json]
   mithril-agent index status --dir ABSOLUTE_PATH [--json]
   mithril-agent index query --dir ABSOLUTE_PATH [--owner ADDRESS] [--account ADDRESS] \
     [--after SLOT:ORDINAL] [--limit N] [--include-data] [--json]
   mithril-agent index transactions --dir ABSOLUTE_PATH [--signature SIGNATURE] \
     [--mention ADDRESS] [--after SLOT:ORDINAL] [--limit N] [--include-payload] [--json]
-  mithril-agent index mcp --dir ABSOLUTE_PATH
+  mithril-agent index mcp --dir ABSOLUTE_PATH [--max-record-age DURATION]
   mithril-agent index mcp-config --dir ABSOLUTE_PATH --name NAME
 
 Ingest reads Mithril's framed rooted-event JSONL from standard input into a
@@ -101,6 +102,7 @@ func runIndexDoctor(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("index doctor", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	dir := flags.String("dir", "", "private index directory")
+	maxRecordAge := flags.Duration("max-record-age", 0, "maximum age of the latest verified journal record")
 	jsonOutput := flags.Bool("json", false, "print JSON")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -115,7 +117,15 @@ func runIndexDoctor(args []string, output io.Writer) error {
 	if !filepath.IsAbs(*dir) || filepath.Clean(*dir) != *dir {
 		return errors.New("index doctor directory must be a clean absolute path")
 	}
+	if *maxRecordAge < 0 {
+		return errors.New("index doctor --max-record-age cannot be negative")
+	}
 	status, err := rootedindex.ReadCompleteStatus(*dir)
+	var freshnessErr error
+	if err == nil && *maxRecordAge > 0 {
+		freshnessErr = rootedindex.RequireFresh(status, time.Now().UTC(), *maxRecordAge)
+		err = freshnessErr
+	}
 	if err == nil {
 		result := indexDoctorResult{Status: "ready", Ready: true, Index: &status}
 		if *jsonOutput {
@@ -135,7 +145,24 @@ func runIndexDoctor(args []string, output io.Writer) error {
 		"If the check still fails, create a new private directory and backfill it from retained rooted events; use --latest only for a deliberately future-only index.",
 		"Keep the old directory for audit and comparison until the replacement is verified.",
 	}
+	if migrationReason, ok := rootedindex.SchemaMigrationReason(err); ok {
+		reason = migrationReason
+		next = []string{
+			"Stop ingest and keep the existing index unchanged for audit.",
+			"Create a new private v5 index with the intended source, cluster, and permanent filters.",
+			"Backfill it from Mithril's event-schema-v3 framed rooted feed, then run doctor on the replacement before switching readers.",
+		}
+	}
 	var checked *rootedindex.Status
+	if freshnessErr != nil {
+		reason = freshnessErr.Error()
+		checked = &status
+		next = []string{
+			"Confirm the supervised rooted-event ingester is healthy and advancing this exact index.",
+			"Run index doctor again after a complete rooted batch has been stored.",
+			"Do not expose this index as fresh evidence until the age check passes.",
+		}
+	}
 	if status.SchemaVersion != 0 && !status.Complete {
 		reason = "ingest stopped before the terminal slot root marker"
 		checked = &status
@@ -191,17 +218,21 @@ func runIndexMCP(ctx context.Context, args []string, input io.Reader, output io.
 	flags := flag.NewFlagSet("index mcp", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	dir := flags.String("dir", "", "private index directory")
+	maxRecordAge := flags.Duration("max-record-age", 0, "maximum age of the latest verified journal record")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || *dir == "" {
 		return errors.New("index mcp requires --dir")
 	}
+	if *maxRecordAge < 0 {
+		return errors.New("index mcp --max-record-age cannot be negative")
+	}
 	closer, ok := input.(io.ReadCloser)
 	if !ok {
 		return errors.New("index MCP input must be closable stdio")
 	}
-	return indexmcp.Serve(ctx, *dir, closer, output)
+	return indexmcp.ServeWithMaxRecordAge(ctx, *dir, closer, output, *maxRecordAge)
 }
 
 var indexMCPName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -358,17 +389,20 @@ func runIndexStatus(args []string, output io.Writer) error {
 	if *jsonOutput {
 		return json.NewEncoder(output).Encode(status)
 	}
-	last, root := "none", "none"
+	last, root, recordedAt := "none", "none", "none"
 	if status.LastCursor != nil {
 		last = status.LastCursor.String()
 	}
 	if status.LastRoot != nil {
 		root = status.LastRoot.String()
 	}
+	if status.LastRecordedAt != nil {
+		recordedAt = status.LastRecordedAt.Format(time.RFC3339Nano)
+	}
 	_, err = fmt.Fprintf(output,
-		"Rooted index integrity verified\nSnapshot complete: %t\nProvenance: %s (%s)\nTransactions: %d\nAccount updates: %d\nRooted slots: %d\nLast cursor: %s\nLast root: %s\nChain head: %s\n",
-		status.Complete, status.Provenance, status.Finality,
-		status.Transactions, status.Accounts, status.Roots, last, root, status.ChainHead)
+		"Rooted index integrity verified\nSnapshot complete: %t\nSchemas: index=%d event=%d\nProvenance: %s (%s)\nTransactions: %d\nAccount updates: %d\nRooted slots: %d\nLast cursor: %s\nLast root: %s\nLast recorded at: %s\nChain head: %s\n",
+		status.Complete, status.SchemaVersion, status.EventSchemaVersion, status.Provenance, status.Finality,
+		status.Transactions, status.Accounts, status.Roots, last, root, recordedAt, status.ChainHead)
 	return err
 }
 
@@ -445,7 +479,7 @@ func runIndexTransactions(args []string, output io.Writer) error {
 	mention := flags.String("mention", "", "mentioned address")
 	afterText := flags.String("after", "", "exclusive rooted cursor")
 	limit := flags.Int("limit", 100, "maximum results")
-	includePayload := flags.Bool("include-payload", false, "include message, logs, CPI, and return data")
+	includePayload := flags.Bool("include-payload", false, "include signed transaction, logs, CPI, and return data")
 	jsonOutput := flags.Bool("json", false, "print JSON")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -493,8 +527,8 @@ func runIndexTransactions(args []string, output io.Writer) error {
 	}
 	for _, result := range results {
 		if _, err := fmt.Fprintf(output,
-			"  %s  signature=%s succeeded=%t compute_units=%d failure=%s logs_truncated=%t\n",
-			result.Cursor, result.Signature, result.Succeeded, result.ComputeUnits,
+			"  %s  signature=%s version=%s message_hash=%s succeeded=%t compute_units=%d failure=%s logs_truncated=%t\n",
+			result.Cursor, result.Signature, result.Version, result.MessageHash, result.Succeeded, result.ComputeUnits,
 			result.Failure, result.LogsTruncated); err != nil {
 			return err
 		}

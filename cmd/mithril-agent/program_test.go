@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril-agent/programinterface"
 	"github.com/Overclock-Validator/mithril-agent/rootedindex"
+	solanago "github.com/solana-foundation/solana-go/v2"
 )
 
 const programCommandAddress = "11111111111111111111111111111111"
@@ -108,6 +110,167 @@ func TestProgramDecodeInstructionFromPinnedInterface(t *testing.T) {
 	}
 }
 
+func TestProgramDecodeInstructionFromRootedV1Transaction(t *testing.T) {
+	registry, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	idl := []byte(`{
+  "address":"11111111111111111111111111111111",
+  "metadata":{"name":"large","version":"0.1.0","spec":"0.1.0"},
+  "instructions":[{"name":"write","discriminator":[1],"accounts":[{"name":"payer","signer":true}],"args":[{"name":"data","type":"bytes"}]}]
+}`)
+	pin, err := programinterface.Pin(registry, programCommandAddress, idl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, 1300)
+	payload[0] = 1
+	binary.LittleEndian.PutUint32(payload[1:5], uint32(len(payload)-5))
+	transaction := testRootedTransactionWithInstructionVersion(
+		t, programCommandAddress, payload, nil, solanago.MessageVersionV1,
+	)
+	indexDir := filepath.Join(t.TempDir(), "activity")
+	index, err := rootedindex.Open(indexDir, testRootedSource(), rootedindex.Filter{Mention: programCommandAddress})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beginRootedBatch(t, index, 1, 2, 2)
+	if _, err := index.Append(rootedindex.Event{
+		SchemaVersion: rootedindex.SchemaVersion, Cursor: rootedindex.Cursor{Slot: 2},
+		Kind: "transaction_executed", Transaction: transaction,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := index.Append(rootedindex.Event{
+		SchemaVersion: rootedindex.SchemaVersion, Cursor: rootedindex.Cursor{Slot: 2, Ordinal: 1},
+		Kind: "slot_rooted", Root: testRootedSlot(testRootedSource(), 1, 1, 0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	args := []string{
+		"program", "decode-instruction", "--json", "--registry", registry,
+		"--program", programCommandAddress, "--sha256", pin.SHA256,
+		"--instruction", "write", "--index-dir", indexDir,
+		"--signature", transaction.Signature, "--outer-index", "0",
+	}
+	var output bytes.Buffer
+	if err := run(args, &output); err != nil {
+		t.Fatal(err)
+	}
+	var decoded decodedProgramInstruction
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Version != rootedindex.TransactionVersionV1 || decoded.Bytes != len(payload) ||
+		decoded.Signature != transaction.Signature || decoded.MessageHash != transaction.MessageHash ||
+		decoded.Provenance != rootedindex.AlpenglowRootedProvenance ||
+		decoded.Finality != rootedindex.RootedFinality || !decoded.Succeeded ||
+		decoded.Scope != "rooted_outer_instruction" || decoded.Location != "outer" || !decoded.Signed ||
+		decoded.Current || decoded.InnerIndex != nil || len(decoded.Accounts) != 1 {
+		t.Fatalf("decoded rooted v1 instruction = %+v", decoded)
+	}
+	output.Reset()
+	humanArgs := append([]string(nil), args[:2]...)
+	humanArgs = append(humanArgs, args[3:]...)
+	if err := run(humanArgs, &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Version: v1", "Message hash: " + transaction.MessageHash,
+		"Provenance: " + rootedindex.AlpenglowRootedProvenance,
+		"Finality: " + rootedindex.RootedFinality, "Accounts:\n  - ", "Arguments:\n",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("human rooted decode omits %q:\n%s", want, output.String())
+		}
+	}
+	args[len(args)-1] = "1"
+	if err := run(args, io.Discard); err == nil || !strings.Contains(err.Error(), "out of range") {
+		t.Fatalf("out-of-range outer instruction error = %v", err)
+	}
+}
+
+func TestDecodeRootedCPIInstructionUsesRuntimeLimit(t *testing.T) {
+	report, err := programinterface.Inspect([]byte(`{
+  "address":"11111111111111111111111111111111",
+  "metadata":{"name":"large","version":"0.1.0","spec":"0.1.0"},
+  "instructions":[{"name":"write","discriminator":[1],"accounts":[],"args":[{"name":"data","type":"bytes"}]}]
+}`), programCommandAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, 5000)
+	payload[0] = 1
+	binary.LittleEndian.PutUint32(payload[1:5], uint32(len(payload)-5))
+	transaction := testRootedTransaction(t, programCommandAddress, nil)
+	transaction.Inner = []rootedindex.InnerInstructions{{Index: 0, Instructions: []rootedindex.CompiledInstruction{{
+		ProgramIDIndex: 1, Data: payload,
+	}}}}
+	decoded, err := decodeRootedProgramInnerInstruction(
+		report, "write", rootedindex.TransactionResult{
+			Cursor: rootedindex.Cursor{Slot: 7}, Signature: transaction.Signature,
+			Version: rootedindex.TransactionVersionLegacy, MessageHash: transaction.MessageHash,
+			AccountKeys: transaction.AccountKeys, Succeeded: true,
+			Transaction: transaction.Transaction, Inner: transaction.Inner,
+		}, 0, 0, rootedindex.AlpenglowRootedProvenance, rootedindex.RootedFinality,
+	)
+	if err != nil || decoded.Bytes != len(payload) || decoded.Signed {
+		t.Fatalf("decoded large CPI instruction = %+v, %v", decoded, err)
+	}
+}
+
+func TestDecodeRootedV0InstructionUsesRecordedLookupAddresses(t *testing.T) {
+	report, err := programinterface.Inspect([]byte(`{
+  "address":"11111111111111111111111111111111",
+  "metadata":{"name":"lookup","version":"0.1.0","spec":"0.1.0"},
+  "instructions":[{"name":"write","discriminator":[1],"accounts":[{"name":"loaded"}],"args":[]}]
+}`), programCommandAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transaction := testRootedV0LookupTransaction(t, programCommandAddress, programSimulationState, []byte{1})
+	result := rootedindex.TransactionResult{
+		Cursor: rootedindex.Cursor{Slot: 7}, Signature: transaction.Signature,
+		Version: rootedindex.TransactionVersionV0, MessageHash: transaction.MessageHash,
+		AccountKeys: transaction.AccountKeys, Succeeded: true, Transaction: transaction.Transaction,
+		Inner: []rootedindex.InnerInstructions{{Index: 0, Instructions: []rootedindex.CompiledInstruction{{
+			ProgramIDIndex: 2, Accounts: []uint16{0}, Data: []byte{1},
+		}}}},
+	}
+	decoded, err := decodeRootedProgramInstruction(
+		report, "write", result, 0, rootedindex.AlpenglowRootedProvenance, rootedindex.RootedFinality,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Version != rootedindex.TransactionVersionV0 || len(decoded.Accounts) != 1 ||
+		decoded.Accounts[0] != programSimulationState {
+		t.Fatalf("decoded v0 lookup instruction = %+v", decoded)
+	}
+	result.Succeeded = false
+	result.Failure = "instruction error"
+	failed, err := decodeRootedProgramInstruction(report, "write", result, 0, "", "")
+	if err != nil || failed.Succeeded || failed.Failure != result.Failure {
+		t.Fatalf("failed rooted outer instruction = %+v, %v", failed, err)
+	}
+	result.Succeeded = true
+	result.Failure = ""
+	report.Program = programSimulationState
+	inner, err := decodeRootedProgramInnerInstruction(report, "write", result, 0, 0, "", "")
+	if err != nil || inner.Location != "inner" || inner.Signed || inner.InnerIndex == nil ||
+		inner.Accounts[0] != result.AccountKeys[0] {
+		t.Fatalf("decoded v0 lookup program CPI = %+v, %v", inner, err)
+	}
+	if _, err := decodeRootedProgramInstruction(report, "write", result, 0, "", ""); err == nil || !strings.Contains(err.Error(), "pinned program") {
+		t.Fatalf("wrong-program rooted instruction error = %v", err)
+	}
+}
+
 func TestProgramDecodeAccountFromRootedIndex(t *testing.T) {
 	registry, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -149,10 +312,7 @@ func TestProgramDecodeAccountFromRootedIndex(t *testing.T) {
 		SchemaVersion: rootedindex.SchemaVersion,
 		Cursor:        rootedindex.Cursor{Slot: 1, Ordinal: 1},
 		Kind:          "slot_rooted",
-		Root: &rootedindex.RootedSlot{
-			ParentSlot: 0, Bankhash: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-			AccountCount: 1,
-		},
+		Root:          testRootedSlot(testRootedSource(), 0, 0, 1),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -223,23 +383,20 @@ func TestProgramDecodeEventFromRootedTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	beginRootedBatch(t, index, 1, 2, 2)
-	signature := strings.Repeat("1", 64)
+	transaction := testRootedTransaction(t, programCommandAddress, []string{
+		"Program ComputeBudget111111111111111111111111111111 invoke [1]",
+		"Program data: " + base64.StdEncoding.EncodeToString([]byte("other")) + " " + encoded,
+		"Program ComputeBudget111111111111111111111111111111 success",
+		"Program " + programCommandAddress + " invoke [1]",
+		"Program data: " + base64.StdEncoding.EncodeToString([]byte("other")) + " " + encoded,
+		"Program " + programCommandAddress + " success",
+	})
+	signature := transaction.Signature
 	if _, err := index.Append(rootedindex.Event{
 		SchemaVersion: rootedindex.SchemaVersion,
 		Cursor:        rootedindex.Cursor{Slot: 2},
 		Kind:          "transaction_executed",
-		Transaction: &rootedindex.Transaction{
-			Signature: signature, Message: []byte("message"),
-			AccountKeys: []string{programCommandAddress}, Succeeded: true,
-			Logs: []string{
-				"Program ComputeBudget111111111111111111111111111111 invoke [1]",
-				"Program data: " + base64.StdEncoding.EncodeToString([]byte("other")) + " " + encoded,
-				"Program ComputeBudget111111111111111111111111111111 success",
-				"Program " + programCommandAddress + " invoke [1]",
-				"Program data: " + base64.StdEncoding.EncodeToString([]byte("other")) + " " + encoded,
-				"Program " + programCommandAddress + " success",
-			},
-		},
+		Transaction:   transaction,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -247,10 +404,7 @@ func TestProgramDecodeEventFromRootedTransaction(t *testing.T) {
 		SchemaVersion: rootedindex.SchemaVersion,
 		Cursor:        rootedindex.Cursor{Slot: 2, Ordinal: 1},
 		Kind:          "slot_rooted",
-		Root: &rootedindex.RootedSlot{
-			ParentSlot: 1, Bankhash: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-			TransactionCount: 1,
-		},
+		Root:          testRootedSlot(testRootedSource(), 1, 1, 0),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -285,6 +439,7 @@ func TestDecodeProgramEventsRejectsInconsistentProgramStack(t *testing.T) {
 		Program: programCommandAddress,
 		Events:  []programinterface.DataDefinition{{Name: "Changed", Discriminator: "01"}},
 	}, "Changed", rootedindex.TransactionResult{
+		Succeeded: true,
 		Logs: []string{
 			"Program " + programCommandAddress + " invoke [1]",
 			"Program ComputeBudget111111111111111111111111111111 success",
@@ -300,7 +455,8 @@ func TestDecodeProgramEventsRejectsIncompleteProgramStack(t *testing.T) {
 		Program: programCommandAddress,
 		Events:  []programinterface.DataDefinition{{Name: "Changed", Discriminator: "01"}},
 	}, "Changed", rootedindex.TransactionResult{
-		Logs: []string{"Program " + programCommandAddress + " invoke [1]"},
+		Succeeded: true,
+		Logs:      []string{"Program " + programCommandAddress + " invoke [1]"},
 	}, rootedindex.RootedProvenance, rootedindex.RootedFinality)
 	if err == nil || !strings.Contains(err.Error(), "stack is incomplete") {
 		t.Fatalf("incomplete stack error = %v", err)
@@ -312,6 +468,7 @@ func TestDecodeProgramEventsRejectsMatchingPrefixWhenLogsAreTruncated(t *testing
 		Program: programCommandAddress,
 		Events:  []programinterface.DataDefinition{{Name: "Changed", Discriminator: "01"}},
 	}, "Changed", rootedindex.TransactionResult{
+		Succeeded:     true,
 		LogsTruncated: true,
 		Logs: []string{
 			"Program " + programCommandAddress + " invoke [1]",
@@ -320,6 +477,13 @@ func TestDecodeProgramEventsRejectsMatchingPrefixWhenLogsAreTruncated(t *testing
 	}, rootedindex.RootedProvenance, rootedindex.RootedFinality)
 	if err == nil || !strings.Contains(err.Error(), "cannot prove a complete result") {
 		t.Fatalf("truncated matching-prefix error = %v", err)
+	}
+}
+
+func TestDecodeProgramEventsRejectsFailedTransaction(t *testing.T) {
+	_, err := decodeProgramEvents(programinterface.Report{}, "", rootedindex.TransactionResult{Succeeded: false}, "", "")
+	if err == nil || !strings.Contains(err.Error(), "transaction failed") {
+		t.Fatalf("failed transaction error = %v", err)
 	}
 }
 

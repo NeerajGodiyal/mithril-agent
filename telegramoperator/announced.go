@@ -12,10 +12,8 @@ import (
 // only SETTLED actions, because claiming an in-flight one as history would
 // silence the very trade the operator is waiting on. So a restart landing while
 // an action is in flight seeds nothing, and when that action settles the new
-// process has no memory that its predecessor already announced it — and sends
-// the message a second time. Observed live: action 6652b6b3932c announced at
-// 20:00:46, the service restarted at 20:26:50, and the same action announced
-// again at 20:31:52.
+// process has no memory that its predecessor already announced it, so it sends
+// the message a second time.
 //
 // Keyed on the ACTION ID, not the leg. The in-memory map keys on the leg's
 // INDEX, which silently shifts the moment a leg is added, removed, or
@@ -23,11 +21,10 @@ import (
 // action ID is a digest: unique on its own, so it needs no stable leg identity
 // and is immune to reordering.
 //
-// Entries WITHOUT an action ID are deliberately never stored. announceKey falls
-// back to decision/reason for those, which is not unique — persisting one would
-// permanently silence every later failure sharing that reason. A duplicate
-// message after a restart is a far smaller harm than a suppressed failure, so
-// those keep the per-process in-memory behaviour.
+// Live-action entries WITHOUT an action ID are deliberately never stored.
+// announceKey falls back to decision/reason for those, which is not unique —
+// persisting one would permanently silence every later failure sharing that
+// reason. Paper events use deterministic IDs in their own bounded store.
 
 const (
 	announcedVersion  = 1
@@ -47,9 +44,11 @@ type announcedDocument struct {
 // announcedStore remembers which actions have already been announced, across
 // restarts. The service is the only writer.
 type announcedStore struct {
-	path  string
-	order []string
-	seen  map[string]struct{}
+	path       string
+	order      []string
+	seen       map[string]struct{}
+	maxEntries int
+	maxBytes   int64
 }
 
 // loadAnnouncedStore reads the record, tolerating absence. A CORRUPT file is
@@ -58,8 +57,17 @@ type announcedStore struct {
 // which is the worse failure for something whose job is to tell you what
 // happened.
 func loadAnnouncedStore(path string) *announcedStore {
-	store := &announcedStore{path: path, seen: map[string]struct{}{}}
-	data, err := securefile.ReadPrivate(path, maxAnnouncedBytes)
+	return loadBoundedAnnouncedStore(path, maxAnnouncedEntries, maxAnnouncedBytes)
+}
+
+func loadBoundedAnnouncedStore(path string, maxEntries int, maxBytes int64) *announcedStore {
+	store := &announcedStore{
+		path: path, seen: map[string]struct{}{}, maxEntries: maxEntries, maxBytes: maxBytes,
+	}
+	if maxEntries <= 0 || maxBytes <= 0 {
+		return store
+	}
+	data, err := securefile.ReadPrivate(path, maxBytes)
 	if err != nil {
 		return store
 	}
@@ -76,6 +84,10 @@ func loadAnnouncedStore(path string) *announcedStore {
 		}
 		store.seen[id] = struct{}{}
 		store.order = append(store.order, id)
+	}
+	for len(store.order) > store.maxEntries {
+		delete(store.seen, store.order[0])
+		store.order = store.order[1:]
 	}
 	return store
 }
@@ -101,9 +113,12 @@ func (s *announcedStore) record(actionID string) error {
 	}
 	s.seen[actionID] = struct{}{}
 	s.order = append(s.order, actionID)
-	for len(s.order) > maxAnnouncedEntries {
+	for len(s.order) > s.maxEntries {
 		delete(s.seen, s.order[0])
 		s.order = s.order[1:]
+	}
+	if s.path == "" {
+		return nil
 	}
 	encoded, err := json.Marshal(announcedDocument{
 		Version: announcedVersion, ActionIDs: s.order,
@@ -112,7 +127,7 @@ func (s *announcedStore) record(actionID string) error {
 		return errors.New("encode announced action record")
 	}
 	if err := securefile.ReplacePrivate(
-		s.path, append(encoded, '\n'), maxAnnouncedBytes,
+		s.path, append(encoded, '\n'), s.maxBytes,
 	); err != nil {
 		return errors.New("write announced action record")
 	}

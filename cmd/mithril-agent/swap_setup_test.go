@@ -99,7 +99,7 @@ func TestSwapSetupCreatesBoundPrivateConfiguration(t *testing.T) {
 		cfg.Swap.PriceTrigger.Direction != pricetrigger.SellAtOrAbove ||
 		cfg.Swap.PriceTrigger.ThresholdMicros != 20_500_000 ||
 		cfg.Swap.PriceTrigger.PrimarySourceSHA256 != pricesource.PythPushIdentitySHA256() ||
-		cfg.Swap.PriceTrigger.SecondarySourceSHA256 != pricesource.CoinbaseIdentitySHA256() ||
+		cfg.Swap.PriceTrigger.SecondarySourceSHA256 != pricesource.KrakenSOLIdentitySHA256() ||
 		cfg.Signer.KeypairPath != fixture.walletKeypair ||
 		cfg.MCP.Command != fixture.mithrilCommand ||
 		!slices.Equal(cfg.MCP.Args, []string{"mcp", "--config", fixture.mithrilConfig, "--profile", "monitor"}) ||

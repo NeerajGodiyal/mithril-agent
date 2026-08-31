@@ -6,19 +6,19 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math/big"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
+	"github.com/Overclock-Validator/mithril-agent/solana"
 )
 
 // Pyth publishes SOL/USD as a sponsored on-chain push feed, so the price can be
 // read through the operator's own Mithril node with no data subscription. The
-// Core upgrade on 2026-08-18 has separate early-upgrade program and feed
-// addresses, while Pyth will upgrade the current contract in place at cutover.
+// Core upgrade has separate legacy and upgraded program-derived feed accounts.
 // Both sponsored accounts and their exact owners are pinned here: reading both
-// avoids an operator-side address switch, and while both publish they
-// cross-check each other for free.
+// survives the migration, and while both publish they cross-check each other.
 //
 // The dangerous failure of a sponsored feed is not disappearance but silent
 // staleness — a stopped feed keeps serving a well-formed, plausible price
@@ -29,12 +29,19 @@ const (
 
 	pythPushLegacyAccount = "7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE"
 	pythPushLegacyOwner   = "rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ"
+	pythPushLegacyProgram = "pythWSnswVUd12oZpeFP8e9CVaEqJg25g1Vtc2biRsT"
 
 	pythPushUpgradedAccount = "7AviUf9nL62mcxNbQGKm4nKDQnPjswo6c5MX4D57HmyE"
 	pythPushUpgradedOwner   = "rec2HHDDnjLfj4kE7VyEtFA1HPGQLK33259532cRyHp"
+	pythPushUpgradedProgram = "pyt2F414BA6dPttK6RddPZUdHfapoBN24GL5wbrPCou"
 
-	pythPushUSDCAccount = "Dpw1EAVrSB1ibxiDQyTAW6Zip3J4Btk2x4SgApQCeFbX"
-	USDCUSDFeedID       = "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"
+	pythPushUSDCAccount         = "Dpw1EAVrSB1ibxiDQyTAW6Zip3J4Btk2x4SgApQCeFbX"
+	pythPushUSDCUpgradedAccount = "6HAuqASbHEh4w4REJEUUUCginTLfj1kwCh215ZLtMkrT"
+	USDCUSDFeedID               = "eaa020c61cc479712813461ce153894a96a6c00b21ed0cfc2798d1f9a9e9c94a"
+
+	pythPushJUPAccount         = "7dbob1psH1iZBS7qPsm3Kwbf5DzSXK8Jyg31CTgTnxH5"
+	pythPushJUPUpgradedAccount = "EitcZS5LtbR4EyNhCSy56vvUHPhsifSfWFG5gwSkjNpV"
+	JUPUSDFeedID               = "0a0408d619e9380abad35060f9192039ed5042fa6f82301d0e48bb52be830996"
 
 	// PriceUpdateV2 is a fixed-size Anchor account: an 8-byte discriminator,
 	// a 32-byte write authority, a 1-byte verification level, the 32-byte feed
@@ -60,6 +67,7 @@ const (
 
 	pythPushIdentityDescription     = "mithril-agent/price-source-v2|pyth-push-onchain|mithril-getaccountinfo|stable:SOL/USD|aggregate-confidence"
 	pythPushUSDCIdentityDescription = "mithril-agent/price-source-v2|pyth-push-onchain|mithril-getaccountinfo|stable:USDC/USD|aggregate-confidence"
+	pythPushJUPIdentityDescription  = "mithril-agent/price-source-v2|pyth-push-onchain|mithril-getaccountinfo|stable:JUP/USD|aggregate-confidence"
 )
 
 var pythPushDiscriminator = [8]byte{0x22, 0xf1, 0x23, 0x63, 0x9d, 0x7e, 0xf4, 0xcd}
@@ -78,10 +86,13 @@ var pythPushFeeds = []pythPushFeed{
 }
 
 var pythPushUSDCFeeds = []pythPushFeed{
-	// Pyth's sponsored-feed registry publishes one current USDC/USD account.
-	// The current receiver contract is upgraded in place at the 2026-08-18
-	// cutover, so this account does not need an early-upgrade sibling.
 	{account: pythPushUSDCAccount, owner: pythPushLegacyOwner},
+	{account: pythPushUSDCUpgradedAccount, owner: pythPushUpgradedOwner},
+}
+
+var pythPushJUPFeeds = []pythPushFeed{
+	{account: pythPushJUPAccount, owner: pythPushLegacyOwner},
+	{account: pythPushJUPUpgradedAccount, owner: pythPushUpgradedOwner},
 }
 
 type pythPushDefinition struct {
@@ -89,6 +100,104 @@ type pythPushDefinition struct {
 	feedID   string
 	identity string
 	accounts []pythPushFeed
+}
+
+// PythPushSpec pins an allowlisted candidate feed to its stable ID and both sponsored
+// Solana accounts. The accounts are derived and checked from the feed ID, so a
+// display ticker can never redirect the reader to a different asset.
+type PythPushSpec struct {
+	Feed            string `json:"feed"`
+	FeedID          string `json:"feed_id"`
+	LegacyAccount   string `json:"legacy_account"`
+	UpgradedAccount string `json:"upgraded_account"`
+}
+
+// NewPythPushSpec derives the upgraded shard-zero account and verifies the
+// published legacy account against the same canonical PDA rule.
+func NewPythPushSpec(feed, feedID, legacyAccount string) (PythPushSpec, error) {
+	decoded, err := hex.DecodeString(feedID)
+	if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != feedID {
+		return PythPushSpec{}, errors.New("Pyth push feed ID is invalid")
+	}
+	shard := []byte{0, 0}
+	legacy, _, err := solana.FindProgramAddress([][]byte{shard, decoded}, pythPushLegacyProgram)
+	if err != nil || legacy != legacyAccount {
+		return PythPushSpec{}, errors.New("Pyth legacy account does not match its feed ID")
+	}
+	upgraded, _, err := solana.FindProgramAddress([][]byte{shard, decoded}, pythPushUpgradedProgram)
+	if err != nil {
+		return PythPushSpec{}, errors.New("derive Pyth upgraded account")
+	}
+	spec := PythPushSpec{
+		Feed: feed, FeedID: feedID, LegacyAccount: legacyAccount, UpgradedAccount: upgraded,
+	}
+	if err := spec.Validate(); err != nil {
+		return PythPushSpec{}, err
+	}
+	return spec, nil
+}
+
+func (spec PythPushSpec) Validate() error {
+	if !pricetrigger.ValidUSDFeed(spec.Feed) {
+		return errors.New("Pyth push feed name is invalid")
+	}
+	feedID, err := hex.DecodeString(spec.FeedID)
+	if err != nil || len(feedID) != 32 || hex.EncodeToString(feedID) != spec.FeedID {
+		return errors.New("Pyth push feed ID is invalid")
+	}
+	shard := []byte{0, 0}
+	legacy, _, err := solana.FindProgramAddress([][]byte{shard, feedID}, pythPushLegacyProgram)
+	if err != nil || legacy != spec.LegacyAccount {
+		return errors.New("Pyth legacy account does not match its feed ID")
+	}
+	upgraded, _, err := solana.FindProgramAddress([][]byte{shard, feedID}, pythPushUpgradedProgram)
+	if err != nil || upgraded != spec.UpgradedAccount {
+		return errors.New("Pyth upgraded account does not match its feed ID")
+	}
+	return nil
+}
+
+func (spec PythPushSpec) definition() (pythPushDefinition, error) {
+	if err := spec.Validate(); err != nil {
+		return pythPushDefinition{}, err
+	}
+	identity := fmt.Sprintf(
+		"mithril-agent/price-source-v3|pyth-push-onchain|mithril-getaccountinfo|stable:%s|feed:%s|accounts:%s,%s|programs:%s,%s|owners:%s,%s|aggregate-confidence",
+		spec.Feed, spec.FeedID, spec.LegacyAccount, spec.UpgradedAccount,
+		pythPushLegacyProgram, pythPushUpgradedProgram,
+		pythPushLegacyOwner, pythPushUpgradedOwner,
+	)
+	return pythPushDefinition{
+		feed: spec.Feed, feedID: spec.FeedID, identity: identity,
+		accounts: []pythPushFeed{
+			{account: spec.LegacyAccount, owner: pythPushLegacyOwner},
+			{account: spec.UpgradedAccount, owner: pythPushUpgradedOwner},
+		},
+	}, nil
+}
+
+func (spec PythPushSpec) IdentitySHA256() (string, error) {
+	definition, err := spec.definition()
+	if err != nil {
+		return "", err
+	}
+	return sourceIdentity(definition.identity), nil
+}
+
+// PythPushSOLSpec returns the pinned SOL/USD account provenance.
+func PythPushSOLSpec() PythPushSpec {
+	return PythPushSpec{
+		Feed: pricetrigger.FeedSOLUSD, FeedID: SOLUSDFeedID,
+		LegacyAccount: pythPushLegacyAccount, UpgradedAccount: pythPushUpgradedAccount,
+	}
+}
+
+// PythPushUSDCSpec returns the pinned USDC/USD account provenance.
+func PythPushUSDCSpec() PythPushSpec {
+	return PythPushSpec{
+		Feed: pricetrigger.FeedUSDCUSD, FeedID: USDCUSDFeedID,
+		LegacyAccount: pythPushUSDCAccount, UpgradedAccount: pythPushUSDCUpgradedAccount,
+	}
 }
 
 var (
@@ -100,6 +209,10 @@ var (
 		feed: pricetrigger.FeedUSDCUSD, feedID: USDCUSDFeedID,
 		identity: pythPushUSDCIdentityDescription, accounts: pythPushUSDCFeeds,
 	}
+	pythPushJUPDefinition = pythPushDefinition{
+		feed: pricetrigger.FeedJUPUSD, feedID: JUPUSDFeedID,
+		identity: pythPushJUPIdentityDescription, accounts: pythPushJUPFeeds,
+	}
 )
 
 func PythPushIdentitySHA256() string {
@@ -109,6 +222,11 @@ func PythPushIdentitySHA256() string {
 
 func PythPushUSDCIdentitySHA256() string {
 	hash := sha256.Sum256([]byte(pythPushUSDCIdentityDescription))
+	return hex.EncodeToString(hash[:])
+}
+
+func PythPushJUPIdentitySHA256() string {
+	hash := sha256.Sum256([]byte(pythPushJUPIdentityDescription))
 	return hex.EncodeToString(hash[:])
 }
 
@@ -134,12 +252,39 @@ type PythPush struct {
 	definition pythPushDefinition
 }
 
+// PythObservation keeps account provenance out of the shared price-sample
+// schema used by existing live and paper journals.
+type PythObservation struct {
+	Sample      pricetrigger.Sample `json:"sample"`
+	ContextSlot uint64              `json:"context_slot"`
+	Account     string              `json:"account"`
+	FeedID      string              `json:"feed_id"`
+}
+
 func NewPythPush(reader AccountReader, now func() time.Time) (*PythPush, error) {
 	return newPythPush(reader, now, pythPushSOLDefinition)
 }
 
 func NewPythPushUSDC(reader AccountReader, now func() time.Time) (*PythPush, error) {
 	return newPythPush(reader, now, pythPushUSDCDefinition)
+}
+
+func NewPythPushJUP(reader AccountReader, now func() time.Time) (*PythPush, error) {
+	return newPythPush(reader, now, pythPushJUPDefinition)
+}
+
+// NewPythPushFromSpec creates an observation-only allowlisted-market source.
+// The existing SOL, USDC, and JUP constructors retain their exact identities.
+func NewPythPushFromSpec(
+	reader AccountReader,
+	now func() time.Time,
+	spec PythPushSpec,
+) (*PythPush, error) {
+	definition, err := spec.definition()
+	if err != nil {
+		return nil, err
+	}
+	return newPythPush(reader, now, definition)
 }
 
 func newPythPush(
@@ -166,7 +311,17 @@ func (source *PythPush) IdentitySHA256() string {
 // action. Staleness is still rejected here, because the feed's own publish time
 // — not the node's slot — is what proves the price is current.
 func (source *PythPush) Latest(ctx context.Context, feed string) (pricetrigger.Sample, error) {
-	return source.read(ctx, feed, 0)
+	observation, err := source.readObservation(ctx, feed, 0)
+	return observation.Sample, err
+}
+
+// LatestObservation returns the advisory price and the exact account that
+// supplied it. Existing Latest callers retain the legacy Sample schema.
+func (source *PythPush) LatestObservation(
+	ctx context.Context,
+	feed string,
+) (PythObservation, error) {
+	return source.readObservation(ctx, feed, 0)
 }
 
 // LatestAtSlot is the authorizing read. The slot floor additionally proves the
@@ -180,22 +335,23 @@ func (source *PythPush) LatestAtSlot(
 	if minContextSlot == 0 {
 		return pricetrigger.Sample{}, errors.New("Pyth push authorizing read requires a proven context slot")
 	}
-	return source.read(ctx, feed, minContextSlot)
+	observation, err := source.readObservation(ctx, feed, minContextSlot)
+	return observation.Sample, err
 }
 
-func (source *PythPush) read(
+func (source *PythPush) readObservation(
 	ctx context.Context,
 	feed string,
 	minContextSlot uint64,
-) (pricetrigger.Sample, error) {
+) (PythObservation, error) {
 	if feed != source.definition.feed {
-		return pricetrigger.Sample{}, errors.New("Pyth push price feed is unsupported")
+		return PythObservation{}, errors.New("Pyth push price feed is unsupported")
 	}
 
 	now := source.now().UTC()
 	type candidate struct {
-		sample pricetrigger.Sample
-		age    time.Duration
+		observation PythObservation
+		age         time.Duration
 	}
 	var accepted []candidate
 	var lastErr error
@@ -208,27 +364,27 @@ func (source *PythPush) read(
 			lastErr = errors.New("read Pyth push account")
 			continue
 		}
-		sample, age, err := decodePythPush(account, pinned, source.definition, now)
+		observation, age, err := decodePythPush(account, pinned, source.definition, now)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		accepted = append(accepted, candidate{sample: sample, age: age})
+		accepted = append(accepted, candidate{observation: observation, age: age})
 	}
 
 	if len(accepted) == 0 {
 		if lastErr == nil {
 			lastErr = errors.New("no Pyth push account was usable")
 		}
-		return pricetrigger.Sample{}, lastErr
+		return PythObservation{}, lastErr
 	}
 	if len(accepted) > 1 {
 		if err := requireCloseEnough(
-			accepted[0].sample.PriceMicros,
-			accepted[1].sample.PriceMicros,
+			accepted[0].observation.Sample.PriceMicros,
+			accepted[1].observation.Sample.PriceMicros,
 			pythPushMaxCrossDeviationBPS,
 		); err != nil {
-			return pricetrigger.Sample{}, err
+			return PythObservation{}, err
 		}
 	}
 	freshest := accepted[0]
@@ -237,7 +393,7 @@ func (source *PythPush) read(
 			freshest = c
 		}
 	}
-	return freshest.sample, nil
+	return freshest.observation, nil
 }
 
 // decodePythPush validates every pinned identity before trusting any number,
@@ -247,21 +403,21 @@ func decodePythPush(
 	pinned pythPushFeed,
 	definition pythPushDefinition,
 	now time.Time,
-) (pricetrigger.Sample, time.Duration, error) {
+) (PythObservation, time.Duration, error) {
 	if account.Owner != pinned.owner {
-		return pricetrigger.Sample{}, 0, errors.New("Pyth push account owner is unexpected")
+		return PythObservation{}, 0, errors.New("Pyth push account owner is unexpected")
 	}
 	if account.DataLength != pythPushAccountBytes || len(account.Data) != pythPushAccountBytes {
-		return pricetrigger.Sample{}, 0, errors.New("Pyth push account length is unexpected")
+		return PythObservation{}, 0, errors.New("Pyth push account length is unexpected")
 	}
 	if [8]byte(account.Data[:8]) != pythPushDiscriminator {
-		return pricetrigger.Sample{}, 0, errors.New("Pyth push account discriminator is unexpected")
+		return PythObservation{}, 0, errors.New("Pyth push account discriminator is unexpected")
 	}
 	if account.Data[8+32] != pythPushVerificationFull {
-		return pricetrigger.Sample{}, 0, errors.New("Pyth push price is not fully verified")
+		return PythObservation{}, 0, errors.New("Pyth push price is not fully verified")
 	}
 	if hex.EncodeToString(account.Data[8+32+1:8+32+1+32]) != definition.feedID {
-		return pricetrigger.Sample{}, 0, errors.New("Pyth push account is for the wrong feed")
+		return PythObservation{}, 0, errors.New("Pyth push account is for the wrong feed")
 	}
 
 	body := account.Data[pythPushPriceOffset:]
@@ -271,35 +427,36 @@ func decodePythPush(
 	publishTime := int64(binary.LittleEndian.Uint64(body[20:28]))
 
 	if price <= 0 {
-		return pricetrigger.Sample{}, 0, errors.New("Pyth push price is not positive")
+		return PythObservation{}, 0, errors.New("Pyth push price is not positive")
 	}
 	priceMicros, err := pythPushMicros(uint64(price), exponent)
 	if err != nil {
-		return pricetrigger.Sample{}, 0, err
+		return PythObservation{}, 0, err
 	}
 	confidenceMicros, err := pythPushMicros(confidence, exponent)
 	if err != nil {
-		return pricetrigger.Sample{}, 0, err
+		return PythObservation{}, 0, err
 	}
 
 	if publishTime <= 0 {
-		return pricetrigger.Sample{}, 0, errors.New("Pyth push publish time is invalid")
+		return PythObservation{}, 0, errors.New("Pyth push publish time is invalid")
 	}
 	publishedAt := time.Unix(publishTime, 0).UTC()
 	if publishedAt.After(now.Add(pythPushMaxFutureSkew)) {
-		return pricetrigger.Sample{}, 0, errors.New("Pyth push publish time is in the future")
+		return PythObservation{}, 0, errors.New("Pyth push publish time is in the future")
 	}
 	age := now.Sub(publishedAt)
 	if age > pythPushMaxAge {
-		return pricetrigger.Sample{}, 0, errors.New("Pyth push price is stale")
+		return PythObservation{}, 0, errors.New("Pyth push price is stale")
 	}
 
-	return pricetrigger.Sample{
-		SourceSHA256:     sourceIdentity(definition.identity),
-		Feed:             definition.feed,
-		PriceMicros:      priceMicros,
-		ConfidenceMicros: confidenceMicros,
-		PublishedAt:      publishedAt,
+	return PythObservation{
+		Sample: pricetrigger.Sample{
+			SourceSHA256: sourceIdentity(definition.identity), Feed: definition.feed,
+			PriceMicros: priceMicros, ConfidenceMicros: confidenceMicros,
+			PublishedAt: publishedAt,
+		},
+		ContextSlot: account.ContextSlot, Account: pinned.account, FeedID: definition.feedID,
 	}, age, nil
 }
 

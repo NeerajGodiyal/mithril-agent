@@ -45,6 +45,10 @@ func TestPythPushReadsSponsoredUSDCFeed(t *testing.T) {
 			ContextSlot: 100, Owner: pythPushLegacyOwner,
 			DataLength: pythPushAccountBytes, Data: data,
 		},
+		pythPushUSDCUpgradedAccount: {
+			ContextSlot: 100, Owner: pythPushUpgradedOwner,
+			DataLength: pythPushAccountBytes, Data: data,
+		},
 	}}
 	source, err := NewPythPushUSDC(reader, func() time.Time { return now })
 	if err != nil {
@@ -61,6 +65,149 @@ func TestPythPushReadsSponsoredUSDCFeed(t *testing.T) {
 	}
 	if PythPushUSDCIdentitySHA256() == PythPushIdentitySHA256() {
 		t.Fatal("SOL and USDC feed identities collided")
+	}
+}
+
+func TestPythPushReadsPinnedJUPMigrationFeeds(t *testing.T) {
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	data := validPushAccountFor(
+		JUPUSDFeedID, 48_500_000, 20_000, -8, now.Add(-20*time.Second).Unix(),
+	)
+	reader := &fakeReader{byAccount: map[string]AccountData{
+		pythPushJUPAccount: {
+			ContextSlot: 100, Owner: pythPushLegacyOwner,
+			DataLength: pythPushAccountBytes, Data: data,
+		},
+		pythPushJUPUpgradedAccount: {
+			ContextSlot: 100, Owner: pythPushUpgradedOwner,
+			DataLength: pythPushAccountBytes, Data: data,
+		},
+	}}
+	source, err := NewPythPushJUP(reader, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	sample, err := source.LatestAtSlot(t.Context(), pricetrigger.FeedJUPUSD, 99)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sample.SourceSHA256 != PythPushJUPIdentitySHA256() ||
+		sample.Feed != pricetrigger.FeedJUPUSD || sample.PriceMicros != 485_000 ||
+		sample.ConfidenceMicros != 200 {
+		t.Fatalf("JUP sample = %+v", sample)
+	}
+	if PythPushJUPIdentitySHA256() == PythPushIdentitySHA256() ||
+		PythPushJUPIdentitySHA256() == PythPushUSDCIdentitySHA256() {
+		t.Fatal("JUP source identity collided with another feed")
+	}
+}
+
+func TestPythPushReadsAnAdmissionBoundFeed(t *testing.T) {
+	const (
+		feedID = "4ca4beeca86f0d164160323817a4e42b10010a724c2217c6ee41b54cd4cc61fc"
+		legacy = "6B23K3tkb51vLZA14jcEQVCA1pfHptzEHFA93V5dYwbT"
+	)
+	spec, err := NewPythPushSpec("WIF/USD", feedID, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.UpgradedAccount == "" || spec.UpgradedAccount == spec.LegacyAccount {
+		t.Fatalf("derived spec = %+v", spec)
+	}
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	data := validPushAccountFor(feedID, 19_405_000, 10_000, -8, now.Add(-time.Second).Unix())
+	reader := &fakeReader{byAccount: map[string]AccountData{
+		spec.LegacyAccount: {
+			ContextSlot: 100, Owner: pythPushLegacyOwner,
+			DataLength: pythPushAccountBytes, Data: data,
+		},
+		spec.UpgradedAccount: {
+			ContextSlot: 100, Owner: pythPushUpgradedOwner,
+			DataLength: pythPushAccountBytes, Data: data,
+		},
+	}}
+	source, err := NewPythPushFromSpec(reader, func() time.Time { return now }, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.IdentitySHA256() != "a3c54705c3da370b3160839a255943b2914017413eeb1abeb05fd0daf659a8c9" {
+		t.Fatalf("unexpected trust-anchor identity: %s", source.IdentitySHA256())
+	}
+	sample, err := source.Latest(t.Context(), spec.Feed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sample.Feed != "WIF/USD" || sample.PriceMicros != 194_050 ||
+		sample.SourceSHA256 != source.IdentitySHA256() ||
+		sample.SourceSHA256 == PythPushIdentitySHA256() {
+		t.Fatalf("sample = %+v", sample)
+	}
+	observation, err := source.LatestObservation(t.Context(), spec.Feed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.Sample != sample || observation.ContextSlot != 100 ||
+		observation.FeedID != feedID || (observation.Account != spec.LegacyAccount &&
+		observation.Account != spec.UpgradedAccount) {
+		t.Fatalf("observation = %+v", observation)
+	}
+
+	tampered := spec
+	tampered.LegacyAccount = spec.UpgradedAccount
+	if _, err := NewPythPushFromSpec(reader, time.Now, tampered); err == nil {
+		t.Fatal("tampered Pyth account binding was accepted")
+	}
+}
+
+func TestPinnedSOLAndUSDCPushSpecsRemainValid(t *testing.T) {
+	for _, spec := range []PythPushSpec{PythPushSOLSpec(), PythPushUSDCSpec()} {
+		if err := spec.Validate(); err != nil {
+			t.Fatalf("pinned spec %+v: %v", spec, err)
+		}
+	}
+}
+
+func TestPythPushUSDCSurvivesLegacyFeedRetirement(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	data := validPushAccountFor(USDCUSDFeedID, 99_999_800, 1_000, -8,
+		now.Add(-20*time.Second).Unix())
+	reader := &fakeReader{
+		byAccount: map[string]AccountData{
+			pythPushUSDCUpgradedAccount: {
+				ContextSlot: 100, Owner: pythPushUpgradedOwner,
+				DataLength: pythPushAccountBytes, Data: data,
+			},
+		},
+		err: map[string]error{pythPushUSDCAccount: errors.New("legacy feed retired")},
+	}
+	source, err := NewPythPushUSDC(reader, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.LatestAtSlot(t.Context(), pricetrigger.FeedUSDCUSD, 99); err != nil {
+		t.Fatalf("upgraded USDC feed did not carry the read: %v", err)
+	}
+}
+
+func TestPythPushUSDCRejectsDisagreeingMigrationFeeds(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	fresh := now.Add(-20 * time.Second).Unix()
+	reader := &fakeReader{byAccount: map[string]AccountData{
+		pythPushUSDCAccount: {
+			ContextSlot: 100, Owner: pythPushLegacyOwner, DataLength: pythPushAccountBytes,
+			Data: validPushAccountFor(USDCUSDFeedID, 100_000_000, 1_000, -8, fresh),
+		},
+		pythPushUSDCUpgradedAccount: {
+			ContextSlot: 100, Owner: pythPushUpgradedOwner, DataLength: pythPushAccountBytes,
+			Data: validPushAccountFor(USDCUSDFeedID, 110_000_000, 1_000, -8, fresh),
+		},
+	}}
+	source, err := NewPythPushUSDC(reader, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.LatestAtSlot(t.Context(), pricetrigger.FeedUSDCUSD, 99); err == nil {
+		t.Fatal("disagreeing legacy and upgraded USDC feeds were accepted")
 	}
 }
 
@@ -302,7 +449,7 @@ func TestPythPushRejectsDisagreeingAccounts(t *testing.T) {
 	}
 }
 
-// The Aug 18 cutover: one account stops, the other must carry the read.
+// After the completed upgrade, one account may stop and the other must carry the read.
 func TestPythPushSurvivesOneAccountFailing(t *testing.T) {
 	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 	fresh := now.Add(-20 * time.Second).Unix()
