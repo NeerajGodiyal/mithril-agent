@@ -63,8 +63,8 @@ make build
 make adapter
 ```
 
-Do not continue if any command fails. `make build` produces eight Go binaries;
-all eight must be installed together. The quote adapter also needs the pinned
+Do not continue if any command fails. `make build` produces nine Go binaries;
+all nine must be installed together. The quote adapter also needs the pinned
 Node.js runtime and its installed `node_modules`. At this early step,
 `make prereqs-trading` may also say that RPC variables are not set. That is expected;
 step 4 puts them in protected service files instead of your login shell.
@@ -76,7 +76,10 @@ Install the service accounts first:
 ```sh
 sudo install -m 0644 deploy/sysusers/mithril-agent-status.conf \
   /usr/lib/sysusers.d/mithril-agent-status.conf
+sudo install -m 0644 deploy/sysusers/mithril-agent-dashboard.conf \
+  /usr/lib/sysusers.d/mithril-agent-dashboard.conf
 sudo systemd-sysusers /usr/lib/sysusers.d/mithril-agent-status.conf
+sudo systemd-sysusers /usr/lib/sysusers.d/mithril-agent-dashboard.conf
 ```
 
 Install the verified runtime:
@@ -96,6 +99,7 @@ sudo install -o root -g root -m 0755 \
   ./bin/mithril-agent-telegram \
   ./bin/mithril-agent-status-bridge \
   ./bin/mithril-agent-paper-status-bridge \
+  ./bin/mithril-agent-paper-dashboard \
   /usr/local/libexec/mithril-agent/
 sudo install -o root -g root -m 0755 "$(command -v node)" \
   /usr/local/libexec/mithril-agent/node
@@ -117,7 +121,8 @@ Check that the installed command can find every sibling helper:
 /usr/local/bin/mithril-agent version
 for name in mithril-agent mithril-agent-policy mithril-agent-signer \
   mithril-agent-submitter mithril-agent-quote mithril-agent-telegram \
-  mithril-agent-status-bridge mithril-agent-paper-status-bridge; do
+  mithril-agent-status-bridge mithril-agent-paper-status-bridge \
+  mithril-agent-paper-dashboard; do
   test -x "/usr/local/libexec/mithril-agent/$name" || exit 1
 done
 ```

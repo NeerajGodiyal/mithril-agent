@@ -10,8 +10,9 @@ SHELL := /bin/bash
 
 BIN_DIR := bin
 CMDS := mithril-agent mithril-agent-policy mithril-agent-signer \
-        mithril-agent-submitter mithril-agent-quote mithril-agent-telegram \
-        mithril-agent-status-bridge mithril-agent-paper-status-bridge
+		mithril-agent-submitter mithril-agent-quote mithril-agent-telegram \
+		mithril-agent-status-bridge mithril-agent-paper-status-bridge \
+		mithril-agent-paper-dashboard
 ADAPTER_DIR := adapters/orca
 MANIFEST ?= mithril-agent-source.sha256
 # Public watch-only owner whose canonical Mainnet USDC account already exists.
@@ -47,7 +48,7 @@ help:
 	@echo "  make test-route-guard        test the isolated keyless Jupiter deployment guard"
 	@echo "  make build-route-guard ROUTE_GUARD_OUT=/private/path"
 	@echo "                         build SBF outside the checkout (needs Agave CLI 4.2+)"
-	@echo "  make build           build all eight binaries into ./$(BIN_DIR)"
+	@echo "  make build           build all nine binaries into ./$(BIN_DIR)"
 	@echo "  make adapter         install the Orca quote adapter (needs Node 24.18+)"
 	@echo "  make test            full test suite, race detector, vet, format check"
 	@echo "  make explain         print what this software can and cannot do"

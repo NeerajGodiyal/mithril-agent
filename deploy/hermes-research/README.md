@@ -444,11 +444,12 @@ sudo systemctl enable --now mithril-agent-paper-jup.service \
 sudo systemctl restart mithril-agent-telegram.service
 ```
 
-`/paper` then leads with combined current P&L and versus-hold for fresh market
-summaries, followed by the separately labelled `SOL/USDC` and `JUP/USDC`
-states. Alerts remain limited to strategy changes, fills, risk pauses, and
-period closes. JUP has its own journal, status directory, notional budget, and
-fee reserve; it does not enter the SOL champion/challenger lifecycle yet.
+`/paper` then returns one compact view with combined P&L, versus-hold, one line
+per market, trade and signal counts, verified-data coverage, and the oldest
+source timestamp. Alerts remain limited to strategy changes, fills, risk
+pauses, period closes, and sustained market-data loss or recovery. JUP has its
+own journal, status directory, notional budget, and fee reserve; it does not
+enter the SOL champion/challenger lifecycle yet.
 
 The initial deployment uses Hermes' keyless web ring for both search and
 single-URL extraction. It requires no Tavily key, but it is rate-limited and is

@@ -15,13 +15,13 @@ running, first verify the checkout without installing or authorising anything:
 
 ```sh
 make prereqs-trading # walletless plus the optional trading runtime
-make build       # eight binaries into ./bin
+make build       # nine binaries into ./bin
 make adapter     # the Orca quote adapter (checks your Node version first)
 make test        # format, vet, tests, race, isolation and private-file checks
 make walkthrough # read-only prices plus a local audit-integrity walkthrough
 ```
 
-Keep all eight files produced by `make build` together. `mithril-agent` starts
+Keep all nine files produced by `make build` together. `mithril-agent` starts
 the policy, signer, submitter, quote, status and Telegram helpers from beside
 its own executable; copying only the main binary creates an incomplete runtime
 that setup correctly refuses.
@@ -520,12 +520,13 @@ go build -o ./bin/mithril-agent-quote ./cmd/mithril-agent-quote
 go build -o ./bin/mithril-agent-telegram ./cmd/mithril-agent-telegram
 go build -o ./bin/mithril-agent-status-bridge ./cmd/mithril-agent-status-bridge
 go build -o ./bin/mithril-agent-paper-status-bridge ./cmd/mithril-agent-paper-status-bridge
+go build -o ./bin/mithril-agent-paper-dashboard ./cmd/mithril-agent-paper-dashboard
 
 npm --prefix ./adapters/orca ci --ignore-scripts
 sha256sum ./bin/* > /absolute/private/validation/binaries.sha256
 ```
 
-After assembling the complete candidate runtime (the eight binaries, pinned
+After assembling the complete candidate runtime (the nine binaries, pinned
 Node.js, `quote.mjs`, and `node_modules`), create one manifest for every file
 and symlink target. The Mithril executable is a separate prerequisite and must
 also be installed at the path passed to setup. Keep the manifest outside the
@@ -560,6 +561,9 @@ candidate is not ready for cutover if any manifest check or comparison fails.
 ```sh
 sha256sum \
   deploy/sysusers/mithril-agent-status.conf \
+  deploy/sysusers/mithril-agent-dashboard.conf \
+  deploy/systemd/mithril-agent-paper-dashboard.service \
+  deploy/systemd/mithril-agent-paper-dashboard.socket \
   deploy/systemd/mithril-agent-quote.service \
   deploy/timesyncd/90-mithril-agent.conf \
   deploy/prometheus/mithril-agent.rules.yml \
@@ -599,9 +603,22 @@ Use this upgrade sequence:
    old binary, restart the old runner in stopped mode, wait for a fresh status,
    and drain again. Do not use this path for `halted`.
 3. Stop the runner, risk-authority sockets, signer sockets, quote, Telegram,
-   status-socket, and bridge units. Verify each unit has `MainPID=0` and that no
-   process remains in any of their control groups. The short-lived authority
-   instances and submitter child must also be absent.
+   status-socket, bridge, and paper-dashboard service and socket units. Verify
+   each unit has `MainPID=0` and that no process remains in any of their control
+   groups. The short-lived authority instances and submitter child must also be
+   absent.
+
+   Stop paper activators before paper processes so they cannot recreate an old
+   observer during the cutover. This includes
+   `mithril-hermes-research.timer`, `mithril-agent-paper-auto-select.timer`,
+   `mithril-agent-paper-bootstrap.timer`,
+   `mithril-agent-paper-champion.path`, and
+   `mithril-agent-paper-challenger.path`. Then stop every installed paper
+   observer (`paper-base`, `paper-jup`, `paper-champion`, and
+   `paper-challenger`), its status bridge and socket, Hermes research, Telegram,
+   and the dashboard service and socket. Record which conditional paper units
+   were active; do not substitute a generic runner name or leave an old paper
+   process publishing the prior status schema.
 4. Preserve a private rollback bundle containing the old runtime, units,
    configs, environment files, policies, keys, journal, control state, signer
    ledger, Telegram cursor, and recorded ownership and mode metadata. Keep it
@@ -620,7 +637,15 @@ Use this upgrade sequence:
    and Prometheus rule while services remain stopped. Run `systemd-analyze
    verify`, `promtool check rules`, and `promtool check config`, then run
    `systemd-sysusers`, `systemctl daemon-reload`, and restart
-   `systemd-timesyncd`. Require `mithril-agent clock-check` to pass, then
+   `systemd-timesyncd`. If the private paper dashboard was enabled before the
+   cutover, restore the previously active paper status sockets and paper
+   observers first, then their bridges, Telegram, paths, and timers. Restart
+   the dashboard socket last and require `curl --fail --unix-socket
+   /run/mithril-agent-paper-dashboard.sock http://localhost/healthz` to succeed
+   before accepting it. Dashboard health is successful only after both
+   configured market sockets publish fresh current-day status from the
+   candidate binary; an `Updating`, stale, or mixed-version market is a failed
+   upgrade. Require `mithril-agent clock-check` to pass, then
    activate Prometheus and Alertmanager through the pinned monitoring
    deployment's documented reload or restart procedure. Keep the old matching
    assets in the rollback bundle and restore them together with the old
@@ -865,7 +890,7 @@ checks the corresponding public identity.
 
 ## Fresh supervised Linux installation
 
-Use a dedicated full-node or RPC host, not a voting validator. Build the eight
+Use a dedicated full-node or RPC host, not a voting validator. Build the nine
 Go binaries and install the pinned Orca dependencies as described above. The
 commands below are for a new host only; they are not an upgrade or rolling
 replacement procedure. An upgrade may reuse the later setup and validation
@@ -874,7 +899,10 @@ requirements, but must use the staged cutover above for runtime files.
 ```sh
 sudo install -m 0644 deploy/sysusers/mithril-agent-status.conf \
   /usr/lib/sysusers.d/mithril-agent-status.conf
+sudo install -m 0644 deploy/sysusers/mithril-agent-dashboard.conf \
+  /usr/lib/sysusers.d/mithril-agent-dashboard.conf
 sudo systemd-sysusers /usr/lib/sysusers.d/mithril-agent-status.conf
+sudo systemd-sysusers /usr/lib/sysusers.d/mithril-agent-dashboard.conf
 
 sudo install -d -o root -g root -m 0755 /usr/local/libexec/mithril-agent
 sudo install -d -o root -g root -m 0755 /usr/local/share/doc/mithril-agent
@@ -890,6 +918,7 @@ sudo install -o root -g root -m 0755 \
   ./bin/mithril-agent-telegram \
   ./bin/mithril-agent-status-bridge \
   ./bin/mithril-agent-paper-status-bridge \
+  ./bin/mithril-agent-paper-dashboard \
   /usr/local/libexec/mithril-agent/
 sudo install -o root -g root -m 0755 /absolute/pinned/node \
   /usr/local/libexec/mithril-agent/node
@@ -1642,7 +1671,7 @@ Use this ownership layout for the service templates:
 
 ```text
 /usr/local/libexec/mithril-agent/   root:root, not writable by the service
-  eight Go binaries, pinned Node.js, quote.mjs, node_modules/
+  nine Go binaries, pinned Node.js, quote.mjs, node_modules/
 /etc/mithril-agent/                 root:root
   rpc.env, quote.env, mcp.env, price.env, telegram-operator.env  mode 0600
 /var/lib/mithril-agent/             mithril-agent:mithril-agent, mode 0700
@@ -3301,8 +3330,16 @@ Jupiter quotes, settlement delay, ledger, fees, and replay checks. Its fixed,
 deterministic regime controller selects momentum in a trend, range reversion in
 a range, a bounded drawdown exit, or no action during warm-up, cooldown,
 excessive volatility, or when the raw signal does not clear the current cost
-hurdle. It rewarms after a data gap and remains risk-off after a filled drawdown
-exit. `shadow backtest` uses the policy directly; do not pass `--buy-at-usd` for
+hurdle. New adaptive policies use schema version 2: the configured maximum
+slippage stays a hard fill-refusal boundary instead of being counted as a
+certain cost on both legs. The expected signal hurdle still covers both modeled
+fees and a margin and expands with observed volatility and adverse quote impact.
+It does not guarantee a profitable fill: a later settlement may still move
+against the decision, and the paper ledger records that later executable quote.
+Version 1 policies retain their original cost math for exact historical replay
+and must be regenerated explicitly to use version 2. The controller rewarms
+after a data gap and remains risk-off after a filled drawdown exit. `shadow
+backtest` uses the policy directly; do not pass `--buy-at-usd` for
 an adaptive policy. Search and Hermes candidate generation may tune only the
 fast/slow windows or raise the minimum signal hurdle; starting inventory and all
 risk, quote, source, timing, and fee boundaries stay unchanged. `InputAmount`
@@ -3377,6 +3414,39 @@ result with P&L versus the opening book and versus holding. Raw signals,
 refused or missed attempts, warm-up, and ordinary waiting remain in the
 hash-chained journal and the on-demand `/paper` view; they do not interrupt the
 operator.
+
+The optional dashboard shows the same bounded paper projection without reading
+the journal, strategy files, research output, Telegram configuration, wallet,
+or signing services. It is read-only and served from a private Unix socket; it
+does not open a TCP port on the host. Install and enable the supplied dashboard
+service and socket after the two paper status sockets are available. Add only
+the intended SSH login user to `mithril-agent-dashboard`, then reconnect that
+SSH session so the new group applies:
+
+```bash
+sudo install -m 0644 deploy/sysusers/mithril-agent-dashboard.conf \
+  /usr/lib/sysusers.d/mithril-agent-dashboard.conf
+sudo systemd-sysusers /usr/lib/sysusers.d/mithril-agent-dashboard.conf
+sudo install -o root -g root -m 0644 \
+  deploy/systemd/mithril-agent-paper-dashboard.service \
+  deploy/systemd/mithril-agent-paper-dashboard.socket \
+  /etc/systemd/system/
+sudo systemd-analyze verify \
+  /etc/systemd/system/mithril-agent-paper-dashboard.service \
+  /etc/systemd/system/mithril-agent-paper-dashboard.socket
+sudo systemctl daemon-reload
+sudo usermod -aG mithril-agent-dashboard ubuntu
+sudo systemctl enable --now mithril-agent-paper-dashboard.socket
+ssh -N -L 127.0.0.1:8787:/run/mithril-agent-paper-dashboard.sock ubuntu@HOST
+```
+
+Open `http://127.0.0.1:8787/` locally. The page labels simulation, stale or
+unavailable markets, paper value, daily P&L, comparison with holding, fills,
+signal counts, current and worst drawdown, a bounded gap-aware current-day
+paper-versus-holding chart, current strategy, and retained activity. It has no
+trade or configuration buttons. Candidate evaluation and selection remain in
+the existing immutable, next-UTC paper lifecycle rather than a browser control
+surface.
 
 The report is not something you take on trust. It is derived by replaying the
 day's hash-chained journal, and it can be recomputed independently at any time:

@@ -388,14 +388,16 @@ func TestAdaptiveReturnVolatilityDoesNotTreatASmoothTrendAsNoise(t *testing.T) {
 	}
 }
 
-func TestDefaultAdaptivePolicyCoversBothSlippageBoundsAndFixedFees(t *testing.T) {
+func TestDefaultAdaptivePolicySeparatesSlippageToleranceFromExpectedCost(t *testing.T) {
 	policy, err := DefaultAdaptivePolicy(100, 5_000, 1_000_000, 60)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 2*100 bps slippage + 2*50 bps fixed fee + 10 bps safety.
-	if policy.MinimumSignalBPS != 310 {
-		t.Fatalf("minimum signal = %d bps, want 310", policy.MinimumSignalBPS)
+	// Two 50 bps fixed fees plus a 10 bps safety margin. The 100 bps
+	// slippage tolerance remains a refusal threshold rather than a certain cost.
+	if policy.Version != AdaptiveVersion || policy.MinimumSignalBPS != 110 {
+		t.Fatalf("adaptive policy = %+v, want version %d with 110 bps floor",
+			policy, AdaptiveVersion)
 	}
 	full := adaptiveTestPolicy()
 	full.SlippageBPS = 100
@@ -405,6 +407,92 @@ func TestDefaultAdaptivePolicyCoversBothSlippageBoundsAndFixedFees(t *testing.T)
 	full.Adaptive.MinimumSignalBPS--
 	if err := full.Validate(); err == nil {
 		t.Fatal("policy accepted an edge below its configured round-trip cost floor")
+	}
+}
+
+func TestAdaptiveVersionOneRetainsItsHistoricalCostFloor(t *testing.T) {
+	if got, err := adaptiveSignalCostFloorBPS(
+		adaptiveLegacyVersion, 100, 5_000, 1_000_000,
+	); err != nil || got != 310 {
+		t.Fatalf("legacy floor = %d, %v; want 310", got, err)
+	}
+	legacy := adaptiveTestPolicy()
+	legacy.Adaptive.Version = adaptiveLegacyVersion
+	legacy.Adaptive.MinimumSignalBPS = 310
+	legacy.SlippageBPS = 100
+	legacy.FeeLamports = 5_000
+	legacy.StartingInputUnits = legacy.InputAmount + 2*legacy.FeeLamports
+	if err := legacy.Validate(); err != nil {
+		t.Fatalf("legacy adaptive policy no longer validates: %v", err)
+	}
+	legacy.Adaptive.MinimumSignalBPS--
+	if err := legacy.Validate(); err == nil {
+		t.Fatal("legacy adaptive policy accepted its historical floor minus one")
+	}
+}
+
+func TestAdaptiveVersionTwoCanResearchAMoveBelowTheExecutionTolerance(t *testing.T) {
+	base := adaptiveTestPolicy()
+	base.Adaptive.MinimumSignalBPS = 20
+	base.Adaptive.MaxDrawdownBPS = 5_000
+	legacy := base
+	legacyAdaptive := *base.Adaptive
+	legacyAdaptive.Version = adaptiveLegacyVersion
+	legacyAdaptive.MinimumSignalBPS = 100
+	legacy.Adaptive = &legacyAdaptive
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	prices := []uint64{100_000_000, 100_000_000, 100_000_000, 99_000_000}
+	decide := func(policy Policy) (AdaptiveDecision, bool) {
+		strategy, err := newAdaptiveStrategy(policy.Adaptive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ledger, err := NewLedger(policy, prices[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decision AdaptiveDecision
+		var triggered bool
+		for index, price := range prices {
+			ledger, err = ledger.Mark(price)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision, triggered, err = strategy.decide(
+				now.Add(time.Duration(index)*time.Minute), price, true, ledger,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		return decision, triggered
+	}
+
+	decision, triggered := decide(base)
+	if !triggered || decision.Regime != RegimeDowntrend || decision.SignalBPS >= 0 {
+		t.Fatalf("version 2 did not admit the moderate downtrend: %+v/%v", decision, triggered)
+	}
+	if legacyDecision, legacyTriggered := decide(legacy); legacyTriggered {
+		t.Fatalf("version 1 unexpectedly changed its historical decision: %+v", legacyDecision)
+	}
+
+	quote := Quote{InputAmount: base.InputAmount, EstimatedOutput: 99_000, MinimumOutput: 98_604}
+	if passes, err := adaptiveQuotePasses(
+		base, &decision, quote, prices[len(prices)-1], true,
+	); err != nil || !passes {
+		t.Fatalf("version 2 rejected its signal-preserving executable quote: %v, %v", passes, err)
+	}
+	if passes, err := adaptiveQuotePasses(
+		legacy, &decision, quote, prices[len(prices)-1], true,
+	); err != nil || passes {
+		t.Fatalf("version 1 quote guard changed its historical cost floor: %v, %v", passes, err)
+	}
+	quote.MinimumOutput = 95_000
+	if passes, err := adaptiveQuotePasses(
+		base, &decision, quote, prices[len(prices)-1], true,
+	); err != nil || passes {
+		t.Fatalf("version 2 weakened the execution slippage refusal: %v, %v", passes, err)
 	}
 }
 

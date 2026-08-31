@@ -12,12 +12,64 @@ a release or incident category:
   `https://solana.com/upgrades/larger-transaction-sizes`, and
   `https://status.solana.com/`;
 - Agave releases: `https://github.com/anza-xyz/agave/releases`;
-- Jupiter documentation and status: `https://developers.jup.ag/docs/swap/index`
-  and `https://status.jup.ag/`;
-- Pyth documentation and status: `https://docs.pyth.network/price-feeds/core/best-practices`
-  and `https://status.pyth.network/`; and
-- Kraken API documentation and status: `https://docs.kraken.com/api-reference/transparency/pre-trade-data`
-  and `https://status.kraken.com/`.
+- Jupiter Swap V2, Price V3, and status:
+  `https://developers.jup.ag/docs/api-reference/swap/build`,
+  `https://developers.jup.ag/docs/price`, and `https://status.jup.ag/`;
+- Pyth real-time and historical price documentation and status:
+  `https://docs.pyth.network/price-feeds/core/fetch-price-updates`,
+  `https://docs.pyth.network/price-feeds/core/price-feeds/price-feed-ids`,
+  `https://docs.pyth.network/price-feeds/core/use-historical-price-data`, and
+  `https://status.pyth.network/`;
+- Kraken public ticker, OHLC, and status:
+  `https://docs.kraken.com/exchange/api-reference/spot-websocket-v2/ticker`,
+  `https://docs.kraken.com/exchange/api-reference/spot-websocket-v2/ohlc`, and
+  `https://status.kraken.com/`;
+- Helius streaming, RPC, and status: `https://www.helius.dev/docs/laserstream`,
+  `https://www.helius.dev/docs/api-reference/endpoints`, and
+  `https://helius.statuspage.io/`; and
+- Jito transaction delivery and ShredStream retirement:
+  `https://docs.jito.wtf/lowlatencytxnsend/` and
+  `https://docs.jito.wtf/lowlatencytxnfeed/`.
+- Governance, wrapped-asset, and quote-asset evidence:
+  `https://forum.solana.com/`, `https://www.coinbase.com/cbbtc`,
+  `https://www.coinbase.com/cbbtc/proof-of-reserves`,
+  `https://status.coinbase.com/`, `https://www.circle.com/transparency`, and
+  `https://status.circle.com/`.
+
+Research a wider reference universe without widening trade authority. The only
+configured paper markets are `SOL/USDC` and `JUP/USDC`. Track SOL/USD, JUP/USD,
+BTC/USD, cbBTC/USD, ETH/USD, USDC/USD, USDT/USD, timestamp-aligned SOL/BTC,
+Solana slot health, priority fees, failed-transaction rates, and Jupiter quote
+availability as context. Treat `cbBTC/USDC` as the first observation-only
+candidate and RAY, JTO, PYTH, and
+PUMP as watchlist research only. Confirm cbBTC's Solana mint from Coinbase and
+Jupiter; pin its expected mint and freeze authority public keys, alert on any
+change, and retain issuer, freeze, and custody risk. Compare the separate Pyth
+BTC/USD and CBBTC/USD feeds; never assume the wrapper is equal to BTC.
+Never resolve an asset by ticker alone. Never admit a trending token automatically.
+
+Do not recommend paper admission until an operator-owned point-in-time
+collector exists and has at least 30 consecutive complete days of evidence,
+canonical mint and pinned-authority checks, at least 99% bidirectional quote
+availability at a fixed cadence, median round-trip quote cost below 20 basis
+points, p95 below 50 basis points, a versioned confidence-aware cross-source
+disagreement bound, and persistent liquidity at the fixed paper notional.
+Timeouts, nulls, authentication failures, parse failures, and missing quotes
+count as unavailable in the predeclared denominator. Measure the route-cost
+screens from expected output, not the slippage floor, and separately account
+for network and priority fees, setup rent, failed transactions, latency
+re-quotes, and adverse movement. These are initial conservative operator
+thresholds for observation-to-paper admission, not all-in execution guarantees.
+Thirty days can qualify operational data quality; it cannot prove durable
+alpha, profitability, or live safety. Wrapped, issuer, custody, authority,
+concentration, and depeg risks must remain explicit.
+
+Keep source roles separate. Pyth and Kraken are independent market observations;
+Jupiter Swap V2 is executable route evidence; Helius and Jito are infrastructure
+or delivery evidence, not trading alpha. Do not propose deprecated Jupiter Price
+V2, legacy Metis V1, or Jito ShredStream integrations. Treat a source that now
+requires authentication as unavailable when no operator-provided credential is
+configured; never work around it with scraping or an unofficial mirror.
 
 General news and social posts are discovery hints only. Follow each material
 claim to a direct protocol, repository, provider, regulator, or status source

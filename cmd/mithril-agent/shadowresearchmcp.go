@@ -118,6 +118,7 @@ type shadowResearchController struct {
 	spreadBPS         uint64
 	maxCandidates     int
 	challengeDays     uint32
+	now               func() time.Time
 }
 
 var shadowResearchAfterCandidateArtifact = func() {}
@@ -251,6 +252,7 @@ func newShadowResearchController(
 		championPointer: championPointer, championRoot: championRoot,
 		challengerRoot: challengerRoot, maxCandidates: maxCandidates,
 		challengeDays: challengeDays,
+		now:           func() time.Time { return time.Now().UTC() },
 	}, nil
 }
 
@@ -283,7 +285,7 @@ func serveShadowResearchMCP(
 		Description: "Schema-validate and attach a cited paper-only hypothesis, require seven chronological train/out-of-sample folds from eight consecutive completed journals, write one immutable challenger artifact, and atomically update only the dedicated paper challenger pointer. Never selects a champion or promotes to live trading.",
 		Annotations: createAnnotations,
 	}, func(_ context.Context, _ *mcpsdk.CallToolRequest, input shadowResearchCandidateInput) (*mcpsdk.CallToolResult, shadowResearchCandidateReceipt, error) {
-		result, err := controller.createCandidate(input, time.Now().UTC())
+		result, err := controller.createCandidate(input, controller.now())
 		return nil, result, err
 	})
 	statusAnnotations := &mcpsdk.ToolAnnotations{
@@ -295,7 +297,7 @@ func serveShadowResearchMCP(
 		Description: "Read the operator-fixed active paper challenger and report its paired forward evidence state. Never changes either pointer or any policy.",
 		Annotations: statusAnnotations,
 	}, func(_ context.Context, _ *mcpsdk.CallToolRequest, _ shadowResearchStatusInput) (*mcpsdk.CallToolResult, shadowResearchChallengeStatus, error) {
-		result, err := controller.challengeStatus(time.Now().UTC())
+		result, err := controller.challengeStatus(controller.now())
 		return nil, result, err
 	})
 	err := server.Run(ctx, &mcpsdk.IOTransport{
@@ -681,7 +683,7 @@ func allowedPaperResearchSource(source *url.URL) bool {
 	case "solana.com", "status.solana.com", "anza.xyz", "developers.jup.ag",
 		"status.jup.ag", "api.jup.ag", "docs.pyth.network", "status.pyth.network",
 		"docs.kraken.com", "status.kraken.com", "api.kraken.com", "helius.dev",
-		"docs.helius.dev":
+		"www.helius.dev", "docs.helius.dev", "helius.statuspage.io", "docs.jito.wtf":
 		return true
 	case "github.com":
 		for _, prefix := range []string{

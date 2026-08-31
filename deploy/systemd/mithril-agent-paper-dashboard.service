@@ -1,0 +1,56 @@
+[Unit]
+Description=Mithril read-only paper trading dashboard
+Requires=mithril-agent-paper-dashboard.socket
+Wants=mithril-agent-paper-status.socket mithril-agent-paper-jup-status.socket
+After=mithril-agent-paper-dashboard.socket mithril-agent-paper-status.socket mithril-agent-paper-jup-status.socket
+
+[Service]
+Type=simple
+User=mithril-agent-dashboard
+Group=mithril-agent-dashboard
+SupplementaryGroups=mithril-agent-status
+UMask=0077
+ExecStart=/usr/local/libexec/mithril-agent/mithril-agent-paper-dashboard --paper-status-socket SOL/USDC=/run/mithril-agent-paper-status.sock --paper-status-socket JUP/USDC=/run/mithril-agent-paper-jup-status.sock
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=10s
+TimeoutStopSec=10s
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateMounts=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+InaccessiblePaths=/var/lib/mithril-agent
+InaccessiblePaths=-/var/lib/mithril-agent-research
+InaccessiblePaths=-/etc/mithril-agent
+LockPersonality=yes
+CPUAccounting=yes
+CPUQuota=20%
+IOAccounting=yes
+MemoryAccounting=yes
+MemoryDenyWriteExecute=yes
+MemoryMax=96M
+MemorySwapMax=0
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+TasksMax=24
+LimitNOFILE=32
+
+[Install]
+WantedBy=multi-user.target

@@ -188,7 +188,9 @@ type shadowRun struct {
 	activationSequence uint64
 	// lastPrice is the most recent price actually observed. The report closes
 	// on it rather than on a cost basis, which would not be a market price.
-	lastPrice uint64
+	lastPrice              uint64
+	consecutiveUnavailable uint8
+	dataUnavailable        bool
 }
 
 func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, error) {
@@ -526,6 +528,7 @@ func (s *shadowRun) refreshSelectedCandidate(now time.Time) error {
 	}
 	s.policy, s.policySHA256 = candidate.Policy, candidate.CandidatePolicySHA256
 	s.roll, s.runner, s.lastPrice = roll, runner, lastPrice
+	s.consecutiveUnavailable, s.dataUnavailable = 0, false
 	if len(roll.Records()) != 0 {
 		ticks, err := shadowTicksFrom(roll.Records(), s.policy, true)
 		if err != nil {
@@ -563,6 +566,9 @@ func (s *shadowRun) rollDay(now time.Time, output io.Writer) (bool, error) {
 	strategyChanged := s.policySHA256 != previousPolicy
 	// A new day resets the operational canary with its own opening mark.
 	if s.roll.Day() != dayKey(now) {
+		if err := s.roll.advanceTo(now); err != nil {
+			return false, err
+		}
 		fresh, err := s.newRunner()
 		if err != nil {
 			return false, err
@@ -614,7 +620,7 @@ func (s *shadowRun) drive(ctx context.Context, once bool, output io.Writer) erro
 		if err := s.alertTick(tick, nextSell); err != nil {
 			return err
 		}
-		if err := s.updatePaperCurrent(tick, nextSell); err != nil {
+		if err := s.updatePaperCurrent(tick, s.runner.NextSell()); err != nil {
 			return err
 		}
 		if once {

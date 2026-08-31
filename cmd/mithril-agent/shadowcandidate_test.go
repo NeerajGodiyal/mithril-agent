@@ -198,6 +198,7 @@ func TestShadowRunChangesPaperPolicyOnlyAtBoundary(t *testing.T) {
 	if run.policySHA256 != first.CandidatePolicySHA256 {
 		t.Fatal("writing the pointer changed the running policy before a boundary")
 	}
+	run.consecutiveUnavailable, run.dataUnavailable = 3, true
 	if err := run.refreshSelectedCandidate(newDay); err != nil {
 		t.Fatal(err)
 	}
@@ -206,6 +207,9 @@ func TestShadowRunChangesPaperPolicyOnlyAtBoundary(t *testing.T) {
 		run.roll.directory != filepath.Join(root, second.CandidatePolicySHA256) ||
 		run.roll.Day() != dayKey(newDay) {
 		t.Fatalf("candidate was not isolated at the boundary: %+v", run)
+	}
+	if run.consecutiveUnavailable != 0 || run.dataUnavailable {
+		t.Fatalf("candidate inherited stale outage state: %+v", run)
 	}
 	if run.policy.Trigger.ThresholdMicros != second.Policy.Trigger.ThresholdMicros ||
 		run.policy.ReturnTrigger == nil ||

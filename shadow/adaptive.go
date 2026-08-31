@@ -7,8 +7,14 @@ import (
 	"time"
 )
 
-// AdaptiveVersion identifies the adaptive decision schema bound into a policy.
-const AdaptiveVersion = uint32(1)
+// AdaptiveVersion identifies the current adaptive decision schema bound into a
+// policy. Version 1 remains replayable because its signal hurdle treated the
+// maximum executable slippage as a certain cost. Version 2 keeps that bound as
+// a fill refusal and prices expected movement through observed volatility.
+const (
+	AdaptiveVersion       = uint32(2)
+	adaptiveLegacyVersion = uint32(1)
+)
 
 const (
 	RegimeWarming   = "warming"
@@ -40,15 +46,19 @@ type AdaptivePolicy struct {
 }
 
 // DefaultAdaptivePolicy returns a deterministic regime-aware policy whose
-// opening signal hurdle covers both configured slippage bounds, both
-// transaction fees, and a small safety margin for one paper round trip.
+// opening signal hurdle covers both transaction fees and a small safety margin
+// for one paper round trip. The separate slippage bound remains a hard fill
+// refusal; recent volatility and the executable quote cover expected movement
+// and price impact without pretending the full tolerance is always paid.
 func DefaultAdaptivePolicy(
 	slippageBPS uint16, feeLamports, inputAmount, tickSeconds uint64,
 ) (AdaptivePolicy, error) {
 	if tickSeconds == 0 || tickSeconds > 43_200 {
 		return AdaptivePolicy{}, errors.New("adaptive observation interval is out of range")
 	}
-	minimumSignal, err := adaptiveCostFloorBPS(slippageBPS, feeLamports, inputAmount)
+	minimumSignal, err := adaptiveSignalCostFloorBPS(
+		AdaptiveVersion, slippageBPS, feeLamports, inputAmount,
+	)
 	if err != nil {
 		return AdaptivePolicy{}, err
 	}
@@ -79,8 +89,9 @@ func DefaultAdaptiveQuotePolicy(
 	if tickSeconds == 0 || tickSeconds > 43_200 {
 		return AdaptivePolicy{}, errors.New("adaptive observation interval is out of range")
 	}
-	minimumSignal, err := adaptiveQuoteCostFloorBPS(
-		slippageBPS, feeLamports, nativeFeePriceCeilingMicros, quoteAmount, quoteDecimals,
+	minimumSignal, err := adaptiveQuoteSignalCostFloorBPS(
+		AdaptiveVersion, slippageBPS, feeLamports, nativeFeePriceCeilingMicros,
+		quoteAmount, quoteDecimals,
 	)
 	if err != nil {
 		return AdaptivePolicy{}, err
@@ -98,7 +109,7 @@ func DefaultAdaptiveQuotePolicy(
 // Validate rejects adaptive settings that cannot produce bounded, cost-aware
 // and replayable paper decisions.
 func (p AdaptivePolicy) Validate() error {
-	if p.Version != AdaptiveVersion {
+	if p.Version != adaptiveLegacyVersion && p.Version != AdaptiveVersion {
 		return errors.New("adaptive policy version is not supported")
 	}
 	if p.FastWindow < 2 || p.SlowWindow <= p.FastWindow || p.SlowWindow > 1_440 {
@@ -319,14 +330,32 @@ func returnVolatilityBPS(prices []uint64) uint16 {
 func adaptiveCostFloorBPS(
 	slippageBPS uint16, feeLamports, inputAmount uint64,
 ) (uint32, error) {
-	if inputAmount == 0 {
+	return adaptiveValueCostFloorBPS(slippageBPS, feeLamports, inputAmount)
+}
+
+func adaptiveSignalCostFloorBPS(
+	version uint32, slippageBPS uint16, feeUnits, inputUnits uint64,
+) (uint32, error) {
+	if version == adaptiveLegacyVersion {
+		return adaptiveValueCostFloorBPS(slippageBPS, feeUnits, inputUnits)
+	}
+	if version != AdaptiveVersion {
+		return 0, errors.New("adaptive policy version is not supported")
+	}
+	return adaptiveValueCostFloorBPS(0, feeUnits, inputUnits)
+}
+
+func adaptiveValueCostFloorBPS(
+	slippageBPS uint16, feeUnits, inputUnits uint64,
+) (uint32, error) {
+	if inputUnits == 0 {
 		return 0, errors.New("adaptive cost floor needs a positive trade amount")
 	}
-	high, low := bits.Mul64(feeLamports, 10_000)
-	if high >= inputAmount {
+	high, low := bits.Mul64(feeUnits, 10_000)
+	if high >= inputUnits {
 		return 0, errors.New("adaptive fee cost is outside the supported range")
 	}
-	feeBPS, remainder := bits.Div64(high, low, inputAmount)
+	feeBPS, remainder := bits.Div64(high, low, inputUnits)
 	if remainder != 0 {
 		if feeBPS == math.MaxUint64 {
 			return 0, errors.New("adaptive fee cost is outside the supported range")
@@ -346,6 +375,17 @@ func adaptiveQuoteCostFloorBPS(
 	feeLamports, nativeFeePriceMicros, quoteAmount uint64,
 	quoteDecimals uint8,
 ) (uint32, error) {
+	return adaptiveQuoteSignalCostFloorBPS(
+		adaptiveLegacyVersion, slippageBPS, feeLamports, nativeFeePriceMicros,
+		quoteAmount, quoteDecimals,
+	)
+}
+
+func adaptiveQuoteSignalCostFloorBPS(
+	version uint32, slippageBPS uint16,
+	feeLamports, nativeFeePriceMicros, quoteAmount uint64,
+	quoteDecimals uint8,
+) (uint32, error) {
 	feeMicros, err := valueAt(feeLamports, nativeFeePriceMicros, 9)
 	if err != nil || feeMicros == 0 {
 		return 0, errors.New("adaptive native fee value is outside the supported range")
@@ -354,25 +394,7 @@ func adaptiveQuoteCostFloorBPS(
 	if err != nil || inputMicros == 0 {
 		return 0, errors.New("adaptive quote budget is outside the supported range")
 	}
-	return adaptiveValueCostFloorBPS(slippageBPS, feeMicros, inputMicros)
-}
-
-func adaptiveValueCostFloorBPS(
-	slippageBPS uint16, feeMicros, inputMicros uint64,
-) (uint32, error) {
-	high, low := bits.Mul64(feeMicros, 10_000)
-	if high >= inputMicros {
-		return 0, errors.New("adaptive fee cost is outside the supported range")
-	}
-	feeBPS, remainder := bits.Div64(high, low, inputMicros)
-	if remainder != 0 {
-		feeBPS++
-	}
-	base := uint64(slippageBPS)*2 + 10
-	if base > 2_000 || feeBPS > (2_000-base)/2 {
-		return 0, errors.New("adaptive round-trip cost exceeds the supported signal limit")
-	}
-	return uint32(base + feeBPS*2), nil
+	return adaptiveSignalCostFloorBPS(version, slippageBPS, feeMicros, inputMicros)
 }
 
 func adaptiveQuotePasses(
@@ -416,7 +438,9 @@ func adaptiveTradeCostFloorBPS(
 		if !sell {
 			baseAmount = quote.MinimumOutput
 		}
-		return adaptiveCostFloorBPS(policy.SlippageBPS, policy.FeeLamports, baseAmount)
+		return adaptiveSignalCostFloorBPS(
+			policy.Adaptive.Version, policy.SlippageBPS, policy.FeeLamports, baseAmount,
+		)
 	}
 	feeMicros, err := valueAt(
 		policy.FeeLamports, policy.NativeFeePriceCeilingMicros, 9,
@@ -433,7 +457,9 @@ func adaptiveTradeCostFloorBPS(
 	if err != nil || inputMicros == 0 {
 		return 0, errors.New("adaptive trade value is outside the supported range")
 	}
-	return adaptiveValueCostFloorBPS(policy.SlippageBPS, feeMicros, inputMicros)
+	return adaptiveSignalCostFloorBPS(
+		policy.Adaptive.Version, policy.SlippageBPS, feeMicros, inputMicros,
+	)
 }
 
 // adaptiveQuoteImpact checks both sides of the independently observed market.

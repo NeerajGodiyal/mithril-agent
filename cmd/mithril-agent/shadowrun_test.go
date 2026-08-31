@@ -345,6 +345,9 @@ func TestRolloverDiscardsPreparedObservationBeforeRunnerMutation(t *testing.T) {
 	if !rolled || run.runner == oldRunner || oldRunner.Counts() != (shadow.Counts{}) {
 		t.Fatalf("rollover reused or mutated old runner: rolled=%t counts=%+v", rolled, oldRunner.Counts())
 	}
+	if run.roll.Day() != dayKey(newAt) {
+		t.Fatalf("rollover kept the closed journal day %q", run.roll.Day())
+	}
 	if _, err := os.Stat(filepath.Join(root, "shadow-2026-08-31.jsonl")); !os.IsNotExist(err) {
 		t.Fatalf("old observation opened the new-day journal: %v", err)
 	}
@@ -665,7 +668,7 @@ func TestClosedUnobservablePeriodReconcilesAfterRestart(t *testing.T) {
 	if len(snapshot.Events) != 1 ||
 		snapshot.Events[0].Kind != paperstatus.KindPeriodClosed ||
 		!snapshot.Events[0].At.Equal(dayEnd) ||
-		!strings.Contains(snapshot.Events[0].Message, "Day closed") ||
+		!strings.Contains(snapshot.Events[0].Message, "DAY FINISHED") ||
 		!strings.Contains(snapshot.Events[0].Message, "No usable market price") {
 		t.Fatalf("reconciled unavailable period alert = %+v", snapshot.Events)
 	}

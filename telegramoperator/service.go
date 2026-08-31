@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/bits"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -362,9 +363,9 @@ func (s *Service) Run(ctx context.Context) error {
 // unprompted message the operator sends, and it still cannot authorize
 // anything: it reads the same bounded status the read-only commands read.
 //
-// Routine waiting stays quiet. Meaningful paper events are announced; source
-// health transitions stay in local logs and /paper reports the current state.
-// None of these messages can authorize an action.
+// Routine waiting stays quiet. Meaningful paper events are announced; failures
+// of the bounded status projection stay in local logs and /paper reports its
+// current state. None of these messages can authorize an action.
 func (s *Service) announce(ctx context.Context) {
 	for index, source := range s.sources {
 		s.announceSource(ctx, index, source)
@@ -388,7 +389,7 @@ func (s *Service) announcePaperSource(ctx context.Context, index int, source Pap
 	}
 	blocked := make(map[int64]bool)
 	for _, event := range events {
-		if !paperAnnounceWorthy(event.Kind) {
+		if !paperAnnounceWorthy(event) {
 			continue
 		}
 		delivered := 0
@@ -436,12 +437,15 @@ func (s *Service) announcePaperSource(ctx context.Context, index int, source Pap
 	}
 }
 
-func paperAnnounceWorthy(kind string) bool {
-	switch kind {
-	case paperstatus.KindStrategyActive, paperstatus.KindStrategyChanged,
-		paperstatus.KindOrderFilled, paperstatus.KindRiskHalted,
-		paperstatus.KindPeriodClosed, "history_truncated":
+func paperAnnounceWorthy(event paperstatus.Event) bool {
+	switch event.Kind {
+	case paperstatus.KindStrategyChanged, paperstatus.KindOrderFilled, paperstatus.KindRiskHalted,
+		paperstatus.KindDataUnavailable, paperstatus.KindDataRestored,
+		"history_truncated":
 		return true
+	case paperstatus.KindPeriodClosed:
+		at := event.At.UTC()
+		return at.Hour() == 0 && at.Minute() == 0 && at.Second() == 0 && at.Nanosecond() == 0
 	default:
 		return false
 	}
@@ -450,6 +454,7 @@ func paperAnnounceWorthy(kind string) bool {
 func paperAnnouncement(event paperstatus.Event, label string) string {
 	message := event.Message
 	if label != "" {
+		label = paperMarketName(label)
 		if strings.HasPrefix(message, "PAPER ·") {
 			message = strings.Replace(message, "PAPER ·", "PAPER · "+label+" ·", 1)
 		} else {
@@ -461,11 +466,11 @@ func paperAnnouncement(event paperstatus.Event, label string) string {
 
 func timestampPaperMessage(message string, at time.Time) string {
 	first, rest, found := strings.Cut(message, "\n")
-	first += " · " + at.Format("2006-01-02 15:04 UTC")
+	stamp := at.UTC().Format("02 Jan · 15:04 UTC")
 	if !found {
-		return first
+		return first + "\n" + stamp
 	}
-	return first + "\n" + rest
+	return first + "\n" + rest + "\n" + stamp
 }
 
 func paperCurrentAge(message string, fresh bool) string {
@@ -773,6 +778,7 @@ func (s *Service) paperReports() string {
 	reports := make([]string, 0, len(s.paperSources))
 	summaries := make([]paperstatus.CurrentSummary, 0, len(s.paperSources))
 	now := s.now()
+	var oldestSummary time.Time
 	for _, source := range s.paperSources {
 		snapshot, err := source.Read()
 		label := ""
@@ -790,6 +796,9 @@ func (s *Service) paperReports() string {
 		fresh := paperSnapshotFresh(snapshot, now)
 		if fresh && snapshot.Summary != nil && snapshot.Summary.Day == now.UTC().Format("2006-01-02") {
 			summaries = append(summaries, *snapshot.Summary)
+			if oldestSummary.IsZero() || snapshot.ObservedAt.Before(oldestSummary) {
+				oldestSummary = snapshot.ObservedAt
+			}
 		}
 		if len(snapshot.Events) == 0 {
 			report := paperCurrentAge(snapshot.Current, fresh)
@@ -816,29 +825,52 @@ func (s *Service) paperReports() string {
 			paperAnnouncement(snapshot.Events[len(snapshot.Events)-1], label),
 		))
 	}
-	if aggregate := paperPortfolioSummary(summaries); aggregate != "" {
-		reports = append([]string{aggregate}, reports...)
+	if len(summaries) == len(s.paperSources) {
+		if aggregate := paperPortfolioSummary(summaries, oldestSummary); aggregate != "" {
+			return aggregate
+		}
 	}
 	return strings.Join(reports, "\n\n")
 }
 
-func paperPortfolioSummary(summaries []paperstatus.CurrentSummary) string {
+func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, observedAt time.Time) string {
 	if len(summaries) < 2 {
 		return ""
 	}
-	var opening, equity, hold, trades uint64
+	var opening, equity, hold, trades, signals uint64
 	paused := 0
+	valueUnit := ""
+	strategiesReady := true
+	strategies := make(map[string]struct{}, 2)
+	minimumCoverageBPS, coverageReady := uint64(10_000), true
 	for _, summary := range summaries {
+		if summary.ValueUnit == "" || valueUnit != "" && valueUnit != summary.ValueUnit {
+			return ""
+		}
+		valueUnit = summary.ValueUnit
 		if summary.OpeningEquityMicros > math.MaxUint64-opening ||
 			summary.EquityMicros > math.MaxUint64-equity ||
 			summary.HoldBenchmarkMicros > math.MaxUint64-hold ||
-			summary.Trades > math.MaxUint64-trades {
+			summary.Trades > math.MaxUint64-trades ||
+			summary.Signals > math.MaxUint64-signals {
 			return ""
 		}
 		opening += summary.OpeningEquityMicros
 		equity += summary.EquityMicros
 		hold += summary.HoldBenchmarkMicros
 		trades += summary.Trades
+		signals += summary.Signals
+		coverageBPS, ok := paperDataCoverageBPS(summary.Checks, summary.Unobservable)
+		if !ok {
+			coverageReady = false
+		} else if coverageBPS < minimumCoverageBPS {
+			minimumCoverageBPS = coverageBPS
+		}
+		if summary.Strategy == "" {
+			strategiesReady = false
+		} else {
+			strategies[summary.Strategy] = struct{}{}
+		}
 		if summary.RiskHalted {
 			paused++
 		}
@@ -846,12 +878,124 @@ func paperPortfolioSummary(summaries []paperstatus.CurrentSummary) string {
 	if opening > math.MaxInt64 || equity > math.MaxInt64 || hold > math.MaxInt64 {
 		return ""
 	}
-	line := fmt.Sprintf("%d markets · %d trades", len(summaries), trades)
+	var report strings.Builder
+	fmt.Fprintf(&report, "PAPER · 📊 TODAY\nP&L %s · vs holding %s",
+		signedPaperValueChange(opening, equity, valueUnit),
+		signedPaperValueChange(hold, equity, valueUnit))
+	for _, summary := range summaries {
+		fmt.Fprintf(&report, "\n%s", paperMarketName(summary.Market))
+		if summary.PriceMicros != 0 {
+			fmt.Fprintf(&report, " %s", formatUSDMicros(summary.PriceMicros))
+		}
+		fmt.Fprintf(&report, " · %s · %s", paperMarketState(summary),
+			signedPaperValueChange(summary.OpeningEquityMicros, summary.EquityMicros, valueUnit))
+	}
+	coverage := "warming"
+	if coverageReady {
+		coverage = fmt.Sprintf("%d.%02d%%", minimumCoverageBPS/100, minimumCoverageBPS%100)
+	}
+	line := fmt.Sprintf("%s · %s · readable checks %s",
+		paperTradeCount(trades), paperSignalCount(signals), coverage)
 	if paused != 0 {
 		line += fmt.Sprintf(" · %d paused", paused)
 	}
-	return "PAPER · Portfolio\nToday " + signedPaperChange(opening, equity) +
-		" · vs hold " + signedPaperChange(hold, equity) + "\n" + line
+	if !observedAt.IsZero() {
+		line += " · " + observedAt.UTC().Format("15:04 UTC")
+	}
+	if strategiesReady && len(strategies) == 1 {
+		if _, adaptive := strategies["adaptive"]; adaptive {
+			line += "\nPlan · follows strong moves and rebounds · daily safety limit"
+		} else if _, fixed := strategies["fixed"]; fixed {
+			line += "\nPlan · trades at saved buy and sell prices"
+		}
+	}
+	return report.String() + "\n" + line
+}
+
+func paperTradeCount(trades uint64) string {
+	if trades == 1 {
+		return "1 trade"
+	}
+	return fmt.Sprintf("%d trades", trades)
+}
+
+func paperSignalCount(signals uint64) string {
+	if signals == 1 {
+		return "1 signal"
+	}
+	return fmt.Sprintf("%d signals", signals)
+}
+
+func paperMarketState(summary paperstatus.CurrentSummary) string {
+	if summary.RiskHalted {
+		return "paused"
+	}
+	switch summary.State {
+	case "warming":
+		return "learning prices"
+	case "volatile":
+		return "waiting for calmer prices"
+	case "waiting for data":
+		return "waiting for prices"
+	case "paused":
+		return "paused"
+	case "order pending":
+		if summary.NextAction != "" {
+			return summary.NextAction + " order open"
+		}
+	}
+	if summary.NextAction != "" {
+		return "waiting to " + summary.NextAction
+	}
+	return paperStateLabel(summary.State)
+}
+
+func paperStateLabel(state string) string {
+	switch state {
+	case "":
+		return "watching"
+	case "warming":
+		return "warming up"
+	case "uptrend":
+		return "rising"
+	case "downtrend":
+		return "falling"
+	case "range":
+		return "sideways"
+	case "volatile":
+		return "too volatile"
+	case "order pending":
+		return "order pending"
+	case "waiting for data":
+		return "data delayed"
+	case "paused":
+		return "paused"
+	default:
+		return "watching"
+	}
+}
+
+func paperMarketName(market string) string {
+	name, _, _ := strings.Cut(market, "/")
+	return name
+}
+
+func paperDataCoverage(checks, unobservable uint64) string {
+	bps, ok := paperDataCoverageBPS(checks, unobservable)
+	if !ok {
+		return "warming"
+	}
+	return fmt.Sprintf("%d.%02d%%", bps/100, bps%100)
+}
+
+func paperDataCoverageBPS(checks, unobservable uint64) (uint64, bool) {
+	if checks == 0 || unobservable > checks {
+		return 0, false
+	}
+	observable := checks - unobservable
+	high, low := bits.Mul64(observable, 10_000)
+	bps, _ := bits.Div64(high, low, checks)
+	return bps, true
 }
 
 func signedPaperChange(reference, current uint64) string {
@@ -862,6 +1006,19 @@ func signedPaperChange(reference, current uint64) string {
 		delta = -delta
 	}
 	return sign + formatUSDMicros(uint64(delta))
+}
+
+func signedPaperValueChange(reference, current uint64, unit string) string {
+	if unit == "USD" {
+		return signedPaperChange(reference, current)
+	}
+	delta := int64(current) - int64(reference)
+	sign := "+"
+	if delta < 0 {
+		sign = "-"
+		delta = -delta
+	}
+	return sign + formatMicroUnits(uint64(delta)) + " " + unit
 }
 
 func labelPaperMessage(message, label string) string {

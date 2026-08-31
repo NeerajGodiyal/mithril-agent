@@ -71,9 +71,10 @@ func TestGeneratedAdaptivePolicyUsesRelativeMarketDecisions(t *testing.T) {
 	if policy.Adaptive == nil || !policy.RoundTrip() {
 		t.Fatalf("generated adaptive policy has no adaptive round trip: %+v", policy)
 	}
-	if policy.Adaptive.MinimumSignalBPS != 1_110 ||
+	if policy.Adaptive.Version != shadow.AdaptiveVersion ||
+		policy.Adaptive.MinimumSignalBPS != 110 ||
 		policy.Adaptive.MaxVolatilityBPS <= policy.Adaptive.MinimumSignalBPS {
-		t.Fatalf("adaptive defaults do not cover configured execution cost: %+v", policy.Adaptive)
+		t.Fatalf("adaptive defaults do not separate expected cost from the slippage bound: %+v", policy.Adaptive)
 	}
 	if policy.Trigger.ThresholdMicros <= 100_000_000 ||
 		policy.ReturnTrigger.ThresholdMicros >= 100_000_000 {

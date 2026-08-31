@@ -120,7 +120,7 @@ journal with strict replay before applying a hypothetical candidate.
 An adaptive policy has no absolute entry prices. Its deterministic, regime-aware
 controller maintains rolling fast and slow market baselines, measures return
 volatility and drawdown, and chooses momentum, range-reversion, risk-exit, or
-no-trade. It rewarms after a data gap, recomputes the fee hurdle as paper sizing
+no-trade. It uses versioned cost rules, rewarms after a data gap, and recomputes the fee hurdle as paper sizing
 changes, and latches risk-off after a drawdown exit for the rest of the run.
 Every decision and raw signal is journaled and recomputed during replay. This is
 a paper heuristic, not a profitability claim. `InputAmount` is the initial lot;
@@ -171,7 +171,7 @@ The rehearsal uses temporary, unfunded test identities and makes no broadcast.
 No operator wallet or custody-provider or messaging account is required.
 
 For installation, follow [QUICKSTART.md](QUICKSTART.md) completely. It installs
-all eight binaries, restricted service identities, protected environments, the
+all nine binaries, restricted service identities, protected environments, the
 dedicated Devnet account, optional Telegram alerts, and generated services. A
 typical generated-runner path is explicit:
 

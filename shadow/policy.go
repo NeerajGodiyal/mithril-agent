@@ -295,18 +295,20 @@ func (p Policy) Validate() error {
 			if p.IsSell() {
 				return errors.New("JUP/USDC adaptive paper policy must start from its USDC buy leg")
 			}
-			costFloor, err = adaptiveQuoteCostFloorBPS(
-				p.SlippageBPS, p.FeeLamports, p.NativeFeePriceCeilingMicros,
-				p.InputAmount, p.InputDecimals,
+			costFloor, err = adaptiveQuoteSignalCostFloorBPS(
+				p.Adaptive.Version, p.SlippageBPS, p.FeeLamports,
+				p.NativeFeePriceCeilingMicros, p.InputAmount, p.InputDecimals,
 			)
 		} else {
-			costFloor, err = adaptiveCostFloorBPS(p.SlippageBPS, p.FeeLamports, p.InputAmount)
+			costFloor, err = adaptiveSignalCostFloorBPS(
+				p.Adaptive.Version, p.SlippageBPS, p.FeeLamports, p.InputAmount,
+			)
 		}
 		if err != nil {
 			return err
 		}
 		if uint32(p.Adaptive.MinimumSignalBPS) < costFloor {
-			return errors.New("adaptive minimum signal must cover opening slippage, fees, and a safety margin")
+			return errors.New("adaptive minimum signal must cover round-trip fees and its versioned safety margin")
 		}
 		if p.Adaptive.MaxObservationGapSeconds < p.TickSeconds {
 			return errors.New("adaptive observation gap must allow at least one policy tick")

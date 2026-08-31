@@ -42,6 +42,9 @@ func TestShadowResearchMCPWritesOnlyAnImmutablePaperChallenger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	controller.now = func() time.Time {
+		return time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+	}
 
 	pointerPath := championPointer
 	pointerBefore, err := os.ReadFile(pointerPath)
@@ -938,6 +941,23 @@ func validShadowResearchInput() shadowResearchCandidateInput {
 			}},
 		},
 		TrainDay: "2026-08-28", ValidationDay: "2026-08-29",
+	}
+}
+
+func TestShadowPaperHypothesisAcceptsOfficialRosterSources(t *testing.T) {
+	for _, sourceURL := range []string{
+		"https://developers.jup.ag/docs/api-reference/swap/build",
+		"https://docs.pyth.network/price-feeds/core/fetch-price-updates",
+		"https://docs.kraken.com/exchange/api-reference/spot-websocket-v2/ticker",
+		"https://www.helius.dev/docs/laserstream",
+		"https://helius.statuspage.io/",
+		"https://docs.jito.wtf/lowlatencytxnsend/",
+	} {
+		input := validShadowResearchInput()
+		input.Hypothesis.Sources[0].URL = sourceURL
+		if err := input.Hypothesis.validate(); err != nil {
+			t.Errorf("official source %q was refused: %v", sourceURL, err)
+		}
 	}
 }
 

@@ -20,9 +20,11 @@ import (
 const (
 	Version             = 1
 	MaxEvents           = 64
+	MaxHistoryPoints    = 144
 	MaxMessageBytes     = 3000
 	maxCurrentBytes     = 512
 	maxSnapshotBytes    = 256 << 10
+	historyInterval     = 10 * time.Minute
 	messagePrefix       = "PAPER ·"
 	legacyMessagePrefix = "PAPER SIMULATION —"
 	legacyDisclaimer    = "No transaction was signed or submitted."
@@ -36,6 +38,8 @@ const (
 	KindOrderRefused    = "order_refused"
 	KindOrderMissed     = "order_missed"
 	KindRiskHalted      = "risk_halted"
+	KindDataUnavailable = "data_unavailable"
+	KindDataRestored    = "data_restored"
 	KindPeriodClosed    = "period_closed"
 )
 
@@ -61,19 +65,40 @@ type Snapshot struct {
 	// markets without parsing human-facing Telegram text. The journal remains
 	// authoritative; this is only a read-only current view.
 	Summary *CurrentSummary `json:"summary,omitempty"`
+	// History is a bounded, current-day performance projection for operator
+	// charts. It contains no journal records, provider details, or authority.
+	History []PerformancePoint `json:"history,omitempty"`
 }
 
 type CurrentSummary struct {
 	Market              string `json:"market"`
+	ValueUnit           string `json:"value_unit,omitempty"`
 	Day                 string `json:"day"`
 	TickSeconds         uint64 `json:"tick_seconds"`
 	OpeningEquityMicros uint64 `json:"opening_equity_micros"`
 	EquityMicros        uint64 `json:"equity_micros"`
 	HoldBenchmarkMicros uint64 `json:"hold_benchmark_micros"`
+	DrawdownMicros      uint64 `json:"drawdown_micros,omitempty"`
+	MaxDrawdownMicros   uint64 `json:"max_drawdown_micros,omitempty"`
 	Checks              uint64 `json:"checks"`
 	Signals             uint64 `json:"signals"`
 	Trades              uint64 `json:"trades"`
+	Unobservable        uint64 `json:"unobservable,omitempty"`
+	Missed              uint64 `json:"missed,omitempty"`
+	PriceMicros         uint64 `json:"price_micros,omitempty"`
+	State               string `json:"state,omitempty"`
+	Strategy            string `json:"strategy,omitempty"`
+	NextAction          string `json:"next_action,omitempty"`
 	RiskHalted          bool   `json:"risk_halted,omitempty"`
+}
+
+type PerformancePoint struct {
+	At                  time.Time `json:"at"`
+	EquityMicros        uint64    `json:"equity_micros"`
+	HoldBenchmarkMicros uint64    `json:"hold_benchmark_micros"`
+	DrawdownMicros      uint64    `json:"drawdown_micros,omitempty"`
+	MaxDrawdownMicros   uint64    `json:"max_drawdown_micros,omitempty"`
+	Unavailable         bool      `json:"unavailable,omitempty"`
 }
 
 type Writer struct {
@@ -101,7 +126,7 @@ func (w *Writer) Reconcile(at time.Time, kind, key, message string) error {
 }
 
 // UpdateCurrent refreshes the operator-facing state without creating an alert
-// event. Alerts remain reserved for fills, risk pauses, and period summaries.
+// event. Alerts remain reserved for operator-significant transitions.
 func (w *Writer) UpdateCurrent(at time.Time, current string) error {
 	return w.UpdateCurrentSummary(at, current, nil)
 }
@@ -111,7 +136,8 @@ func (w *Writer) UpdateCurrentSummary(
 ) error {
 	if w == nil || !cleanPath(w.path) || at.IsZero() || !at.Equal(at.UTC()) ||
 		len(current) == 0 || len(current) > maxCurrentBytes || !validMessage(current) ||
-		validateCurrentSummary(summary) != nil {
+		validateCurrentSummary(summary) != nil ||
+		summary != nil && summary.Day != at.Format("2006-01-02") {
 		return errors.New("paper current status is invalid")
 	}
 	snapshot := Snapshot{Version: Version, ObservedAt: at, Events: []Event{}}
@@ -127,6 +153,9 @@ func (w *Writer) UpdateCurrentSummary(
 		return errors.New("read paper alert status")
 	}
 	snapshot.ObservedAt, snapshot.Current, snapshot.Summary = at, current, summary
+	if summary != nil {
+		snapshot.History = updateHistory(snapshot.History, at, *summary)
+	}
 	return w.write(snapshot)
 }
 
@@ -214,8 +243,25 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		(snapshot.Current != "" && (len(snapshot.Current) > maxCurrentBytes ||
 			!validMessage(snapshot.Current))) ||
 		(snapshot.Current == "" && snapshot.Summary != nil) ||
+		len(snapshot.History) > MaxHistoryPoints ||
 		validateCurrentSummary(snapshot.Summary) != nil {
 		return errors.New("paper alert snapshot is invalid")
+	}
+	if snapshot.Summary != nil && snapshot.Summary.Day != snapshot.ObservedAt.Format("2006-01-02") {
+		return errors.New("paper alert snapshot summary is not current")
+	}
+	var previousPoint time.Time
+	for _, point := range snapshot.History {
+		if point.At.IsZero() || !point.At.Equal(point.At.UTC()) ||
+			point.At.After(snapshot.ObservedAt) || point.HoldBenchmarkMicros == 0 ||
+			point.DrawdownMicros > point.MaxDrawdownMicros ||
+			!previousPoint.IsZero() && !point.At.After(previousPoint) {
+			return errors.New("paper alert snapshot history is invalid")
+		}
+		if snapshot.Summary != nil && point.At.Format("2006-01-02") != snapshot.Summary.Day {
+			return errors.New("paper alert snapshot history is not current")
+		}
+		previousPoint = point.At
 	}
 	seen := make(map[string]struct{}, len(snapshot.Events))
 	var previous time.Time
@@ -245,7 +291,12 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 	if len(summary.Market) == 0 || len(summary.Market) > 32 ||
 		summary.TickSeconds < 5 || summary.TickSeconds > 3600 ||
 		summary.OpeningEquityMicros == 0 || summary.HoldBenchmarkMicros == 0 ||
-		summary.Signals > summary.Checks || summary.Trades > summary.Signals {
+		summary.DrawdownMicros > summary.MaxDrawdownMicros ||
+		summary.Signals > summary.Checks || summary.Trades > summary.Signals ||
+		summary.Unobservable > summary.Checks || summary.Missed > summary.Signals ||
+		!validValueUnit(summary.ValueUnit) ||
+		!validCurrentState(summary.State) || !validCurrentStrategy(summary.Strategy) ||
+		!validNextAction(summary.NextAction) {
 		return errors.New("paper current summary is invalid")
 	}
 	for _, character := range summary.Market {
@@ -263,6 +314,50 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 	return nil
 }
 
+func updateHistory(history []PerformancePoint, at time.Time, summary CurrentSummary) []PerformancePoint {
+	point := PerformancePoint{
+		At: at, EquityMicros: summary.EquityMicros,
+		HoldBenchmarkMicros: summary.HoldBenchmarkMicros,
+		DrawdownMicros:      summary.DrawdownMicros, MaxDrawdownMicros: summary.MaxDrawdownMicros,
+		Unavailable: summary.State == "waiting for data",
+	}
+	if len(history) > 0 && history[len(history)-1].At.Format("2006-01-02") != summary.Day {
+		history = nil
+	}
+	if len(history) > 0 && history[len(history)-1].At.Truncate(historyInterval) == at.Truncate(historyInterval) {
+		point.Unavailable = point.Unavailable || history[len(history)-1].Unavailable
+		history[len(history)-1] = point
+		return history
+	}
+	history = append(history, point)
+	if len(history) > MaxHistoryPoints {
+		history = history[len(history)-MaxHistoryPoints:]
+	}
+	return history
+}
+
+func validValueUnit(unit string) bool {
+	return unit == "" || unit == "USD" || unit == "devUSDC"
+}
+
+func validCurrentStrategy(strategy string) bool {
+	return strategy == "" || strategy == "fixed" || strategy == "adaptive"
+}
+
+func validNextAction(action string) bool {
+	return action == "" || action == "buy" || action == "sell"
+}
+
+func validCurrentState(state string) bool {
+	switch state {
+	case "", "watching", "warming", "uptrend", "downtrend", "range", "volatile",
+		"order pending", "waiting for data", "paused":
+		return true
+	default:
+		return false
+	}
+}
+
 func validMessage(message string) bool {
 	return strings.HasPrefix(message, messagePrefix) ||
 		strings.HasPrefix(message, legacyMessagePrefix) &&
@@ -277,7 +372,8 @@ func eventID(kind, key string) string {
 func validKind(kind string) bool {
 	switch kind {
 	case KindStrategyActive, KindStrategyChanged, KindOrderOpened, KindOrderFilled,
-		KindOrderRefused, KindOrderMissed, KindRiskHalted, KindPeriodClosed:
+		KindOrderRefused, KindOrderMissed, KindRiskHalted, KindDataUnavailable,
+		KindDataRestored, KindPeriodClosed:
 		return true
 	default:
 		return false

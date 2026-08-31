@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,9 +81,9 @@ func TestPaperAnnouncementsAreCompactPersistentAndReadOnly(t *testing.T) {
 		t.Fatalf("paper sends = %+v", bot.sent)
 	}
 	for _, sent := range bot.sent {
-		if sent.Text != "PAPER · 🟢 SELL filled · 2026-08-30 01:02 UTC\n"+
+		if sent.Text != "PAPER · 🟢 SELL filled\n"+
 			"0.001 SOL → 0.2 USDC · ref $200\n"+
-			"Equity $1.25" ||
+			"Equity $1.25\n30 Aug · 01:02 UTC" ||
 			strings.Contains(sent.Text, "explorer.solana.com") {
 			t.Fatalf("ambiguous paper alert = %q", sent.Text)
 		}
@@ -153,7 +154,7 @@ func TestPaperAnnouncementDeduplicatesPerChatAfterPartialDelivery(t *testing.T) 
 	}
 }
 
-func TestPaperAnnouncementsSkipRoutineDecisionNoise(t *testing.T) {
+func TestPaperAnnouncementsKeepRoutineOrderOutcomesInStatusOnly(t *testing.T) {
 	now := time.Date(2026, time.August, 30, 1, 2, 3, 0, time.UTC)
 	kinds := []string{
 		paperstatus.KindOrderOpened, paperstatus.KindOrderRefused, paperstatus.KindOrderMissed,
@@ -178,26 +179,41 @@ func TestPaperAnnouncementsSkipRoutineDecisionNoise(t *testing.T) {
 	}
 	service.announce(t.Context())
 	if len(bot.sent) != 0 {
-		t.Fatalf("routine paper details interrupted the operator: %+v", bot.sent)
+		t.Fatalf("routine paper outcomes interrupted the operator: %+v", bot.sent)
 	}
 }
 
 func TestPaperAnnouncementKindsKeepOnlyOperatorActions(t *testing.T) {
 	for _, kind := range []string{
-		paperstatus.KindStrategyActive, paperstatus.KindStrategyChanged,
-		paperstatus.KindOrderFilled, paperstatus.KindRiskHalted,
-		paperstatus.KindPeriodClosed, "history_truncated",
+		paperstatus.KindStrategyChanged,
+		paperstatus.KindOrderFilled,
+		paperstatus.KindRiskHalted,
+		paperstatus.KindDataUnavailable, paperstatus.KindDataRestored,
+		"history_truncated",
 	} {
-		if !paperAnnounceWorthy(kind) {
+		if !paperAnnounceWorthy(paperstatus.Event{Kind: kind}) {
 			t.Errorf("important paper event %q was muted", kind)
 		}
 	}
 	for _, kind := range []string{
-		paperstatus.KindOrderOpened, paperstatus.KindOrderRefused, paperstatus.KindOrderMissed,
+		paperstatus.KindStrategyActive, paperstatus.KindOrderOpened,
+		paperstatus.KindOrderRefused, paperstatus.KindOrderMissed,
 	} {
-		if paperAnnounceWorthy(kind) {
+		if paperAnnounceWorthy(paperstatus.Event{Kind: kind}) {
 			t.Errorf("routine paper event %q still interrupts the operator", kind)
 		}
+	}
+	if paperAnnounceWorthy(paperstatus.Event{
+		Kind: paperstatus.KindPeriodClosed,
+		At:   time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC),
+	}) {
+		t.Error("partial period close still interrupts the operator")
+	}
+	if !paperAnnounceWorthy(paperstatus.Event{
+		Kind: paperstatus.KindPeriodClosed,
+		At:   time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC),
+	}) {
+		t.Error("UTC day close was muted")
 	}
 }
 
@@ -344,7 +360,7 @@ func TestLegacyPaperAnnouncementGetsAMultiSourceLabel(t *testing.T) {
 	}
 	message := paperAnnouncement(event, "SRC 123ABC")
 	if !strings.HasPrefix(message, "PAPER SIMULATION · SRC 123ABC ·") ||
-		!strings.Contains(message, " · 2026-08-30 01:02 UTC") {
+		!strings.Contains(message, "\n30 Aug · 01:02 UTC") {
 		t.Fatalf("legacy multi-source announcement = %q", message)
 	}
 }
@@ -458,7 +474,7 @@ func TestPaperCommandPrefersCurrentStateWithoutAnnouncingIt(t *testing.T) {
 	now := time.Date(2026, time.August, 30, 1, 2, 3, 0, time.UTC)
 	reader := &paperStatusStub{snapshot: paperstatus.Snapshot{
 		Version: paperstatus.Version, ObservedAt: now,
-		Current: "PAPER · 👀 Watching\nRange · no edge after costs · SOL $106.55",
+		Current: "PAPER · 👀 LOOKING TO SELL\nSOL $106.55 · no good price yet",
 		Events: []paperstatus.Event{{
 			ID: strings.Repeat("4", 64), At: now.Add(-time.Minute),
 			Kind: paperstatus.KindStrategyActive, Message: "PAPER · 🧠 Strategy on",
@@ -474,11 +490,11 @@ func TestPaperCommandPrefersCurrentStateWithoutAnnouncingIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	reply, ok := service.Reply(t.Context(), 123, "/paper")
-	if !ok || !strings.Contains(reply, "👀 Watching") || strings.Contains(reply, "Strategy on") {
+	if !ok || !strings.Contains(reply, "LOOKING TO SELL") || strings.Contains(reply, "Strategy on") {
 		t.Fatalf("paper reply = %q", reply)
 	}
 	service.announce(t.Context())
-	if len(bot.sent) != 1 || strings.Contains(bot.sent[0].Text, "Watching") {
+	if len(bot.sent) != 0 {
 		t.Fatalf("current status was announced: %+v", bot.sent)
 	}
 }
@@ -486,13 +502,19 @@ func TestPaperCommandPrefersCurrentStateWithoutAnnouncingIt(t *testing.T) {
 func TestPaperCommandShowsCombinedCurrentPortfolioPnL(t *testing.T) {
 	now := time.Date(2026, time.August, 30, 1, 2, 3, 0, time.UTC)
 	build := func(sourceID, market string, opening, equity, hold, trades uint64) *paperStatusStub {
+		nextAction := "sell"
+		if market == "JUP/USDC" {
+			nextAction = "buy"
+		}
 		return &paperStatusStub{sourceID: sourceID, label: market, snapshot: paperstatus.Snapshot{
 			Version: paperstatus.Version, ObservedAt: now,
 			Current: "PAPER · 👀 Watching\n" + market,
 			Summary: &paperstatus.CurrentSummary{
-				Market: market, Day: "2026-08-30", TickSeconds: 60,
+				Market: market, ValueUnit: "USD", Day: "2026-08-30", TickSeconds: 60,
 				OpeningEquityMicros: opening, EquityMicros: equity,
 				HoldBenchmarkMicros: hold, Checks: 10, Signals: trades, Trades: trades,
+				PriceMicros: 100_250_000, State: "range",
+				Strategy: "adaptive", NextAction: nextAction,
 			},
 		}}
 	}
@@ -509,8 +531,11 @@ func TestPaperCommandShowsCombinedCurrentPortfolioPnL(t *testing.T) {
 	}
 	report := service.paperReports()
 	for _, want := range []string{
-		"PAPER · Portfolio", "Today +$0.50", "vs hold +$1.00", "2 markets · 3 trades",
-		"SOL/USDC", "JUP/USDC",
+		"PAPER · 📊 TODAY", "P&L +$0.50", "vs holding +$1.00",
+		"SOL $100.25 · waiting to sell · +$1.00",
+		"JUP $100.25 · waiting to buy · -$0.50",
+		"3 trades · 3 signals · readable checks 100.00% · 01:02 UTC",
+		"Plan · follows strong moves and rebounds · daily safety limit",
 	} {
 		if !strings.Contains(report, want) {
 			t.Errorf("portfolio report omits %q:\n%s", want, report)
@@ -518,6 +543,68 @@ func TestPaperCommandShowsCombinedCurrentPortfolioPnL(t *testing.T) {
 	}
 	if strings.Contains(report, "SRC ") {
 		t.Fatalf("portfolio report used anonymous source tags:\n%s", report)
+	}
+	if strings.Count(report, "PAPER ·") != 1 {
+		t.Fatalf("portfolio report repeated per-market blocks:\n%s", report)
+	}
+}
+
+func TestPaperStateLabelUsesPlainLanguage(t *testing.T) {
+	tests := map[string]string{
+		"":                 "watching",
+		"watching":         "watching",
+		"warming":          "warming up",
+		"uptrend":          "rising",
+		"downtrend":        "falling",
+		"range":            "sideways",
+		"volatile":         "too volatile",
+		"order pending":    "order pending",
+		"waiting for data": "data delayed",
+		"paused":           "paused",
+		"invalid":          "watching",
+	}
+	for state, want := range tests {
+		if got := paperStateLabel(state); got != want {
+			t.Errorf("paper state label for %q = %q, want %q", state, got, want)
+		}
+	}
+	if got := paperMarketState(paperstatus.CurrentSummary{RiskHalted: true}); got != "paused" {
+		t.Fatalf("legacy risk-halted summary = %q", got)
+	}
+}
+
+func TestPaperDataCoverageHandlesMaximumCounters(t *testing.T) {
+	if got := paperDataCoverage(math.MaxUint64, 0); got != "100.00%" {
+		t.Fatalf("maximum paper coverage = %q", got)
+	}
+	if got := paperDataCoverage(4, 1); got != "75.00%" {
+		t.Fatalf("partial paper coverage = %q", got)
+	}
+}
+
+func TestPaperPortfolioShowsTheWeakestMarketCoverage(t *testing.T) {
+	got := paperPortfolioSummary([]paperstatus.CurrentSummary{
+		{
+			Market: "SOL/USDC", ValueUnit: "USD", OpeningEquityMicros: 1, EquityMicros: 1,
+			HoldBenchmarkMicros: 1, Checks: 100,
+		},
+		{
+			Market: "JUP/USDC", ValueUnit: "USD", OpeningEquityMicros: 1, EquityMicros: 1,
+			HoldBenchmarkMicros: 1, Checks: 10, Unobservable: 5,
+		},
+	}, time.Time{})
+	if !strings.Contains(got, "readable checks 50.00%") {
+		t.Fatalf("portfolio hid the weakest market coverage:\n%s", got)
+	}
+}
+
+func TestPaperPortfolioDoesNotMixValueUnits(t *testing.T) {
+	got := paperPortfolioSummary([]paperstatus.CurrentSummary{
+		{Market: "SOL/USDC", ValueUnit: "USD", OpeningEquityMicros: 1, EquityMicros: 1, HoldBenchmarkMicros: 1},
+		{Market: "SOL/devUSDC", ValueUnit: "devUSDC", OpeningEquityMicros: 1, EquityMicros: 1, HoldBenchmarkMicros: 1},
+	}, time.Time{})
+	if got != "" {
+		t.Fatalf("mixed-unit portfolio = %q", got)
 	}
 }
 
@@ -528,7 +615,7 @@ func TestPaperCommandExcludesAStoppedSameDayObserverFromCurrentPortfolio(t *test
 			Version: paperstatus.Version, ObservedAt: observedAt,
 			Current: "PAPER · 👀 Watching\nToday +$1.00 · no trade",
 			Summary: &paperstatus.CurrentSummary{
-				Market: market, Day: "2026-08-30", TickSeconds: 60,
+				Market: market, ValueUnit: "USD", Day: "2026-08-30", TickSeconds: 60,
 				OpeningEquityMicros: 100_000_000, EquityMicros: 101_000_000,
 				HoldBenchmarkMicros: 100_000_000, Checks: 1,
 			},
@@ -546,7 +633,7 @@ func TestPaperCommandExcludesAStoppedSameDayObserverFromCurrentPortfolio(t *test
 		t.Fatal(err)
 	}
 	report := service.paperReports()
-	if strings.Contains(report, "PAPER · Portfolio") ||
+	if strings.Contains(report, "PAPER · 📊 TODAY") ||
 		!strings.Contains(report, "PAPER · JUP/USDC · ⚠️ Observer stale") ||
 		!strings.Contains(report, "Last result +$1.00") {
 		t.Fatalf("stopped observer was shown as current:\n%s", report)
@@ -571,7 +658,7 @@ func TestPaperCommandDoesNotCallYesterdayToday(t *testing.T) {
 	}
 	reply, ok := service.Reply(t.Context(), 123, "/paper")
 	if !ok || !strings.Contains(reply, "Last result +$1.25") ||
-		strings.Contains(reply, "\nToday ") || !strings.Contains(reply, "2026-08-30 23:59 UTC") {
+		strings.Contains(reply, "\nToday ") || !strings.Contains(reply, "30 Aug · 23:59 UTC") {
 		t.Fatalf("stale paper reply = %q", reply)
 	}
 }

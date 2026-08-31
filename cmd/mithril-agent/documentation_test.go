@@ -164,7 +164,7 @@ func TestFullStrategyDocumentationMatchesGeneratedLayout(t *testing.T) {
 		}
 	}
 	operations := readDocumentation(t, "../../OPERATIONS.md")
-	for _, want := range []string{"# Mithril Agent operations and reference", "[README.md](README.md)", "[QUICKSTART.md](QUICKSTART.md)", "### Node-state filesystem access", "mithril-agent audit snapshot", "keyless systemd timer", "make test-account-free", "make test-free-rehearsal", "make test-free-custody", "make test-free-policy", "make test-free-market-data", "make test-free-jupiter", "make test-free-evidence", "proposal evidence-check", "proposal review", "proposal approval-create", "proposal key-create", "proposal policy-create", "--operator-approver", "proposal bundle-check", "proposal self-hosted-check", "proposal authority-check", "proposal submitter-check", "proposal canary-check", "proposal turnkey-check", "--recovery-status", "stores the exact two-provider reconciliation", "--retire-mainnet", "--recovery-mode stop_only", "exact_retry"} {
+	for _, want := range []string{"# Mithril Agent operations and reference", "[README.md](README.md)", "[QUICKSTART.md](QUICKSTART.md)", "### Node-state filesystem access", "mithril-agent audit snapshot", "keyless systemd timer", "make test-account-free", "make test-free-rehearsal", "make test-free-custody", "make test-free-policy", "make test-free-market-data", "make test-free-jupiter", "make test-free-evidence", "proposal evidence-check", "proposal review", "proposal approval-create", "proposal key-create", "proposal policy-create", "--operator-approver", "proposal bundle-check", "proposal self-hosted-check", "proposal authority-check", "proposal submitter-check", "proposal canary-check", "proposal turnkey-check", "--recovery-status", "stores the exact two-provider reconciliation", "--retire-mainnet", "--recovery-mode stop_only", "exact_retry", "mithril-agent-paper-auto-select.timer", "mithril-agent-paper-champion.path", "market sockets publish fresh current-day"} {
 		if !strings.Contains(operations, want) {
 			t.Errorf("OPERATIONS.md is missing reference fact %q", want)
 		}
@@ -413,10 +413,18 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	marketScout := readDocumentation(t, "../../deploy/hermes-research/prompts/market-scout.md")
 	for _, want := range []string{
 		"https://solana.com/changelog", "https://github.com/anza-xyz/agave/releases",
-		"https://status.jup.ag/", "https://status.pyth.network/",
-		"https://docs.kraken.com/api-reference/transparency/pre-trade-data",
+		"https://developers.jup.ag/docs/api-reference/swap/build",
+		"https://developers.jup.ag/docs/price", "https://status.jup.ag/",
+		"https://docs.pyth.network/price-feeds/core/fetch-price-updates",
+		"https://status.pyth.network/",
+		"https://docs.kraken.com/exchange/api-reference/spot-websocket-v2/ticker",
 		"https://status.kraken.com/", "Do not ingest or deliver through Telegram",
-		"previous 12 hours",
+		"https://www.helius.dev/docs/laserstream", "https://docs.jito.wtf/lowlatencytxnsend/",
+		"previous 12 hours", "infrastructure", "not trading alpha",
+		"cbBTC/USDC", "30 consecutive complete days of evidence",
+		"Never resolve an asset by ticker alone",
+		"https://www.coinbase.com/cbbtc", "https://www.circle.com/transparency",
+		"not all-in execution guarantees",
 	} {
 		if !strings.Contains(marketScout, want) {
 			t.Errorf("Hermes market scout omits official source rule %q", want)
@@ -490,6 +498,8 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"./deploy/systemd/mithril-agent-paper-bootstrap.timer",
 		"./deploy/systemd/mithril-agent-paper-auto-select.service",
 		"./deploy/systemd/mithril-agent-paper-auto-select.timer",
+		"./deploy/systemd/mithril-agent-paper-dashboard.service",
+		"./deploy/systemd/mithril-agent-paper-dashboard.socket",
 		"./deploy/systemd/mithril-hermes-research-egress.service",
 		"./deploy/systemd/mithril-hermes-research.service",
 		"./deploy/systemd/mithril-hermes-research.timer",
@@ -708,6 +718,44 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		if !strings.Contains(telegramPaper, want) {
 			t.Errorf("paper Telegram opt-in is missing %q", want)
 		}
+	}
+	dashboardUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-dashboard.service")
+	dashboardSocket := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-dashboard.socket")
+	dashboardSysusers := readDocumentation(t, "../../deploy/sysusers/mithril-agent-dashboard.conf")
+	for _, want := range []string{
+		"User=mithril-agent-dashboard", "SupplementaryGroups=mithril-agent-status",
+		"PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
+		"InaccessiblePaths=/var/lib/mithril-agent",
+		"SOL/USDC=/run/mithril-agent-paper-status.sock",
+		"JUP/USDC=/run/mithril-agent-paper-jup-status.sock",
+	} {
+		if !strings.Contains(dashboardUnit, want) {
+			t.Errorf("paper dashboard unit is missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"EnvironmentFile=", "ReadWritePaths=", "AF_INET", "--listen"} {
+		if strings.Contains(dashboardUnit, forbidden) {
+			t.Errorf("paper dashboard unit contains unsafe capability %q", forbidden)
+		}
+	}
+	for _, want := range []string{
+		"ListenStream=/run/mithril-agent-paper-dashboard.sock",
+		"SocketGroup=mithril-agent-dashboard", "SocketMode=0660",
+		"FileDescriptorName=paper-dashboard", "Accept=no",
+	} {
+		if !strings.Contains(dashboardSocket, want) {
+			t.Errorf("paper dashboard socket is missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"g mithril-agent-dashboard -", "u mithril-agent-dashboard -:mithril-agent-dashboard",
+	} {
+		if !strings.Contains(dashboardSysusers, want) {
+			t.Errorf("paper dashboard identity is missing %q", want)
+		}
+	}
+	if strings.Contains(dashboardSysusers, "m mithril-agent-dashboard mithril-agent-status") {
+		t.Error("paper dashboard identity has status access outside its hardened service")
 	}
 	for _, want := range []string{
 		"/var/lib/mithril-agent-research/index \\",
