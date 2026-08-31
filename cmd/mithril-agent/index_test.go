@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/rootedindex"
 	"github.com/Overclock-Validator/mithril-agent/solana"
 	solanago "github.com/solana-foundation/solana-go/v2"
@@ -406,6 +408,49 @@ func TestIndexDoctorReadyAndFailedRecoveryIsReadOnly(t *testing.T) {
 	}
 	if !bytes.Equal(after, tampered) {
 		t.Fatal("doctor changed the failed index")
+	}
+}
+
+func TestIndexDoctorExplainsSchemaMigration(t *testing.T) {
+	dir := t.TempDir()
+	store, err := journal.OpenRotating(filepath.Join(dir, "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(time.Now().UTC(), "rooted_index.header", "", map[string]any{
+		"index_schema_version": uint32(4), "source": testRootedSource(), "filter": rootedindex.Filter{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(dir, "events.jsonl")
+	before, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err = runIndex(context.Background(), []string{"doctor", "--dir", dir, "--json"}, strings.NewReader(""), &output)
+	if !errors.Is(err, errIndexNeedsAttention) {
+		t.Fatalf("migration doctor error = %v", err)
+	}
+	var result indexDoctorResult
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	steps := strings.Join(result.NextSteps, " ")
+	if result.Ready || !strings.Contains(result.Reason, "schema v4") ||
+		!strings.Contains(steps, "existing index unchanged") ||
+		!strings.Contains(steps, "event-schema-v3") || len(result.NextSteps) != 3 {
+		t.Fatalf("migration doctor = %+v", result)
+	}
+	after, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("migration doctor changed the old index")
 	}
 }
 

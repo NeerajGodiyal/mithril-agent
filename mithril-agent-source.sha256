@@ -64,8 +64,8 @@ dbc75b18d84298345a45fea6527cd1716a401c21e592b88d983a15bd22d223ef  ./cmd/mithril-
 9b46fd2421c1f9e13232e5d9284d206c424cde2b1dd17fd7a917ad0209a38ba9  ./cmd/mithril-agent/funding_test.go
 27232da3685ff53ffe6a2b5bc04fa990cbc2c5f0a1365c97b2f162cbd82341aa  ./cmd/mithril-agent/hostpaths.go
 39baf12ab1ab429368967d34c517ec459aff5516f0477084fa6820e1df649783  ./cmd/mithril-agent/hostpaths_test.go
-05026cbc431867702c7efaa2794aa1b9f76b231df6d37640e4fb7395c492e841  ./cmd/mithril-agent/index.go
-d3331f4dc1b41f8c1bbbac18fb3fc47f1707e0d02bda48da0b895ec3381fc61b  ./cmd/mithril-agent/index_test.go
+ec328be3f8d9dd8e1bc12902ec7488621a29b2b0082cf63bbea945598869b97c  ./cmd/mithril-agent/index.go
+7be7b6797efe60c75985cfb2eb92e4adec133c2a1a33823f92f5826e1f5eea7b  ./cmd/mithril-agent/index_test.go
 54c2f606a14bd889fcce29c0e92a3ccaaf70c893ad0e98d4d54f8a36b4ea736b  ./cmd/mithril-agent/journal.go
 a231f8e63c8d16e027362818c17852387e70aea6ecfca4db0f2eeddb47a1f139  ./cmd/mithril-agent/journal_test.go
 81b2e199a08523abe0bf49ada90a2c182bdee1cf5d9162c39007270549777c9c  ./cmd/mithril-agent/main.go
@@ -318,7 +318,7 @@ a5293307800851997f15c5d84b3d0cb601497e855f8fca059426d03ccf76badb  ./readiness/re
 5dc5f6178e0766604c456ed338970b17ab17fc83e99a2a98b3ec41fab8f1b364  ./readiness/unset_state_test.go
 bf973881ce7277ca0f23987ac46e5ce8da98058fc0f0d9b3b9de717dcec9ff19  ./riskgrant/grant.go
 34510860559ede0a9951c95bbc82f8cb714ea82afca9b6a21335c7a4b0ec7908  ./riskgrant/grant_test.go
-a15dd28c315ceda45683a0a30f05d2f079f09f3b429a8ab6326acb081ee7b750  ./rootedindex/index.go
+f9f5f55bf51bbeabbf09edba843636242e04d282d09ded32dbf098740052ad30  ./rootedindex/index.go
 00534f520969b0605d0e983217deb78dcb990afbe02d50c10ba8b51e15e58c74  ./rootedindex/index_test.go
 d1cc1b3a75b03d5bd8ebd978cc4bc1cd5fca9231c7f1fff476cd8607e30d2990  ./rootedindex/public_contract_test.go
 2eb3eb79b91e01d345d258c120564c3931586db250345e25f519198589b07bc4  ./sealedtx/envelope.go

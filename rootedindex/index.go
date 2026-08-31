@@ -66,6 +66,19 @@ var (
 	errSourceLessIndex = errors.New("rooted index schema lacks the current event, source, or stream-start binding; preserve it for audit and rebuild a private v5 index from Mithril's event-schema-v3 framed rooted feed")
 )
 
+// SchemaMigrationReason returns only the bounded migration guidance emitted by
+// this package, never a raw filesystem or journal error.
+func SchemaMigrationReason(err error) (string, bool) {
+	switch {
+	case errors.Is(err, errV4Index):
+		return errV4Index.Error(), true
+	case errors.Is(err, errSourceLessIndex):
+		return errSourceLessIndex.Error(), true
+	default:
+		return "", false
+	}
+}
+
 type TransactionVersion string
 
 const (

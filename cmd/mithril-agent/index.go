@@ -135,6 +135,14 @@ func runIndexDoctor(args []string, output io.Writer) error {
 		"If the check still fails, create a new private directory and backfill it from retained rooted events; use --latest only for a deliberately future-only index.",
 		"Keep the old directory for audit and comparison until the replacement is verified.",
 	}
+	if migrationReason, ok := rootedindex.SchemaMigrationReason(err); ok {
+		reason = migrationReason
+		next = []string{
+			"Stop ingest and keep the existing index unchanged for audit.",
+			"Create a new private v5 index with the intended source, cluster, and permanent filters.",
+			"Backfill it from Mithril's event-schema-v3 framed rooted feed, then run doctor on the replacement before switching readers.",
+		}
+	}
 	var checked *rootedindex.Status
 	if status.SchemaVersion != 0 && !status.Complete {
 		reason = "ingest stopped before the terminal slot root marker"
