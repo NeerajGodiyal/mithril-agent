@@ -155,6 +155,7 @@ type Service struct {
 	paperAnnounced  *announcedStore
 	paperHealthSeen map[string]bool
 	paperHealthy    map[string]bool
+	startedAt       time.Time
 }
 
 func New(config Config) (*Service, error) {
@@ -206,6 +207,7 @@ func New(config Config) (*Service, error) {
 	if config.Now == nil {
 		config.Now = time.Now
 	}
+	startedAt := config.Now().UTC()
 	if config.PollTimeout == 0 {
 		config.PollTimeout = defaultPollTimeout
 	}
@@ -240,6 +242,7 @@ func New(config Config) (*Service, error) {
 		),
 		paperHealthSeen: map[string]bool{}, paperHealthy: map[string]bool{},
 		explainer: config.Explainer, explanationBudget: config.ExplanationBudget, now: config.Now,
+		startedAt:   startedAt,
 		pollTimeout: config.PollTimeout, minInterval: config.MinimumInterval,
 		pollRetryDelay: defaultPollRetryDelay,
 		explainTimeout: config.ExplanationLimit, next: make(map[int64]time.Time),
@@ -370,15 +373,41 @@ func (s *Service) announce(ctx context.Context) {
 	for index, source := range s.sources {
 		s.announceSource(ctx, index, source)
 	}
+	snapshots := make([]paperstatus.Snapshot, len(s.paperSources))
+	errorsBySource := make([]error, len(s.paperSources))
+	summaries := make([]paperstatus.CurrentSummary, 0, len(s.paperSources))
+	now := s.now()
 	for index, source := range s.paperSources {
-		s.announcePaperSource(ctx, index, source)
+		snapshots[index], errorsBySource[index] = source.Read()
+		if errorsBySource[index] == nil && paperstatus.ValidateSnapshot(snapshots[index]) == nil &&
+			paperSnapshotMatchesReader(source, snapshots[index]) &&
+			paperSnapshotFresh(snapshots[index], now) && snapshots[index].Summary != nil &&
+			snapshots[index].Summary.Day == now.UTC().Format("2006-01-02") {
+			summaries = append(summaries, *snapshots[index].Summary)
+		}
+	}
+	portfolio := ""
+	if len(summaries) == len(s.paperSources) {
+		portfolio = paperPortfolioAlertSummary(summaries)
+	}
+	for index, source := range s.paperSources {
+		s.announcePaperSource(
+			ctx, index, source, snapshots[index], errorsBySource[index], portfolio,
+		)
 	}
 }
 
-func (s *Service) announcePaperSource(ctx context.Context, index int, source PaperStatusReader) {
+func (s *Service) announcePaperSource(
+	ctx context.Context,
+	index int,
+	source PaperStatusReader,
+	snapshot paperstatus.Snapshot,
+	readErr error,
+	portfolio string,
+) {
 	sourceID := source.SourceID()
-	snapshot, err := source.Read()
-	if err != nil || paperstatus.ValidateSnapshot(snapshot) != nil {
+	if readErr != nil || paperstatus.ValidateSnapshot(snapshot) != nil ||
+		!paperSnapshotMatchesReader(source, snapshot) {
 		s.recordPaperHealth(index, sourceID, false)
 		return
 	}
@@ -390,6 +419,13 @@ func (s *Service) announcePaperSource(ctx context.Context, index int, source Pap
 	blocked := make(map[int64]bool)
 	for _, event := range events {
 		if !paperAnnounceWorthy(event) {
+			continue
+		}
+		// An opened order is a timely heads-up, not durable history. On an
+		// upgrade or restart, retained opens may already have filled or expired;
+		// replaying them creates a burst of obsolete Telegram messages. Fills,
+		// safety events, and daily results remain durably replayable.
+		if event.Kind == paperstatus.KindOrderOpened && !event.At.After(s.startedAt) {
 			continue
 		}
 		delivered := 0
@@ -418,7 +454,14 @@ func (s *Service) announcePaperSource(ctx context.Context, index int, source Pap
 			if len(s.paperSources) > 1 {
 				label = paperReaderLabel(source)
 			}
-			if err := s.bot.Send(ctx, chatID, bounded(paperAnnouncement(event, label))); err != nil {
+			message := paperAnnouncement(event, label)
+			if event.Kind == paperstatus.KindOrderFilled {
+				if portfolio != "" {
+					message = omitPaperLine(message, "Market value:")
+				}
+				message += portfolio
+			}
+			if err := s.bot.Send(ctx, chatID, bounded(message)); err != nil {
 				if ctx.Err() != nil {
 					return
 				}
@@ -439,7 +482,8 @@ func (s *Service) announcePaperSource(ctx context.Context, index int, source Pap
 
 func paperAnnounceWorthy(event paperstatus.Event) bool {
 	switch event.Kind {
-	case paperstatus.KindStrategyChanged, paperstatus.KindOrderFilled, paperstatus.KindRiskHalted,
+	case paperstatus.KindStrategyChanged, paperstatus.KindOrderOpened,
+		paperstatus.KindOrderFilled, paperstatus.KindRiskHalted,
 		paperstatus.KindDataUnavailable, paperstatus.KindDataRestored,
 		"history_truncated":
 		return true
@@ -452,36 +496,30 @@ func paperAnnounceWorthy(event paperstatus.Event) bool {
 }
 
 func paperAnnouncement(event paperstatus.Event, label string) string {
-	message := event.Message
+	message := readablePaperMessage(event.Message)
 	if label != "" {
-		label = paperMarketName(label)
-		if strings.HasPrefix(message, "PAPER ·") {
-			message = strings.Replace(message, "PAPER ·", "PAPER · "+label+" ·", 1)
-		} else {
-			message = strings.Replace(message, "PAPER SIMULATION —", "PAPER SIMULATION · "+label+" ·", 1)
-		}
+		message = paperMarketMessage(message)
 	}
-	return timestampPaperMessage(message, event.At)
-}
-
-func timestampPaperMessage(message string, at time.Time) string {
-	first, rest, found := strings.Cut(message, "\n")
-	stamp := at.UTC().Format("02 Jan · 15:04 UTC")
-	if !found {
-		return first + "\n" + stamp
-	}
-	return first + "\n" + rest + "\n" + stamp
+	return stackPaperMessage(message, paperMarketName(label))
 }
 
 func paperCurrentAge(message string, fresh bool) string {
+	message = readablePaperMessage(message)
 	if fresh {
 		return message
 	}
-	header := "PAPER · ⚠️ Observer stale"
+	header := "PAPER · ⚠️ LATEST UPDATE DELAYED"
 	if strings.HasPrefix(message, "PAPER · ⚠️ WAITING FOR PRICES") {
 		header = "PAPER · ⚠️ PRICE DATA DELAYED"
 	}
-	message = strings.Replace(message, "\nToday's result:", "\nLast recorded result:", 1)
+	for _, current := range []string{
+		"\nPaper gain/loss today:",
+		"\nGain/loss today:",
+		"\nToday's estimated paper value:",
+		"\nToday's result:",
+	} {
+		message = strings.Replace(message, current, "\nLast recorded gain/loss:", 1)
+	}
 	_, details, found := strings.Cut(
 		strings.Replace(message, "\nToday ", "\nLast result ", 1), "\n",
 	)
@@ -489,6 +527,148 @@ func paperCurrentAge(message string, fresh bool) string {
 		return header
 	}
 	return header + "\n" + details
+}
+
+// readablePaperMessage upgrades retained display text without changing the
+// immutable event or its ID in the evidence snapshot.
+func readablePaperMessage(message string) string {
+	lines := strings.Split(message, "\n")
+	if len(lines) == 0 {
+		return message
+	}
+	lines[0] = strings.ReplaceAll(lines[0], "SELL filled", "SOLD")
+	lines[0] = strings.ReplaceAll(lines[0], "BUY filled", "BOUGHT")
+	for index := 1; index < len(lines); index++ {
+		lines[index] = strings.ReplaceAll(lines[index], "Practice account:", "Paper account:")
+		lines[index] = strings.ReplaceAll(lines[index], "Total paper account:", "Paper account:")
+		lines[index] = strings.ReplaceAll(lines[index], "Equity $", "Paper account: $")
+		lines[index] = strings.Replace(lines[index], "Result:", "Paper gain/loss:", 1)
+		lines[index] = strings.ReplaceAll(lines[index], "Today's estimated paper value:", "Gain/loss today:")
+		lines[index] = strings.ReplaceAll(lines[index], "Today's result:", "Gain/loss today:")
+		lines[index] = strings.ReplaceAll(lines[index], "Compared with no trading:", "Compared with holding:")
+		lines[index] = strings.ReplaceAll(lines[index], "Versus no trading:", "Compared with holding:")
+		lines[index] = strings.ReplaceAll(lines[index], "better than no trading", "better than holding")
+		lines[index] = strings.ReplaceAll(lines[index], "worse than no trading", "worse than holding")
+		lines[index] = strings.ReplaceAll(lines[index], "same as no trading", "same as holding")
+		lines[index] = readablePaperTradeCount(lines[index])
+		lines[index] = shortenPaperUSD(lines[index])
+		for _, action := range []string{"Sold", "Received", "Paid", "Bought"} {
+			lines[index] = strings.Replace(lines[index], action+" ", action+": ", 1)
+		}
+	}
+	if len(lines) < 2 {
+		return paperDisplayResultLines(strings.Join(lines, "\n"))
+	}
+	movement, extra, _ := strings.Cut(lines[1], " · ")
+	from, to, arrow := strings.Cut(movement, " → ")
+	if !arrow {
+		return paperDisplayResultLines(strings.Join(lines, "\n"))
+	}
+	sell := strings.Contains(lines[0], "SOLD")
+	replacement := []string{"Paid: " + from, "Bought: " + to}
+	if sell {
+		replacement = []string{"Sold: " + from, "Received: " + to}
+	}
+	if extra != "" {
+		replacement = append(replacement, extra)
+	}
+	lines = append(lines[:1], append(replacement, lines[2:]...)...)
+	return paperDisplayResultLines(strings.Join(lines, "\n"))
+}
+
+func paperDisplayResultLines(message string) string {
+	lines := strings.Split(message, "\n")
+	for index, line := range lines {
+		for _, label := range []string{
+			"Paper gain/loss:", "Gain/loss today:", "This market today:",
+			"All markets today:", "Last recorded gain/loss:",
+		} {
+			if result, found := strings.CutPrefix(line, label+" "); found {
+				lines[index] = label + " " + paperResultDisplay(result)
+				break
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func paperResultDisplay(result string) string {
+	if amount, found := strings.CutPrefix(result, "up "); found {
+		return paperResultAmount("🟢 ▲ ", amount, "profit")
+	}
+	if amount, found := strings.CutPrefix(result, "down "); found {
+		return paperResultAmount("🔴 ▼ ", amount, "loss")
+	}
+	if result == "unchanged" {
+		return "⚪ → unchanged"
+	}
+	return result
+}
+
+func paperResultAmount(icon, result, word string) string {
+	amount, detail, found := strings.Cut(result, " · ")
+	display := icon + amount + " (" + word + ")"
+	if found {
+		display += " · " + detail
+	}
+	return display
+}
+
+func shortenPaperUSD(line string) string {
+	for offset := 0; offset < len(line); {
+		relative := strings.IndexByte(line[offset:], '$')
+		if relative < 0 {
+			break
+		}
+		start := offset + relative
+		end := start + 1
+		for end < len(line) && (line[end] == '.' || line[end] >= '0' && line[end] <= '9') {
+			end++
+		}
+		whole, fraction, found := strings.Cut(line[start+1:end], ".")
+		if !found {
+			fraction = ""
+		}
+		if len(fraction) > 6 {
+			return line
+		}
+		fraction += strings.Repeat("0", 6-len(fraction))
+		wholeValue, wholeErr := strconv.ParseUint(whole, 10, 64)
+		fractionValue, fractionErr := strconv.ParseUint(fraction, 10, 64)
+		if wholeErr != nil || fractionErr != nil ||
+			wholeValue > (math.MaxUint64-fractionValue)/1_000_000 {
+			return line
+		}
+		formatted := formatPaperUSD(wholeValue*1_000_000 + fractionValue)
+		line = line[:start] + formatted + line[end:]
+		offset = start + len(formatted)
+	}
+	return line
+}
+
+func readablePaperTradeCount(line string) string {
+	marker := " · "
+	index := strings.LastIndex(line, marker)
+	if index < 0 {
+		return line
+	}
+	tail := line[index+len(marker):]
+	number, found := strings.CutSuffix(tail, " trades")
+	if !found {
+		number, found = strings.CutSuffix(tail, " trade")
+	}
+	if !found {
+		return line
+	}
+	count, err := strconv.ParseUint(number, 10, 64)
+	if err != nil {
+		return line
+	}
+	label := fmt.Sprintf("%d filled paper orders", count)
+	if count == 1 {
+		label = "1 filled paper order"
+	}
+	return line[:index+len(marker)] + label
 }
 
 func paperSnapshotFresh(snapshot paperstatus.Snapshot, now time.Time) bool {
@@ -793,7 +973,8 @@ func (s *Service) paperReports() string {
 		if len(s.paperSources) > 1 {
 			label = paperReaderLabel(source)
 		}
-		if err != nil || paperstatus.ValidateSnapshot(snapshot) != nil {
+		if err != nil || paperstatus.ValidateSnapshot(snapshot) != nil ||
+			!paperSnapshotMatchesReader(source, snapshot) {
 			report := "PAPER ALERTS · ⚠️ Unavailable"
 			if label != "" {
 				report = "PAPER ALERTS · " + label + " · ⚠️ Unavailable"
@@ -816,16 +997,11 @@ func (s *Service) paperReports() string {
 			if label != "" {
 				report = labelPaperMessage(report, label)
 			}
-			report = timestampPaperMessage(report, snapshot.ObservedAt)
 			reports = append(reports, report)
 			continue
 		}
 		if snapshot.Current != "" {
-			report := timestampPaperMessage(
-				labelPaperMessage(
-					paperCurrentAge(snapshot.Current, fresh), label,
-				), snapshot.ObservedAt,
-			)
+			report := labelPaperMessage(paperCurrentAge(snapshot.Current, fresh), label)
 			reports = append(reports, paperReportExcerpt(report))
 			continue
 		}
@@ -841,7 +1017,16 @@ func (s *Service) paperReports() string {
 	return strings.Join(reports, "\n\n")
 }
 
-func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, observedAt time.Time) string {
+func paperSummaryMatchesReader(source PaperStatusReader, summary paperstatus.CurrentSummary) bool {
+	labeled, ok := source.(interface{ SourceLabel() string })
+	return !ok || labeled.SourceLabel() == "" || summary.Market == labeled.SourceLabel()
+}
+
+func paperSnapshotMatchesReader(source PaperStatusReader, snapshot paperstatus.Snapshot) bool {
+	return snapshot.Summary == nil || paperSummaryMatchesReader(source, *snapshot.Summary)
+}
+
+func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, _ time.Time) string {
 	if len(summaries) < 2 {
 		return ""
 	}
@@ -884,16 +1069,19 @@ func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, observedAt ti
 		}
 	}
 	var report strings.Builder
-	fmt.Fprintf(&report, "PAPER · 📊 TODAY\nPractice result: %s\nCompared with no trading: %s",
-		paperResultChange(opening, equity, valueUnit),
+	fmt.Fprintf(&report, "PAPER\n\n📊 ACCOUNT TODAY\nTotal paper value: %s\nToday's total result: %s\nCompared with just holding: %s",
+		paperAbsoluteValue(equity, valueUnit),
+		paperResultDisplay(paperResultChange(opening, equity, valueUnit)),
 		paperResultComparison(hold, equity, valueUnit))
 	for _, summary := range summaries {
-		fmt.Fprintf(&report, "\n%s", paperMarketName(summary.Market))
+		fmt.Fprintf(&report, "\n\n%s", paperMarketName(summary.Market))
 		if summary.PriceMicros != 0 {
-			fmt.Fprintf(&report, " %s", formatUSDMicros(summary.PriceMicros))
+			fmt.Fprintf(&report, "\nMarket price: %s", formatUSDMicros(summary.PriceMicros))
 		}
-		fmt.Fprintf(&report, " · %s · %s", paperMarketState(summary),
-			paperResultChange(summary.OpeningEquityMicros, summary.EquityMicros, valueUnit))
+		fmt.Fprintf(&report, "\nPlan: %s\nThis market's result today: %s", paperMarketState(summary),
+			paperResultDisplay(paperResultChange(
+				summary.OpeningEquityMicros, summary.EquityMicros, valueUnit,
+			)))
 	}
 	coverage := "warming"
 	if coverageReady {
@@ -906,9 +1094,6 @@ func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, observedAt ti
 	if paused != 0 {
 		line += fmt.Sprintf(" · %d paused", paused)
 	}
-	if !observedAt.IsZero() {
-		line += " · " + observedAt.UTC().Format("15:04 UTC")
-	}
 	if strategiesReady && len(strategies) == 1 {
 		if _, adaptive := strategies["adaptive"]; adaptive {
 			line += "\nPlan · follows strong moves and rebounds · daily safety limit"
@@ -919,18 +1104,39 @@ func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, observedAt ti
 	return report.String() + "\n" + line
 }
 
+func paperPortfolioAlertSummary(summaries []paperstatus.CurrentSummary) string {
+	if len(summaries) < 2 {
+		return ""
+	}
+	var opening, equity uint64
+	valueUnit := ""
+	for _, summary := range summaries {
+		if summary.ValueUnit == "" || valueUnit != "" && valueUnit != summary.ValueUnit ||
+			summary.OpeningEquityMicros > math.MaxUint64-opening ||
+			summary.EquityMicros > math.MaxUint64-equity {
+			return ""
+		}
+		valueUnit = summary.ValueUnit
+		opening += summary.OpeningEquityMicros
+		equity += summary.EquityMicros
+	}
+	return "\n\nTOTAL PAPER ACCOUNT\n" + paperAbsoluteValue(equity, valueUnit) +
+		"\n\nTODAY'S TOTAL RESULT\n" +
+		paperResultDisplay(paperResultChange(opening, equity, valueUnit))
+}
+
 func paperTradeCount(trades uint64) string {
 	if trades == 1 {
-		return "1 completed trade"
+		return "1 filled paper order"
 	}
-	return fmt.Sprintf("%d completed trades", trades)
+	return fmt.Sprintf("%d filled paper orders", trades)
 }
 
 func paperSignalCount(signals uint64) string {
 	if signals == 1 {
-		return "plan reacted 1 time"
+		return "the plan tried to trade once"
 	}
-	return fmt.Sprintf("plan reacted %d times", signals)
+	return fmt.Sprintf("the plan tried to trade %d times", signals)
 }
 
 func paperMarketState(summary paperstatus.CurrentSummary) string {
@@ -983,8 +1189,7 @@ func paperStateLabel(state string) string {
 }
 
 func paperMarketName(market string) string {
-	name, _, _ := strings.Cut(market, "/")
-	return name
+	return market
 }
 
 func paperDataCoverage(checks, unobservable uint64) string {
@@ -1027,17 +1232,59 @@ func paperResultComparison(reference, current uint64, unit string) string {
 
 func paperAbsoluteValue(value uint64, unit string) string {
 	if unit == "USD" {
-		return formatUSDMicros(value)
+		return formatPaperUSD(value)
 	}
 	return formatMicroUnits(value) + " " + unit
 }
 
+func formatPaperUSD(value uint64) string {
+	if value != 0 && value < 10_000 {
+		return "<$0.01"
+	}
+	cents := value / 10_000
+	if value%10_000 >= 5_000 && cents != math.MaxUint64 {
+		cents++
+	}
+	return fmt.Sprintf("$%d.%02d", cents/100, cents%100)
+}
+
 func labelPaperMessage(message, label string) string {
-	if label == "" {
+	if label != "" {
+		message = paperMarketMessage(message)
+	}
+	return stackPaperMessage(message, paperMarketName(label))
+}
+
+func paperMarketMessage(message string) string {
+	message = strings.Replace(message, "\nPaper account:", "\nMarket value:", 1)
+	return omitPaperLine(message, "Gain/loss today:")
+}
+
+func stackPaperMessage(message, market string) string {
+	header, details, found := strings.Cut(message, "\n")
+	action, paper := strings.CutPrefix(header, "PAPER · ")
+	if !paper {
+		if market != "" {
+			return strings.Replace(message, "PAPER SIMULATION —", "PAPER SIMULATION · "+market+" ·", 1)
+		}
 		return message
 	}
-	if strings.HasPrefix(message, "PAPER ·") {
-		return strings.Replace(message, "PAPER ·", "PAPER · "+label+" ·", 1)
+	stacked := "PAPER\n\n" + action
+	if market != "" {
+		stacked += "\nMarket: " + market
+	}
+	if found {
+		stacked += "\n" + details
+	}
+	return stacked
+}
+
+func omitPaperLine(message, prefix string) string {
+	lines := strings.Split(message, "\n")
+	for index, line := range lines {
+		if strings.HasPrefix(line, prefix) {
+			return strings.Join(append(lines[:index], lines[index+1:]...), "\n")
+		}
 	}
 	return message
 }

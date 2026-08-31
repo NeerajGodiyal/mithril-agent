@@ -59,9 +59,10 @@ func TestStatusCombinesMarketsWithoutExposingIDsOrHTML(t *testing.T) {
 			}},
 		}}
 	}
+	sol := build("SOL/USDC", 100, 0, 100_000_000, 101_000_000, 100_500_000)
+	sol.snapshot.DroppedEvents = 3
 	server, err := New([]Source{
-		build("SOL/USDC", 100, 0, 100_000_000, 101_000_000, 100_500_000),
-		build("JUP/USDC", 10, 5, 50_000_000, 49_000_000, 48_000_000),
+		sol, build("JUP/USDC", 10, 5, 50_000_000, 49_000_000, 48_000_000),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +82,7 @@ func TestStatusCombinesMarketsWithoutExposingIDsOrHTML(t *testing.T) {
 	if !view.Complete || view.Overview.EquityMicros != 150_000_000 ||
 		view.Overview.Signals != 2 || view.Overview.CoverageBPS != 5_000 ||
 		len(view.Markets) != 2 || len(view.Markets[0].History) != 2 ||
-		len(view.Activity) != 2 {
+		len(view.Activity) != 2 || view.ActivityOmitted != 3 {
 		t.Fatalf("view = %+v", view)
 	}
 	for _, header := range []string{
@@ -279,15 +280,30 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for path, wants := range map[string][]string{
-		"/":        {"Paper order activity", "aria-live=\"polite\">Refresh"},
-		"/app.css": {".help:focus", ".help[aria-expanded=\"true\"]", ".button.loading:before", "@keyframes spin"},
+		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "Automation setup", "Futures and perps", "View recent paper orders"},
+		"/app.css": {
+			".help:focus", ".help[aria-expanded=\"true\"]", ".button.loading:before", "@keyframes spin",
+			".market-overview", ".market-price{font-size:1.3rem}", "--line-strong:#51647a", "--subtle:#7f8b9a",
+			".topbar:after,.metric:before", ".dot,.dot.ok,.dot.bad", "backdrop-filter:none",
+			".badge.green{background:var(--green-bg)!important}", ".controls .button{padding-inline:6px",
+			"@media(max-width:520px){.automation-grid", "@media(max-width:430px){.topbar",
+			"@media(max-width:390px){.tabs", "@media(max-width:360px){.metrics",
+		},
 		"/app.js": {
-			"Practice account", "Today's result", "Versus no trading", "Completed trades",
+			"Total paper value", "Today's paper result", "Compared with holding", "Filled paper orders",
 			"role=\"tooltip\"", "aria-describedby", "event.key!=='Escape'", "Waiting for fresh prices",
-			"More trades do not necessarily mean more profit.", "repeats can belong to the same trade",
+			"More filled orders do not necessarily mean more profit.",
 			"?fresh=1", "Refreshing…", "Updated ✓",
-			"Checked ✓", "Data delayed", "requestSequence", "Last recorded result",
-			"Market-responsive paper plan", "does not retrain itself live", "deltaValue",
+			"Checked ✓", "Data delayed", "requestSequence", "Last result",
+			"Market-responsive paper plan", "separate forward paper test", "deltaValue",
+			"readableActivity", "Use Refresh to try again.", "liveUpdates&&!$('refresh').disabled",
+			"This market value:", "This market's result today:", "readableActivityResult", "(profit?'profit':'loss')",
+			"Plan tried to trade once", "The plan checked ",
+			"market-overview", "Current plan", "age(current.observed_at)",
+			"integer(micros)>0n&&integer(micros)<10000n?'<$0.01'",
+			"amount>=1000000n?2:amount>=10000n?4:6",
+			"chartDots", "Max drawdown", "Strategy '+paperValue", "Holding '+paperValue", "older events omitted", "Configured", "Nous Hermes",
+			"does not yet prove its timer", "open-order-history",
 		},
 	} {
 		request := httptest.NewRequest(http.MethodGet, "http://localhost"+path, nil)

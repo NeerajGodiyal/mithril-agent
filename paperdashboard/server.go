@@ -43,6 +43,9 @@ type View struct {
 	Overview   Overview   `json:"overview"`
 	Markets    []Market   `json:"markets"`
 	Activity   []Activity `json:"activity"`
+	// ActivityOmitted counts older bounded status events plus events removed by
+	// the dashboard's own combined-list cap.
+	ActivityOmitted uint64 `json:"activity_omitted"`
 }
 
 type Overview struct {
@@ -127,7 +130,7 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	case "/":
 		serveAsset(writer, request, "text/html; charset=utf-8", indexHTML)
 	case "/app.css":
-		serveAsset(writer, request, "text/css; charset=utf-8", appCSS+mobileCSS)
+		serveAsset(writer, request, "text/css; charset=utf-8", appCSS+mobileCSS+refinedCSS+finishingCSS+narrowCSS+observabilityCSS+qaCSS+finalCSS)
 	case "/app.js":
 		serveAsset(writer, request, "text/javascript; charset=utf-8", appJS)
 	case "/api/v1/status":
@@ -243,6 +246,11 @@ func (s *Server) readSnapshot(now time.Time) View {
 				Market: label, At: event.At, Kind: event.Kind, Message: event.Message,
 			})
 		}
+		if view.ActivityOmitted > math.MaxUint64-snapshot.DroppedEvents {
+			view.ActivityOmitted = math.MaxUint64
+		} else {
+			view.ActivityOmitted += snapshot.DroppedEvents
+		}
 	}
 	view.Overview.CoverageReady = coverageReady
 	if coverageReady {
@@ -252,6 +260,12 @@ func (s *Server) readSnapshot(now time.Time) View {
 		return view.Activity[i].At.After(view.Activity[j].At)
 	})
 	if len(view.Activity) > maxActivity {
+		omitted := uint64(len(view.Activity) - maxActivity)
+		if view.ActivityOmitted > math.MaxUint64-omitted {
+			view.ActivityOmitted = math.MaxUint64
+		} else {
+			view.ActivityOmitted += omitted
+		}
 		view.Activity = view.Activity[:maxActivity]
 	}
 	if !view.Complete {

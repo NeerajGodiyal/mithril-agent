@@ -47,9 +47,9 @@ func (s *shadowRun) alertTick(tick shadow.Tick, nextSell bool) error {
 	key := s.policySHA256 + "/" + tick.At.Format(time.RFC3339Nano) + "/" + tick.Event
 	if tick.Decision != nil && tick.Decision.Regime == shadow.RegimeRisk &&
 		tick.Event != shadow.EventFilled {
-		message := "PAPER · ⏸ PAUSED\nPractice account reached today's safety limit"
+		message := "PAPER · ⏸ NEW BUYS PAUSED\nToday's paper safety limit was reached\nSells can still reduce risk"
 		if tick.Decision.Strategy == shadow.StrategyRiskExit {
-			message = "PAPER · 🛡 SAFETY EXIT ACTIVE\nPractice account reached today's safety limit"
+			message = "PAPER · 🛡 SAFETY SELL ACTIVE\nToday's paper safety limit was reached\nSelling to reduce risk"
 		}
 		riskKey := s.policySHA256 + "/" + dayKey(tick.At) + "/risk-halt"
 		if err := s.appendAlert(tick.At, paperstatus.KindRiskHalted, riskKey, message); err != nil {
@@ -59,18 +59,32 @@ func (s *shadowRun) alertTick(tick shadow.Tick, nextSell bool) error {
 	switch {
 	case tick.Event == shadow.EventSignal && tick.DecisionQuote != nil:
 		input, _ := shadowAssets(s.policy, nextSell)
-		message := fmt.Sprintf("PAPER · %s %s ORDER OPEN\n%s %s · waiting for result",
+		action := "Buying with up to"
+		if nextSell {
+			action = "Selling up to"
+		}
+		message := fmt.Sprintf("PAPER · %s %s ORDER OPEN\n%s %s %s\nWaiting to see if it fills",
 			paperOpenIcon(nextSell), shadowSide(nextSell),
-			formatShadowAmount(tick.DecisionQuote.InputAmount, input.decimals), input.name)
+			action, formatShadowAmount(tick.DecisionQuote.InputAmount, input.decimals), input.name)
+		if tick.PriceMicros != 0 {
+			message += "\nReference price: $" + formatShadowAmount(tick.PriceMicros, 6)
+		}
 		return s.appendAlert(tick.At, paperstatus.KindOrderOpened, key, message)
 	case tick.Event == shadow.EventFilled && tick.Fill != nil && tick.Fill.Filled:
 		input, output := shadowAssets(s.policy, tick.Fill.Sell)
+		opening := uint64(0)
+		if s.runner != nil {
+			opening = s.runner.Ledger().OpeningEquityMicros
+		}
+		fill := paperFillLine(*tick.Fill, input, output)
+		if prices := paperFillPriceLines(s.policy, *tick.Fill, input, output); prices != "" {
+			fill += "\n" + prices
+		}
 		message := fmt.Sprintf(
-			"PAPER · %s %s\n%s %s → %s %s · %s",
+			"PAPER · %s %s\n%s\n%s",
 			paperFilledIcon(tick.Fill.Sell), shadowFilledSide(tick.Fill.Sell),
-			formatShadowAmount(tick.Fill.SpentUnits, input.decimals), input.name,
-			formatShadowAmount(tick.Fill.ReceivedUnits, output.decimals), output.name,
-			paperValueLine(s.policy, tick.EquityMicros),
+			fill,
+			paperAccountLine(s.policy, opening, tick.EquityMicros),
 		)
 		return s.appendAlert(tick.At, paperstatus.KindOrderFilled, key, message)
 	case tick.Event == shadow.EventRefused:
@@ -199,7 +213,7 @@ func addPaperPerformance(message, performance string) string {
 }
 
 func paperPerformanceLine(opening, current, hold uint64, unit string) string {
-	return "Today's result: " + formatPaperChange(opening, current, unit) +
+	return "Paper gain/loss today: " + formatPaperChange(opening, current, unit) +
 		" · " + formatPaperComparison(hold, current, unit)
 }
 
@@ -209,20 +223,20 @@ func paperCurrentMessage(policy shadow.Policy, tick shadow.Tick, nextSell bool) 
 		switch tick.Event {
 		case shadow.EventSignal:
 			if tick.Decision.Strategy == shadow.StrategyRiskExit && tick.DecisionQuote != nil {
-				return "PAPER · 🟠 SELL ORDER OPEN\nReducing risk · waiting for result"
+				return "PAPER · 🟠 SELL ORDER OPEN\nSelling to reduce risk\nWaiting to see if it fills"
 			}
-			return "PAPER · ⏸ PAUSED\nWaiting for the open order"
+			return "PAPER · ⏸ PAUSED\nWaiting to see if the open order fills"
 		case shadow.EventFilled:
-			label := "Order"
+			lastAction := "order completed"
 			if tick.Fill != nil {
-				label = shadowSide(tick.Fill.Sell)
+				lastAction = strings.ToLower(shadowFilledSide(tick.Fill.Sell))
 			}
-			return "PAPER · ⏸ PAUSED\n" + label + " filled · " +
+			return "PAPER · ⏸ PAUSED\nLast action: " + lastAction + "\n" +
 				paperValueLine(policy, tick.EquityMicros)
 		case shadow.EventRefused, shadow.EventMissed:
 			return "PAPER · ⏸ PAUSED\nLast order did not fill"
 		default:
-			return "PAPER · ⏸ PAUSED\nPractice account reached today's safety limit"
+			return "PAPER · ⏸ NEW BUYS PAUSED\nSells can still reduce risk"
 		}
 	}
 	switch tick.Event {
@@ -230,13 +244,17 @@ func paperCurrentMessage(policy shadow.Policy, tick shadow.Tick, nextSell bool) 
 		return "PAPER · ⚠️ WAITING FOR PRICES\nNo new orders until prices return"
 	case shadow.EventSignal:
 		if tick.DecisionQuote == nil {
-			return fmt.Sprintf("PAPER · %s %s ORDER OPEN\nWaiting for result",
+			return fmt.Sprintf("PAPER · %s %s ORDER OPEN\nWaiting to see if it fills",
 				paperOpenIcon(nextSell), shadowSide(nextSell))
 		}
 		input, _ := shadowAssets(policy, nextSell)
-		return fmt.Sprintf("PAPER · %s %s ORDER OPEN\n%s %s · price $%s",
+		action := "Buying with up to"
+		if nextSell {
+			action = "Selling up to"
+		}
+		return fmt.Sprintf("PAPER · %s %s ORDER OPEN\n%s %s %s\nReference price: $%s",
 			paperOpenIcon(nextSell), shadowSide(nextSell),
-			formatShadowAmount(tick.DecisionQuote.InputAmount, input.decimals), input.name, price)
+			action, formatShadowAmount(tick.DecisionQuote.InputAmount, input.decimals), input.name, price)
 	case shadow.EventFilled:
 		if tick.Fill == nil {
 			return "PAPER · ✅ ORDER FILLED\nLooking for the next trade"
@@ -366,8 +384,8 @@ func shadowAssets(policy shadow.Policy, sell bool) (shadowAsset, shadowAsset) {
 		quote = "USDC"
 	}
 	baseName := "SOL"
-	if policy.Market == shadow.MarketJUPUSDC {
-		baseName = "JUP"
+	if name, found := strings.CutSuffix(policy.Market, "/USDC"); found && name != "" {
+		baseName = name
 	}
 	base, counter := shadowAsset{baseName, baseDecimals}, shadowAsset{quote, quoteDecimals}
 	if sell {
@@ -508,9 +526,9 @@ func shadowSize(policy shadow.Policy) string {
 
 func shadowReportTrades(counts shadow.Counts) string {
 	if counts.Fills == 1 {
-		return "1 trade"
+		return "1 filled paper order"
 	}
-	return fmt.Sprintf("%d trades", counts.Fills)
+	return fmt.Sprintf("%d filled paper orders", counts.Fills)
 }
 
 func shadowEquityLine(policy shadow.Policy, equity uint64) string {
@@ -522,9 +540,66 @@ func shadowEquityLine(policy shadow.Policy, equity uint64) string {
 
 func paperValueLine(policy shadow.Policy, equity uint64) string {
 	if policy.Cluster == shadow.Mainnet {
-		return "Practice account: $" + formatShadowAmount(equity, 6)
+		return "Total paper account: $" + formatShadowAmount(equity, 6)
 	}
-	return "Practice account: " + formatShadowAmount(equity, 6) + " devUSDC"
+	return "Total paper account: " + formatShadowAmount(equity, 6) + " devUSDC"
+}
+
+func paperFillLine(fill shadow.Fill, input, output shadowAsset) string {
+	if fill.Sell {
+		return fmt.Sprintf("Sold %s %s\nReceived %s %s",
+			formatShadowAmount(fill.SpentUnits, input.decimals), input.name,
+			formatShadowAmount(fill.ReceivedUnits, output.decimals), output.name)
+	}
+	return fmt.Sprintf("Bought %s %s\nPaid %s %s",
+		formatShadowAmount(fill.ReceivedUnits, output.decimals), output.name,
+		formatShadowAmount(fill.SpentUnits, input.decimals), input.name)
+}
+
+func paperFillPriceLines(
+	policy shadow.Policy,
+	fill shadow.Fill,
+	input, output shadowAsset,
+) string {
+	quoted, quotedErr := paperEffectivePrice(
+		fill.Sell, input, output,
+		fill.DecisionQuote.InputAmount, fill.DecisionQuote.EstimatedOutput,
+	)
+	filled, filledErr := paperEffectivePrice(
+		fill.Sell, input, output, fill.SpentUnits, fill.ReceivedUnits,
+	)
+	if quotedErr != nil || filledErr != nil {
+		return ""
+	}
+	return "Expected price: " + paperMarketPrice(policy, quoted) +
+		"\nFilled price: " + paperMarketPrice(policy, filled)
+}
+
+func paperEffectivePrice(
+	sell bool,
+	input, output shadowAsset,
+	inputAmount, outputAmount uint64,
+) (uint64, error) {
+	if sell {
+		return shadow.PriceMicros(inputAmount, outputAmount, uint8(input.decimals), uint8(output.decimals))
+	}
+	return shadow.PriceMicros(outputAmount, inputAmount, uint8(output.decimals), uint8(input.decimals))
+}
+
+func paperMarketPrice(policy shadow.Policy, price uint64) string {
+	formatted := formatShadowAmount(price, 6)
+	if policy.Cluster == shadow.Mainnet {
+		return "$" + formatted
+	}
+	return formatted + " devUSDC"
+}
+
+func paperAccountLine(policy shadow.Policy, opening, equity uint64) string {
+	line := paperValueLine(policy, equity)
+	if opening != 0 {
+		line += "\nGain/loss today: " + formatPaperChange(opening, equity, paperValueUnit(policy))
+	}
+	return line
 }
 
 func paperValueUnit(policy shadow.Policy) string {
@@ -539,7 +614,7 @@ func shadowPerformanceLine(report shadow.Report) string {
 	if report.Cluster == shadow.Mainnet {
 		unit = "USD"
 	}
-	return "Result: " + formatPaperChange(
+	return "Paper gain/loss: " + formatPaperChange(
 		report.OpeningEquityMicros, report.ClosingEquityMicros, unit,
 	) + " · " + formatPaperDifference(report.VersusHoldMicros, unit)
 }
@@ -556,21 +631,21 @@ func formatPaperChange(reference, current uint64, unit string) string {
 
 func formatPaperComparison(reference, current uint64, unit string) string {
 	if current == reference {
-		return "same as no trading"
+		return "same as holding"
 	}
 	if current > reference {
-		return formatPaperAmount(current-reference, unit) + " better than no trading"
+		return formatPaperAmount(current-reference, unit) + " better than holding"
 	}
-	return formatPaperAmount(reference-current, unit) + " worse than no trading"
+	return formatPaperAmount(reference-current, unit) + " worse than holding"
 }
 
 func formatPaperDifference(value int64, unit string) string {
 	if value == 0 {
-		return "same as no trading"
+		return "same as holding"
 	}
-	comparison, magnitude := " better than no trading", uint64(value)
+	comparison, magnitude := " better than holding", uint64(value)
 	if value < 0 {
-		comparison = " worse than no trading"
+		comparison = " worse than holding"
 		magnitude = uint64(-(value + 1)) + 1
 	}
 	return formatPaperAmount(magnitude, unit) + comparison
