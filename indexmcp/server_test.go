@@ -247,3 +247,34 @@ func TestServerRejectsIncompleteTerminalSlot(t *testing.T) {
 		t.Fatalf("incomplete index MCP error = %v", err)
 	}
 }
+
+func TestServerRejectsStaleCompleteIndex(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	index, err := rootedindex.Open(dir, testSource, rootedindex.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beginBatch(t, index, 1, 51)
+	if _, err := index.Append(rootedindex.Event{
+		SchemaVersion: rootedindex.SchemaVersion,
+		Cursor:        rootedindex.Cursor{Slot: 51, Ordinal: 0},
+		Kind:          "slot_rooted",
+		Root:          testRoot(50, 0),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := index.Close(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	if err := ServeWithMaxRecordAge(t.Context(), dir, reader, io.Discard, time.Nanosecond); err == nil ||
+		!strings.Contains(err.Error(), "stale") {
+		t.Fatalf("stale index MCP error = %v", err)
+	}
+}

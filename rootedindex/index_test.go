@@ -202,6 +202,26 @@ func TestIndexRestartQueryAndIdempotence(t *testing.T) {
 	}
 }
 
+func TestRequireFreshUsesVerifiedRecordTime(t *testing.T) {
+	recordedAt := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	status := Status{LastRecordedAt: &recordedAt}
+	if err := RequireFresh(status, recordedAt.Add(15*time.Minute), 15*time.Minute); err != nil {
+		t.Fatalf("fresh status = %v", err)
+	}
+	if err := RequireFresh(status, recordedAt.Add(15*time.Minute+time.Nanosecond), 15*time.Minute); err == nil ||
+		!strings.Contains(err.Error(), "stale") {
+		t.Fatalf("stale status = %v", err)
+	}
+	if err := RequireFresh(status, recordedAt.Add(-time.Nanosecond), 15*time.Minute); err == nil ||
+		!strings.Contains(err.Error(), "future") {
+		t.Fatalf("future status = %v", err)
+	}
+	if err := RequireFresh(Status{}, recordedAt, 15*time.Minute); err == nil ||
+		!strings.Contains(err.Error(), "last-recorded") {
+		t.Fatalf("missing timestamp = %v", err)
+	}
+}
+
 func TestQueriesPageAfterCursorWithoutSkippingBursts(t *testing.T) {
 	accountDir := t.TempDir()
 	accounts, err := Open(accountDir, testSource(), Filter{Owner: testOwner})

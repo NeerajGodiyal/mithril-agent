@@ -1440,6 +1440,25 @@ func ReadCompleteStatus(dir string) (Status, error) {
 	return status, requireComplete(status)
 }
 
+// RequireFresh verifies the age of the latest record in an already-verified
+// index status. It proves recent local ingestion, not parity with a node root.
+func RequireFresh(status Status, now time.Time, maxAge time.Duration) error {
+	if maxAge <= 0 {
+		return errors.New("maximum rooted index record age must be positive")
+	}
+	if status.LastRecordedAt == nil {
+		return errors.New("rooted index has no last-recorded time")
+	}
+	age := now.Sub(*status.LastRecordedAt)
+	if age < 0 {
+		return errors.New("rooted index last-recorded time is in the future")
+	}
+	if age > maxAge {
+		return fmt.Errorf("rooted index is stale: last record age %s exceeds %s", age, maxAge)
+	}
+	return nil
+}
+
 func QueryAccounts(dir string, query Query) ([]Result, error) {
 	if query.Limit <= 0 || query.Limit > 10_000 {
 		return nil, errors.New("query limit must be between 1 and 10000")

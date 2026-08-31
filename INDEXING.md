@@ -339,7 +339,11 @@ index; it is not recovery for a missed cursor.
 
 Automation may use `index doctor --json`. A result with `ready: false` also
 exits nonzero, so a script cannot accidentally treat recovery instructions as
-a healthy index.
+a healthy index. Automation that needs recent local ingestion can add
+`--max-record-age 15m`. The doctor then also fails closed when the verified
+journal timestamp is older than that bound or is in the future. This is a
+local-ingest age check; it does not compare the last rooted slot with a node's
+current root.
 
 ## Local MCP queries
 
@@ -359,10 +363,10 @@ Codex and Claude Code can instead register the exact local stdio command:
 
 ```sh
 codex mcp add my-program-state -- \
-  /usr/local/bin/mithril-agent index mcp --dir "$STATE_INDEX"
+  /usr/local/bin/mithril-agent index mcp --dir "$STATE_INDEX" --max-record-age 15m
 
 claude mcp add --transport stdio my-program-state -- \
-  /usr/local/bin/mithril-agent index mcp --dir "$STATE_INDEX"
+  /usr/local/bin/mithril-agent index mcp --dir "$STATE_INDEX" --max-record-age 15m
 ```
 
 Verify with `codex mcp list` or `claude mcp list`. For an MCP client on a
@@ -375,7 +379,9 @@ client entry.
 The configured MCP client launches `mithril-agent index mcp` under the same OS
 account. It may remain connected while the single ingest writer advances. Each
 call sees one completely published and reverified journal prefix, never a
-partially written slot or batch. That account and the exact private directory in the generated command
+partially written slot or batch. With `--max-record-age`, every call also
+rechecks that prefix's journal timestamp; a connection cannot keep serving an
+index after it ages past the bound. That account and the exact private directory in the generated command
 authorize access; no port is opened and no bearer token is stored. The three
 tools expose verified status, bounded account metadata, and bounded transaction
 metadata. They cap queries at 1,000 results and never return raw account bytes,

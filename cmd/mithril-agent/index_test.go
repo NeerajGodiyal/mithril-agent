@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/rootedindex"
 	"github.com/Overclock-Validator/mithril-agent/solana"
@@ -306,6 +307,24 @@ func TestIndexDoctorReadyAndFailedRecoveryIsReadOnly(t *testing.T) {
 	}
 	if !ready.Ready || ready.Status != "ready" || ready.Index == nil || ready.Index.Roots != 1 {
 		t.Fatalf("ready doctor = %+v", ready)
+	}
+
+	time.Sleep(time.Millisecond)
+	output.Reset()
+	err = runIndex(context.Background(), []string{
+		"doctor", "--dir", dir, "--max-record-age", "1ns", "--json",
+	}, strings.NewReader(""), &output)
+	if !errors.Is(err, errIndexNeedsAttention) {
+		t.Fatalf("stale doctor error = %v", err)
+	}
+	var stale indexDoctorResult
+	if err := json.Unmarshal(output.Bytes(), &stale); err != nil {
+		t.Fatal(err)
+	}
+	if stale.Ready || stale.Index == nil || !stale.Index.Complete ||
+		!strings.Contains(stale.Reason, "stale") ||
+		!strings.Contains(strings.Join(stale.NextSteps, " "), "supervised rooted-event ingester") {
+		t.Fatalf("stale doctor = %+v", stale)
 	}
 
 	journalPath := filepath.Join(dir, "events.jsonl")

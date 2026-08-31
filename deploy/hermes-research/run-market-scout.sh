@@ -12,7 +12,8 @@ fi
 if [ -f /var/lib/mithril-agent-research/index/events.jsonl ] &&
   /usr/sbin/runuser -u mithril-agent-research -- \
     /usr/local/libexec/mithril-agent/mithril-agent index doctor \
-      --dir /var/lib/mithril-agent-research/index >/dev/null; then
+      --dir /var/lib/mithril-agent-research/index \
+      --max-record-age 15m >/dev/null; then
   toolsets="$toolsets,mithril_index"
 fi
 

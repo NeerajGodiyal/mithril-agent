@@ -116,6 +116,8 @@ mcp_servers:
       - mcp
       - --dir
       - /var/lib/mithril-agent/index
+      - --max-record-age
+      - 15m
     enabled: true
     trust: full
     timeout: 30

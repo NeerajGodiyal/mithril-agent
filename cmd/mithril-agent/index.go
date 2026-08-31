@@ -21,13 +21,13 @@ const indexUsage = `Usage:
   mithril-agent index ingest --dir ABSOLUTE_PATH --cluster NAME --genesis-hash HASH \
     [--owner ADDRESS] [--account ADDRESS] [--mention ADDRESS] [--json]
   mithril-agent index ingest --workspace ABSOLUTE_WORKSPACE_JSON --kind state|activity [--json]
-  mithril-agent index doctor --dir ABSOLUTE_PATH [--json]
+  mithril-agent index doctor --dir ABSOLUTE_PATH [--max-record-age DURATION] [--json]
   mithril-agent index status --dir ABSOLUTE_PATH [--json]
   mithril-agent index query --dir ABSOLUTE_PATH [--owner ADDRESS] [--account ADDRESS] \
     [--after SLOT:ORDINAL] [--limit N] [--include-data] [--json]
   mithril-agent index transactions --dir ABSOLUTE_PATH [--signature SIGNATURE] \
     [--mention ADDRESS] [--after SLOT:ORDINAL] [--limit N] [--include-payload] [--json]
-  mithril-agent index mcp --dir ABSOLUTE_PATH
+  mithril-agent index mcp --dir ABSOLUTE_PATH [--max-record-age DURATION]
   mithril-agent index mcp-config --dir ABSOLUTE_PATH --name NAME
 
 Ingest reads Mithril's framed rooted-event JSONL from standard input into a
@@ -102,6 +102,7 @@ func runIndexDoctor(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("index doctor", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	dir := flags.String("dir", "", "private index directory")
+	maxRecordAge := flags.Duration("max-record-age", 0, "maximum age of the latest verified journal record")
 	jsonOutput := flags.Bool("json", false, "print JSON")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -116,7 +117,15 @@ func runIndexDoctor(args []string, output io.Writer) error {
 	if !filepath.IsAbs(*dir) || filepath.Clean(*dir) != *dir {
 		return errors.New("index doctor directory must be a clean absolute path")
 	}
+	if *maxRecordAge < 0 {
+		return errors.New("index doctor --max-record-age cannot be negative")
+	}
 	status, err := rootedindex.ReadCompleteStatus(*dir)
+	var freshnessErr error
+	if err == nil && *maxRecordAge > 0 {
+		freshnessErr = rootedindex.RequireFresh(status, time.Now().UTC(), *maxRecordAge)
+		err = freshnessErr
+	}
 	if err == nil {
 		result := indexDoctorResult{Status: "ready", Ready: true, Index: &status}
 		if *jsonOutput {
@@ -137,6 +146,15 @@ func runIndexDoctor(args []string, output io.Writer) error {
 		"Keep the old directory for audit and comparison until the replacement is verified.",
 	}
 	var checked *rootedindex.Status
+	if freshnessErr != nil {
+		reason = freshnessErr.Error()
+		checked = &status
+		next = []string{
+			"Confirm the supervised rooted-event ingester is healthy and advancing this exact index.",
+			"Run index doctor again after a complete rooted batch has been stored.",
+			"Do not expose this index as fresh evidence until the age check passes.",
+		}
+	}
 	if status.SchemaVersion != 0 && !status.Complete {
 		reason = "ingest stopped before the terminal slot root marker"
 		checked = &status
@@ -192,17 +210,21 @@ func runIndexMCP(ctx context.Context, args []string, input io.Reader, output io.
 	flags := flag.NewFlagSet("index mcp", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	dir := flags.String("dir", "", "private index directory")
+	maxRecordAge := flags.Duration("max-record-age", 0, "maximum age of the latest verified journal record")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 || *dir == "" {
 		return errors.New("index mcp requires --dir")
 	}
+	if *maxRecordAge < 0 {
+		return errors.New("index mcp --max-record-age cannot be negative")
+	}
 	closer, ok := input.(io.ReadCloser)
 	if !ok {
 		return errors.New("index MCP input must be closable stdio")
 	}
-	return indexmcp.Serve(ctx, *dir, closer, output)
+	return indexmcp.ServeWithMaxRecordAge(ctx, *dir, closer, output, *maxRecordAge)
 }
 
 var indexMCPName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
