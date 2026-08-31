@@ -14,7 +14,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril-agent/rootedindex"
 	"github.com/Overclock-Validator/mithril-agent/solana"
-	solanago "github.com/gagliardetto/solana-go"
+	solanago "github.com/solana-foundation/solana-go/v2"
 	"github.com/zeebo/blake3"
 )
 

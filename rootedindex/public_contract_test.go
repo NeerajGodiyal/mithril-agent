@@ -7,7 +7,7 @@ import (
 	"slices"
 	"testing"
 
-	solanago "github.com/gagliardetto/solana-go"
+	solanago "github.com/solana-foundation/solana-go/v2"
 )
 
 func TestPublicMithrilRootedContractFixture(t *testing.T) {

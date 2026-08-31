@@ -23,7 +23,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
 	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/solana"
-	solanago "github.com/gagliardetto/solana-go"
+	solanago "github.com/solana-foundation/solana-go/v2"
 	"github.com/zeebo/blake3"
 )
 

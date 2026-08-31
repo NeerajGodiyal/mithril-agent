@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/journal"
-	solanago "github.com/gagliardetto/solana-go"
+	solanago "github.com/solana-foundation/solana-go/v2"
 )
 
 const (
