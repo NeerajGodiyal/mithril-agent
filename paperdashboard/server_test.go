@@ -125,11 +125,24 @@ func TestStatusReadsEachSourceOnlyOncePerRefreshInterval(t *testing.T) {
 	if got := source.readCount(); got != 1 {
 		t.Fatalf("source reads = %d, want 1", got)
 	}
+	source.mu.Lock()
+	source.snapshot.Summary.EquityMicros = 2
+	source.mu.Unlock()
+	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/v1/status?fresh=1", nil)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, request)
+	var forced View
+	if err := json.Unmarshal(response.Body.Bytes(), &forced); err != nil {
+		t.Fatal(err)
+	}
+	if got := source.readCount(); got != 2 || forced.Overview.EquityMicros != 2 {
+		t.Fatalf("forced refresh = %d reads, %d equity; want 2 reads, 2 equity", got, forced.Overview.EquityMicros)
+	}
 	now = now.Add(refreshInterval)
-	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/v1/status", nil)
+	request = httptest.NewRequest(http.MethodGet, "http://localhost/api/v1/status", nil)
 	server.ServeHTTP(httptest.NewRecorder(), request)
-	if got := source.readCount(); got != 2 {
-		t.Fatalf("source reads after refresh = %d, want 2", got)
+	if got := source.readCount(); got != 3 {
+		t.Fatalf("source reads after refresh = %d, want 3", got)
 	}
 }
 
@@ -144,6 +157,14 @@ func TestStatusRejectsIncompleteStaleOrMismatchedSummaries(t *testing.T) {
 			Current: "PAPER · Watching", Summary: &paperstatus.CurrentSummary{
 				Market: "SOL/USDC", ValueUnit: "USD", Day: "2026-08-31", TickSeconds: 60,
 				OpeningEquityMicros: 1, EquityMicros: 2, HoldBenchmarkMicros: 1,
+			},
+		}},
+		"waiting for price data": {label: "SOL/USDC", snapshot: paperstatus.Snapshot{
+			Version: paperstatus.Version, ObservedAt: now,
+			Current: "PAPER · Waiting for prices", Summary: &paperstatus.CurrentSummary{
+				Market: "SOL/USDC", ValueUnit: "USD", Day: "2026-08-31", TickSeconds: 60,
+				OpeningEquityMicros: 1, EquityMicros: 2, HoldBenchmarkMicros: 1,
+				Checks: 2, Unobservable: 1, PriceMicros: 100_000_000, State: "waiting for data",
 			},
 		}},
 		"mismatched market": {label: "SOL/USDC", snapshot: paperstatus.Snapshot{
@@ -249,6 +270,37 @@ func TestDashboardRejectsRemoteHostsAndMutatingMethods(t *testing.T) {
 	}
 	if body, _ := io.ReadAll(mutationResponse.Result().Body); len(body) > 128 {
 		t.Fatalf("oversized error body: %q", body)
+	}
+}
+
+func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
+	server, err := New([]Source{&sourceStub{label: "SOL/USDC"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, wants := range map[string][]string{
+		"/":        {"Paper order activity", "aria-live=\"polite\">Refresh"},
+		"/app.css": {".help:focus", ".help[aria-expanded=\"true\"]", ".button.loading:before", "@keyframes spin"},
+		"/app.js": {
+			"Practice account", "Today's result", "Versus no trading", "Completed trades",
+			"role=\"tooltip\"", "aria-describedby", "event.key!=='Escape'", "Waiting for fresh prices",
+			"More trades do not necessarily mean more profit.", "repeats can belong to the same trade",
+			"?fresh=1", "Refreshing…", "Updated ✓",
+			"Checked ✓", "Data delayed", "requestSequence", "Last recorded result",
+			"Market-responsive paper plan", "does not retrain itself live", "deltaValue",
+		},
+	} {
+		request := httptest.NewRequest(http.MethodGet, "http://localhost"+path, nil)
+		response := httptest.NewRecorder()
+		server.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status = %d", path, response.Code)
+		}
+		for _, want := range wants {
+			if !strings.Contains(response.Body.String(), want) {
+				t.Errorf("%s omits %q", path, want)
+			}
+		}
 	}
 }
 

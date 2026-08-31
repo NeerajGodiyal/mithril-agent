@@ -477,16 +477,24 @@ func paperCurrentAge(message string, fresh bool) string {
 	if fresh {
 		return message
 	}
+	header := "PAPER · ⚠️ Observer stale"
+	if strings.HasPrefix(message, "PAPER · ⚠️ WAITING FOR PRICES") {
+		header = "PAPER · ⚠️ PRICE DATA DELAYED"
+	}
+	message = strings.Replace(message, "\nToday's result:", "\nLast recorded result:", 1)
 	_, details, found := strings.Cut(
 		strings.Replace(message, "\nToday ", "\nLast result ", 1), "\n",
 	)
 	if !found {
-		return "PAPER · ⚠️ Observer stale"
+		return header
 	}
-	return "PAPER · ⚠️ Observer stale\n" + details
+	return header + "\n" + details
 }
 
 func paperSnapshotFresh(snapshot paperstatus.Snapshot, now time.Time) bool {
+	if snapshot.Summary != nil && snapshot.Summary.State == "waiting for data" {
+		return false
+	}
 	if snapshot.ObservedAt.After(now.Add(5*time.Second)) ||
 		snapshot.ObservedAt.UTC().Format("2006-01-02") != now.UTC().Format("2006-01-02") {
 		return false
@@ -761,7 +769,7 @@ func (s *Service) allowAt(chatID int64, now time.Time) bool {
 func (s *Service) help(_ time.Time) string {
 	commands := "/help — commands\n/status — live strategy status\n/price — live price rule\n/last_trade — latest live action"
 	if len(s.paperSources) > 0 {
-		commands += "\n/paper — paper status and today's P&L"
+		commands += "\n/paper — practice trading results"
 	}
 	if s.explainer != nil {
 		commands += "\n/explain QUESTION — explain live status"
@@ -875,27 +883,26 @@ func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, observedAt ti
 			paused++
 		}
 	}
-	if opening > math.MaxInt64 || equity > math.MaxInt64 || hold > math.MaxInt64 {
-		return ""
-	}
 	var report strings.Builder
-	fmt.Fprintf(&report, "PAPER · 📊 TODAY\nP&L %s · vs holding %s",
-		signedPaperValueChange(opening, equity, valueUnit),
-		signedPaperValueChange(hold, equity, valueUnit))
+	fmt.Fprintf(&report, "PAPER · 📊 TODAY\nPractice result: %s\nCompared with no trading: %s",
+		paperResultChange(opening, equity, valueUnit),
+		paperResultComparison(hold, equity, valueUnit))
 	for _, summary := range summaries {
 		fmt.Fprintf(&report, "\n%s", paperMarketName(summary.Market))
 		if summary.PriceMicros != 0 {
 			fmt.Fprintf(&report, " %s", formatUSDMicros(summary.PriceMicros))
 		}
 		fmt.Fprintf(&report, " · %s · %s", paperMarketState(summary),
-			signedPaperValueChange(summary.OpeningEquityMicros, summary.EquityMicros, valueUnit))
+			paperResultChange(summary.OpeningEquityMicros, summary.EquityMicros, valueUnit))
 	}
 	coverage := "warming"
 	if coverageReady {
 		coverage = fmt.Sprintf("%d.%02d%%", minimumCoverageBPS/100, minimumCoverageBPS%100)
 	}
-	line := fmt.Sprintf("%s · %s · readable checks %s",
-		paperTradeCount(trades), paperSignalCount(signals), coverage)
+	line := fmt.Sprintf("%s · %s", paperTradeCount(trades), paperSignalCount(signals))
+	if coverage != "100.00%" {
+		line += " · price data " + coverage
+	}
 	if paused != 0 {
 		line += fmt.Sprintf(" · %d paused", paused)
 	}
@@ -914,16 +921,16 @@ func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, observedAt ti
 
 func paperTradeCount(trades uint64) string {
 	if trades == 1 {
-		return "1 trade"
+		return "1 completed trade"
 	}
-	return fmt.Sprintf("%d trades", trades)
+	return fmt.Sprintf("%d completed trades", trades)
 }
 
 func paperSignalCount(signals uint64) string {
 	if signals == 1 {
-		return "1 signal"
+		return "plan reacted 1 time"
 	}
-	return fmt.Sprintf("%d signals", signals)
+	return fmt.Sprintf("plan reacted %d times", signals)
 }
 
 func paperMarketState(summary paperstatus.CurrentSummary) string {
@@ -998,27 +1005,31 @@ func paperDataCoverageBPS(checks, unobservable uint64) (uint64, bool) {
 	return bps, true
 }
 
-func signedPaperChange(reference, current uint64) string {
-	delta := int64(current) - int64(reference)
-	sign := "+"
-	if delta < 0 {
-		sign = "-"
-		delta = -delta
+func paperResultChange(reference, current uint64, unit string) string {
+	if current == reference {
+		return "unchanged"
 	}
-	return sign + formatUSDMicros(uint64(delta))
+	if current > reference {
+		return "up " + paperAbsoluteValue(current-reference, unit)
+	}
+	return "down " + paperAbsoluteValue(reference-current, unit)
 }
 
-func signedPaperValueChange(reference, current uint64, unit string) string {
+func paperResultComparison(reference, current uint64, unit string) string {
+	if current == reference {
+		return "the same"
+	}
+	if current > reference {
+		return paperAbsoluteValue(current-reference, unit) + " better"
+	}
+	return paperAbsoluteValue(reference-current, unit) + " worse"
+}
+
+func paperAbsoluteValue(value uint64, unit string) string {
 	if unit == "USD" {
-		return signedPaperChange(reference, current)
+		return formatUSDMicros(value)
 	}
-	delta := int64(current) - int64(reference)
-	sign := "+"
-	if delta < 0 {
-		sign = "-"
-		delta = -delta
-	}
-	return sign + formatMicroUnits(uint64(delta)) + " " + unit
+	return formatMicroUnits(value) + " " + unit
 }
 
 func labelPaperMessage(message, label string) string {

@@ -464,7 +464,7 @@ func TestPaperCommandReturnsTheLatestBoundedEvent(t *testing.T) {
 		!strings.Contains(reply, "01:02 UTC") {
 		t.Fatalf("paper reply = %q", reply)
 	}
-	if help := service.help(now); !strings.Contains(help, "/paper — paper status and today's P&L") ||
+	if help := service.help(now); !strings.Contains(help, "/paper — practice trading results") ||
 		strings.Contains(help, "Checked:") {
 		t.Fatalf("paper help = %q", help)
 	}
@@ -531,10 +531,10 @@ func TestPaperCommandShowsCombinedCurrentPortfolioPnL(t *testing.T) {
 	}
 	report := service.paperReports()
 	for _, want := range []string{
-		"PAPER · 📊 TODAY", "P&L +$0.50", "vs holding +$1.00",
-		"SOL $100.25 · waiting to sell · +$1.00",
-		"JUP $100.25 · waiting to buy · -$0.50",
-		"3 trades · 3 signals · readable checks 100.00% · 01:02 UTC",
+		"PAPER · 📊 TODAY", "Practice result: up $0.50", "Compared with no trading: $1.00 better",
+		"SOL $100.25 · waiting to sell · up $1.00",
+		"JUP $100.25 · waiting to buy · down $0.50",
+		"3 completed trades · plan reacted 3 times · 01:02 UTC",
 		"Plan · follows strong moves and rebounds · daily safety limit",
 	} {
 		if !strings.Contains(report, want) {
@@ -582,6 +582,22 @@ func TestPaperDataCoverageHandlesMaximumCounters(t *testing.T) {
 	}
 }
 
+func TestPaperPortfolioUsesPlainResultLanguage(t *testing.T) {
+	for _, test := range []struct {
+		got  string
+		want string
+	}{
+		{paperResultChange(1_000_000, 1_250_000, "USD"), "up $0.25"},
+		{paperResultChange(1_000_000, 750_000, "USD"), "down $0.25"},
+		{paperResultComparison(1_000_000, 1_000_000, "USD"), "the same"},
+		{paperResultComparison(1_000_000, 750_000, "USD"), "$0.25 worse"},
+	} {
+		if test.got != test.want {
+			t.Errorf("paper portfolio language = %q, want %q", test.got, test.want)
+		}
+	}
+}
+
 func TestPaperPortfolioShowsTheWeakestMarketCoverage(t *testing.T) {
 	got := paperPortfolioSummary([]paperstatus.CurrentSummary{
 		{
@@ -593,7 +609,7 @@ func TestPaperPortfolioShowsTheWeakestMarketCoverage(t *testing.T) {
 			HoldBenchmarkMicros: 1, Checks: 10, Unobservable: 5,
 		},
 	}, time.Time{})
-	if !strings.Contains(got, "readable checks 50.00%") {
+	if !strings.Contains(got, "price data 50.00%") {
 		t.Fatalf("portfolio hid the weakest market coverage:\n%s", got)
 	}
 }
@@ -608,12 +624,51 @@ func TestPaperPortfolioDoesNotMixValueUnits(t *testing.T) {
 	}
 }
 
+func TestPaperPortfolioSupportsUnsignedTotalsAboveMaxInt64(t *testing.T) {
+	value := uint64(math.MaxInt64)/2 + 1
+	got := paperPortfolioSummary([]paperstatus.CurrentSummary{
+		{Market: "SOL/USDC", ValueUnit: "USD", OpeningEquityMicros: value, EquityMicros: value, HoldBenchmarkMicros: value},
+		{Market: "JUP/USDC", ValueUnit: "USD", OpeningEquityMicros: value, EquityMicros: value, HoldBenchmarkMicros: value},
+	}, time.Time{})
+	if got == "" || !strings.Contains(got, "Practice result: unchanged") {
+		t.Fatalf("large unsigned portfolio = %q", got)
+	}
+}
+
+func TestPaperCommandTreatsMissingPricesAsDelayed(t *testing.T) {
+	now := time.Date(2026, time.August, 30, 1, 2, 3, 0, time.UTC)
+	reader := &paperStatusStub{snapshot: paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now,
+		Current: "PAPER · ⚠️ WAITING FOR PRICES\nNo new orders until prices return\nToday's result: up $1.00",
+		Summary: &paperstatus.CurrentSummary{
+			Market: "SOL/USDC", ValueUnit: "USD", Day: "2026-08-30", TickSeconds: 60,
+			OpeningEquityMicros: 100_000_000, EquityMicros: 101_000_000,
+			HoldBenchmarkMicros: 100_000_000, Checks: 2, Unobservable: 1,
+			State: "waiting for data",
+		},
+	}}
+	service, err := New(Config{
+		Bot: &botStub{}, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
+		PaperSources: []PaperStatusReader{reader}, AllowedChatIDs: []int64{123},
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, ok := service.Reply(t.Context(), 123, "/paper")
+	if !ok || !strings.Contains(reply, "PRICE DATA DELAYED") ||
+		!strings.Contains(reply, "Last recorded result: up $1.00") ||
+		strings.Contains(reply, "PAPER · 📊 TODAY") {
+		t.Fatalf("delayed price reply = %q", reply)
+	}
+}
+
 func TestPaperCommandExcludesAStoppedSameDayObserverFromCurrentPortfolio(t *testing.T) {
 	now := time.Date(2026, time.August, 30, 23, 59, 0, 0, time.UTC)
 	build := func(sourceID, market string, observedAt time.Time) *paperStatusStub {
 		return &paperStatusStub{sourceID: sourceID, label: market, snapshot: paperstatus.Snapshot{
 			Version: paperstatus.Version, ObservedAt: observedAt,
-			Current: "PAPER · 👀 Watching\nToday +$1.00 · no trade",
+			Current: "PAPER · 👀 WATCHING\nToday's result: up $1.00\nNo good trade yet",
 			Summary: &paperstatus.CurrentSummary{
 				Market: market, ValueUnit: "USD", Day: "2026-08-30", TickSeconds: 60,
 				OpeningEquityMicros: 100_000_000, EquityMicros: 101_000_000,
@@ -635,7 +690,7 @@ func TestPaperCommandExcludesAStoppedSameDayObserverFromCurrentPortfolio(t *test
 	report := service.paperReports()
 	if strings.Contains(report, "PAPER · 📊 TODAY") ||
 		!strings.Contains(report, "PAPER · JUP/USDC · ⚠️ Observer stale") ||
-		!strings.Contains(report, "Last result +$1.00") {
+		!strings.Contains(report, "Last recorded result: up $1.00") {
 		t.Fatalf("stopped observer was shown as current:\n%s", report)
 	}
 }
@@ -645,7 +700,7 @@ func TestPaperCommandDoesNotCallYesterdayToday(t *testing.T) {
 	now := observed.Add(2 * time.Minute)
 	reader := &paperStatusStub{snapshot: paperstatus.Snapshot{
 		Version: paperstatus.Version, ObservedAt: observed,
-		Current: "PAPER · 👀 Watching\nToday +$1.25 · vs hold +$0.25\nRange · no trade",
+		Current: "PAPER · 👀 WATCHING\nToday's result: up $1.25\nCompared with no trading: $0.25 better",
 		Events:  []paperstatus.Event{},
 	}}
 	service, err := New(Config{
@@ -657,8 +712,8 @@ func TestPaperCommandDoesNotCallYesterdayToday(t *testing.T) {
 		t.Fatal(err)
 	}
 	reply, ok := service.Reply(t.Context(), 123, "/paper")
-	if !ok || !strings.Contains(reply, "Last result +$1.25") ||
-		strings.Contains(reply, "\nToday ") || !strings.Contains(reply, "30 Aug · 23:59 UTC") {
+	if !ok || !strings.Contains(reply, "Last recorded result: up $1.25") ||
+		strings.Contains(reply, "Today's result:") || !strings.Contains(reply, "30 Aug · 23:59 UTC") {
 		t.Fatalf("stale paper reply = %q", reply)
 	}
 }

@@ -145,7 +145,7 @@ func (s *Server) serveStatus(writer http.ResponseWriter, request *http.Request) 
 		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	view := s.snapshot()
+	view := s.snapshotWithRefresh(request.URL.Query().Get("fresh") == "1")
 	encoded, err := json.Marshal(view)
 	if err != nil {
 		http.Error(writer, "status unavailable", http.StatusServiceUnavailable)
@@ -185,10 +185,14 @@ func (s *Server) serveHealth(writer http.ResponseWriter, request *http.Request) 
 }
 
 func (s *Server) snapshot() View {
+	return s.snapshotWithRefresh(false)
+}
+
+func (s *Server) snapshotWithRefresh(force bool) View {
 	now := s.now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.readAt.IsZero() && now.Sub(s.readAt) >= 0 && now.Sub(s.readAt) < refreshInterval {
+	if !force && !s.readAt.IsZero() && now.Sub(s.readAt) >= 0 && now.Sub(s.readAt) < refreshInterval {
 		return s.cached
 	}
 	s.cached, s.readAt = s.readSnapshot(now), now
@@ -272,7 +276,8 @@ func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Mark
 	}
 	if summary := snapshot.Summary; summary != nil {
 		market.Ready = summary.ValueUnit != ""
-		market.Fresh = market.Ready && summary.Day == now.UTC().Format("2006-01-02") && fresh(snapshot, now)
+		market.Fresh = market.Ready && summary.State != "waiting for data" &&
+			summary.Day == now.UTC().Format("2006-01-02") && fresh(snapshot, now)
 		market.Day = summary.Day
 		market.ValueUnit = summary.ValueUnit
 		market.OpeningEquityMicros = summary.OpeningEquityMicros

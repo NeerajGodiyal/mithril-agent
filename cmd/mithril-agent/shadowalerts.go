@@ -16,7 +16,7 @@ func (s *shadowRun) alertStrategy(at time.Time, kind string) error {
 	if s.alerts == nil {
 		return nil
 	}
-	title := "PLAN ON"
+	title := "PLAN STARTED"
 	label := "active"
 	if kind == paperstatus.KindStrategyChanged {
 		title = "PLAN UPDATED"
@@ -47,9 +47,9 @@ func (s *shadowRun) alertTick(tick shadow.Tick, nextSell bool) error {
 	key := s.policySHA256 + "/" + tick.At.Format(time.RFC3339Nano) + "/" + tick.Event
 	if tick.Decision != nil && tick.Decision.Regime == shadow.RegimeRisk &&
 		tick.Event != shadow.EventFilled {
-		message := "PAPER · ⏸ PAUSED\nPaper value hit today's safety limit"
+		message := "PAPER · ⏸ PAUSED\nPractice account reached today's safety limit"
 		if tick.Decision.Strategy == shadow.StrategyRiskExit {
-			message = "PAPER · 🛡 SAFETY EXIT ACTIVE\nPaper value hit today's safety limit"
+			message = "PAPER · 🛡 SAFETY EXIT ACTIVE\nPractice account reached today's safety limit"
 		}
 		riskKey := s.policySHA256 + "/" + dayKey(tick.At) + "/risk-halt"
 		if err := s.appendAlert(tick.At, paperstatus.KindRiskHalted, riskKey, message); err != nil {
@@ -136,7 +136,7 @@ func (s *shadowRun) updatePaperCurrent(tick shadow.Tick, nextSell bool) error {
 		if equityErr == nil && holdErr == nil && ledger.OpeningEquityMicros != 0 {
 			drawdown := ledger.PeakEquityMicros - min(equity, ledger.PeakEquityMicros)
 			message = addPaperPerformance(message, paperPerformanceLine(
-				ledger.OpeningEquityMicros, equity, hold,
+				ledger.OpeningEquityMicros, equity, hold, paperValueUnit(s.policy),
 			))
 			summary = &paperstatus.CurrentSummary{
 				Market: shadowMarketPair(s.policy), ValueUnit: paperValueUnit(s.policy),
@@ -198,9 +198,9 @@ func addPaperPerformance(message, performance string) string {
 	return before + "\n" + performance + "\n" + after
 }
 
-func paperPerformanceLine(opening, current, hold uint64) string {
-	return "Today " + formatEquityChange(opening, current) +
-		" · vs holding " + formatEquityChange(hold, current)
+func paperPerformanceLine(opening, current, hold uint64, unit string) string {
+	return "Today's result: " + formatPaperChange(opening, current, unit) +
+		" · " + formatPaperComparison(hold, current, unit)
 }
 
 func paperCurrentMessage(policy shadow.Policy, tick shadow.Tick, nextSell bool) string {
@@ -222,7 +222,7 @@ func paperCurrentMessage(policy shadow.Policy, tick shadow.Tick, nextSell bool) 
 		case shadow.EventRefused, shadow.EventMissed:
 			return "PAPER · ⏸ PAUSED\nLast order did not fill"
 		default:
-			return "PAPER · ⏸ PAUSED\nPaper value hit today's safety limit"
+			return "PAPER · ⏸ PAUSED\nPractice account reached today's safety limit"
 		}
 	}
 	switch tick.Event {
@@ -318,7 +318,7 @@ func (s *shadowRun) alertUnavailableReport(from, to time.Time) error {
 		return nil
 	}
 	message := "PAPER · ⚠️ " + shadowPeriodTitle(from, to) +
-		"\nNo usable market price\nNo P&L report"
+		"\nNo usable market price\nNo daily result"
 	key := s.policySHA256 + "/" + from.Format("2006-01-02") + "/" + to.Format(time.RFC3339Nano)
 	return s.appendAlert(to, paperstatus.KindPeriodClosed, key, message)
 }
@@ -513,16 +513,6 @@ func shadowReportTrades(counts shadow.Counts) string {
 	return fmt.Sprintf("%d trades", counts.Fills)
 }
 
-func formatSignedDollars(value int64) string {
-	sign := "+"
-	magnitude := uint64(value)
-	if value < 0 {
-		sign = "-"
-		magnitude = uint64(-(value + 1)) + 1
-	}
-	return sign + "$" + formatShadowAmount(magnitude, 6)
-}
-
 func shadowEquityLine(policy shadow.Policy, equity uint64) string {
 	if policy.Cluster == shadow.Mainnet {
 		return "Equity $" + formatShadowAmount(equity, 6)
@@ -532,9 +522,9 @@ func shadowEquityLine(policy shadow.Policy, equity uint64) string {
 
 func paperValueLine(policy shadow.Policy, equity uint64) string {
 	if policy.Cluster == shadow.Mainnet {
-		return "Paper value $" + formatShadowAmount(equity, 6)
+		return "Practice account: $" + formatShadowAmount(equity, 6)
 	}
-	return "Paper value " + formatShadowAmount(equity, 6) + " devUSDC"
+	return "Practice account: " + formatShadowAmount(equity, 6) + " devUSDC"
 }
 
 func paperValueUnit(policy shadow.Policy) string {
@@ -545,20 +535,52 @@ func paperValueUnit(policy shadow.Policy) string {
 }
 
 func shadowPerformanceLine(report shadow.Report) string {
-	pnl := formatEquityChange(report.OpeningEquityMicros, report.ClosingEquityMicros)
+	unit := "devUSDC"
 	if report.Cluster == shadow.Mainnet {
-		return "P&L " + pnl + " · vs holding " + formatSignedDollars(report.VersusHoldMicros)
+		unit = "USD"
 	}
-	return "Test P&L " + strings.Replace(pnl, "$", "", 1) +
-		" · vs holding " + strings.Replace(formatSignedDollars(report.VersusHoldMicros), "$", "", 1) +
-		" devUSDC"
+	return "Result: " + formatPaperChange(
+		report.OpeningEquityMicros, report.ClosingEquityMicros, unit,
+	) + " · " + formatPaperDifference(report.VersusHoldMicros, unit)
 }
 
-func formatEquityChange(opening, closing uint64) string {
-	if closing >= opening {
-		return "+$" + formatShadowAmount(closing-opening, 6)
+func formatPaperChange(reference, current uint64, unit string) string {
+	if current == reference {
+		return "unchanged"
 	}
-	return "-$" + formatShadowAmount(opening-closing, 6)
+	if current > reference {
+		return "up " + formatPaperAmount(current-reference, unit)
+	}
+	return "down " + formatPaperAmount(reference-current, unit)
+}
+
+func formatPaperComparison(reference, current uint64, unit string) string {
+	if current == reference {
+		return "same as no trading"
+	}
+	if current > reference {
+		return formatPaperAmount(current-reference, unit) + " better than no trading"
+	}
+	return formatPaperAmount(reference-current, unit) + " worse than no trading"
+}
+
+func formatPaperDifference(value int64, unit string) string {
+	if value == 0 {
+		return "same as no trading"
+	}
+	comparison, magnitude := " better than no trading", uint64(value)
+	if value < 0 {
+		comparison = " worse than no trading"
+		magnitude = uint64(-(value + 1)) + 1
+	}
+	return formatPaperAmount(magnitude, unit) + comparison
+}
+
+func formatPaperAmount(value uint64, unit string) string {
+	if unit == "USD" {
+		return "$" + formatShadowAmount(value, 6)
+	}
+	return formatShadowAmount(value, 6) + " " + unit
 }
 
 func shadowCoverageLine(report shadow.Report) string {

@@ -70,7 +70,7 @@ func TestShadowAlertsAreBoundedExplicitAndContainNoLiveAuthority(t *testing.T) {
 		}
 	}
 	if message := snapshot.Events[0].Message; message !=
-		"PAPER · 🧠 PLAN ON\nSells at $200\nStarts with 1 SOL" {
+		"PAPER · 🧠 PLAN STARTED\nSells at $200\nStarts with 1 SOL" {
 		t.Fatalf("unreadable strategy alert: %q", message)
 	}
 	if message := snapshot.Events[1].Message; message !=
@@ -78,7 +78,7 @@ func TestShadowAlertsAreBoundedExplicitAndContainNoLiveAuthority(t *testing.T) {
 		t.Fatalf("unreadable open-order alert: %q", message)
 	}
 	if message := snapshot.Events[2].Message; message !=
-		"PAPER · 🔵 SOLD\n0.001 SOL → 0.2 USDC · Paper value $1.25" {
+		"PAPER · 🔵 SOLD\n0.001 SOL → 0.2 USDC · Practice account: $1.25" {
 		t.Fatalf("unreadable filled-order alert: %q", message)
 	}
 }
@@ -151,7 +151,7 @@ func TestPaperCurrentMakesAQuietAdaptiveLoopVisible(t *testing.T) {
 	if got := paperCurrentMessage(policy, shadow.Tick{
 		At: tick.At, Event: shadow.EventFilled, EquityMicros: 900_000,
 		Decision: risk, Fill: &shadow.Fill{Filled: true, Sell: true},
-	}, true); got != "PAPER · ⏸ PAUSED\nSELL filled · Paper value $0.9" {
+	}, true); got != "PAPER · ⏸ PAUSED\nSELL filled · Practice account: $0.9" {
 		t.Fatalf("risk-exit fill status = %q", got)
 	}
 	if got := paperCurrentMessage(policy, shadow.Tick{
@@ -199,12 +199,29 @@ func TestPaperSummaryStateIsBoundedAndOperatorReadable(t *testing.T) {
 func TestPaperCurrentPutsTodayResultBeforeStrategyDetail(t *testing.T) {
 	status := "PAPER · 👀 LOOKING TO SELL\nSOL $106.55 · no good price yet"
 	status = addPaperPerformance(status, "123 price checks · 1 trade")
-	performance := paperPerformanceLine(100_000_000, 101_250_000, 101_000_000)
-	want := "PAPER · 👀 LOOKING TO SELL\nToday +$1.25 · vs holding +$0.25\n" +
+	performance := paperPerformanceLine(100_000_000, 101_250_000, 101_000_000, "USD")
+	want := "PAPER · 👀 LOOKING TO SELL\nToday's result: up $1.25 · $0.25 better than no trading\n" +
 		"123 price checks · 1 trade\n" +
 		"SOL $106.55 · no good price yet"
 	if got := addPaperPerformance(status, performance); got != want {
 		t.Fatalf("current performance = %q, want %q", got, want)
+	}
+}
+
+func TestPaperResultLanguageExplainsGainLossAndComparison(t *testing.T) {
+	for _, test := range []struct {
+		got  string
+		want string
+	}{
+		{formatPaperChange(1_000_000, 1_250_000, "USD"), "up $0.25"},
+		{formatPaperChange(1_000_000, 750_000, "USD"), "down $0.25"},
+		{formatPaperChange(1_000_000, 1_000_000, "USD"), "unchanged"},
+		{formatPaperComparison(1_000_000, 1_250_000, "USD"), "$0.25 better than no trading"},
+		{formatPaperComparison(1_000_000, 750_000, "USD"), "$0.25 worse than no trading"},
+	} {
+		if test.got != test.want {
+			t.Errorf("paper result language = %q, want %q", test.got, test.want)
+		}
 	}
 }
 
@@ -333,7 +350,7 @@ func TestAdaptiveShadowAlertReportsTheRiskPauseOnce(t *testing.T) {
 	}
 	event := snapshot.Events[0]
 	if event.Kind != paperstatus.KindRiskHalted ||
-		event.Message != "PAPER · ⏸ PAUSED\nPaper value hit today's safety limit" {
+		event.Message != "PAPER · ⏸ PAUSED\nPractice account reached today's safety limit" {
 		t.Fatalf("risk alert = %+v", event)
 	}
 
@@ -367,7 +384,7 @@ func TestAdaptiveShadowAlertReportsTheRiskPauseOnce(t *testing.T) {
 	}
 	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 4 ||
 		snapshot.Events[0].Kind != paperstatus.KindRiskHalted ||
-		snapshot.Events[0].Message != "PAPER · 🛡 SAFETY EXIT ACTIVE\nPaper value hit today's safety limit" {
+		snapshot.Events[0].Message != "PAPER · 🛡 SAFETY EXIT ACTIVE\nPractice account reached today's safety limit" {
 		t.Fatalf("risk-exit pause snapshot=%+v err=%v", snapshot, err)
 	}
 	for index, kind := range []string{
@@ -699,8 +716,8 @@ func TestPartialAndCompletePeriodReportsHaveDistinctAlerts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(snapshot.Events) != 2 ||
-		snapshot.Events[0].Message != "PAPER · ⚠️ STOPPED\nTest P&L +0 · vs holding +0 devUSDC · 0 trades\nPrice data 0.00% · some data missing" ||
-		snapshot.Events[1].Message != "PAPER · ⚠️ DAY FINISHED\nTest P&L +0 · vs holding +0 devUSDC · 0 trades\nPrice data 0.00% · some data missing" {
+		snapshot.Events[0].Message != "PAPER · ⚠️ STOPPED\nResult: unchanged · same as no trading · 0 trades\nPrice data 0.00% · some data missing" ||
+		snapshot.Events[1].Message != "PAPER · ⚠️ DAY FINISHED\nResult: unchanged · same as no trading · 0 trades\nPrice data 0.00% · some data missing" {
 		t.Fatalf("period alerts = %+v", snapshot.Events)
 	}
 }
@@ -739,7 +756,7 @@ func TestMainnetDayAlertShowsTrustworthyPnLAndCoverage(t *testing.T) {
 	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 1 {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
-	want := "PAPER · 📊 DAY FINISHED\nP&L +$0.8 · vs holding +$0.2 · 3 trades\n" +
+	want := "PAPER · 📊 DAY FINISHED\nResult: up $0.8 · $0.2 better than no trading · 3 trades\n" +
 		"Price data 100.00%"
 	if snapshot.Events[0].Message != want {
 		t.Fatalf("day alert = %q, want %q", snapshot.Events[0].Message, want)
