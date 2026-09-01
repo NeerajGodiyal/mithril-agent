@@ -136,12 +136,13 @@ verify-source:
 	fi
 	@expected=$$(mktemp); listed=$$(mktemp); \
 	 trap 'rm -f "$$expected" "$$listed"' EXIT; \
-	 find . -type f \( -name '*.go' -o -name '*.rs' -o -name '*.mjs' -o -name '*.html' -o -name '*.json' \
+	find . -type f \( -name '*.go' -o -name '*.rs' -o -name '*.js' -o -name '*.mjs' -o -name '*.html' -o -name '*.json' \
+	      -o -name '*.svg' -o -name '*.woff2' \
 	      -o -name '*.yaml' -o -name '*.sh' -o -name '*.example' -o -name 'Dockerfile' -o -name '.dockerignore' \
 	      -o -name '*.md' -o -name 'Makefile' -o -name '*.service' \
 	      -o -name '*.socket' -o -name '*.path' -o -name '*.timer' -o -name '*.conf' -o -name '*.yml' \
 	      -o -name 'go.mod' -o -name 'go.sum' -o -name 'Cargo.toml' \
-	      -o -name 'Cargo.lock' -o -name '.gitignore' \) \
+	      -o -name 'Cargo.lock' -o -name '.gitignore' -o -name 'LICENSE*' -o -name 'NOTICE*' \) \
 	    -not -path './.git/*' -not -path './bin/*' \
 	    -not -path '*/node_modules/*' -not -path '*/target/*' \
 	    -not -path './deploy/hermes-research/state/*' \
@@ -172,12 +173,13 @@ verify-source:
 # a manifest that silently regenerates itself proves nothing about the source.
 .PHONY: manifest
 manifest:
-	@find . -type f \( -name '*.go' -o -name '*.rs' -o -name '*.mjs' -o -name '*.html' -o -name '*.json' \
+	@find . -type f \( -name '*.go' -o -name '*.rs' -o -name '*.js' -o -name '*.mjs' -o -name '*.html' -o -name '*.json' \
+	     -o -name '*.svg' -o -name '*.woff2' \
 	     -o -name '*.yaml' -o -name '*.sh' -o -name '*.example' -o -name 'Dockerfile' -o -name '.dockerignore' \
 	     -o -name '*.md' -o -name 'Makefile' -o -name '*.service' \
 	     -o -name '*.socket' -o -name '*.path' -o -name '*.timer' -o -name '*.conf' -o -name '*.yml' \
 	     -o -name 'go.mod' -o -name 'go.sum' -o -name 'Cargo.toml' \
-	     -o -name 'Cargo.lock' -o -name '.gitignore' \) \
+	     -o -name 'Cargo.lock' -o -name '.gitignore' -o -name 'LICENSE*' -o -name 'NOTICE*' \) \
 	   -not -path './.git/*' -not -path './bin/*' \
 	   -not -path '*/node_modules/*' -not -path '*/target/*' \
 	   -not -path './deploy/hermes-research/state/*' \

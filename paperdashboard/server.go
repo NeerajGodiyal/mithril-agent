@@ -4,6 +4,7 @@ package paperdashboard
 
 import (
 	"crypto/sha256"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,15 @@ import (
 const maxActivity = 100
 
 const refreshInterval = 10 * time.Second
+
+//go:embed vendor/lightweight-charts-5.2.1.min.js
+var lightweightChartsJS string
+
+//go:embed vendor/space-grotesk-latin.woff2
+var spaceGroteskFont []byte
+
+//go:embed vendor/overclock.svg
+var overclockLogo []byte
 
 type Source interface {
 	SourceLabel() string
@@ -171,9 +181,15 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	case "/":
 		serveAsset(writer, request, "text/html; charset=utf-8", indexHTML)
 	case "/app.css":
-		serveAsset(writer, request, "text/css; charset=utf-8", appCSS+mobileCSS+refinedCSS+finishingCSS+narrowCSS+observabilityCSS+qaCSS+finalCSS+clarityCSS+controlCSS+cockpitCSS+cockpitAccessibilityCSS+cockpitChoreographyCSS)
+		serveAsset(writer, request, "text/css; charset=utf-8", dashboardCSS)
 	case "/app.js":
 		serveAsset(writer, request, "text/javascript; charset=utf-8", appJS)
+	case "/vendor/lightweight-charts-5.2.1.js":
+		serveAsset(writer, request, "text/javascript; charset=utf-8", lightweightChartsJS)
+	case "/vendor/space-grotesk-latin.woff2":
+		serveBytesAsset(writer, request, "font/woff2", spaceGroteskFont)
+	case "/vendor/overclock.svg":
+		serveBytesAsset(writer, request, "image/svg+xml", overclockLogo)
 	case "/api/v1/status":
 		s.serveStatus(writer, request)
 	case "/api/v1/instruction":
@@ -465,6 +481,10 @@ func coverage(checks, unavailable uint64) (uint64, bool) {
 }
 
 func serveAsset(writer http.ResponseWriter, request *http.Request, contentType, body string) {
+	serveBytesAsset(writer, request, contentType, []byte(body))
+}
+
+func serveBytesAsset(writer http.ResponseWriter, request *http.Request, contentType string, body []byte) {
 	if request.Method != http.MethodGet && request.Method != http.MethodHead {
 		writer.Header().Set("Allow", "GET, HEAD")
 		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
@@ -473,12 +493,12 @@ func serveAsset(writer http.ResponseWriter, request *http.Request, contentType, 
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("Content-Type", contentType)
 	if request.Method == http.MethodGet {
-		_, _ = writer.Write([]byte(body))
+		_, _ = writer.Write(body)
 	}
 }
 
 func setSecurityHeaders(header http.Header) {
-	header.Set("Content-Security-Policy", "default-src 'none'; connect-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	header.Set("Content-Security-Policy", "default-src 'none'; connect-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 	header.Set("Cross-Origin-Opener-Policy", "same-origin")
 	header.Set("Cross-Origin-Resource-Policy", "same-origin")
 	header.Set("Referrer-Policy", "no-referrer")

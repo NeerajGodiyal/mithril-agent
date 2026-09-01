@@ -1,7 +1,9 @@
 package paperdashboard
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -307,46 +309,117 @@ func TestDashboardRejectsRemoteHostsAndMutatingMethods(t *testing.T) {
 	}
 }
 
+func TestDashboardServesPinnedInteractiveChartAsset(t *testing.T) {
+	server, err := New([]Source{&sourceStub{label: "SOL/USDC"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const path = "/vendor/lightweight-charts-5.2.1.js"
+	get := httptest.NewRecorder()
+	server.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "http://localhost"+path, nil))
+	if get.Code != http.StatusOK || get.Header().Get("Content-Type") != "text/javascript; charset=utf-8" {
+		t.Fatalf("vendor GET = %d %q", get.Code, get.Header().Get("Content-Type"))
+	}
+	digest := sha256.Sum256(get.Body.Bytes())
+	if got := fmt.Sprintf("%x", digest); got != "e21cc5caa0226ef30bd8549c50b9ef926615f2a4ee6b4e486353477a55f598cf" {
+		t.Fatalf("vendor digest = %s", got)
+	}
+	head := httptest.NewRecorder()
+	server.ServeHTTP(head, httptest.NewRequest(http.MethodHead, "http://localhost"+path, nil))
+	if head.Code != http.StatusOK || head.Body.Len() != 0 {
+		t.Fatalf("vendor HEAD = %d, %d bytes", head.Code, head.Body.Len())
+	}
+	post := httptest.NewRecorder()
+	server.ServeHTTP(post, httptest.NewRequest(http.MethodPost, "http://localhost"+path, nil))
+	if post.Code != http.StatusMethodNotAllowed || post.Header().Get("Allow") != "GET, HEAD" {
+		t.Fatalf("vendor POST = %d, Allow %q", post.Code, post.Header().Get("Allow"))
+	}
+}
+
+func TestDashboardServesPinnedLocalFont(t *testing.T) {
+	server, err := New([]Source{&sourceStub{label: "SOL/USDC"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const path = "/vendor/space-grotesk-latin.woff2"
+	get := httptest.NewRecorder()
+	server.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "http://localhost"+path, nil))
+	if get.Code != http.StatusOK || get.Header().Get("Content-Type") != "font/woff2" {
+		t.Fatalf("font GET = %d %q", get.Code, get.Header().Get("Content-Type"))
+	}
+	digest := sha256.Sum256(get.Body.Bytes())
+	if got := fmt.Sprintf("%x", digest); got != "a0d054c4af557de20afd6ca59f47ab353bcaec49c63ff04b6c9d39d0f8910557" {
+		t.Fatalf("font digest = %s", got)
+	}
+	head := httptest.NewRecorder()
+	server.ServeHTTP(head, httptest.NewRequest(http.MethodHead, "http://localhost"+path, nil))
+	if head.Code != http.StatusOK || head.Body.Len() != 0 {
+		t.Fatalf("font HEAD = %d, %d bytes", head.Code, head.Body.Len())
+	}
+}
+
+func TestDashboardServesPinnedOverclockLogo(t *testing.T) {
+	server, err := New([]Source{&sourceStub{label: "SOL/USDC"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const path = "/vendor/overclock.svg"
+	get := httptest.NewRecorder()
+	server.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "http://localhost"+path, nil))
+	if get.Code != http.StatusOK || get.Header().Get("Content-Type") != "image/svg+xml" {
+		t.Fatalf("logo GET = %d %q", get.Code, get.Header().Get("Content-Type"))
+	}
+	digest := sha256.Sum256(get.Body.Bytes())
+	if got := fmt.Sprintf("%x", digest); got != "b77564161f8a92e39dc807254c7dfb782c8d6fc3f47860cc62fbe5f98c1ce76b" {
+		t.Fatalf("logo digest = %s", got)
+	}
+}
+
 func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 	server, err := New([]Source{&sourceStub{label: "SOL/USDC"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for path, wants := range map[string][]string{
-		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "Automation setup", "Reviewed scope", "WIF, JTO, and PYTH", "are review candidates", "7-day checkpoint", "30 complete collector days", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Largest order", "Paper loss stop", "Activation:"},
+		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "class=\"overview-workspace\"", "id=\"market-switcher\"", "class=\"activity-table\"", "id=\"help-dialog\"", "Quick explanation", "strategy-brief", "/vendor/overclock.svg", "Automation setup", "Reviewed scope", "WIF, JTO, and PYTH", "are review candidates", "7-day checkpoint", "30 complete collector days", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Largest order", "Paper loss stop", "Activation:", "About this paper account", "bot's UTC day", "/vendor/lightweight-charts-5.2.1.js", "TradingView Lightweight Charts™"},
 		"/app.css": {
-			".help:focus", ".help[aria-expanded=\"true\"]", ".button.loading:before", "@keyframes spin",
-			".market-overview", ".market-price{font-size:1.3rem}", "--line-strong:#51647a", "--subtle:#7f8b9a",
-			".topbar:after,.metric:before", ".dot,.dot.ok,.dot.bad", "backdrop-filter:none",
-			".badge.green{background:var(--green-bg)!important}", ".controls .button{padding-inline:6px",
-			"@media(max-width:520px){.automation-grid", "@media(max-width:430px){.topbar",
-			"@media(max-width:390px){.tabs", "@media(max-width:360px){.metrics",
-			".coverage-ring", "#overview #markets>.market", "@keyframes cockpit-enter",
-			".chart-toggle:focus-visible{outline:2px solid var(--blue)", ".coverage-ring .ring-label{font-size:5.4px}",
-			".market-meta", ".market-bottom", ".decision-sequence", "@media(max-width:600px){.header-state{grid-column:1/-1;grid-row:2",
+			"@font-face", "/vendor/space-grotesk-latin.woff2", "--canvas: #000", "--green: #86efac", "--line-strong: #353535", "--text: #e7e7e7", "--subtle: #7f7f7f",
+			".tabs {", "position: fixed", ".tab.active", ".brand-logo", ".panel:focus-visible",
+			".metrics {", ".metric:first-child .metric-value", ".help-dialog::backdrop", ".activity-table .activity-list-head", "scrollbar-gutter: stable", ".button.loading::before", "@keyframes spin",
+			"height: calc(100vh - 120px)", ".overview-workspace", "grid-template-columns: minmax(0, 3fr) minmax(330px, 2fr)", "grid-template-columns: minmax(110px, 1fr) 82px max-content", ".market-list-head", ".market-choice.active::before", ".market-chart-stage",
+			".chart-toggle.active", ".chart-canvas { width: 100%; height: 390px", ".chart-data table",
+			".activity-list-head", ".strategy-market-row", ".automation-list-head", "@keyframes view-enter",
+			"@media (max-width: 1023px)", "@media (max-width: 767px)", "@media (max-width: 430px)", "prefers-reduced-motion",
 		},
 		"/app.js": {
-			"Paper value now", "Started today with", "Today's result", "Compared with holding", "Filled paper orders",
-			"role=\"tooltip\"", "aria-describedby", "event.key!=='Escape'", "Waiting for fresh prices",
-			"More filled orders do not necessarily mean more profit.",
+			"Paper account now", "Started today", "Account P&L today", "Versus holding", "Filled paper orders", "Compared with holding",
+			"<button class=\"help\"", "data-help-copy=", "helpDialog.showModal()", "Waiting for fresh prices",
 			"?fresh=1", "Refreshing…", "Updated ✓",
-			"Checked ✓", "Data delayed", "requestSequence", "Last result",
+			"Checked ✓", "Data delayed", "requestSequence",
 			"Market-responsive paper plan", "not strategy quality", "deltaValue",
 			"readableActivity", "Use Refresh to try again.", "liveUpdates&&!$('refresh').disabled",
 			"This market value:", "This market's result today:", "readableActivityResult", "(profit?'profit':'loss')",
-			"Plan tried to trade once", "The plan checked ",
-			"market-overview", "Current plan", "age(current.observed_at)",
+			"compactActivityDollars", "Paper gain\\/loss", "ahead of holding", "behind holding",
+			"Plan tried to trade once",
+			"Performance", "marketStatus(m,feeBudgetUsed)",
 			"integer(micros)>0n&&integer(micros)<10000n?'<$0.01'",
 			"amount>=1000000n?2:amount>=10000n?4:6",
-			"chartDots", "marketPriceChart", "Largest drop", "Our strategy '+paperValue", "If held '+paperValue", "Closed-trade result", "Open-position result", "older events omitted", "Proposal ready", "Nous Hermes",
+			"marketPriceChart", "LightweightCharts.createChart", "chartSegments", "View exact chart values", "data-chart-action=\"zoom-in\"", "activeChart.remove()", "Bot strategy", "If simply held", "Ahead by ", "Behind by ", "older events omitted", "Proposal ready", "Nous Hermes",
+			"chartPointAvailable", "key!=='price_micros'||integer(point[key])>0n", "m.state==='waiting for data'", "price-values", "performance-values", "pnl===0n?'→'", "Paper values')+' unavailable", "readout.innerHTML=original",
 			"Rejected output", "No valid run yet", "No active plan was changed.", "open-order-history", "Starting trade lot", "Loss pause",
 			"Minimum opportunity", "saveInstruction", "X-Mithril-Paper-Request",
 			"Fee budget left", "Orders left today", "No more orders today",
-			"Orders paused for today", "Orders paused until tomorrow",
+			"Orders paused until tomorrow",
 			"Total traded today", "Modeled fees today", "renderActiveLimits",
-			"High concentration", "Save experiment request", "validInstructionRequest",
-			"coverageRing", "Usable price data ", "portfolio-card",
-			"Paper rule status", "Decision sequence", "Trade opportunities", "decisionReason", "marketStatus", "Fixed paper plan", "Evaluate the saved fixed paper-price rules", "Paper bounds",
+			"High concentration", "Largest market", "of the starting account", "Current first leg",
+			"Saving this does not change the active bots", "above this request",
+			"Save experiment request", "validInstructionRequest",
+			"decisionReason", "marketStatus", "Fixed paper plan", "const watching=", "const deciding=",
+			"Limited price data", "coverage_bps", "marketDataHealthy", "rememberChartRange",
+			"Math.hypot", "openChartDetail", "openDetails", "helpReturn", "captureRenderFocus", "updateTabOrientation", "ArrowDown", "ArrowUp",
+			"selectedMarketName", "market-choice", "aria-controls=\"markets\"", "current.markets.find(market=>market.name===selectedMarketName)",
+			"if(changed)window.scrollTo(0,0)",
+			"activity-more", "strategy-list-head", "automation-list-head",
 		},
 	} {
 		request := httptest.NewRequest(http.MethodGet, "http://localhost"+path, nil)
@@ -359,6 +432,25 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			if !strings.Contains(response.Body.String(), want) {
 				t.Errorf("%s omits %q", path, want)
 			}
+		}
+	}
+	if strings.Contains(appJS, "chartPaths") || strings.Contains(appJS, "chartDots") ||
+		strings.Contains(appJS, "<polyline") || strings.Contains(appJS, "<svg viewBox=\"0 0 100 56\"") {
+		t.Fatal("custom chart SVG remains in /app.js")
+	}
+	css := dashboardCSS
+	for _, obsolete := range []string{".chart svg", ".chart-grid", ".chart-paper", ".chart-hold", ".chart-market", ".chart-hit", ".coverage-ring", ".has-visual"} {
+		if strings.Contains(css, obsolete) {
+			t.Errorf("obsolete custom chart style %q remains", obsolete)
+		}
+	}
+	if strings.Contains(indexHTML, "unsafe-inline") || strings.Contains(indexHTML, "unsafe-eval") ||
+		strings.Contains(appJS, "style=\"") {
+		t.Fatal("interactive chart weakens CSP compatibility")
+	}
+	for _, legacy := range []string{".market-meta", ".market-stat-rail", ".market-bottom", ".market-overview", ".decision-flow"} {
+		if strings.Contains(dashboardCSS, legacy) || strings.Contains(appJS, legacy) {
+			t.Fatalf("legacy dashboard structure %q remains", legacy)
 		}
 	}
 }
