@@ -240,7 +240,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"nousresearch/hermes-agent:v2026.8.27@sha256:e0df6adebddf29b91112aefc999d4aaf6846c9eb544faca5672a16a13590ff79",
 		"name: mithril-hermes-research", "external: true",
 		"source: /usr/local/libexec/mithril-agent/mithril-agent",
-		"source: /opt/mithril-hermes-research/prompts/market-scout.md",
+		"source: ${MITHRIL_HERMES_QUERY_FILE:-/opt/mithril-hermes-research/prompts/market-scout.md}",
 		"source: /var/lib/mithril-agent-research/index",
 		"source: /var/lib/mithril-agent-research/policy",
 		"source: /var/lib/mithril-agent-research/journals",
@@ -405,7 +405,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"mithril-agent-paper-auto-select.timer", "shadow restore", "champion/previous.json",
 		"/var/lib/mithril-agent-research/status/champion/alerts.json",
 		"single-URL extraction canary: pass", "state/cache/web",
-		"REVIEWED_SHA256", "'root:root 755'",
+		"REVIEWED_SHA256", "'root:root 755'", "--fee-reserve-sol 0.080",
 	} {
 		if !strings.Contains(deployReadme, want) {
 			t.Errorf("Hermes deployment README is missing isolation check %q", want)
@@ -424,6 +424,8 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"previous 12 hours", "infrastructure", "not trading alpha",
 		"cbBTC/USDC", "30 consecutive complete days of evidence",
 		"Never resolve an asset by ticker alone",
+		"hypothesis_id", "verified_facts", "no_trade_case", "risk_veto",
+		"candidate_parameter_diff", "two independent timestamped",
 		"https://www.coinbase.com/cbbtc", "https://www.circle.com/transparency",
 		"not all-in execution guarantees",
 	} {
@@ -501,6 +503,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"./deploy/systemd/mithril-agent-paper-auto-select.timer",
 		"./deploy/systemd/mithril-agent-paper-dashboard.service",
 		"./deploy/systemd/mithril-agent-paper-dashboard.socket",
+		"./deploy/systemd/mithril-agent-market-candidate@.service",
 		"./deploy/systemd/mithril-hermes-research-egress.service",
 		"./deploy/systemd/mithril-hermes-research.service",
 		"./deploy/systemd/mithril-hermes-research.timer",
@@ -567,6 +570,18 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	} {
 		if !strings.Contains(marketScoutWrapper, want) {
 			t.Errorf("Hermes paper tools are not gated by a healthy observer: %q", want)
+		}
+	}
+	candidateUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-market-candidate@.service")
+	for _, want := range []string{
+		"ConditionPathExists=/etc/mithril-agent/market-%i.env",
+		"--market ${MITHRIL_AGENT_MARKET} --observe ${MITHRIL_AGENT_OBSERVE}",
+		"--journal /var/lib/mithril-agent-research/market-admission-%i/evidence.jsonl",
+		"ReadWritePaths=/var/lib/mithril-agent-research/market-admission-%i",
+		"ProtectSystem=strict", "UMask=0077",
+	} {
+		if !strings.Contains(candidateUnit, want) {
+			t.Errorf("candidate admission collector is missing %q", want)
 		}
 	}
 	autoSelectUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-auto-select.service")
@@ -637,7 +652,10 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"After=docker.service mithril-hermes-research-egress.service",
 		"ConditionPathExists=/opt/mithril-hermes-research/state/auth.json",
 		"ConditionPathExists=/var/lib/mithril-agent-research/policy/policy.json",
+		"ConditionPathIsDirectory=/var/lib/mithril-agent-research/reports",
+		"ConditionPathIsDirectory=/var/lib/mithril-agent-dashboard",
 		"Type=oneshot", "UMask=0077",
+		"RuntimeDirectory=mithril-hermes-research", "RuntimeDirectoryMode=0711",
 		"iptables -C DOCKER-USER", "iptables -C INPUT",
 		"ExecStart=/opt/mithril-hermes-research/run-market-scout.sh",
 		"TimeoutStartSec=6min", "TimeoutStopSec=1min",
@@ -662,7 +680,17 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"index doctor", "--max-record-age 15m",
 		"toolsets=\"$toolsets,mithril_index\"",
 		"export MITHRIL_HERMES_TOOLSETS=\"$toolsets\"",
-		"exec /usr/bin/docker compose run --rm --no-TTY hermes-research",
+		"/var/lib/mithril-agent-dashboard/instruction.json",
+		"--render-instruction \"$instruction\"",
+		"query_file=/run/mithril-hermes-research/market-scout.md",
+		"/usr/bin/chmod 0644 \"$query_file\"",
+		"export MITHRIL_HERMES_QUERY_FILE=\"$query_file\"",
+		"ulimit -f 128",
+		"/usr/bin/docker compose run --rm --no-TTY hermes-research >\"$packet\"",
+		"mithril-agent research packet-record", "--archive-dir /var/lib/mithril-agent-research/reports",
+		"--latest \"$latest\"", "/var/lib/mithril-agent-dashboard/research.json",
+		"/usr/bin/install -o mithril-agent-dashboard -g mithril-agent-dashboard -m 0600",
+		"runuser -u mithril-agent-dashboard", "--in \"$dashboard_packet\" --latest \"$projection\"",
 	} {
 		if !strings.Contains(researchRunner, want) {
 			t.Errorf("Hermes market scout wrapper is missing %q", want)
@@ -741,6 +769,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"InaccessiblePaths=/var/lib/mithril-agent",
 		"SOL/USDC=/run/mithril-agent-paper-status.sock",
 		"JUP/USDC=/run/mithril-agent-paper-jup-status.sock",
+		"--research-packet-path /var/lib/mithril-agent-dashboard/research.json",
 	} {
 		if !strings.Contains(dashboardUnit, want) {
 			t.Errorf("paper dashboard unit is missing %q", want)
@@ -774,6 +803,12 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"/var/lib/mithril-agent-research/index \\",
 		"/var/lib/mithril-agent-research/runs \\",
 		"/var/lib/mithril-agent-research/status \\",
+		"/var/lib/mithril-agent-research/reports \\",
+		"/var/lib/mithril-agent-dashboard",
+		"MITHRIL_AGENT_MARKET=JTO/USDC", "MITHRIL_AGENT_MARKET=PYTH/USDC",
+		"mithril-agent-market-candidate@jto.service",
+		"mithril-agent-market-candidate@pyth.service",
+		"PUMP remains excluded", "Token-2022",
 		"id -g mithril-agent-research",
 		"Do not copy or hand-edit `events.jsonl`",
 		"/opt/mithril-hermes-research",

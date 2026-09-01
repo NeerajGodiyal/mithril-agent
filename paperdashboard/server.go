@@ -11,11 +11,13 @@ import (
 	"math/bits"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/marketadmission"
 	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 )
 
@@ -29,20 +31,29 @@ type Source interface {
 }
 
 type Server struct {
-	sources []Source
-	now     func() time.Time
-	mu      sync.Mutex
-	cached  View
-	readAt  time.Time
+	sources         []Source
+	instructionPath string
+	researchPath    string
+	now             func() time.Time
+	mu              sync.Mutex
+	cached          View
+	readAt          time.Time
 }
 
 type View struct {
-	Mode       string     `json:"mode"`
-	ObservedAt *time.Time `json:"observed_at,omitempty"`
-	Complete   bool       `json:"complete"`
-	Overview   Overview   `json:"overview"`
-	Markets    []Market   `json:"markets"`
-	Activity   []Activity `json:"activity"`
+	Mode                string       `json:"mode"`
+	ObservedAt          *time.Time   `json:"observed_at,omitempty"`
+	Complete            bool         `json:"complete"`
+	Overview            Overview     `json:"overview"`
+	Markets             []Market     `json:"markets"`
+	Activity            []Activity   `json:"activity"`
+	InstructionsEnabled bool         `json:"instructions_enabled"`
+	Instruction         *Instruction `json:"instruction,omitempty"`
+	InstructionError    bool         `json:"instruction_error,omitempty"`
+	ResearchEnabled     bool         `json:"research_enabled"`
+	Research            *Research    `json:"research,omitempty"`
+	ResearchError       bool         `json:"research_error,omitempty"`
+	ResearchMarkets     []string     `json:"research_markets"`
 	// ActivityOmitted counts older bounded status events plus events removed by
 	// the dashboard's own combined-list cap.
 	ActivityOmitted uint64 `json:"activity_omitted"`
@@ -53,6 +64,9 @@ type Overview struct {
 	OpeningEquityMicros uint64 `json:"opening_equity_micros,omitempty,string"`
 	EquityMicros        uint64 `json:"equity_micros,omitempty,string"`
 	HoldBenchmarkMicros uint64 `json:"hold_benchmark_micros,omitempty,string"`
+	AccountingTracked   bool   `json:"accounting_tracked,omitempty"`
+	RealizedMicros      int64  `json:"realized_micros,omitempty,string"`
+	UnrealizedMicros    int64  `json:"unrealized_micros,omitempty,string"`
 	Signals             uint64 `json:"signals"`
 	Trades              uint64 `json:"trades"`
 	CoverageBPS         uint64 `json:"coverage_bps,omitempty"`
@@ -60,34 +74,57 @@ type Overview struct {
 }
 
 type Market struct {
-	Name                string             `json:"name"`
-	ObservedAt          *time.Time         `json:"observed_at,omitempty"`
-	Available           bool               `json:"available"`
-	Ready               bool               `json:"ready"`
-	Fresh               bool               `json:"fresh"`
-	Current             string             `json:"current,omitempty"`
-	Day                 string             `json:"day,omitempty"`
-	ValueUnit           string             `json:"value_unit,omitempty"`
-	OpeningEquityMicros uint64             `json:"opening_equity_micros,omitempty,string"`
-	EquityMicros        uint64             `json:"equity_micros,omitempty,string"`
-	HoldBenchmarkMicros uint64             `json:"hold_benchmark_micros,omitempty,string"`
-	DrawdownMicros      uint64             `json:"drawdown_micros,omitempty,string"`
-	MaxDrawdownMicros   uint64             `json:"max_drawdown_micros,omitempty,string"`
-	PriceMicros         uint64             `json:"price_micros,omitempty,string"`
-	Checks              uint64             `json:"checks,omitempty"`
-	Signals             uint64             `json:"signals,omitempty"`
-	Trades              uint64             `json:"trades,omitempty"`
-	CoverageBPS         uint64             `json:"coverage_bps,omitempty"`
-	CoverageReady       bool               `json:"coverage_ready"`
-	State               string             `json:"state,omitempty"`
-	Strategy            string             `json:"strategy,omitempty"`
-	NextAction          string             `json:"next_action,omitempty"`
-	RiskHalted          bool               `json:"risk_halted,omitempty"`
-	History             []PerformancePoint `json:"history,omitempty"`
+	Name                        string             `json:"name"`
+	ObservedAt                  *time.Time         `json:"observed_at,omitempty"`
+	Available                   bool               `json:"available"`
+	Ready                       bool               `json:"ready"`
+	Fresh                       bool               `json:"fresh"`
+	Current                     string             `json:"current,omitempty"`
+	Day                         string             `json:"day,omitempty"`
+	ValueUnit                   string             `json:"value_unit,omitempty"`
+	TickSeconds                 uint64             `json:"tick_seconds,omitempty"`
+	OpeningEquityMicros         uint64             `json:"opening_equity_micros,omitempty,string"`
+	EquityMicros                uint64             `json:"equity_micros,omitempty,string"`
+	HoldBenchmarkMicros         uint64             `json:"hold_benchmark_micros,omitempty,string"`
+	AccountingTracked           bool               `json:"accounting_tracked,omitempty"`
+	RealizedMicros              int64              `json:"realized_micros,omitempty,string"`
+	UnrealizedMicros            int64              `json:"unrealized_micros,omitempty,string"`
+	DrawdownMicros              uint64             `json:"drawdown_micros,omitempty,string"`
+	MaxDrawdownMicros           uint64             `json:"max_drawdown_micros,omitempty,string"`
+	PriceMicros                 uint64             `json:"price_micros,omitempty,string"`
+	Checks                      uint64             `json:"checks,omitempty"`
+	Signals                     uint64             `json:"signals,omitempty"`
+	Trades                      uint64             `json:"trades,omitempty"`
+	CoverageBPS                 uint64             `json:"coverage_bps,omitempty"`
+	CoverageReady               bool               `json:"coverage_ready"`
+	State                       string             `json:"state,omitempty"`
+	Strategy                    string             `json:"strategy,omitempty"`
+	NextAction                  string             `json:"next_action,omitempty"`
+	DecisionReason              string             `json:"decision_reason,omitempty"`
+	RiskHalted                  bool               `json:"risk_halted,omitempty"`
+	InitialLotUnits             uint64             `json:"initial_lot_units,omitempty,string"`
+	InitialLotDecimals          uint8              `json:"initial_lot_decimals,omitempty"`
+	InitialLotAsset             string             `json:"initial_lot_asset,omitempty"`
+	FeeReserveLamports          uint64             `json:"fee_reserve_lamports,omitempty,string"`
+	FeeLamports                 uint64             `json:"fee_lamports,omitempty,string"`
+	FeeBudgetTracked            bool               `json:"fee_budget_tracked,omitempty"`
+	RemainingFeeReserveLamports uint64             `json:"remaining_fee_reserve_lamports,omitempty,string"`
+	EstimatedFillsRemaining     uint64             `json:"estimated_fills_remaining,omitempty"`
+	SlippageBPS                 uint16             `json:"slippage_bps,omitempty"`
+	SettleSeconds               uint64             `json:"settle_seconds,omitempty"`
+	FastWindow                  uint16             `json:"fast_window,omitempty"`
+	SlowWindow                  uint16             `json:"slow_window,omitempty"`
+	MinimumSignalBPS            uint16             `json:"minimum_signal_bps,omitempty"`
+	MaxVolatilityBPS            uint16             `json:"max_volatility_bps,omitempty"`
+	MaxQuoteImpactBPS           uint16             `json:"max_quote_impact_bps,omitempty"`
+	MaxDrawdownBPS              uint16             `json:"max_drawdown_bps,omitempty"`
+	CooldownSeconds             uint64             `json:"cooldown_seconds,omitempty"`
+	History                     []PerformancePoint `json:"history,omitempty"`
 }
 
 type PerformancePoint struct {
 	At                  time.Time `json:"at"`
+	PriceMicros         uint64    `json:"price_micros,omitempty,string"`
 	EquityMicros        uint64    `json:"equity_micros,string"`
 	HoldBenchmarkMicros uint64    `json:"hold_benchmark_micros,string"`
 	DrawdownMicros      uint64    `json:"drawdown_micros,string"`
@@ -130,11 +167,13 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	case "/":
 		serveAsset(writer, request, "text/html; charset=utf-8", indexHTML)
 	case "/app.css":
-		serveAsset(writer, request, "text/css; charset=utf-8", appCSS+mobileCSS+refinedCSS+finishingCSS+narrowCSS+observabilityCSS+qaCSS+finalCSS)
+		serveAsset(writer, request, "text/css; charset=utf-8", appCSS+mobileCSS+refinedCSS+finishingCSS+narrowCSS+observabilityCSS+qaCSS+finalCSS+clarityCSS)
 	case "/app.js":
 		serveAsset(writer, request, "text/javascript; charset=utf-8", appJS)
 	case "/api/v1/status":
 		s.serveStatus(writer, request)
+	case "/api/v1/instruction":
+		s.serveInstruction(writer, request)
 	case "/healthz":
 		s.serveHealth(writer, request)
 	default:
@@ -205,7 +244,26 @@ func (s *Server) snapshotWithRefresh(force bool) View {
 func (s *Server) readSnapshot(now time.Time) View {
 	view := View{
 		Mode: "paper", Complete: true,
-		Markets: make([]Market, 0, len(s.sources)), Activity: make([]Activity, 0),
+		InstructionsEnabled: s.instructionPath != "",
+		ResearchEnabled:     s.researchPath != "",
+		ResearchMarkets:     marketadmission.Markets(),
+		Markets:             make([]Market, 0, len(s.sources)), Activity: make([]Activity, 0),
+	}
+	if s.instructionPath != "" {
+		instruction, err := readInstruction(s.instructionPath)
+		if err == nil {
+			view.Instruction = instruction
+		} else if !errors.Is(err, os.ErrNotExist) {
+			view.InstructionError = true
+		}
+	}
+	if s.researchPath != "" {
+		research, err := readResearch(s.researchPath, now)
+		if err == nil {
+			view.Research = research
+		} else if !errors.Is(err, os.ErrNotExist) {
+			view.ResearchError = true
+		}
 	}
 	minimumCoverage := uint64(10_000)
 	coverageReady := true
@@ -282,7 +340,7 @@ func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Mark
 	}
 	for _, point := range snapshot.History {
 		market.History = append(market.History, PerformancePoint{
-			At: point.At, EquityMicros: point.EquityMicros,
+			At: point.At, PriceMicros: point.PriceMicros, EquityMicros: point.EquityMicros,
 			HoldBenchmarkMicros: point.HoldBenchmarkMicros,
 			DrawdownMicros:      point.DrawdownMicros, MaxDrawdownMicros: point.MaxDrawdownMicros,
 			Unavailable: point.Unavailable,
@@ -294,9 +352,13 @@ func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Mark
 			summary.Day == now.UTC().Format("2006-01-02") && fresh(snapshot, now)
 		market.Day = summary.Day
 		market.ValueUnit = summary.ValueUnit
+		market.TickSeconds = summary.TickSeconds
 		market.OpeningEquityMicros = summary.OpeningEquityMicros
 		market.EquityMicros = summary.EquityMicros
 		market.HoldBenchmarkMicros = summary.HoldBenchmarkMicros
+		market.AccountingTracked = summary.AccountingTracked
+		market.RealizedMicros = summary.RealizedMicros
+		market.UnrealizedMicros = summary.UnrealizedMicros
 		market.DrawdownMicros = summary.DrawdownMicros
 		market.MaxDrawdownMicros = summary.MaxDrawdownMicros
 		market.PriceMicros = summary.PriceMicros
@@ -307,7 +369,25 @@ func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Mark
 		market.State = summary.State
 		market.Strategy = summary.Strategy
 		market.NextAction = summary.NextAction
+		market.DecisionReason = summary.DecisionReason
 		market.RiskHalted = summary.RiskHalted
+		market.InitialLotUnits = summary.InitialLotUnits
+		market.InitialLotDecimals = summary.InitialLotDecimals
+		market.InitialLotAsset = summary.InitialLotAsset
+		market.FeeReserveLamports = summary.FeeReserveLamports
+		market.FeeLamports = summary.FeeLamports
+		market.FeeBudgetTracked = summary.FeeBudgetTracked
+		market.RemainingFeeReserveLamports = summary.RemainingFeeReserveLamports
+		market.EstimatedFillsRemaining = summary.EstimatedFillsRemaining
+		market.SlippageBPS = summary.SlippageBPS
+		market.SettleSeconds = summary.SettleSeconds
+		market.FastWindow = summary.FastWindow
+		market.SlowWindow = summary.SlowWindow
+		market.MinimumSignalBPS = summary.MinimumSignalBPS
+		market.MaxVolatilityBPS = summary.MaxVolatilityBPS
+		market.MaxQuoteImpactBPS = summary.MaxQuoteImpactBPS
+		market.MaxDrawdownBPS = summary.MaxDrawdownBPS
+		market.CooldownSeconds = summary.CooldownSeconds
 	}
 	return market
 }
@@ -336,12 +416,33 @@ func addOverview(overview *Overview, summary paperstatus.CurrentSummary) bool {
 		overview.Trades > math.MaxUint64-summary.Trades {
 		return false
 	}
+	tracked := summary.AccountingTracked
+	if overview.ValueUnit != "" {
+		tracked = overview.AccountingTracked && tracked
+	}
+	if tracked && (!addSigned(&overview.RealizedMicros, summary.RealizedMicros) ||
+		!addSigned(&overview.UnrealizedMicros, summary.UnrealizedMicros)) {
+		return false
+	}
+	if !tracked {
+		overview.RealizedMicros, overview.UnrealizedMicros = 0, 0
+	}
+	overview.AccountingTracked = tracked
 	overview.OpeningEquityMicros += summary.OpeningEquityMicros
 	overview.EquityMicros += summary.EquityMicros
 	overview.HoldBenchmarkMicros += summary.HoldBenchmarkMicros
 	overview.Signals += summary.Signals
 	overview.Trades += summary.Trades
 	overview.ValueUnit = summary.ValueUnit
+	return true
+}
+
+func addSigned(total *int64, value int64) bool {
+	if value > 0 && *total > math.MaxInt64-value ||
+		value < 0 && *total < math.MinInt64-value {
+		return false
+	}
+	*total += value
 	return true
 }
 

@@ -35,7 +35,7 @@ const indexHTML = `<!doctype html>
     <div id="notice" class="notice" role="status" aria-live="polite"></div>
     <section id="overview" class="panel active" role="tabpanel" aria-labelledby="tab-overview" tabindex="0">
       <div class="section-title">
-        <h2 id="overview-title">Paper account</h2>
+        <h2 id="overview-title">Today's paper account</h2>
         <div class="controls">
           <button id="live" class="button quiet" type="button" aria-pressed="true">Live updates: On</button>
           <button id="refresh" class="button" type="button">Refresh</button>
@@ -43,6 +43,7 @@ const indexHTML = `<!doctype html>
         </div>
       </div>
       <div id="metrics" class="metrics" aria-label="Paper account summary"></div>
+      <p class="daily-note"><strong>Daily paper test:</strong> the simulated balance restarts each day. “Started today” and “Now” are this UTC day's values, not a continuously compounded wallet.</p>
       <div class="section-title compact"><h2>Markets</h2><p>Price, current plan, and results.</p></div>
       <div id="markets" class="market-grid"></div>
     </section>
@@ -87,6 +88,28 @@ const indexHTML = `<!doctype html>
         </aside>
       </div>
       <div id="strategy-markets" class="market-grid small"></div>
+      <article id="research-instruction" class="card instruction-card" hidden>
+        <div class="instruction-copy">
+          <span class="badge violet">Nous Hermes research</span>
+          <h3>Guide what the research agent explores next.</h3>
+          <p>This preference reaches the next scheduled research run. It cannot place an order, resize today's paper account, weaken a safety limit, or skip the forward paper test.</p>
+        </div>
+        <div class="instruction-controls" aria-label="Paper research preference">
+          <label>Market
+            <select id="instruction-market"><option value="all">All paper markets</option></select>
+          </label>
+          <label>Research goal
+            <select id="instruction-preference">
+              <option value="balanced">Keep it balanced</option>
+              <option value="more-opportunities">Look for more opportunities</option>
+              <option value="more-selective">Be more selective</option>
+            </select>
+          </label>
+          <button id="save-instruction" class="button" type="button">Save preference</button>
+          <span id="instruction-status" role="status" aria-live="polite">No preference saved yet.</span>
+        </div>
+        <p class="instruction-boundary"><strong>Why budget is separate:</strong> resizing the base paper mandate starts a new clean comparison book. It should never happen silently in the middle of today's results.</p>
+      </article>
     </section>
     <section id="system" class="panel" role="tabpanel" aria-labelledby="tab-system" tabindex="0" hidden>
       <div class="section-title"><div><p class="eyebrow">Who does what</p><h2 id="system-title">Automation setup</h2><p>Configured roles, permissions, and current market observers.</p></div></div>
@@ -96,17 +119,17 @@ const indexHTML = `<!doctype html>
       <div class="section-title compact"><div><p class="eyebrow">Trust boundary</p><h2>Access and evidence</h2></div></div>
       <div class="detail-grid">
         <article class="card detail-card"><span class="badge green">Paper only</span><h3>Permissions</h3><p>No wallet key, signing, real funds, Mainnet submission, margin, leverage, short position, or liquidation authority.</p></article>
-        <article class="card detail-card"><span class="badge blue">Independent checks</span><h3>Market sources</h3><p>Pyth on-chain prices are checked against Kraken, and Jupiter supplies route quotes. The separate Hermes profile is configured for official web, Solana, and bounded Mithril research tools.</p></article>
-        <article class="card detail-card"><span class="badge amber">Not enabled</span><h3>Futures and perps</h3><p>This is spot-like paper trading. Perpetual positions need separate margin, funding, liquidation, oracle, and venue accounting before they can be shown truthfully.</p></article>
+        <article id="research-evidence" class="card detail-card"><span class="badge blue">Research status</span><h3>Latest Hermes research</h3><p>Waiting for a validated research packet.</p></article>
+        <article class="card detail-card"><span class="badge amber">Reviewed scope</span><h3>Markets</h3><p>SOL and JUP are active paper markets. WIF, JTO, and PYTH have separate evidence collectors before admission. Perps and non-Solana venues still need their own margin, funding, liquidation, and custody boundaries.</p></article>
         <article class="card detail-card"><span class="badge blue">Evidence retained</span><h3>Recent order activity</h3><p>The dashboard keeps a bounded recent list. Older events remain in the local evidence journals. There are no on-chain signatures because no transaction is submitted.</p><button id="open-order-history" class="text-button" type="button">View recent paper orders</button></article>
       </div>
       <article class="card access">
         <div><span class="badge green">Private access</span><h3>Dashboard stays on the server</h3></div>
-        <p>Open it through an SSH tunnel. It is not published to the internet and has no trading controls.</p>
+        <p>Open it through an SSH tunnel. It is not published to the internet. Its only write action is the bounded paper-research preference above.</p>
       </article>
     </section>
   </main>
-  <footer class="shell">Read-only paper status · Values are simulated, not financial results.</footer>
+  <footer class="shell">Private paper dashboard · Values are simulated, not financial results.</footer>
   <script src="/app.js" defer></script>
 </body>
 </html>`
@@ -131,21 +154,30 @@ const observabilityCSS = `.topbar{border-bottom:1px solid #101b2a}.trust{border-
 
 const qaCSS = `body{background:var(--bg)}.topbar:after,.metric:before,.market:before,.automation-card:before{display:none}.checked{border-radius:6px;background:var(--surface)}.dot,.dot.ok,.dot.bad{border-radius:2px;box-shadow:none}.trust{border-color:var(--line);background:var(--green-bg)}.tabs{border-radius:var(--radius);background:var(--bg);backdrop-filter:none}.tab.active{border-color:var(--line-strong);background:var(--raised-2);box-shadow:none}.metric,.card,.market,.activity-item,.system-row,.automation-card,.activity-item:hover,.access{background:var(--surface);box-shadow:inset 0 1px 0 rgba(255,255,255,.025)}.metric:first-child{border-color:var(--line-strong);background:var(--raised)}.market{border-top-color:var(--line)}.button,.filter select,.help:before{border-color:var(--line-strong)}.button:disabled{cursor:wait;opacity:.62}.badge{border-color:transparent;border-radius:4px}.badge.green{background:var(--green-bg)!important}.badge.blue{background:var(--blue-bg)!important}.badge.amber{background:var(--amber-bg)!important}.badge.red{background:var(--red-bg)!important}.badge.violet{background:var(--violet-bg)!important}.role-symbol{border-color:var(--line);background:var(--blue-bg)}.automation-card.hermes .role-symbol{background:var(--violet-bg)}.automation-card.alerts .role-symbol{background:var(--amber-bg)}.metric-label,.market-label,.facts dt{color:var(--muted)}.metric-label,.market-label,.facts dt,.metric-foot,.updated,.badge,.chart-head,.chart-legend,.market-metrics span{font-size:.75rem}.market-overview,.market-metrics,.chart{border-color:var(--line)}.market-metrics,.chart{background:var(--bg)}.chart-grid{stroke:var(--line)}.chart-paper{stroke:var(--blue)}.chart-hold{stroke:var(--subtle)}.chart-legend{flex-wrap:wrap}.chart-legend span:first-child:before{background:var(--blue)}.chart-legend span:nth-child(2){margin-left:auto}.chart-legend span:nth-child(2):before,.chart-legend span:last-child:before{display:inline-block;background:repeating-linear-gradient(90deg,var(--subtle) 0 4px,transparent 4px 7px)}.automation-card p,.detail-card p{font-size:.8125rem}footer{color:var(--subtle)}@media(max-width:600px){.metric:last-child{display:flex;min-height:104px}.metric:last-child .metric-value,.metric:last-child .metric-foot{grid-column:auto;grid-row:auto}}@media(max-width:520px){.automation-grid{grid-template-columns:1fr}.automation-card{min-height:0}}@media(max-width:430px){.topbar{align-items:flex-start;flex-direction:column;justify-content:center;gap:9px}.checked{align-self:flex-start;max-width:none}.market-head{align-items:flex-start;flex-direction:column}.market-status{align-items:flex-start;flex-direction:row}}@media(max-width:390px){.tabs{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:360px){.metrics{grid-template-columns:1fr}.metric:first-child,.metric:last-child{grid-column:auto}.trust-inner{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px}.trust strong{grid-column:1/-1}.trust-inner span:first-of-type{display:flex}}`
 
-const finalCSS = `.help:focus-visible:not([aria-expanded="true"]) .help-tip{display:none}@media(max-width:600px){.metric:last-child{min-height:82px;display:grid;grid-template-columns:1fr auto;align-items:center;gap:4px 12px}.metric:last-child .metric-value{grid-column:2;grid-row:1}.metric:last-child .metric-foot{grid-column:1/-1}}@media(max-width:360px){.metric:last-child{display:flex;min-height:104px}}`
+const finalCSS = `.help:focus-visible:not([aria-expanded="true"]) .help-tip{display:none}.limit-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;margin:18px 0 0;background:var(--line);border:1px solid var(--line)}.limit-grid div{min-width:0;padding:12px;background:var(--bg)}.limit-grid dt{margin:0 0 4px;color:var(--muted);font-size:.7rem}.limit-grid dd{margin:0;font-size:.82rem;font-weight:650;overflow-wrap:anywhere}.limit-note{margin:14px 0 0;color:var(--muted);font-size:.76rem;line-height:1.5}.instruction-card{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,.9fr);gap:24px;margin-top:14px}.instruction-copy h3{margin:16px 0 7px;font-size:1.1rem}.instruction-copy p,.instruction-boundary{margin:0;color:var(--muted);font-size:.82rem;line-height:1.55}.instruction-controls{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-content:start}.instruction-controls label{display:grid;gap:6px;color:var(--muted);font-size:.74rem}.instruction-controls select{width:100%;min-height:44px;padding:0 34px 0 11px;border:1px solid var(--line-strong);border-radius:6px;background:var(--raised);color:var(--text)}.instruction-controls .button{align-self:end}.instruction-controls .button:disabled{cursor:wait;opacity:.62}#instruction-status{align-self:center;color:var(--muted);font-size:.75rem;line-height:1.35}.instruction-boundary{grid-column:1/-1;padding-top:14px;border-top:1px solid var(--line)}.instruction-boundary strong{color:var(--text)}@media(max-width:820px){.instruction-card{grid-template-columns:1fr}}@media(max-width:600px){.metric:last-child{min-height:82px;display:grid;grid-template-columns:1fr auto;align-items:center;gap:4px 12px}.metric:last-child .metric-value{grid-column:2;grid-row:1}.metric:last-child .metric-foot{grid-column:1/-1}.instruction-controls{grid-template-columns:1fr}.limit-grid{grid-template-columns:1fr 1fr}}@media(max-width:360px){.metric:last-child{display:flex;min-height:104px}.limit-grid{grid-template-columns:1fr}}`
+
+const clarityCSS = `.daily-note{margin:-5px 0 16px;padding:11px 13px;border-left:3px solid var(--blue);background:var(--blue-bg);color:#cad8ea;font-size:.78rem;line-height:1.5}.market-metrics{grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line)}.market-metrics>div{padding:12px;background:var(--bg)}.market-result-note{margin:13px 0 0;color:var(--muted);font-size:.75rem;line-height:1.5}.chart.market-price-chart{border-top:0;margin-top:12px;padding:15px;background:var(--bg);border:1px solid var(--line)}.chart.market-price-chart svg{height:72px}.chart-market{fill:none;stroke:var(--amber);stroke-width:2;vector-effect:non-scaling-stroke}.chart-market-dot{fill:var(--amber)}.chart.market-price-chart .chart-legend span:before{background:var(--amber)}.chart.market-price-chart .chart-legend span:last-child:before{display:none}.chart-title{color:var(--text);font-weight:650}.chart-change{font-weight:650}.chart-change.positive{color:var(--green)}.chart-change.negative{color:var(--red)}@media(max-width:700px){.market-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:380px){.market-metrics{grid-template-columns:1fr}.market-metrics>div{padding:11px}}`
 
 const appJS = `const $=id=>document.getElementById(id);
 let current=null;
 let refreshReset;
 let requestSequence=0;
 let liveUpdates=true;
+let instructionDirty=false;
 const safe=value=>String(value??'').replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
 const integer=value=>{try{return BigInt(value||0);}catch{return 0n;}};
 const decimal=(value,min,max)=>{let amount=integer(value),sign='';if(amount<0n){sign='-';amount=-amount;}const shift=10n**BigInt(6-max);amount=(amount+shift/2n)/shift;const base=10n**BigInt(max);const whole=amount/base;let fraction=(amount%base).toString().padStart(max,'0');while(fraction.length>min&&fraction.endsWith('0'))fraction=fraction.slice(0,-1);return sign+whole.toLocaleString()+(fraction?'.'+fraction:'');};
 const money=micros=>integer(micros)>0n&&integer(micros)<10000n?'<$0.01':'$'+decimal(micros,2,2);
 const price=micros=>{const amount=integer(micros),places=amount>=1000000n?2:amount>=10000n?4:6;return '$'+decimal(amount,2,places);};
 const paperValue=(micros,unit)=>unit==='USD'?money(micros):decimal(micros,2,6)+' '+(unit||'units');
+const assetAmount=(units,places,asset)=>{const amount=integer(units),digits=Math.max(0,Math.min(18,Number(places||0))),base=10n**BigInt(digits),whole=amount/base;let fraction=(amount%base).toString().padStart(digits,'0').replace(/0+$/,'');if(fraction.length>9)fraction=fraction.slice(0,9).replace(/0+$/,'');return whole.toLocaleString()+(fraction?'.'+fraction:'')+' '+safe(asset||'units');};
+const percent=bps=>(Number(bps||0)/100).toFixed(2).replace(/\.00$/,'')+'%';
+const duration=seconds=>Number(seconds||0)>=60&&Number(seconds||0)%60===0?(Number(seconds)/60)+' min':Number(seconds||0)+' sec';
 const deltaValue=(micros,unit)=>unit==='USD'&&integer(micros)<10000n?'<$0.01':unit==='USD'?money(micros):paperValue(micros,unit);
 const resultDelta=(from,to,unit)=>{const value=integer(to)-integer(from);if(value===0n)return 'Unchanged';return (value>0n?'Up ':'Down ')+deltaValue(value>0n?value:-value,unit);};
+const signedResult=(value,unit)=>{value=integer(value);if(value===0n)return 'Unchanged';return (value>0n?'Up ':'Down ')+deltaValue(value>0n?value:-value,unit);};
+const changePercent=(from,to)=>{from=integer(from);to=integer(to);if(from===0n)return '';const change=to-from;if(change===0n)return '0.00%';const hundredths=change*10000n/from,absolute=hundredths<0n?-hundredths:hundredths;return (change>0n?'+':'-')+(Number(absolute)/100).toFixed(2)+'%';};
+const resultWithPercent=(from,to,unit)=>{const percentage=changePercent(from,to);return resultDelta(from,to,unit)+(percentage?' ('+percentage+')':'');};
 const comparisonDelta=(from,to,unit)=>{const value=integer(to)-integer(from);if(value===0n)return 'The same';return deltaValue(value>0n?value:-value,unit)+(value>0n?' better':' worse');};
 const attempts=value=>Number(value||0)===1?'Plan tried to trade once':'Plan tried to trade '+Number(value||0)+' times';
 const tone=value=>value>0n?'positive':value<0n?'negative':'neutral';
@@ -167,9 +199,34 @@ function chartDots(points,minValue,span,start,end,unit){
   for(let index=1;index<6&&index<available.length-1;index++)indexes.add(Math.round(index*(available.length-1)/6));
   return [...indexes].sort((a,b)=>a-b).map(index=>{const point=available[index],at=Date.parse(point.at),x=end===start?50:(at-start)*100/(end-start),y=50-Number((integer(point.equity_micros)-minValue)*4400n/span)/100;const label=new Date(at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})+' · Strategy '+paperValue(point.equity_micros,unit)+' · Holding '+paperValue(point.hold_benchmark_micros,unit);return '<circle class="chart-hit" cx="'+x.toFixed(2)+'" cy="'+y.toFixed(2)+'" r="1.4"><title>'+safe(label)+'</title></circle>';}).join('');
 }
+function marketPrices(m){
+  const points=(m.history||[]).filter(point=>!point.unavailable&&integer(point.price_micros)>0n&&Number.isFinite(Date.parse(point.at))).map(point=>({...point}));
+  const observed=Date.parse(m.observed_at),currentPrice=integer(m.price_micros);
+  if(currentPrice>0n&&Number.isFinite(observed)){
+    const last=points[points.length-1];
+    if(last&&Date.parse(last.at)===observed)last.price_micros=String(currentPrice);
+    else if(!last||integer(last.price_micros)!==currentPrice)points.push({at:m.observed_at,price_micros:String(currentPrice)});
+  }
+  return points;
+}
+function marketPriceDots(points,minValue,span,start,end){
+  if(!points.length)return '';
+  const indexes=new Set([0,points.length-1]);
+  for(let index=1;index<5&&index<points.length-1;index++)indexes.add(Math.round(index*(points.length-1)/5));
+  return [...indexes].sort((a,b)=>a-b).map(index=>{const point=points[index],at=Date.parse(point.at),x=end===start?50:(at-start)*100/(end-start),y=50-Number((integer(point.price_micros)-minValue)*4400n/span)/100;const label=new Date(at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})+' · '+price(point.price_micros);return '<circle class="chart-market-dot" cx="'+x.toFixed(2)+'" cy="'+y.toFixed(2)+'" r="1.4"><title>'+safe(label)+'</title></circle>';}).join('');
+}
+function marketPriceChart(m){
+  const points=marketPrices(m),period=m.fresh?'Market price today':'Last recorded market prices';
+  if(points.length<2)return '<div class="chart market-price-chart"><div class="chart-head"><span class="chart-title">'+period+'</span><span>Open-to-now change</span></div><div class="chart-empty">Building the market chart…</div></div>';
+  const values=points.map(point=>integer(point.price_micros));let minimum=values[0],maximum=values[0];values.forEach(value=>{if(value<minimum)minimum=value;if(value>maximum)maximum=value;});
+  const span=maximum===minimum?1n:maximum-minimum,start=Date.parse(points[0].at),end=Date.parse(points[points.length-1].at);
+  const line=chartPaths(points,'price_micros',minimum,span,start,end).replaceAll('chart-price_micros','chart-market');
+  const first=points[0],last=points[points.length-1],change=integer(last.price_micros)-integer(first.price_micros),summary=m.name+' market price moved from '+price(first.price_micros)+' to '+price(last.price_micros)+' ('+changePercent(first.price_micros,last.price_micros)+').';
+  return '<div class="chart market-price-chart"><div class="chart-head"><span class="chart-title">'+period+'</span><span class="chart-change '+tone(change)+'">'+safe(changePercent(first.price_micros,last.price_micros))+'</span></div><svg viewBox="0 0 100 56" preserveAspectRatio="none" role="img" aria-label="'+safe(summary)+'"><line class="chart-grid" x1="0" y1="6" x2="100" y2="6"></line><line class="chart-grid" x1="0" y1="28" x2="100" y2="28"></line><line class="chart-grid" x1="0" y1="50" x2="100" y2="50"></line>'+line+marketPriceDots(points,minimum,span,start,end)+'</svg><div class="chart-legend"><span>Started '+price(first.price_micros)+'</span><span>Now '+price(last.price_micros)+'</span></div></div>';
+}
 function performanceChart(m){
   const points=m.history||[],available=points.filter(point=>!point.unavailable);
-  const period=m.fresh?'Today':'Last recorded session';
+  const period=m.fresh?'Our paper account today':'Last recorded paper account';
   if(available.length<2)return '<div class="chart"><div class="chart-head"><span>'+period+'</span><span>Max drawdown '+paperValue(m.max_drawdown_micros,m.value_unit)+'</span></div><div class="chart-empty">Building the performance chart…</div></div>';
   const values=available.flatMap(point=>[integer(point.equity_micros),integer(point.hold_benchmark_micros)]);
   let minimum=values[0],maximum=values[0];values.forEach(value=>{if(value<minimum)minimum=value;if(value>maximum)maximum=value;});
@@ -180,7 +237,7 @@ function performanceChart(m){
   const first=available[0],last=available[available.length-1],gaps=points.filter(point=>point.unavailable).length;
   const summary=m.name+' estimated paper account value moved from '+paperValue(first.equity_micros,m.value_unit)+' to '+paperValue(last.equity_micros,m.value_unit)+' ('+resultDelta(first.equity_micros,last.equity_micros,m.value_unit)+'). Holding comparison moved from '+paperValue(first.hold_benchmark_micros,m.value_unit)+' to '+paperValue(last.hold_benchmark_micros,m.value_unit)+' ('+resultDelta(first.hold_benchmark_micros,last.hold_benchmark_micros,m.value_unit)+'). '+gaps+' unavailable interval'+(gaps===1?'':'s')+'.';
   const dots=chartDots(points,minimum,span,start,end,m.value_unit);
-  return '<div class="chart"><div class="chart-head"><span>'+period+'</span><span>Max drawdown '+paperValue(m.max_drawdown_micros,m.value_unit)+'</span></div><svg viewBox="0 0 100 56" preserveAspectRatio="none" role="img" aria-label="'+safe(summary)+'"><line class="chart-grid" x1="0" y1="6" x2="100" y2="6"></line><line class="chart-grid" x1="0" y1="28" x2="100" y2="28"></line><line class="chart-grid" x1="0" y1="50" x2="100" y2="50"></line>'+hold+paper+dots+'</svg><div class="chart-legend"><span>Strategy '+paperValue(last.equity_micros,m.value_unit)+'</span><span>Holding '+paperValue(last.hold_benchmark_micros,m.value_unit)+'</span></div></div>';
+  return '<div class="chart"><div class="chart-head"><span class="chart-title">'+period+'</span><span>Largest drop '+paperValue(m.max_drawdown_micros,m.value_unit)+'</span></div><svg viewBox="0 0 100 56" preserveAspectRatio="none" role="img" aria-label="'+safe(summary)+'"><line class="chart-grid" x1="0" y1="6" x2="100" y2="6"></line><line class="chart-grid" x1="0" y1="28" x2="100" y2="28"></line><line class="chart-grid" x1="0" y1="50" x2="100" y2="50"></line>'+hold+paper+dots+'</svg><div class="chart-legend"><span>Our strategy '+paperValue(last.equity_micros,m.value_unit)+'</span><span>If held '+paperValue(last.hold_benchmark_micros,m.value_unit)+'</span></div></div>';
 }
 
 const tabs=[...document.querySelectorAll('.tab')];
@@ -194,6 +251,9 @@ $('refresh').addEventListener('click',()=>load(true));
 $('live').addEventListener('click',()=>{liveUpdates=!liveUpdates;$('live').setAttribute('aria-pressed',String(liveUpdates));$('live').textContent='Live updates: '+(liveUpdates?'On':'Paused');$('refresh-status').textContent=liveUpdates?'Live updates turned on':'Live updates paused';if($('notice').textContent.startsWith('Dashboard status is unavailable.'))setNotice('Dashboard status is unavailable. '+(liveUpdates?'It will retry automatically.':'Use Refresh to try again.'));if(liveUpdates&&!$('refresh').disabled)load();});
 $('activity-filter').addEventListener('change',renderActivity);
 $('open-order-history').addEventListener('click',()=>{$('activity-filter').value='orders';renderActivity();selectTab($('tab-activity'),true);});
+$('instruction-market').addEventListener('change',()=>instructionDirty=true);
+$('instruction-preference').addEventListener('change',()=>instructionDirty=true);
+$('save-instruction').addEventListener('click',saveInstruction);
 document.addEventListener('click',event=>{const selected=event.target.closest('.help');document.querySelectorAll('.help[aria-expanded="true"]').forEach(button=>{if(button!==selected)button.setAttribute('aria-expanded','false');});if(selected)selected.setAttribute('aria-expanded',String(selected.getAttribute('aria-expanded')!=='true'));else if(document.activeElement?.classList.contains('help'))document.activeElement.blur();});
 document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;document.querySelectorAll('.help[aria-expanded="true"]').forEach(button=>button.setAttribute('aria-expanded','false'));});
 
@@ -202,14 +262,16 @@ function metric(label,value,foot,klass='',explanation=''){
   return '<article class="metric"><span class="metric-label"><span>'+safe(label)+'</span>'+help(label,explanation)+'</span><strong class="metric-value '+klass+'">'+safe(value)+'</strong><span class="metric-foot">'+safe(foot)+'</span></article>';
 }
 function renderMetrics(){
-  if(!current.complete){$('metrics').innerHTML=metric('Total paper value','—','Waiting for all markets','','Estimated value of all simulated cash and coins at current prices. It is not a real wallet balance.')+metric("Today's paper result",'—','Waiting for current data','','Change across every paper market since today started. It includes coins that have not been sold.')+metric('Compared with holding','—','Waiting for current data','','Difference from leaving the starting assets unchanged.')+metric('Filled paper orders','—','Waiting for current data','','Simulated buy or sell orders that finished. More filled orders do not necessarily mean more profit.');return;}
+  if(!current.complete){$('metrics').innerHTML=metric('Paper value now','—','Waiting for all markets','','Current value of all simulated cash and coins. It is not a real wallet balance.')+metric('Started today with','—','Waiting for current data','','Value assigned to today’s independent paper test when its books opened.')+metric("Today's result",'—','Waiting for current data','','Change across every paper market since today started. It includes sold and unsold positions.')+metric('Filled paper orders','—','Waiting for current data','','Simulated buy or sell orders that finished. More filled orders do not necessarily mean more profit.');return;}
   const o=current.overview||{};
   const pnl=integer(o.equity_micros)-integer(o.opening_equity_micros);
   const hold=integer(o.equity_micros)-integer(o.hold_benchmark_micros);
   const coverage=o.coverage_ready?'Price data '+(Number(o.coverage_bps||0)/100).toFixed(2)+'%':'Price data warming';
-  $('metrics').innerHTML=metric('Total paper value',paperValue(o.equity_micros,o.value_unit),'Simulated cash + coins','neutral','Estimated value of all simulated cash and coins at current prices. It is not a real wallet balance.')+
-    metric("Today's paper result",resultDelta(o.opening_equity_micros,o.equity_micros,o.value_unit),'All markets · includes unsold coins',tone(pnl),'Change across every paper market since today started. It includes coins that have not been sold.')+
-    metric('Compared with holding',comparisonDelta(o.hold_benchmark_micros,o.equity_micros,o.value_unit),'Starting assets left unchanged',tone(hold),'Difference from leaving the starting assets unchanged.')+
+  const breakdown=o.accounting_tracked?'Closed '+signedResult(o.realized_micros,o.value_unit)+' · Open '+signedResult(o.unrealized_micros,o.value_unit):'Sold/open breakdown updating';
+  const holdingText=hold===0n?'Same as holding':comparisonDelta(o.hold_benchmark_micros,o.equity_micros,o.value_unit)+' than holding';
+  $('metrics').innerHTML=metric('Paper value now',paperValue(o.equity_micros,o.value_unit),'Simulated cash + coins','neutral','Current value of all simulated cash and coins. It is not a real wallet balance.')+
+    metric('Started today with',paperValue(o.opening_equity_micros,o.value_unit),'Daily test opening value','neutral','Value assigned to today’s independent paper test when its books opened.')+
+    metric("Today's result",resultWithPercent(o.opening_equity_micros,o.equity_micros,o.value_unit),breakdown+' · '+holdingText,tone(pnl),'Change across every paper market since today started. Closed means inventory already sold; open means the mark-to-market result still held. The holding comparison asks what happened if the starting assets were left untouched.')+
     metric('Filled paper orders',String(o.trades||0),coverage+' · '+attempts(o.signals),'neutral','The plan checked '+Number(o.signals||0)+' possible trades; only filled orders changed the paper account. Price-data coverage shows how much of today had usable independent prices. More filled orders do not necessarily mean more profit.');
 }
 function marketCard(m){
@@ -218,26 +280,81 @@ function marketCard(m){
   const badge=m.risk_halted?'<span class="badge red">New buys paused</span>':m.fresh?'<span class="badge green">Running</span>':'<span class="badge amber">Stale</span>';
   const pnl=integer(m.equity_micros)-integer(m.opening_equity_micros);
   const holding=integer(m.equity_micros)-integer(m.hold_benchmark_micros);
-  const action=m.risk_halted?'New buys paused':!m.fresh?'Waiting for fresh prices':m.next_action?'Looking to '+safe(m.next_action):'Watching';
-  const actionNote=m.risk_halted?'Sells can still reduce risk':!m.fresh?'The plan waits until prices recover':m.next_action?'Only if the opportunity is strong enough':state(m.state);
+	const feeBudgetUsed=m.fresh&&Boolean(m.fee_budget_tracked)&&!Number(m.estimated_fills_remaining||0);
+  const action=feeBudgetUsed?'Orders paused for today':m.risk_halted?'New buys paused':!m.fresh?'Waiting for fresh prices':m.next_action?'Looking to '+safe(m.next_action):'Watching';
+  const actionNote=feeBudgetUsed?'Simulated SOL for fees is used up':m.risk_halted?'Sells can still reduce risk':!m.fresh?'The plan waits until prices recover':m.next_action?'Only if the opportunity is strong enough':state(m.state);
   const marketPrice=m.price_micros?price(m.price_micros):'Learning';
   const priceLabel=m.fresh?'Market price':'Last market price';
   const resultLabel=m.fresh?"Today's result":'Last result';
-  const comparisonLabel=m.fresh?'Compared with holding':'Last compared with holding';
   const coverage=m.coverage_ready?'Price data '+(Number(m.coverage_bps||0)/100).toFixed(2)+'%':'Price data warming';
-  return '<article class="market"><div class="market-head"><h3>'+safe(m.name)+'</h3><div class="market-status"><span class="updated">'+safe(age(m.observed_at))+'</span>'+badge+'</div></div><div class="market-overview"><div><span class="market-label">'+priceLabel+'</span><strong class="market-price">'+marketPrice+'</strong></div><div><span class="market-label">Current plan</span><strong class="market-plan">'+action+'</strong><span class="market-context">'+safe(actionNote)+'</span></div></div><div class="market-metrics"><div><span>This market value</span><strong>'+paperValue(m.equity_micros,m.value_unit)+'</strong></div><div><span>'+resultLabel+'</span><strong class="'+tone(pnl)+'">'+resultDelta(m.opening_equity_micros,m.equity_micros,m.value_unit)+'</strong></div><div><span>'+comparisonLabel+'</span><strong class="'+tone(holding)+'">'+comparisonDelta(m.hold_benchmark_micros,m.equity_micros,m.value_unit)+'</strong></div><div><span>Filled orders</span><strong>'+safe(String(m.trades||0))+'</strong><span class="market-detail">'+safe(coverage+' · '+attempts(m.signals))+'</span></div></div>'+performanceChart(m)+'</article>';
+  const prices=marketPrices(m),openPrice=prices.length?prices[0].price_micros:0,marketChange=openPrice?changePercent(openPrice,m.price_micros):'Building';
+  const closed=m.accounting_tracked?signedResult(m.realized_micros,m.value_unit):'Updating';
+  const open=m.accounting_tracked?signedResult(m.unrealized_micros,m.value_unit):'Updating';
+  const holdingText=holding===0n?'Same as holding':comparisonDelta(m.hold_benchmark_micros,m.equity_micros,m.value_unit)+' than holding';
+  return '<article class="market"><div class="market-head"><h3>'+safe(m.name)+'</h3><div class="market-status"><span class="updated">'+safe(age(m.observed_at))+'</span>'+badge+'</div></div><div class="market-overview"><div><span class="market-label">'+priceLabel+'</span><strong class="market-price">'+marketPrice+'</strong></div><div><span class="market-label">Current plan</span><strong class="market-plan">'+action+'</strong><span class="market-context">'+safe(actionNote)+'</span></div></div><div class="market-metrics"><div><span>Market today</span><strong class="'+tone(openPrice?integer(m.price_micros)-integer(openPrice):0n)+'">'+safe(marketChange)+'</strong><span class="market-detail">'+(openPrice?'Started '+price(openPrice):'Collecting today’s prices')+'</span></div><div><span>'+resultLabel+'</span><strong class="'+tone(pnl)+'">'+resultWithPercent(m.opening_equity_micros,m.equity_micros,m.value_unit)+'</strong><span class="market-detail">Started '+paperValue(m.opening_equity_micros,m.value_unit)+'</span></div><div><span>Paper value now</span><strong>'+paperValue(m.equity_micros,m.value_unit)+'</strong><span class="market-detail">'+safe(holdingText)+'</span></div><div><span>Closed-trade result</span><strong class="'+tone(integer(m.realized_micros))+'">'+closed+'</strong><span class="market-detail">Inventory already sold</span></div><div><span>Open-position result</span><strong class="'+tone(integer(m.unrealized_micros))+'">'+open+'</strong><span class="market-detail">Inventory still held</span></div><div><span>Filled orders</span><strong>'+safe(String(m.trades||0))+'</strong><span class="market-detail">'+safe(coverage+' · '+attempts(m.signals))+'</span></div></div><p class="market-result-note">Closed-trade result + open-position result = today’s result. A sell does not guarantee profit; its fill price and the account result after it remain in Activity.</p>'+marketPriceChart(m)+performanceChart(m)+'</article>';
 }
 function strategyCard(m){
   const unavailable=!m.available,label=unavailable?'Unavailable':m.ready?(m.strategy==='adaptive'?'Market-responsive paper plan':m.strategy||'Saved plan'):'Updating';
-  const next=unavailable?'Status source unavailable':!m.ready?'Waiting for status':!m.fresh?'Waiting for fresh prices':m.risk_halted?'New buys paused; sells can still reduce risk':m.next_action?'If a good opportunity appears: '+m.next_action:'No next side yet';
+	const feeBudgetUsed=m.fresh&&Boolean(m.fee_budget_tracked)&&!Number(m.estimated_fills_remaining||0);
+  const next=unavailable?'Status source unavailable':!m.ready?'Waiting for status':feeBudgetUsed?'Orders paused until tomorrow; simulated SOL for fees is used up':!m.fresh?'Waiting for fresh prices':m.risk_halted?'New buys paused; sells can still reduce risk':m.next_action?'If a good opportunity appears: '+m.next_action:'No next side yet';
   const status=unavailable?'Unavailable':m.ready?state(m.state):'Status updating';
   const trades=unavailable||!m.ready?'—':(m.trades||0)+' filled paper orders · '+attempts(m.signals).toLowerCase()+' '+(m.fresh?'today':'in the last recorded session');
-  const note=m.strategy==='adaptive'?'<p class="metric-foot">Prices change decisions now. New parameter versions must beat the current plan in a separate forward paper test before selection.</p>':'';
-  return '<article class="market"><div class="market-head"><h3>'+safe(m.name)+'</h3><span class="badge '+(unavailable?'red':'blue')+'">'+safe(label)+'</span></div><p class="strategy-next">'+safe(next)+'</p><div class="market-state"><strong>'+safe(status)+'</strong><span>'+safe(trades)+'</span></div>'+note+'</article>';
+  if(unavailable||!m.ready)return '<article class="market"><div class="market-head"><h3>'+safe(m.name)+'</h3><span class="badge '+(unavailable?'red':'amber')+'">'+safe(label)+'</span></div><p class="strategy-next">'+safe(next)+'</p><div class="market-state"><strong>'+safe(status)+'</strong><span>'+safe(trades)+'</span></div></article>';
+  const lot=m.initial_lot_units?assetAmount(m.initial_lot_units,m.initial_lot_decimals,m.initial_lot_asset):'Updating';
+  const reserve=m.fee_reserve_lamports?assetAmount(m.fee_reserve_lamports,9,'SOL'):'None';
+  const feeLeft=m.fee_budget_tracked?(m.estimated_fills_remaining?String(m.estimated_fills_remaining)+' estimated orders':'No more orders today'):'Not tracked';
+	const feeReserveLeft=m.fee_budget_tracked?assetAmount(m.remaining_fee_reserve_lamports||0,9,'SOL'):'Not tracked';
+  const cadence=m.tick_seconds?'Every '+duration(m.tick_seconds):'Updating';
+  const settle=m.settle_seconds?duration(m.settle_seconds):'Updating';
+	const why={'watching':'Watching the next price update','collecting_history':'Still learning recent prices','drawdown_limit':'Reducing risk after the loss limit','risk_halt':'New buys are paused by the loss limit','drawdown_halt':'New buys are paused by the loss limit','volatility_limit':'The market is moving too quickly','cooldown':'Taking a short break after a fill','trend_aligned_buy':'The trend supported a buy','sell_leg_waiting':'Waiting for a better sell move','trend_aligned_sell':'The trend supported a sell','buy_leg_waiting':'Waiting for a better buy move','range_high_sell':'Price reached the plan’s sell range','range_low_buy':'Price reached the plan’s buy range','signal_below_cost_hurdle':'The move is too small after costs','data_unavailable':'Fresh prices are unavailable','fee_budget_used':'Today’s simulated fee budget is used up','route_cost_limit':'The route was too expensive','order_pending':'A paper order is waiting to fill','order_filled':'The latest paper order filled','fill_limit':'Price moved beyond the fill limit','trade_unavailable':'The paper trade could not be priced or funded'}[m.decision_reason]||'Watching the market';
+  const limits='<dl class="limit-grid">'+
+    '<div><dt>Today\'s starting paper value</dt><dd>'+safe(paperValue(m.opening_equity_micros,m.value_unit))+'</dd></div>'+
+    '<div><dt>Starting trade lot</dt><dd>'+lot+'</dd></div>'+
+    '<div><dt>Fee reserve</dt><dd>'+reserve+'</dd></div>'+
+		'<div><dt>Fee budget left</dt><dd>'+feeReserveLeft+'</dd></div>'+
+		'<div><dt>Orders left today</dt><dd>'+safe(feeLeft)+'</dd></div>'+
+    '<div><dt>Loss pause</dt><dd>'+safe(m.max_drawdown_bps?percent(m.max_drawdown_bps):'Not set')+' below today\'s high</dd></div>'+
+    '<div><dt>Minimum opportunity</dt><dd>'+safe(m.minimum_signal_bps?percent(m.minimum_signal_bps):'Not set')+'</dd></div>'+
+    '<div><dt>After a fill</dt><dd>Wait '+safe(duration(m.cooldown_seconds))+'</dd></div>'+
+    '<div><dt>Price checks</dt><dd>'+safe(cadence)+'</dd></div>'+
+    '<div><dt>Order scoring delay</dt><dd>'+safe(settle)+'</dd></div>'+
+    '<div><dt>Slippage ceiling</dt><dd>'+safe(m.slippage_bps?percent(m.slippage_bps):'Not set')+'</dd></div>'+
+    '<div><dt>Route impact ceiling</dt><dd>'+safe(m.max_quote_impact_bps?percent(m.max_quote_impact_bps):'Not set')+'</dd></div>'+
+    '<div><dt>Volatility pause</dt><dd>'+safe(m.max_volatility_bps?percent(m.max_volatility_bps):'Not set')+'</dd></div>'+
+    '<div><dt>Price memory</dt><dd>'+safe(m.fast_window&&m.slow_window?m.fast_window+' / '+m.slow_window+' checks':'Not set')+'</dd></div></dl>';
+  const note='<p class="limit-note"><strong>Why now:</strong> '+safe(why)+'</p><p class="limit-note">Later orders use the simulated proceeds, so the lot is not a fixed dollar order. Absolute profit is the percentage return multiplied by this paper capital; a larger mandate scales gains and losses, not strategy quality.</p>';
+  return '<article class="market"><div class="market-head"><h3>'+safe(m.name)+'</h3><span class="badge blue">'+safe(label)+'</span></div><p class="strategy-next">'+safe(next)+'</p><div class="market-state"><strong>'+safe(status)+'</strong><span>'+safe(trades)+'</span></div>'+limits+note+'</article>';
+}
+function instructionLabel(value){return {'more-opportunities':'Look for more opportunities',balanced:'Keep it balanced','more-selective':'Be more selective'}[value]||'Saved preference';}
+function renderInstruction(){
+	const card=$('research-instruction');
+	card.hidden=!current.instructions_enabled;
+	card.style.display=card.hidden?'none':'';
+	if(card.hidden)return;
+  const market=$('instruction-market'),selected=market.value||'all';
+  const options=[...new Set(['all',...current.markets.map(item=>item.name),...(current.research_markets||[])])];
+  if([...market.options].map(option=>option.value).join('|')!==options.join('|'))market.innerHTML=options.map(value=>'<option value="'+safe(value)+'">'+(value==='all'?'All paper markets':safe(value))+'</option>').join('');
+  if(instructionDirty){if(options.includes(selected))market.value=selected;return;}
+  const saved=current.instruction;
+  market.value=saved&&options.includes(saved.market)?saved.market:'all';
+  $('instruction-preference').value=saved?.preference||'balanced';
+  $('instruction-status').textContent=current.instruction_error?'Saved preference is unavailable and will not be used.':saved?'Saved for the next research run: '+instructionLabel(saved.preference)+'.':'No preference saved yet.';
+}
+async function saveInstruction(){
+  const button=$('save-instruction'),status=$('instruction-status');
+  if(!current){status.textContent='Wait for the first dashboard update, then try again.';return;}
+  button.disabled=true;button.textContent='Saving…';status.textContent='Saving research preference…';
+  try{
+    const response=await fetch('/api/v1/instruction',{method:'POST',headers:{'Content-Type':'application/json','X-Mithril-Paper-Request':'1'},body:JSON.stringify({market:$('instruction-market').value,preference:$('instruction-preference').value})});
+    if(!response.ok)throw new Error('save failed');
+    current.instruction=await response.json();current.instruction_error=false;instructionDirty=false;renderInstruction();
+  }catch(error){status.textContent='Could not save. The live paper plans were not changed.';}
+  finally{button.disabled=false;button.textContent='Save preference';}
 }
 function renderMarkets(){
   $('markets').innerHTML=current.markets.length?current.markets.map(marketCard).join(''):'<div class="empty">No paper markets configured.</div>';
   $('strategy-markets').innerHTML=current.markets.map(strategyCard).join('');
+  renderInstruction();
 }
 function activityUSD(amount){
   const value=Number(amount);
@@ -245,9 +362,9 @@ function activityUSD(amount){
   return value>0&&value<.005?'<$0.01':'$'+value.toFixed(2);
 }
 function readableActivityResult(line){
-  const value=line.match(/^This market value: \$([0-9]+(?:\.[0-9]+)?)$/);
-  if(value)return 'This market value: '+activityUSD(value[1]);
-  const result=line.match(/^(This market(?:'s result)? (?:today|gain\/loss):) (up|down) \$([0-9]+(?:\.[0-9]+)?)(.*)$/);
+  const value=line.match(/^(?:This market value|Paper value now): \$([0-9]+(?:\.[0-9]+)?)$/);
+  if(value)return 'Paper value now: '+activityUSD(value[1]);
+  const result=line.match(/^((?:This market(?:'s result)? (?:today|gain\/loss)|Today's result after trade):) (up|down) \$([0-9]+(?:\.[0-9]+)?)(.*)$/);
   if(!result)return line;
   const profit=result[2]==='up';
   return result[1]+' '+(profit?'🟢 ▲ ':'🔴 ▼ ')+activityUSD(result[3])+' ('+(profit?'profit':'loss')+')'+result[4];
@@ -264,6 +381,7 @@ function readableActivity(message){
       .replace(/\b1 trade\b/g,'1 filled paper order').replace(/\b(\d+) trades\b/g,'$1 filled paper orders')
       .replace('Versus no trading:','Compared with holding:').replace('Compared with no trading:','Compared with holding:'));
   }
+  if(/\b(?:BOUGHT|SOLD)\b/.test(lines[0]))for(let index=1;index<lines.length;index++)lines[index]=lines[index].replace('This market value:','Paper value now:').replace("This market's result today:","Today's result after trade:");
   if(lines[1]?.includes(' → ')){
     const [movement,...rest]=lines[1].split(' · '),[from,to]=movement.split(' → ');
     if(from&&to){const sell=/\bSOLD\b/i.test(lines[0]);lines.splice(1,1,(sell?'Sold ':'Paid ')+from,(sell?'Received ':'Bought ')+to,...rest);}
@@ -285,15 +403,30 @@ function renderActivity(){
   }).join(''):'<div class="empty">No matching activity yet.</div>';
 }
 function automationCard(klass,symbol,title,label,toneName,description){return '<article class="automation-card '+klass+'"><div class="automation-head"><span class="role-symbol" aria-hidden="true">'+safe(symbol)+'</span><span class="badge '+toneName+'">'+safe(label)+'</span></div><h3>'+safe(title)+'</h3><p>'+safe(description)+'</p></article>';}
+function researchView(){
+  if(!current.research_enabled)return {label:'Not connected',tone:'amber',description:'No validated Hermes packet path is configured.',detail:'Hermes remains outside the trading and wallet boundary.'};
+  if(current.research_error)return {label:'Rejected output',tone:'red',description:'The latest output did not pass the Mithril packet checks.',detail:'No proposal or policy change was accepted.'};
+  const packet=current.research;
+  if(!packet)return {label:'No valid run yet',tone:'amber',description:'Waiting for the first validated source-cited packet.',detail:'The paper plans continue without Hermes input.'};
+  const evidence=packet.verified_facts+' verified fact'+(packet.verified_facts===1?'':'s')+' from '+packet.sources+' source'+(packet.sources===1?'':'s');
+  if(!packet.current)return {label:'Expired',tone:'amber',description:safe(packet.market)+' research expired. '+evidence+'.',detail:'It cannot be used for a new paper experiment.'};
+  const passed=packet.risk_decision==='pass';
+  const label=packet.disposition==='candidate'&&packet.actionable?'Proposal ready':packet.disposition==='blocked'?'Vetoed':'No change';
+  const tone=packet.disposition==='candidate'&&packet.actionable?'blue':packet.disposition==='blocked'?'red':'green';
+  const changes=(packet.proposed_changes||[]).map(change=>change.name.replaceAll('_',' ')+' '+change.current+' → '+change.proposed).join(' · ');
+	  return {label,tone,description:safe(packet.market)+' · '+evidence+' · '+age(packet.created_at)+'.',detail:'Risk check '+(passed?'passed':'rejected')+': '+safe(packet.risk_reason)+(changes?' Proposed only: '+safe(changes)+'.':'')+' No active plan was changed.'};
+}
 function renderSystem(){
   const healthy=current.markets.filter(m=>m.available&&m.ready&&m.fresh).length,total=current.markets.length;
   const marketNames=current.markets.map(m=>m.name).join(', ')||'none configured';
+	const research=researchView();
   $('automation').innerHTML=
     automationCard('engines','BOT','Paper engines',healthy===total&&total?'Running':'Needs attention',healthy===total&&total?'green':'amber',healthy+' of '+total+' market observers are current: '+marketNames+'. They make the current simulated decisions.')+
-    automationCard('hermes','H','Nous Hermes','Configured','violet','The isolated research profile is configured for scheduled source checks and bounded paper proposals. This dashboard does not yet prove its timer is currently healthy.')+
+    automationCard('hermes','H','Nous Hermes',research.label,research.tone,research.description)+
     automationCard('strategy','AD','Versioned learning','Gate required','blue','Market rules adapt on current prices. A new parameter version can replace a paper plan only after independent forward evidence; configuration alone does not mean it passed.')+
     automationCard('alerts','TG','Telegram alerts','Open + filled','amber','Sends concise open-order, filled-order, safety, data, and daily-result messages. Unfilled attempts appear in Recent activity instead of creating Telegram noise.');
   $('system-list').innerHTML=current.markets.map(m=>{const healthy=m.available&&m.ready&&m.fresh;const updating=m.available&&!m.ready;const description=healthy?'Paper observer and bounded status are current.':updating?'Waiting for the first complete paper status.':m.available?'Observer status is older than expected.':'Status source could not be read. Other markets continue independently.';const label=healthy?'Healthy':updating?'Updating':m.available?'Stale':'Unavailable';return '<article class="system-row"><p><strong>'+safe(m.name)+'</strong></p><p class="description">'+description+'</p><span class="badge '+(healthy?'green':updating||m.available?'amber':'red')+'">'+label+'</span></article>';}).join('');
+	$('research-evidence').innerHTML='<span class="badge '+research.tone+'">'+safe(research.label)+'</span><h3>Latest Hermes research</h3><p>'+safe(research.description)+'<br>'+safe(research.detail)+'</p>';
 }
 function setNotice(message){if($('notice').textContent!==message)$('notice').textContent=message;}
 function render(){

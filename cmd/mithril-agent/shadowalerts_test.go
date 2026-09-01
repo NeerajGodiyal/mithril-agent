@@ -108,6 +108,80 @@ func TestPaperStartingSizeUsesBuyFirstOpeningInventory(t *testing.T) {
 	}
 }
 
+func TestPaperSettingsExposeOnlyBoundedUserFacingLimits(t *testing.T) {
+	policy := validShadowPolicy()
+	policy.Cluster = shadow.Mainnet
+	policy.Market = shadow.MarketJUPUSDC
+	policy.Trigger.Direction = pricetrigger.BuyAtOrBelow
+	policy.InputAmount = 250_000_000
+	policy.InputDecimals = 6
+	policy.OutputDecimals = 6
+	policy.FeeLamports = 100_000
+	policy.StartingFeeReserveLamports = 32_000_000
+	policy.OneTimeSetupRentLamports = 3_000_000
+	adaptive, err := shadow.DefaultAdaptivePolicy(
+		policy.SlippageBPS, policy.FeeLamports, policy.InputAmount, policy.TickSeconds,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Adaptive = &adaptive
+	summary := &paperstatus.CurrentSummary{}
+	addPaperSettings(summary, policy)
+	addPaperFeeBudget(summary, policy, shadow.Ledger{FeeReserveLamports: 32_000_000})
+	if summary.InitialLotUnits != 250_000_000 || summary.InitialLotDecimals != 6 ||
+		summary.InitialLotAsset != "USDC" || summary.FeeReserveLamports != 32_000_000 ||
+		summary.FeeLamports != 100_000 || !summary.FeeBudgetTracked ||
+		summary.RemainingFeeReserveLamports != 29_000_000 ||
+		summary.EstimatedFillsRemaining != 290 ||
+		summary.SlippageBPS != policy.SlippageBPS || summary.SettleSeconds != policy.SettleSeconds ||
+		summary.FastWindow != adaptive.FastWindow || summary.SlowWindow != adaptive.SlowWindow ||
+		summary.MaxDrawdownBPS != adaptive.MaxDrawdownBPS ||
+		summary.CooldownSeconds != adaptive.CooldownSeconds {
+		t.Fatalf("paper settings = %+v", summary)
+	}
+}
+
+func TestPaperFeeBudgetDoesNotCountLockedSetupRentTwice(t *testing.T) {
+	policy := validShadowPolicy()
+	policy.FeeLamports = 100_000
+	policy.StartingFeeReserveLamports = 32_000_000
+	policy.OneTimeSetupRentLamports = 3_000_000
+	remaining, fills, ok := paperFeeBudget(policy, shadow.Ledger{
+		FeeReserveLamports: 28_900_000, LockedRentLamports: 3_000_000,
+	})
+	if !ok || remaining != 28_900_000 || fills != 289 {
+		t.Fatalf("fee budget = %d lamports, %d fills, ok=%t", remaining, fills, ok)
+	}
+	remaining, fills, ok = paperFeeBudget(policy, shadow.Ledger{FeeReserveLamports: 3_000_000})
+	if !ok || remaining != 0 || fills != 0 {
+		t.Fatalf("pre-setup exhausted budget = %d lamports, %d fills, ok=%t", remaining, fills, ok)
+	}
+}
+
+func TestPaperDecisionReasonExplainsQuietAndBlockedTicks(t *testing.T) {
+	for name, test := range map[string]struct {
+		tick   shadow.Tick
+		budget bool
+		want   string
+	}{
+		"adaptive wait": {
+			tick: shadow.Tick{Event: shadow.EventWaiting, Decision: &shadow.AdaptiveDecision{
+				Reason: "signal_below_cost_hurdle",
+			}}, want: "signal_below_cost_hurdle",
+		},
+		"route cost": {tick: shadow.Tick{Event: shadow.EventFiltered}, want: "route_cost_limit"},
+		"fill limit": {tick: shadow.Tick{Event: shadow.EventRefused}, want: "fill_limit"},
+		"fee budget": {tick: shadow.Tick{Event: shadow.EventMissed}, budget: true, want: "fee_budget_used"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := paperDecisionReason(test.tick, test.budget); got != test.want {
+				t.Fatalf("reason = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestPaperCurrentMakesAQuietAdaptiveLoopVisible(t *testing.T) {
 	policy := validShadowPolicy()
 	adaptive, err := shadow.DefaultAdaptivePolicy(

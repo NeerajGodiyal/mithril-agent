@@ -20,7 +20,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 )
 
-const usage = "Usage: mithril-agent-paper-dashboard --paper-status-socket MARKET=/absolute/path [--paper-status-socket MARKET=/absolute/path]"
+const usage = "Usage: mithril-agent-paper-dashboard --paper-status-socket MARKET=/absolute/path [--instruction-path /absolute/path] [--research-packet-path /absolute/path]"
 
 var activatedListener = systemdUnixListener
 
@@ -44,7 +44,11 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("mithril-agent-paper-dashboard", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var sockets socketPaths
+	var instructionPath, researchPath, renderInstructionPath string
 	flags.Var(&sockets, "paper-status-socket", "MARKET=/absolute/path to a bounded paper status socket")
+	flags.StringVar(&instructionPath, "instruction-path", "", "private path for a bounded paper research preference")
+	flags.StringVar(&researchPath, "research-packet-path", "", "private path for the latest validated Hermes packet")
+	flags.StringVar(&renderInstructionPath, "render-instruction", "", "render a validated preference for the Hermes research prompt")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, usage)
@@ -52,7 +56,21 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		}
 		return err
 	}
-	if flags.NArg() != 0 || len(sockets) == 0 {
+	if renderInstructionPath != "" {
+		if flags.NArg() != 0 || len(sockets) != 0 || instructionPath != "" || researchPath != "" ||
+			!cleanAbsolutePath(renderInstructionPath) {
+			return errors.New("--render-instruction requires one clean absolute path and no server flags")
+		}
+		rendered, err := paperdashboard.RenderInstruction(renderInstructionPath)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprint(output, rendered)
+		return err
+	}
+	if flags.NArg() != 0 || len(sockets) == 0 ||
+		(instructionPath != "" && !cleanAbsolutePath(instructionPath)) ||
+		(researchPath != "" && !cleanAbsolutePath(researchPath)) {
 		return errors.New("at least one --paper-status-socket is required")
 	}
 	sources := make([]paperdashboard.Source, 0, len(sockets))
@@ -66,6 +84,16 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	handler, err := paperdashboard.New(sources)
 	if err != nil {
 		return err
+	}
+	if instructionPath != "" {
+		if err := handler.EnableInstructions(instructionPath); err != nil {
+			return err
+		}
+	}
+	if researchPath != "" {
+		if err := handler.EnableResearch(researchPath); err != nil {
+			return err
+		}
 	}
 	listener, err := activatedListener()
 	if err != nil {

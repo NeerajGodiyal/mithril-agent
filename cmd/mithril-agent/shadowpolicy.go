@@ -34,15 +34,16 @@ you; everything else has a working default.
   --cluster NAME    mainnet-beta (default) or devnet
   --adaptive        derive actions from rolling trend, volatility, and range;
                     do not provide fixed buy or sell prices
-  --market NAME     paper mandate market: SOL/USDC, JUP/USDC, or WIF/USDC
+  --market NAME     paper mandate market: SOL/USDC, JUP/USDC, WIF/USDC,
+                    JTO/USDC, or PYTH/USDC
 	--admission-artifact PATH
-	                    qualified market-evidence artifact for WIF/USDC
+	                    qualified evidence for an admitted candidate market
 	--admission-journal PATH
 	                    exact journal bound by that artifact
   --budget-sol N    total simulated SOL budget, including fees and setup rent
-  --budget-usdc N   simulated USDC budget for JUP/USDC
+  --budget-usdc N   simulated USDC budget for non-SOL token markets
   --fee-reserve-sol N
-                    simulated native reserve for JUP/USDC (default 0.004)
+                    simulated native reserve for token markets (default 0.080)
   --setup-rent-sol N
                     one-time native capital locked by token setup (default 0.003)
   --drawdown-stop-bps N
@@ -68,8 +69,10 @@ const (
 	defaultPaperFeeLamports        = uint64(100_000)
 	defaultPaperFeeReserveLamports = uint64(1_000_000) // 0.001 SOL
 	defaultPaperMandateReserve     = uint64(4_000_000) // 0.004 SOL
-	defaultJUPFeeReserveLamports   = uint64(4_000_000) // 0.004 SOL
-	defaultJUPSetupRentLamports    = uint64(3_000_000) // 0.003 SOL
+	// 0.003 SOL setup rent plus 770 attempts at the conservative default fee
+	// covers a full day even when every settled signal is submitted and refused.
+	defaultTokenFeeReserveLamports = uint64(80_000_000) // 0.080 SOL
+	defaultTokenSetupRentLamports  = uint64(3_000_000)  // 0.003 SOL
 )
 
 func runShadowPolicy(args []string, output io.Writer) error {
@@ -84,11 +87,11 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	budgetSOL := flags.String("budget-sol", "", "total simulated SOL budget")
 	budgetUSDC := flags.String("budget-usdc", "", "simulated USDC budget")
 	feeReserveSOL := flags.String(
-		"fee-reserve-sol", formatShadowAmount(defaultJUPFeeReserveLamports, 9),
+		"fee-reserve-sol", formatShadowAmount(defaultTokenFeeReserveLamports, 9),
 		"simulated native fee reserve",
 	)
 	setupRentSOL := flags.String(
-		"setup-rent-sol", formatShadowAmount(defaultJUPSetupRentLamports, 9),
+		"setup-rent-sol", formatShadowAmount(defaultTokenSetupRentLamports, 9),
 		"one-time token setup rent",
 	)
 	drawdownStopBPS := flags.Uint("drawdown-stop-bps", 0, "daily paper drawdown stop")
@@ -150,10 +153,10 @@ func runShadowPolicy(args []string, output io.Writer) error {
 			return errors.New("paper mandate flags require --adaptive on mainnet-beta")
 		}
 		if *market != shadow.MarketSOLUSDC && *market != shadow.MarketJUPUSDC &&
-			*market != shadow.MarketWIFUSDC {
-			return errors.New("--market must be SOL/USDC, JUP/USDC, or WIF/USDC")
+			!shadow.AdmittedMarket(*market) {
+			return errors.New("--market must be SOL/USDC, JUP/USDC, WIF/USDC, JTO/USDC, or PYTH/USDC")
 		}
-		admitted := *market == shadow.MarketWIFUSDC
+		admitted := shadow.AdmittedMarket(*market)
 		if admitted {
 			var err error
 			admission, err = loadQualifiedMarketAdmission(
@@ -172,7 +175,7 @@ func runShadowPolicy(args []string, output io.Writer) error {
 				return errors.New("--slippage-bps must match the qualified market evidence")
 			}
 		} else if *admissionArtifact != "" || *admissionJournal != "" {
-			return errors.New("market admission flags are only for WIF/USDC")
+			return errors.New("market admission flags are only for admitted candidate markets")
 		}
 		if !explicit["drawdown-stop-bps"] {
 			return errors.New("paper mandate requires --drawdown-stop-bps")
@@ -219,7 +222,7 @@ func runShadowPolicy(args []string, output io.Writer) error {
 				return err
 			}
 			if admitted && tradeAmount != admission.Candidate.QuoteNotionalUSDC {
-				return errors.New("WIF/USDC paper budget must match the qualified quote notional")
+				return errors.New("admitted paper budget must match the qualified quote notional")
 			}
 			feeReserveLamports, err = parseDecimalUnits9(*feeReserveSOL, "paper SOL fee reserve")
 			if err != nil {
@@ -243,8 +246,8 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	var policy shadow.Policy
 	var err error
 	if *adaptive {
-		if mandate && (*market == shadow.MarketJUPUSDC || *market == shadow.MarketWIFUSDC) {
-			if *market == shadow.MarketWIFUSDC {
+		if mandate && (*market == shadow.MarketJUPUSDC || shadow.AdmittedMarket(*market)) {
+			if shadow.AdmittedMarket(*market) {
 				policy, err = buildAdaptiveAdmittedPolicy(
 					admission, tradeAmount, feeReserveLamports, setupRentLamports,
 					uint16(*slippageBPS), *feeLamports, *observe, *tickSeconds,
@@ -410,6 +413,10 @@ func buildAdaptiveQuoteMarketPolicy(
 	tickSeconds uint64,
 ) (shadow.Policy, error) {
 	const nativeFeePriceCeilingMicros = uint64(1_000_000_000) // $1,000/SOL
+	baseDecimals, ok := shadow.MainnetMarketBaseDecimals(market)
+	if !ok {
+		return shadow.Policy{}, errors.New("paper market decimals are unsupported")
+	}
 	triggerVersion := pricetrigger.MultiFeedVersion
 	if version == shadow.AdmittedVersion {
 		triggerVersion = pricetrigger.AdmittedFeedVersion
@@ -451,7 +458,7 @@ func buildAdaptiveQuoteMarketPolicy(
 		Adaptive:             &adaptive, Trigger: trigger, ReturnTrigger: &returnTrigger,
 		QuoteRoute:  shadow.MainnetMarketQuoteRoute(market, false),
 		Observe:     observe,
-		InputAmount: quoteBudget, InputDecimals: 6, OutputDecimals: 6,
+		InputAmount: quoteBudget, InputDecimals: 6, OutputDecimals: baseDecimals,
 		SlippageBPS: slippageBPS, FeeLamports: feeLamports,
 		TickSeconds: tickSeconds, SettleSeconds: 60,
 		StartingInputUnits:         quoteBudget,

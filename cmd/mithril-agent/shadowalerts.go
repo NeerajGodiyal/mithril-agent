@@ -92,6 +92,11 @@ func (s *shadowRun) alertTick(tick shadow.Tick, nextSell bool) error {
 			shadowSide(nextSell))
 		return s.appendAlert(tick.At, paperstatus.KindOrderRefused, key, message)
 	case tick.Event == shadow.EventMissed:
+		if s.paperFeeBudgetUsed() {
+			message := "PAPER · ⏸ ORDERS PAUSED\nSimulated SOL for fees is used up today"
+			budgetKey := s.policySHA256 + "/" + dayKey(tick.At) + "/fee-budget-used"
+			return s.appendAlert(tick.At, paperstatus.KindOrderMissed, budgetKey, message)
+		}
 		message := fmt.Sprintf("PAPER · ⏭ %s SKIPPED\nTrade could not be completed",
 			shadowSide(nextSell))
 		return s.appendAlert(tick.At, paperstatus.KindOrderMissed, key, message)
@@ -147,7 +152,9 @@ func (s *shadowRun) updatePaperCurrent(tick shadow.Tick, nextSell bool) error {
 		ledger := s.runner.Ledger()
 		equity, equityErr := ledger.EquityMicros(s.lastPrice)
 		hold, holdErr := ledger.HoldBenchmarkMicros(s.lastPrice)
-		if equityErr == nil && holdErr == nil && ledger.OpeningEquityMicros != 0 {
+		unrealized, unrealizedErr := ledger.UnrealizedMicros(s.lastPrice)
+		if equityErr == nil && holdErr == nil && unrealizedErr == nil &&
+			ledger.OpeningEquityMicros != 0 {
 			drawdown := ledger.PeakEquityMicros - min(equity, ledger.PeakEquityMicros)
 			message = addPaperPerformance(message, paperPerformanceLine(
 				ledger.OpeningEquityMicros, equity, hold, paperValueUnit(s.policy),
@@ -158,7 +165,9 @@ func (s *shadowRun) updatePaperCurrent(tick shadow.Tick, nextSell bool) error {
 				TickSeconds:         s.policy.TickSeconds,
 				OpeningEquityMicros: ledger.OpeningEquityMicros,
 				EquityMicros:        equity, HoldBenchmarkMicros: hold,
-				DrawdownMicros: drawdown, MaxDrawdownMicros: ledger.MaxDrawdownMicros,
+				AccountingTracked: true, RealizedMicros: ledger.RealizedMicros,
+				UnrealizedMicros: unrealized,
+				DrawdownMicros:   drawdown, MaxDrawdownMicros: ledger.MaxDrawdownMicros,
 				Checks:       counts.Ticks,
 				Signals:      counts.Signals,
 				Trades:       counts.Fills,
@@ -170,9 +179,85 @@ func (s *shadowRun) updatePaperCurrent(tick shadow.Tick, nextSell bool) error {
 				NextAction:   strings.ToLower(shadowSide(nextSell)),
 				RiskHalted:   s.runner.RiskHalted(),
 			}
+			addPaperSettings(summary, s.policy)
+			addPaperFeeBudget(summary, s.policy, ledger)
+			summary.DecisionReason = paperDecisionReason(tick,
+				summary.FeeBudgetTracked && summary.EstimatedFillsRemaining == 0)
 		}
 	}
 	return s.alerts.UpdateCurrentSummary(tick.At, message, summary)
+}
+
+func paperDecisionReason(tick shadow.Tick, feeBudgetUsed bool) string {
+	if feeBudgetUsed {
+		return "fee_budget_used"
+	}
+	switch tick.Event {
+	case shadow.EventUnobservable:
+		return "data_unavailable"
+	case shadow.EventFiltered:
+		return "route_cost_limit"
+	case shadow.EventSignal:
+		return "order_pending"
+	case shadow.EventFilled:
+		return "order_filled"
+	case shadow.EventRefused:
+		return "fill_limit"
+	case shadow.EventMissed:
+		return "trade_unavailable"
+	}
+	if tick.Decision != nil {
+		return tick.Decision.Reason
+	}
+	return "watching"
+}
+
+func addPaperSettings(summary *paperstatus.CurrentSummary, policy shadow.Policy) {
+	initial, _ := shadowAssets(policy, policy.IsSell())
+	summary.InitialLotUnits = policy.InputAmount
+	summary.InitialLotDecimals = uint8(initial.decimals)
+	summary.InitialLotAsset = initial.name
+	summary.FeeReserveLamports = policy.StartingFeeReserveLamports
+	summary.FeeLamports = policy.FeeLamports
+	summary.SlippageBPS = policy.SlippageBPS
+	summary.SettleSeconds = policy.SettleSeconds
+	if adaptive := policy.Adaptive; adaptive != nil {
+		summary.FastWindow, summary.SlowWindow = adaptive.FastWindow, adaptive.SlowWindow
+		summary.MinimumSignalBPS = adaptive.MinimumSignalBPS
+		summary.MaxVolatilityBPS = adaptive.MaxVolatilityBPS
+		summary.MaxQuoteImpactBPS = adaptive.MaxQuoteImpactBPS
+		summary.MaxDrawdownBPS = adaptive.MaxDrawdownBPS
+		summary.CooldownSeconds = adaptive.CooldownSeconds
+	}
+}
+
+func addPaperFeeBudget(summary *paperstatus.CurrentSummary, policy shadow.Policy, ledger shadow.Ledger) {
+	remaining, fills, ok := paperFeeBudget(policy, ledger)
+	if !ok {
+		return
+	}
+	summary.FeeBudgetTracked = true
+	summary.RemainingFeeReserveLamports = remaining
+	summary.EstimatedFillsRemaining = fills
+}
+
+func paperFeeBudget(policy shadow.Policy, ledger shadow.Ledger) (uint64, uint64, bool) {
+	if policy.StartingFeeReserveLamports == 0 || policy.FeeLamports == 0 {
+		return 0, 0, false
+	}
+	remaining := ledger.FeeReserveLamports
+	if ledger.LockedRentLamports == 0 {
+		remaining -= min(remaining, policy.OneTimeSetupRentLamports)
+	}
+	return remaining, remaining / policy.FeeLamports, true
+}
+
+func (s *shadowRun) paperFeeBudgetUsed() bool {
+	if s.runner == nil {
+		return false
+	}
+	_, fills, ok := paperFeeBudget(s.policy, s.runner.Ledger())
+	return ok && fills == 0
 }
 
 func paperSummaryState(tick shadow.Tick) string {

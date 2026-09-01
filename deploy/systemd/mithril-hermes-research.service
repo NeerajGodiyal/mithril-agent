@@ -7,11 +7,15 @@ Wants=network-online.target
 PartOf=docker.service
 ConditionPathExists=/opt/mithril-hermes-research/state/auth.json
 ConditionPathExists=/var/lib/mithril-agent-research/policy/policy.json
+ConditionPathIsDirectory=/var/lib/mithril-agent-research/reports
+ConditionPathIsDirectory=/var/lib/mithril-agent-dashboard
 
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/mithril-hermes-research
 UMask=0077
+RuntimeDirectory=mithril-hermes-research
+RuntimeDirectoryMode=0711
 ExecStartPre=/opt/mithril-hermes-research/check-network.sh
 ExecStartPre=/usr/sbin/iptables -C DOCKER-USER -s 172.30.77.0/28 -j MITHRIL_HERMES
 ExecStartPre=/usr/sbin/iptables -C INPUT -s 172.30.77.0/28 -j REJECT

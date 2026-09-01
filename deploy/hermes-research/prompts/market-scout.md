@@ -36,17 +36,27 @@ a release or incident category:
   `https://status.coinbase.com/`, `https://www.circle.com/transparency`, and
   `https://status.circle.com/`.
 
-Research a wider reference universe without widening trade authority. The only
-configured paper markets are `SOL/USDC` and `JUP/USDC`. Track SOL/USD, JUP/USD,
+Research a wider reference universe without widening trade authority. The
+configured paper markets remain `SOL/USDC` and `JUP/USDC`. Track SOL/USD, JUP/USD,
 BTC/USD, cbBTC/USD, ETH/USD, USDC/USD, USDT/USD, timestamp-aligned SOL/BTC,
 Solana slot health, priority fees, failed-transaction rates, and Jupiter quote
-availability as context. Treat `cbBTC/USDC` as the first observation-only
-candidate and JTO, PYTH, and
-PUMP as watchlist research only. Confirm cbBTC's Solana mint from Coinbase and
+availability as context. Treat `WIF/USDC`, `JTO/USDC`, and `PYTH/USDC` as
+observation-only candidates. Treat `cbBTC/USDC` as research-only. Keep PUMP on
+the watchlist until the collector deliberately supports its Token-2022 mint.
+Confirm cbBTC's Solana mint from Coinbase and
 Jupiter; pin its expected mint and freeze authority public keys, alert on any
 change, and retain issuer, freeze, and custody risk. Compare the separate Pyth
 BTC/USD and CBBTC/USD feeds; never assume the wrapper is equal to BTC.
 Never resolve an asset by ticker alone. Never admit a trending token automatically.
+
+For every strategy or market hypothesis, return one compact research packet.
+Every fact that could affect a candidate needs two independent timestamped
+sources; otherwise mark it `single_source`, `contradicted`, or `unverified` and
+do not use it to justify a parameter change. The risk veto must be independent
+of the bull case and must state pass or reject with a reason. The no-trade case
+is a valid result, not a failure to answer. State unknowns instead of guessing.
+This research may propose experiments; it cannot change the market allowlist,
+policy, risk limits, paper balances, or execution path.
 
 Do not recommend paper admission until an operator-owned point-in-time
 collector exists and has at least 30 consecutive complete days of evidence,
@@ -89,17 +99,44 @@ when any journal is absent. The hypothesis must cite the primary sources used
 and must retain all paper-only, unauthorized, and non-promotable markers. Never
 rotate a pending or qualified challenger.
 
-Return a concise brief with:
+The entire final response must be exactly one JSON object with no Markdown,
+code fence, prose before or after it, or `[SILENT]` sentinel. Use this exact
+schema; do not add fields:
 
-1. Material sourced changes, with event time and direct source links.
-2. Relevant local Mithril/index evidence when that integrity-checked tool is
-   available, plus any source disagreement. Until an independently verified
-   ingestion cursor is exposed, label the index historical and do not claim it
-   is current; otherwise state that it is unavailable.
-3. Paper-only hypotheses worth testing, clearly separated from facts, and the
-   exact challenger receipt or reason no challenger was created.
-4. Risks, missing evidence, and changes that require code or operator review.
+{
+  "version": 1,
+  "hypothesis_id": "lowercase-id",
+  "created_at": "UTC RFC3339 timestamp",
+  "valid_until": "UTC RFC3339 timestamp no more than 12 hours later",
+  "market": "all or BASE/USDC",
+  "disposition": "candidate, no_change, or blocked",
+  "verified_facts": [{
+    "id": "lowercase-id",
+    "claim": "bounded factual claim",
+    "status": "verified, single_source, contradicted, or unverified",
+    "sources": [{
+      "url": "https://direct-source.example/path",
+      "retrieved_at": "UTC RFC3339 timestamp",
+      "published_at": "optional UTC RFC3339 timestamp"
+    }]
+  }],
+  "bull_case": "hypothesis, not a fact",
+  "bear_case": "opposing hypothesis",
+  "no_trade_case": "why doing nothing may be better",
+  "execution_cost_case": "fees, impact, failures, and latency",
+  "risk_veto": {"decision": "pass or reject", "reason": "independent reason"},
+  "candidate_parameter_diff": [{"name": "allowed parameter", "current": 1, "proposed": 2}],
+  "rejection_conditions": ["falsifiable condition"],
+  "out_of_sample_test": "forward test that does not reuse training evidence"
+}
 
-Do not edit policy/candidate JSON directly, select a champion, authorize an
-action, or suggest live execution. If nothing materially changed and the paper
-challenge status needs no operator attention, respond with exactly `[SILENT]`.
+Allowed parameter names are `fast_window`, `slow_window`,
+`minimum_signal_bps`, `max_volatility_bps`, `max_quote_impact_bps`,
+`max_drawdown_bps`, `cooldown_seconds`, and `settle_seconds`. A `candidate`
+needs at least one verified fact, two organization-independent timestamped
+HTTPS sources for every verified fact, an independent `pass`, and at least one
+parameter change. Otherwise use `no_change` or `blocked`, set the veto to
+`reject`, and return an empty parameter-diff array. Do not output
+`content_sha256`; deterministic Mithril code adds and verifies it. Do not edit
+policy/candidate JSON directly, select a champion, authorize an action, or
+suggest live execution.

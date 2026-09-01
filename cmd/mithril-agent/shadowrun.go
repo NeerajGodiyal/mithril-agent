@@ -240,7 +240,7 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 		}
 		admission = &artifact
 	} else if options.admissionArtifact != "" || options.admissionJournal != "" {
-		return nil, errors.New("market admission flags require an admitted WIF/USDC policy")
+		return nil, errors.New("market admission flags require an admitted candidate-market policy")
 	}
 	endpoint := os.Getenv(shadowEndpointEnvironment)
 	if err := validateShadowEndpoint(endpoint); err != nil {

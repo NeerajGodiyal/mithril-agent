@@ -106,6 +106,7 @@ Other supported tools:
   mithril-agent shadow auto-select --policy PATH --champion-pointer PATH --challenger-pointer PATH --champion-dir PATH --challenger-dir PATH --days N --rollback-pointer PATH --lifecycle-lock PATH
   mithril-agent shadow restore --policy PATH --champion-pointer PATH --rollback-pointer PATH --challenger-pointer PATH --challenger-candidate-dir PATH --lifecycle-lock PATH
   mithril-agent shadow research-mcp --policy PATH --journal-dir PATH ...
+  mithril-agent research packet-record --in PATH --latest PATH [--archive-dir DIR]
   mithril-agent proposal evidence-check --primary-trust-domain NAME --secondary-trust-domain NAME --archive-probe-signature SIGNATURE
   mithril-agent proposal check --taker ADDR --input-mint ADDR --output-mint ADDR --amount N
   mithril-agent proposal recheck --candidate ABSOLUTE_PATH [provider bindings]
@@ -410,6 +411,8 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 			return runProposalTurnkeyPolicy(args[2:], output)
 		}
 		return errors.New("proposal requires the check, evidence-check, recheck, prepare, review, approval-create, key-create, policy-create, policy-check, bundle-check, self-hosted-check, authority-check, submitter-check, canary-check, turnkey-check, or turnkey-policy subcommand")
+	case "research":
+		return runResearch(args[1:], output)
 	case "devnet-once":
 		return runDevnetOnce(ctx, args[1:], output)
 	case "devnet-run":
@@ -457,7 +460,7 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 var knownCommands = []string{
 	"explain", "walkthrough", "setup", "doctor", "wallet", "funding",
 	"preflight", "check", "demo", "status", "swap", "shadow", "proposal", "journal", "audit",
-	"mcp", "program", "index", "clock-check", "version", "help",
+	"mcp", "program", "index", "research", "clock-check", "version", "help",
 }
 
 // unknownCommandError suggests the closest command rather than only refusing.

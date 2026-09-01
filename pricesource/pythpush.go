@@ -112,27 +112,41 @@ type PythPushSpec struct {
 	UpgradedAccount string `json:"upgraded_account"`
 }
 
-// NewPythPushSpec derives the upgraded shard-zero account and verifies the
-// published legacy account against the same canonical PDA rule.
-func NewPythPushSpec(feed, feedID, legacyAccount string) (PythPushSpec, error) {
+// NewPythPushSpecFromFeed derives both shard-zero accounts from one pinned feed
+// ID and the two code-owned receiver program IDs.
+func NewPythPushSpecFromFeed(feed, feedID string) (PythPushSpec, error) {
 	decoded, err := hex.DecodeString(feedID)
 	if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != feedID {
 		return PythPushSpec{}, errors.New("Pyth push feed ID is invalid")
 	}
 	shard := []byte{0, 0}
 	legacy, _, err := solana.FindProgramAddress([][]byte{shard, decoded}, pythPushLegacyProgram)
-	if err != nil || legacy != legacyAccount {
-		return PythPushSpec{}, errors.New("Pyth legacy account does not match its feed ID")
+	if err != nil {
+		return PythPushSpec{}, errors.New("derive Pyth legacy account")
 	}
 	upgraded, _, err := solana.FindProgramAddress([][]byte{shard, decoded}, pythPushUpgradedProgram)
 	if err != nil {
 		return PythPushSpec{}, errors.New("derive Pyth upgraded account")
 	}
 	spec := PythPushSpec{
-		Feed: feed, FeedID: feedID, LegacyAccount: legacyAccount, UpgradedAccount: upgraded,
+		Feed: feed, FeedID: feedID, LegacyAccount: legacy, UpgradedAccount: upgraded,
 	}
 	if err := spec.Validate(); err != nil {
 		return PythPushSpec{}, err
+	}
+	return spec, nil
+}
+
+// NewPythPushSpec also checks a separately published legacy account when a
+// candidate has one. New candidate definitions can use the derived form above
+// and still bind both exact accounts through PythPushSpec.
+func NewPythPushSpec(feed, feedID, legacyAccount string) (PythPushSpec, error) {
+	spec, err := NewPythPushSpecFromFeed(feed, feedID)
+	if err != nil {
+		return PythPushSpec{}, err
+	}
+	if spec.LegacyAccount != legacyAccount {
+		return PythPushSpec{}, errors.New("Pyth legacy account does not match its feed ID")
 	}
 	return spec, nil
 }

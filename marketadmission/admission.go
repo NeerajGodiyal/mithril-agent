@@ -27,7 +27,9 @@ const (
 	mainnetUSDCMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 	tokenProgram    = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
-	MarketWIFUSDC = "WIF/USDC"
+	MarketWIFUSDC  = "WIF/USDC"
+	MarketJTOUSDC  = "JTO/USDC"
+	MarketPYTHUSDC = "PYTH/USDC"
 
 	EventOpened   = "market_admission.opened"
 	EventObserved = "market_admission.observed"
@@ -77,6 +79,38 @@ func Lookup(market string) (Candidate, bool) {
 			Pyth: pyth, Kraken: pricesource.KrakenSpec{Feed: "WIF/USD", Product: "WIF/USD"},
 			QuoteNotionalUSDC: 25_000_000, QuoteSlippageBPS: 100,
 		}
+	case MarketJTOUSDC:
+		pyth, err := pricesource.NewPythPushSpecFromFeed(
+			"JTO/USD",
+			"b43660a5f790c69354b0729a5ef9d50d68f1df92107540210b9cccba1f947cc2",
+		)
+		if err != nil {
+			return Candidate{}, false
+		}
+		candidate = Candidate{
+			Version: Version, Market: MarketJTOUSDC,
+			BaseMint:  "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL",
+			QuoteMint: mainnetUSDCMint, TokenProgram: tokenProgram, BaseDecimals: 9,
+			MintAuthorityDisabled: true, FreezeAuthorityDisabled: true,
+			Pyth: pyth, Kraken: pricesource.KrakenSpec{Feed: "JTO/USD", Product: "JTO/USD"},
+			QuoteNotionalUSDC: 25_000_000, QuoteSlippageBPS: 100,
+		}
+	case MarketPYTHUSDC:
+		pyth, err := pricesource.NewPythPushSpecFromFeed(
+			"PYTH/USD",
+			"0bbf28e9a841a1cc788f6a361b17ca072d0ea3098a1e5df1c3922d06719579ff",
+		)
+		if err != nil {
+			return Candidate{}, false
+		}
+		candidate = Candidate{
+			Version: Version, Market: MarketPYTHUSDC,
+			BaseMint:  "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3",
+			QuoteMint: mainnetUSDCMint, TokenProgram: tokenProgram, BaseDecimals: 6,
+			MintAuthorityDisabled: true, FreezeAuthorityDisabled: true,
+			Pyth: pyth, Kraken: pricesource.KrakenSpec{Feed: "PYTH/USD", Product: "PYTH/USD"},
+			QuoteNotionalUSDC: 25_000_000, QuoteSlippageBPS: 100,
+		}
 	default:
 		return Candidate{}, false
 	}
@@ -84,6 +118,11 @@ func Lookup(market string) (Candidate, bool) {
 		return Candidate{}, false
 	}
 	return candidate, true
+}
+
+// Markets returns the code-owned observation allowlist in display order.
+func Markets() []string {
+	return []string{MarketWIFUSDC, MarketJTOUSDC, MarketPYTHUSDC}
 }
 
 func (candidate Candidate) Validate() error {

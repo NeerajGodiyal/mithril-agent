@@ -51,6 +51,7 @@ func TestRunServesOnlyFromActivatedUnixSocket(t *testing.T) {
 		done <- run(ctx, []string{
 			"--paper-status-socket", "SOL/USDC=/run/mithril-agent-paper-status.sock",
 			"--paper-status-socket", "JUP/USDC=/run/mithril-agent-paper-jup-status.sock",
+			"--research-packet-path", "/var/lib/mithril-agent-dashboard/research.json",
 		}, &bytes.Buffer{})
 	}()
 	select {
@@ -98,5 +99,33 @@ func TestRunRequiresSourcesAndActivatedSocket(t *testing.T) {
 		"--paper-status-socket", "SOL/USDC=/run/sol.sock",
 	}, &bytes.Buffer{}); err == nil || err.Error() != "not activated" {
 		t.Fatalf("activation error = %v", err)
+	}
+}
+
+func TestRenderInstructionModeDoesNotOpenAListener(t *testing.T) {
+	previous := activatedListener
+	activatedListener = func() (net.Listener, error) {
+		t.Fatal("render mode opened a listener")
+		return nil, errors.New("unexpected listener")
+	}
+	t.Cleanup(func() { activatedListener = previous })
+	var output bytes.Buffer
+	if err := run(t.Context(), []string{"--render-instruction", "/tmp/missing-paper-instruction.json"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("missing instruction output = %q", output.String())
+	}
+	if err := run(t.Context(), []string{
+		"--render-instruction", "/tmp/missing-paper-instruction.json",
+		"--paper-status-socket", "SOL/USDC=/run/sol.sock",
+	}, &output); err == nil {
+		t.Fatal("mixed render and server flags accepted")
+	}
+	if err := run(t.Context(), []string{
+		"--render-instruction", "/tmp/missing-paper-instruction.json",
+		"--research-packet-path", "/tmp/research.json",
+	}, &output); err == nil {
+		t.Fatal("render mode accepted a research projection")
 	}
 }

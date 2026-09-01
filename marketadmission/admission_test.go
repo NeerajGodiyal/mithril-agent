@@ -15,7 +15,11 @@ import (
 const testObserve = "11111111111111111111111111111111"
 
 func TestCatalogPinsCanonicalCandidateMetadata(t *testing.T) {
-	for _, market := range []string{MarketWIFUSDC} {
+	markets := Markets()
+	if strings.Join(markets, ",") != "WIF/USDC,JTO/USDC,PYTH/USDC" {
+		t.Fatalf("markets = %v", markets)
+	}
+	for _, market := range markets {
 		candidate, ok := Lookup(market)
 		if !ok || candidate.Validate() != nil || candidate.BaseMint == "" ||
 			candidate.Pyth.UpgradedAccount == "" || candidate.Kraken.Product == "" ||

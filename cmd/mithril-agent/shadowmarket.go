@@ -29,7 +29,7 @@ and writes a new artifact without replacing an existing file. Qualification
 covers market-data and route quality only; it does not start a paper strategy.
 
 Both commands are keyless and cannot sign or submit.
-Allowlisted market: WIF/USDC`
+Allowlisted markets: WIF/USDC, JTO/USDC, PYTH/USDC`
 
 const maxMarketAdmissionArtifactBytes = 1 << 20
 
@@ -70,7 +70,7 @@ func runShadowMarketCollect(ctx context.Context, args []string, output io.Writer
 	}
 	candidate, ok := marketadmission.Lookup(*market)
 	if !ok {
-		return errors.New("--market must be WIF/USDC")
+		return errors.New("--market must be WIF/USDC, JTO/USDC, or PYTH/USDC")
 	}
 	opening, err := marketadmission.NewOpening(
 		candidate, *observe, marketadmission.DefaultThresholds(),

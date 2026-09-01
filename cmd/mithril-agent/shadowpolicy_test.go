@@ -108,7 +108,7 @@ func TestGeneratedAdaptiveMandateMapsToExistingPolicy(t *testing.T) {
 		policy.StartingInputUnits != 250_000_000-defaultPaperMandateReserve ||
 		policy.InputAmount != 250_000_000-defaultPaperMandateReserve ||
 		policy.StartingFeeReserveLamports != defaultPaperMandateReserve ||
-		policy.OneTimeSetupRentLamports != defaultJUPSetupRentLamports ||
+		policy.OneTimeSetupRentLamports != defaultTokenSetupRentLamports ||
 		policy.QuoteRoute != shadow.MainnetQuoteRoute(true) {
 		t.Fatalf("paper mandate policy = %+v", policy)
 	}
@@ -137,7 +137,7 @@ func TestGeneratedJUPMandateBindsMarketAndIndependentSOLFees(t *testing.T) {
 		"--out", path,
 		"--observe", "So11111111111111111111111111111111111111112",
 		"--adaptive", "--market", "JUP/USDC", "--budget-usdc", "250",
-		"--fee-reserve-sol", "0.004", "--drawdown-stop-bps", "300",
+		"--drawdown-stop-bps", "300",
 	}, &output); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestGeneratedJUPMandateBindsMarketAndIndependentSOLFees(t *testing.T) {
 	if policy.Market != shadow.MarketJUPUSDC || policy.Adaptive == nil ||
 		policy.Adaptive.MaxDrawdownBPS != 300 || policy.InputAmount != 250_000_000 ||
 		policy.StartingInputUnits != 250_000_000 || policy.StartingOutputUnits != 0 ||
-		policy.StartingFeeReserveLamports != 4_000_000 ||
+		policy.StartingFeeReserveLamports != defaultTokenFeeReserveLamports ||
 		policy.OneTimeSetupRentLamports != 3_000_000 ||
 		policy.InputDecimals != 6 || policy.OutputDecimals != 6 ||
 		policy.QuoteRoute != shadow.MainnetMarketQuoteRoute(shadow.MarketJUPUSDC, false) {
@@ -164,12 +164,17 @@ func TestGeneratedJUPMandateBindsMarketAndIndependentSOLFees(t *testing.T) {
 		t.Fatalf("JUP evidence bindings = %+v / %+v", policy.Trigger, policy.NativeFeePrice)
 	}
 	for _, want := range []string{
-		"Paper mandate: JUP/USDC", "budget 250 USDC", "native reserve 0.004 SOL",
+		"Paper mandate: JUP/USDC", "budget 250 USDC", "native reserve 0.08 SOL",
 		"setup locks 0.003 SOL", "cannot sign",
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Errorf("JUP mandate output omits %q:\n%s", want, output.String())
 		}
+	}
+	maxDailyAttempts := uint64(24*60*60) / (policy.TickSeconds + policy.SettleSeconds)
+	if attempts := (policy.StartingFeeReserveLamports - policy.OneTimeSetupRentLamports) /
+		policy.FeeLamports; attempts < maxDailyAttempts {
+		t.Fatalf("default JUP reserve funds only %d of %d maximum daily attempts", attempts, maxDailyAttempts)
 	}
 }
 

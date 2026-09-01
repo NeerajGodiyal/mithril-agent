@@ -113,9 +113,17 @@ func TestWriterUpdatesCurrentWithoutCreatingAnAlert(t *testing.T) {
 		Market: "SOL/USDC", ValueUnit: "USD", Day: "2026-08-30", TickSeconds: 60,
 		OpeningEquityMicros: 100_000_000, EquityMicros: 101_000_000,
 		HoldBenchmarkMicros: 100_500_000, Checks: 10, Signals: 2, Trades: 1,
+		AccountingTracked: true, RealizedMicros: 400_000, UnrealizedMicros: 600_000,
 		Unobservable: 1, Missed: 1, PriceMicros: 106_550_000, State: "range",
 		DrawdownMicros: 250_000, MaxDrawdownMicros: 500_000,
-		Strategy: "adaptive", NextAction: "sell",
+		Strategy: "adaptive", NextAction: "sell", DecisionReason: "signal_below_cost_hurdle",
+		InitialLotUnits: 246_000_000, InitialLotDecimals: 9, InitialLotAsset: "SOL",
+		FeeReserveLamports: 32_000_000, FeeLamports: 100_000, FeeBudgetTracked: true,
+		RemainingFeeReserveLamports: 29_000_000, EstimatedFillsRemaining: 290,
+		SlippageBPS: 100, SettleSeconds: 60,
+		FastWindow: 5, SlowWindow: 20, MinimumSignalBPS: 20,
+		MaxVolatilityBPS: 500, MaxQuoteImpactBPS: 500, MaxDrawdownBPS: 300,
+		CooldownSeconds: 300,
 	}
 	if err := writer.UpdateCurrentSummary(start.Add(time.Second), current, summary); err != nil {
 		t.Fatal(err)
@@ -131,6 +139,7 @@ func TestWriterUpdatesCurrentWithoutCreatingAnAlert(t *testing.T) {
 	if snapshot.Current != current || snapshot.Summary == nil ||
 		snapshot.Summary.Market != "SOL/USDC" || len(snapshot.Events) != 1 ||
 		len(snapshot.History) != 1 || snapshot.History[0].EquityMicros != 101_000_000 ||
+		snapshot.History[0].PriceMicros != 106_550_000 ||
 		!snapshot.ObservedAt.Equal(start.Add(time.Second)) {
 		t.Fatalf("snapshot = %+v", snapshot)
 	}
@@ -179,6 +188,11 @@ func TestWriterUpdatesCurrentWithoutCreatingAnAlert(t *testing.T) {
 		t.Fatal("accepted a current drawdown above the period maximum")
 	}
 	bad = *summary
+	bad.UnrealizedMicros++
+	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
+		t.Fatal("accepted accounting that does not reconcile to the paper account")
+	}
+	bad = *summary
 	bad.TickSeconds = 0
 	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
 		t.Fatal("accepted a current summary with no observation cadence")
@@ -199,6 +213,11 @@ func TestWriterUpdatesCurrentWithoutCreatingAnAlert(t *testing.T) {
 		t.Fatal("accepted an unsupported next action")
 	}
 	bad = *summary
+	bad.DecisionReason = "llm_said_buy"
+	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
+		t.Fatal("accepted an unsupported paper decision reason")
+	}
+	bad = *summary
 	bad.ValueUnit = "BTC"
 	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
 		t.Fatal("accepted an unsupported paper value unit")
@@ -207,6 +226,83 @@ func TestWriterUpdatesCurrentWithoutCreatingAnAlert(t *testing.T) {
 	bad.Unobservable = bad.Checks + 1
 	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
 		t.Fatal("accepted impossible market-data counts")
+	}
+	bad = *summary
+	bad.MaxDrawdownBPS = 5_001
+	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
+		t.Fatal("accepted paper settings outside the policy bounds")
+	}
+	bad = *summary
+	bad.EstimatedFillsRemaining++
+	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
+		t.Fatal("accepted a paper fill estimate above the remaining fee budget")
+	}
+	bad = *summary
+	bad.EstimatedFillsRemaining = 0
+	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
+		t.Fatal("accepted a zero paper fill estimate with a positive remaining fee budget")
+	}
+	bad = *summary
+	bad.FeeBudgetTracked = false
+	bad.RemainingFeeReserveLamports = 0
+	bad.EstimatedFillsRemaining = 0
+	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
+		t.Fatal("accepted an untracked nonzero fee reserve")
+	}
+	bad = *summary
+	bad.FastWindow, bad.SlowWindow = 0, 0
+	bad.MinimumSignalBPS, bad.MaxVolatilityBPS = 0, 0
+	bad.MaxQuoteImpactBPS, bad.MaxDrawdownBPS, bad.CooldownSeconds = 0, 0, 0
+	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
+		t.Fatal("accepted an adaptive strategy without adaptive limits")
+	}
+	bad = *summary
+	bad.Strategy = "fixed"
+	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
+		t.Fatal("accepted fixed strategy with contradictory adaptive limits")
+	}
+}
+
+func TestWriterUpgradesLegacyStatusProjection(t *testing.T) {
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "alerts.json")
+	start := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	legacy := Snapshot{
+		Version: legacyVersion, ObservedAt: start, Current: "PAPER · Watching",
+		Summary: &CurrentSummary{
+			Market: "SOL/USDC", ValueUnit: "USD", Day: "2026-08-30", TickSeconds: 60,
+			OpeningEquityMicros: 1, EquityMicros: 1, HoldBenchmarkMicros: 1,
+		},
+		Events: []Event{},
+	}
+	encoded, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := securefile.ReplacePrivate(path, append(encoded, '\n'), maxSnapshotBytes); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := OpenWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.UpdateCurrentSummary(start.Add(time.Second), "PAPER · Watching", legacy.Summary); err != nil {
+		t.Fatal(err)
+	}
+	data, err := securefile.ReadPrivate(path, maxSnapshotBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var upgraded Snapshot
+	if err := strictjson.Decode(data, &upgraded); err != nil || upgraded.Version != Version ||
+		ValidateSnapshot(upgraded) != nil {
+		t.Fatalf("upgraded snapshot = %+v, err = %v", upgraded, err)
 	}
 }
 

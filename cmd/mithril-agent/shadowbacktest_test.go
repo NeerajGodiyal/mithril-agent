@@ -159,7 +159,7 @@ func TestModelledPoolUsesThePolicySlippageFloor(t *testing.T) {
 
 func TestModelledPoolUsesJUPSixDecimalUnitsInBothDirections(t *testing.T) {
 	policy, err := buildAdaptiveJUPPolicy(
-		100_000_000, defaultJUPFeeReserveLamports, defaultJUPSetupRentLamports, 100, 5_000,
+		100_000_000, defaultTokenFeeReserveLamports, defaultTokenSetupRentLamports, 100, 5_000,
 		"So11111111111111111111111111111111111111112", 60,
 	)
 	if err != nil {

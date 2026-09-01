@@ -43,14 +43,18 @@ const (
 	QuoteJupiter = "jupiter"
 	QuoteOrca    = "orca"
 
-	MarketSOLUSDC = "SOL/USDC"
-	MarketJUPUSDC = "JUP/USDC"
-	MarketWIFUSDC = "WIF/USDC"
+	MarketSOLUSDC  = "SOL/USDC"
+	MarketJUPUSDC  = "JUP/USDC"
+	MarketWIFUSDC  = "WIF/USDC"
+	MarketJTOUSDC  = "JTO/USDC"
+	MarketPYTHUSDC = "PYTH/USDC"
 
 	wrappedSOLMint  = "So11111111111111111111111111111111111111112"
 	mainnetUSDCMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 	mainnetJUPMint  = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
 	mainnetWIFMint  = "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"
+	mainnetJTOMint  = "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL"
+	mainnetPYTHMint = "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3"
 )
 
 // JournalVersion identifies the run header written before the first tick. The
@@ -107,15 +111,44 @@ func MainnetMarketQuoteRoute(market string, sell bool) QuoteRoute {
 		baseMint = mainnetJUPMint
 	case MarketWIFUSDC:
 		baseMint = mainnetWIFMint
+	case MarketJTOUSDC:
+		baseMint = mainnetJTOMint
+	case MarketPYTHUSDC:
+		baseMint = mainnetPYTHMint
 	default:
 		return QuoteRoute{}
 	}
-	input, output := mainnetUSDCMint, wrappedSOLMint
-	output = baseMint
+	input, output := mainnetUSDCMint, baseMint
 	if sell {
 		input, output = baseMint, mainnetUSDCMint
 	}
 	return QuoteRoute{Provider: QuoteJupiter, InputMint: input, OutputMint: output}
+}
+
+// AdmittedMarket reports whether a reviewed market can be activated only
+// through a current, verified market-admission artifact.
+func AdmittedMarket(market string) bool {
+	switch market {
+	case MarketWIFUSDC, MarketJTOUSDC, MarketPYTHUSDC:
+		return true
+	default:
+		return false
+	}
+}
+
+// MainnetMarketBaseDecimals returns the pinned base-token scale for a supported
+// market. Unknown mints fail closed instead of defaulting to six decimals.
+func MainnetMarketBaseDecimals(market string) (uint8, bool) {
+	switch market {
+	case MarketSOLUSDC:
+		return 9, true
+	case MarketJUPUSDC, MarketWIFUSDC, MarketPYTHUSDC:
+		return 6, true
+	case MarketJTOUSDC:
+		return 9, true
+	default:
+		return 0, false
+	}
 }
 
 // Policy is a complete description of a shadow run: what to watch, what rule to
@@ -269,7 +302,7 @@ func (p Policy) Validate() error {
 	}
 	admitted := p.Version == AdmittedVersion
 	if admitted {
-		if p.Cluster != Mainnet || market != MarketWIFUSDC ||
+		if p.Cluster != Mainnet || !AdmittedMarket(market) ||
 			!validPolicyDigest(p.MarketEvidenceSHA256) {
 			return errors.New("admitted shadow policy market evidence is invalid")
 		}
@@ -496,12 +529,13 @@ func (p Policy) validateQuoteRoute() error {
 		market = MarketSOLUSDC
 	}
 	want := MainnetMarketQuoteRoute(market, p.IsSell())
-	wantInputDecimals, wantOutputDecimals := uint8(6), uint8(6)
-	if market == MarketSOLUSDC {
-		wantOutputDecimals = 9
-		if p.IsSell() {
-			wantInputDecimals, wantOutputDecimals = 9, 6
-		}
+	baseDecimals, ok := MainnetMarketBaseDecimals(market)
+	if !ok {
+		return errors.New("Mainnet shadow market decimals are unsupported")
+	}
+	wantInputDecimals, wantOutputDecimals := uint8(6), baseDecimals
+	if p.IsSell() {
+		wantInputDecimals, wantOutputDecimals = baseDecimals, 6
 	}
 	if p.QuoteRoute != want ||
 		p.InputDecimals != wantInputDecimals || p.OutputDecimals != wantOutputDecimals {

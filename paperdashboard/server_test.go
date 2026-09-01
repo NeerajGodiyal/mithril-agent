@@ -37,8 +37,15 @@ func (s *sourceStub) readCount() int {
 }
 
 func TestStatusCombinesMarketsWithoutExposingIDsOrHTML(t *testing.T) {
+	if !strings.Contains(appJS, "card.style.display=card.hidden?'none':''") {
+		t.Fatal("instruction controls can override the disabled hidden state")
+	}
+	if strings.Count(appJS, "feeBudgetUsed=m.fresh&&Boolean(m.fee_budget_tracked)") != 2 {
+		t.Fatal("stale fee budgets can be presented as a current-day pause")
+	}
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	build := func(label string, checks, unavailable, opening, equity, hold uint64) *sourceStub {
+		pnl := int64(equity) - int64(opening)
 		return &sourceStub{label: label, snapshot: paperstatus.Snapshot{
 			Version: paperstatus.Version, ObservedAt: now,
 			Current: "PAPER · <script>alert(1)</script>",
@@ -46,12 +53,22 @@ func TestStatusCombinesMarketsWithoutExposingIDsOrHTML(t *testing.T) {
 				Market: label, ValueUnit: "USD", Day: "2026-08-31", TickSeconds: 60,
 				OpeningEquityMicros: opening, EquityMicros: equity,
 				HoldBenchmarkMicros: hold, Checks: checks, Trades: 1, Signals: 1,
-				Unobservable: unavailable, PriceMicros: 100_000_000,
+				AccountingTracked: true, RealizedMicros: pnl / 4,
+				UnrealizedMicros: pnl - pnl/4,
+				Unobservable:     unavailable, PriceMicros: 100_000_000,
 				State: "range", Strategy: "adaptive", NextAction: "buy",
+				DecisionReason:  "signal_below_cost_hurdle",
+				InitialLotUnits: 250_000_000, InitialLotDecimals: 6, InitialLotAsset: "USDC",
+				FeeReserveLamports: 32_000_000, FeeLamports: 100_000, FeeBudgetTracked: true,
+				RemainingFeeReserveLamports: 29_000_000, EstimatedFillsRemaining: 290,
+				SlippageBPS: 100, SettleSeconds: 60,
+				FastWindow: 5, SlowWindow: 20, MinimumSignalBPS: 20,
+				MaxVolatilityBPS: 500, MaxQuoteImpactBPS: 500, MaxDrawdownBPS: 300,
+				CooldownSeconds: 300,
 			},
 			History: []paperstatus.PerformancePoint{
-				{At: now.Add(-10 * time.Minute), EquityMicros: opening, HoldBenchmarkMicros: opening},
-				{At: now, EquityMicros: equity, HoldBenchmarkMicros: hold},
+				{At: now.Add(-10 * time.Minute), PriceMicros: 99_000_000, EquityMicros: opening, HoldBenchmarkMicros: opening},
+				{At: now, PriceMicros: 100_000_000, EquityMicros: equity, HoldBenchmarkMicros: hold},
 			},
 			Events: []paperstatus.Event{{
 				ID: strings.Repeat("a", 64), At: now, Kind: paperstatus.KindOrderFilled,
@@ -81,9 +98,22 @@ func TestStatusCombinesMarketsWithoutExposingIDsOrHTML(t *testing.T) {
 	}
 	if !view.Complete || view.Overview.EquityMicros != 150_000_000 ||
 		view.Overview.Signals != 2 || view.Overview.CoverageBPS != 5_000 ||
+		!view.Overview.AccountingTracked || view.Overview.RealizedMicros != 0 ||
+		view.Overview.UnrealizedMicros != 0 || view.Markets[0].History[0].PriceMicros != 99_000_000 ||
 		len(view.Markets) != 2 || len(view.Markets[0].History) != 2 ||
 		len(view.Activity) != 2 || view.ActivityOmitted != 3 {
 		t.Fatalf("view = %+v", view)
+	}
+	if view.Markets[0].InitialLotUnits != 250_000_000 ||
+		view.Markets[0].InitialLotAsset != "USDC" || view.Markets[0].MaxDrawdownBPS != 300 ||
+		!view.Markets[0].FeeBudgetTracked ||
+		view.Markets[0].RemainingFeeReserveLamports != 29_000_000 ||
+		view.Markets[0].EstimatedFillsRemaining != 290 ||
+		view.Markets[0].DecisionReason != "signal_below_cost_hurdle" {
+		t.Fatalf("paper limits = %+v", view.Markets[0])
+	}
+	if view.InstructionsEnabled {
+		t.Fatal("instruction controls shown without an enabled instruction endpoint")
 	}
 	for _, header := range []string{
 		"Content-Security-Policy", "Cross-Origin-Resource-Policy",
@@ -280,7 +310,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for path, wants := range map[string][]string{
-		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "Automation setup", "Futures and perps", "View recent paper orders"},
+		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "Automation setup", "Reviewed scope", "WIF, JTO, and PYTH", "View recent paper orders", "Guide what the research agent explores next", "Why budget is separate"},
 		"/app.css": {
 			".help:focus", ".help[aria-expanded=\"true\"]", ".button.loading:before", "@keyframes spin",
 			".market-overview", ".market-price{font-size:1.3rem}", "--line-strong:#51647a", "--subtle:#7f8b9a",
@@ -290,20 +320,23 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"@media(max-width:390px){.tabs", "@media(max-width:360px){.metrics",
 		},
 		"/app.js": {
-			"Total paper value", "Today's paper result", "Compared with holding", "Filled paper orders",
+			"Paper value now", "Started today with", "Today's result", "Compared with holding", "Filled paper orders",
 			"role=\"tooltip\"", "aria-describedby", "event.key!=='Escape'", "Waiting for fresh prices",
 			"More filled orders do not necessarily mean more profit.",
 			"?fresh=1", "Refreshing…", "Updated ✓",
 			"Checked ✓", "Data delayed", "requestSequence", "Last result",
-			"Market-responsive paper plan", "separate forward paper test", "deltaValue",
+			"Market-responsive paper plan", "not strategy quality", "deltaValue",
 			"readableActivity", "Use Refresh to try again.", "liveUpdates&&!$('refresh').disabled",
 			"This market value:", "This market's result today:", "readableActivityResult", "(profit?'profit':'loss')",
 			"Plan tried to trade once", "The plan checked ",
 			"market-overview", "Current plan", "age(current.observed_at)",
 			"integer(micros)>0n&&integer(micros)<10000n?'<$0.01'",
 			"amount>=1000000n?2:amount>=10000n?4:6",
-			"chartDots", "Max drawdown", "Strategy '+paperValue", "Holding '+paperValue", "older events omitted", "Configured", "Nous Hermes",
-			"does not yet prove its timer", "open-order-history",
+			"chartDots", "marketPriceChart", "Largest drop", "Our strategy '+paperValue", "If held '+paperValue", "Closed-trade result", "Open-position result", "older events omitted", "Proposal ready", "Nous Hermes",
+			"Rejected output", "No valid run yet", "No active plan was changed.", "open-order-history", "Starting trade lot", "Loss pause",
+			"Minimum opportunity", "saveInstruction", "X-Mithril-Paper-Request",
+			"Fee budget left", "Orders left today", "No more orders today",
+			"Orders paused for today", "Orders paused until tomorrow",
 		},
 	} {
 		request := httptest.NewRequest(http.MethodGet, "http://localhost"+path, nil)

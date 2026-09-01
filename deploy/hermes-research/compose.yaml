@@ -38,7 +38,7 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: /opt/mithril-hermes-research/prompts/market-scout.md
+        source: ${MITHRIL_HERMES_QUERY_FILE:-/opt/mithril-hermes-research/prompts/market-scout.md}
         target: /opt/mithril/prompts/market-scout.md
         read_only: true
         bind:

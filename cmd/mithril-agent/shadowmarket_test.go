@@ -292,6 +292,44 @@ func TestAdmittedPolicyBindsTheQualifiedMarketContract(t *testing.T) {
 	}
 }
 
+func TestAdmittedCandidatePoliciesKeepTheirPinnedMintDecimals(t *testing.T) {
+	for _, market := range []string{
+		marketadmission.MarketWIFUSDC,
+		marketadmission.MarketJTOUSDC,
+		marketadmission.MarketPYTHUSDC,
+	} {
+		t.Run(market, func(t *testing.T) {
+			candidate, ok := marketadmission.Lookup(market)
+			if !ok {
+				t.Fatal("candidate missing")
+			}
+			primary, err := candidate.Pyth.IdentitySHA256()
+			if err != nil {
+				t.Fatal(err)
+			}
+			secondary, err := candidate.Kraken.IdentitySHA256()
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy, err := buildAdaptiveQuoteMarketPolicy(
+				shadow.AdmittedVersion, candidate.Market, candidate.Pyth.Feed,
+				primary, secondary, strings.Repeat("a", 64),
+				candidate.QuoteNotionalUSDC, 4_000_000, 3_000_000,
+				candidate.QuoteSlippageBPS, 100_000,
+				"11111111111111111111111111111111", 60,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if policy.OutputDecimals != candidate.BaseDecimals ||
+				policy.QuoteRoute.OutputMint != candidate.BaseMint ||
+				policy.Validate() != nil {
+				t.Fatalf("policy = %+v", policy)
+			}
+		})
+	}
+}
+
 func TestMarketAdmissionMustCoverTheCurrentCompletedWindow(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	artifact := marketadmission.Artifact{Through: now.Truncate(24 * time.Hour)}

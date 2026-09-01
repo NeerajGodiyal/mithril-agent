@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +19,9 @@ import (
 )
 
 const (
-	Version             = 1
+	legacyVersion       = 1
+	settingsVersion     = 2
+	Version             = 3
 	MaxEvents           = 64
 	MaxHistoryPoints    = 144
 	MaxMessageBytes     = 3000
@@ -78,22 +81,51 @@ type CurrentSummary struct {
 	OpeningEquityMicros uint64 `json:"opening_equity_micros"`
 	EquityMicros        uint64 `json:"equity_micros"`
 	HoldBenchmarkMicros uint64 `json:"hold_benchmark_micros"`
-	DrawdownMicros      uint64 `json:"drawdown_micros,omitempty"`
-	MaxDrawdownMicros   uint64 `json:"max_drawdown_micros,omitempty"`
-	Checks              uint64 `json:"checks"`
-	Signals             uint64 `json:"signals"`
-	Trades              uint64 `json:"trades"`
-	Unobservable        uint64 `json:"unobservable,omitempty"`
-	Missed              uint64 `json:"missed,omitempty"`
-	PriceMicros         uint64 `json:"price_micros,omitempty"`
-	State               string `json:"state,omitempty"`
-	Strategy            string `json:"strategy,omitempty"`
-	NextAction          string `json:"next_action,omitempty"`
-	RiskHalted          bool   `json:"risk_halted,omitempty"`
+	// Realized is the result from inventory already sold, after modeled fees.
+	// Unrealized is the mark-to-market result still held in open inventory.
+	AccountingTracked bool   `json:"accounting_tracked,omitempty"`
+	RealizedMicros    int64  `json:"realized_micros,omitempty"`
+	UnrealizedMicros  int64  `json:"unrealized_micros,omitempty"`
+	DrawdownMicros    uint64 `json:"drawdown_micros,omitempty"`
+	MaxDrawdownMicros uint64 `json:"max_drawdown_micros,omitempty"`
+	Checks            uint64 `json:"checks"`
+	Signals           uint64 `json:"signals"`
+	Trades            uint64 `json:"trades"`
+	Unobservable      uint64 `json:"unobservable,omitempty"`
+	Missed            uint64 `json:"missed,omitempty"`
+	PriceMicros       uint64 `json:"price_micros,omitempty"`
+	State             string `json:"state,omitempty"`
+	Strategy          string `json:"strategy,omitempty"`
+	NextAction        string `json:"next_action,omitempty"`
+	DecisionReason    string `json:"decision_reason,omitempty"`
+	RiskHalted        bool   `json:"risk_halted,omitempty"`
+	// InitialLot is the configured first paper leg. Later legs use the
+	// simulated proceeds, so it is deliberately not described as a fixed order
+	// size. These fields expose no address, provider, policy path, or key.
+	InitialLotUnits    uint64 `json:"initial_lot_units,omitempty"`
+	InitialLotDecimals uint8  `json:"initial_lot_decimals,omitempty"`
+	InitialLotAsset    string `json:"initial_lot_asset,omitempty"`
+	FeeReserveLamports uint64 `json:"fee_reserve_lamports,omitempty"`
+	FeeLamports        uint64 `json:"fee_lamports,omitempty"`
+	// RemainingFeeReserveLamports excludes setup rent that has not yet been
+	// locked, so it is the native amount still available for paper attempts.
+	FeeBudgetTracked            bool   `json:"fee_budget_tracked,omitempty"`
+	RemainingFeeReserveLamports uint64 `json:"remaining_fee_reserve_lamports,omitempty"`
+	EstimatedFillsRemaining     uint64 `json:"estimated_fills_remaining,omitempty"`
+	SlippageBPS                 uint16 `json:"slippage_bps,omitempty"`
+	SettleSeconds               uint64 `json:"settle_seconds,omitempty"`
+	FastWindow                  uint16 `json:"fast_window,omitempty"`
+	SlowWindow                  uint16 `json:"slow_window,omitempty"`
+	MinimumSignalBPS            uint16 `json:"minimum_signal_bps,omitempty"`
+	MaxVolatilityBPS            uint16 `json:"max_volatility_bps,omitempty"`
+	MaxQuoteImpactBPS           uint16 `json:"max_quote_impact_bps,omitempty"`
+	MaxDrawdownBPS              uint16 `json:"max_drawdown_bps,omitempty"`
+	CooldownSeconds             uint64 `json:"cooldown_seconds,omitempty"`
 }
 
 type PerformancePoint struct {
 	At                  time.Time `json:"at"`
+	PriceMicros         uint64    `json:"price_micros,omitempty"`
 	EquityMicros        uint64    `json:"equity_micros"`
 	HoldBenchmarkMicros uint64    `json:"hold_benchmark_micros"`
 	DrawdownMicros      uint64    `json:"drawdown_micros,omitempty"`
@@ -152,6 +184,7 @@ func (w *Writer) UpdateCurrentSummary(
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.New("read paper alert status")
 	}
+	snapshot.Version = Version
 	snapshot.ObservedAt, snapshot.Current, snapshot.Summary = at, current, summary
 	if summary != nil {
 		snapshot.History = updateHistory(snapshot.History, at, *summary)
@@ -175,6 +208,7 @@ func (w *Writer) append(at time.Time, kind, key, message string, reconcile bool)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.New("read paper alert status")
 	}
+	snapshot.Version = Version
 	id := eventID(kind, key)
 	for _, event := range snapshot.Events {
 		if event.ID == id {
@@ -236,7 +270,9 @@ func TruncationEvent(snapshot Snapshot) (Event, bool) {
 }
 
 func ValidateSnapshot(snapshot Snapshot) error {
-	if snapshot.Version != Version || snapshot.ObservedAt.IsZero() ||
+	if snapshot.Version != legacyVersion && snapshot.Version != settingsVersion &&
+		snapshot.Version != Version ||
+		snapshot.ObservedAt.IsZero() ||
 		!snapshot.ObservedAt.Equal(snapshot.ObservedAt.UTC()) ||
 		len(snapshot.Events) > MaxEvents ||
 		(snapshot.DroppedEvents != 0 && len(snapshot.Events) == 0) ||
@@ -295,8 +331,10 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 		summary.Signals > summary.Checks || summary.Trades > summary.Signals ||
 		summary.Unobservable > summary.Checks || summary.Missed > summary.Signals ||
 		!validValueUnit(summary.ValueUnit) ||
+		!validAccounting(*summary) ||
 		!validCurrentState(summary.State) || !validCurrentStrategy(summary.Strategy) ||
-		!validNextAction(summary.NextAction) {
+		!validNextAction(summary.NextAction) || !validDecisionReason(summary.DecisionReason) ||
+		!validPaperSettings(*summary) {
 		return errors.New("paper current summary is invalid")
 	}
 	for _, character := range summary.Market {
@@ -314,9 +352,94 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 	return nil
 }
 
+func validAccounting(summary CurrentSummary) bool {
+	if !summary.AccountingTracked {
+		return summary.RealizedMicros == 0 && summary.UnrealizedMicros == 0
+	}
+	if summary.OpeningEquityMicros > math.MaxInt64 || summary.EquityMicros > math.MaxInt64 ||
+		summary.UnrealizedMicros > 0 && summary.RealizedMicros > math.MaxInt64-summary.UnrealizedMicros ||
+		summary.UnrealizedMicros < 0 && summary.RealizedMicros < math.MinInt64-summary.UnrealizedMicros {
+		return false
+	}
+	return summary.RealizedMicros+summary.UnrealizedMicros ==
+		int64(summary.EquityMicros)-int64(summary.OpeningEquityMicros)
+}
+
+func validDecisionReason(reason string) bool {
+	switch reason {
+	case "", "watching", "collecting_history", "drawdown_limit", "risk_halt",
+		"drawdown_halt", "volatility_limit", "cooldown", "trend_aligned_buy",
+		"sell_leg_waiting", "trend_aligned_sell", "buy_leg_waiting",
+		"range_high_sell", "range_low_buy", "signal_below_cost_hurdle",
+		"data_unavailable", "fee_budget_used", "route_cost_limit",
+		"order_pending", "order_filled", "fill_limit", "trade_unavailable":
+		return true
+	default:
+		return false
+	}
+}
+
+func validPaperSettings(summary CurrentSummary) bool {
+	commonPresent := summary.InitialLotUnits != 0 || summary.InitialLotDecimals != 0 ||
+		summary.InitialLotAsset != "" || summary.FeeReserveLamports != 0 ||
+		summary.FeeLamports != 0 || summary.FeeBudgetTracked ||
+		summary.RemainingFeeReserveLamports != 0 ||
+		summary.EstimatedFillsRemaining != 0 ||
+		summary.SlippageBPS != 0 || summary.SettleSeconds != 0
+	adaptivePresent := summary.FastWindow != 0 || summary.SlowWindow != 0 ||
+		summary.MinimumSignalBPS != 0 || summary.MaxVolatilityBPS != 0 ||
+		summary.MaxQuoteImpactBPS != 0 || summary.MaxDrawdownBPS != 0 ||
+		summary.CooldownSeconds != 0
+	if !commonPresent && !adaptivePresent {
+		return true
+	}
+	if !commonPresent || summary.InitialLotUnits == 0 || summary.InitialLotDecimals > 18 ||
+		!validAsset(summary.InitialLotAsset) || summary.SlippageBPS == 0 ||
+		summary.SlippageBPS > 500 || summary.SettleSeconds == 0 ||
+		summary.SettleSeconds > 600 ||
+		adaptivePresent != (summary.Strategy == "adaptive") ||
+		summary.FeeBudgetTracked != (summary.FeeReserveLamports != 0) ||
+		(!summary.FeeBudgetTracked && (summary.RemainingFeeReserveLamports != 0 ||
+			summary.EstimatedFillsRemaining != 0)) ||
+		(summary.FeeBudgetTracked && (summary.FeeLamports == 0 ||
+			summary.FeeReserveLamports == 0 ||
+			summary.RemainingFeeReserveLamports > summary.FeeReserveLamports ||
+			summary.EstimatedFillsRemaining != summary.RemainingFeeReserveLamports/summary.FeeLamports)) {
+		return false
+	}
+	if !adaptivePresent {
+		return true
+	}
+	if summary.FastWindow < 2 ||
+		summary.SlowWindow <= summary.FastWindow || summary.SlowWindow > 1_440 ||
+		summary.MinimumSignalBPS == 0 || summary.MinimumSignalBPS > 2_000 ||
+		summary.MaxVolatilityBPS <= summary.MinimumSignalBPS ||
+		summary.MaxVolatilityBPS > 5_000 || summary.MaxQuoteImpactBPS == 0 ||
+		summary.MaxQuoteImpactBPS > 5_000 || summary.MaxDrawdownBPS == 0 ||
+		summary.MaxDrawdownBPS > 5_000 || summary.CooldownSeconds > 86_400 {
+		return false
+	}
+	return true
+}
+
+func validAsset(asset string) bool {
+	if asset == "" || len(asset) > 16 {
+		return false
+	}
+	for _, character := range asset {
+		if character != '-' && character != '_' &&
+			(character < '0' || character > '9') &&
+			(character < 'A' || character > 'Z') &&
+			(character < 'a' || character > 'z') {
+			return false
+		}
+	}
+	return true
+}
+
 func updateHistory(history []PerformancePoint, at time.Time, summary CurrentSummary) []PerformancePoint {
 	point := PerformancePoint{
-		At: at, EquityMicros: summary.EquityMicros,
+		At: at, PriceMicros: summary.PriceMicros, EquityMicros: summary.EquityMicros,
 		HoldBenchmarkMicros: summary.HoldBenchmarkMicros,
 		DrawdownMicros:      summary.DrawdownMicros, MaxDrawdownMicros: summary.MaxDrawdownMicros,
 		Unavailable: summary.State == "waiting for data",

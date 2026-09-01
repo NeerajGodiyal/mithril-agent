@@ -1,8 +1,10 @@
 # Nous Hermes research profile
 
-This deploys Nous Research Hermes Agent as a scheduled research process with one
-bounded paper-only write: mature one-shot sessions may create an
-immutable challenger and update its dedicated challenger pointer. It can also
+This deploys Nous Research Hermes Agent as a scheduled research process with two
+bounded paper-only outputs: mature one-shot sessions may create an immutable
+challenger and update its dedicated challenger pointer, and every run must emit
+one strict source-cited JSON packet that deterministic Mithril code validates,
+hashes, archives, and projects to the dashboard. It can also
 read the local rooted index, current paper challenge state, official Solana
 documentation, and public web sources. It cannot change the
 champion or a live policy, build, sign, submit, authorize, or promote a
@@ -100,10 +102,15 @@ rootless Docker, its unprivileged runtime owner may run them instead:
 ```sh
 sudo install -m 0644 deploy/sysusers/mithril-agent-status.conf \
   /usr/lib/sysusers.d/mithril-agent-status.conf
-sudo systemd-sysusers /usr/lib/sysusers.d/mithril-agent-status.conf
+sudo install -m 0644 deploy/sysusers/mithril-agent-dashboard.conf \
+  /usr/lib/sysusers.d/mithril-agent-dashboard.conf
+sudo systemd-sysusers \
+  /usr/lib/sysusers.d/mithril-agent-status.conf \
+  /usr/lib/sysusers.d/mithril-agent-dashboard.conf
 sudo install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
   /var/lib/mithril-agent-research \
   /var/lib/mithril-agent-research/index \
+  /var/lib/mithril-agent-research/reports \
   /var/lib/mithril-agent-research/runs \
   /var/lib/mithril-agent-research/status \
   /var/lib/mithril-agent-research/{policy,journals,champion,challenger} \
@@ -111,6 +118,8 @@ sudo install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
   /var/lib/mithril-agent-research/challenger/candidates \
   /var/lib/mithril-agent-research/runs/{champion,challenger} \
   /var/lib/mithril-agent-research/status/{champion,jup}
+sudo install -d -o mithril-agent-dashboard -g mithril-agent-dashboard -m 0700 \
+  /var/lib/mithril-agent-dashboard
 ```
 
 Before the rooted index may inform research, populate that fixed `index/`
@@ -425,7 +434,7 @@ sudo -u mithril-agent-research env HOME=/var/lib/mithril-agent-research \
   /usr/local/libexec/mithril-agent/mithril-agent shadow policy \
   --out /var/lib/mithril-agent-research/policy/jup-policy.json \
   --observe WATCH_ONLY_ADDRESS --adaptive --market JUP/USDC \
-  --budget-usdc 250 --fee-reserve-sol 0.004 --setup-rent-sol 0.003 \
+  --budget-usdc 250 --fee-reserve-sol 0.080 --setup-rent-sol 0.003 \
   --drawdown-stop-bps 300 --fee-lamports 100000
 sudo install -o root -g root -m 0644 \
   systemd/mithril-agent-paper-jup.service \
@@ -454,13 +463,16 @@ pauses, period closes, and sustained market-data loss or recovery. JUP has its
 own journal, status directory, notional budget, and fee reserve; it does not
 enter the SOL champion/challenger lifecycle yet.
 
-### WIF/USDC admission collector
+### Solana market-admission collectors
 
 WIF is not enabled as a paper market immediately. Its collector first records
 30 complete UTC days of minute-by-minute Pyth, Kraken, Jupiter route, mint,
 USDC-peg, and native-fee evidence. Missing buckets and provider failures count
 as unavailable. This prevents a newly discovered token from becoming a paper
-mandate on the strength of a ticker or a short favorable sample.
+mandate on the strength of a ticker or a short favorable sample. JTO/USDC and
+PYTH/USDC use the same gate with their own pinned mint, decimals, Pyth feed,
+Kraken pair, and Jupiter routes. They do not share evidence or become active
+paper markets merely because their collectors are running.
 
 Create a root-owned environment file containing only the public watch-only
 quote address, then install the collector. The address cannot sign or spend.
@@ -477,11 +489,40 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now mithril-agent-market-wif.service
 ```
 
+To observe the two additional reviewed candidates, create separate root-owned
+environment files. `MITHRIL_AGENT_OBSERVE` is the same public watch-only quote
+address; it cannot sign or spend.
+
+```sh
+printf '%s\n' 'MITHRIL_AGENT_MARKET=JTO/USDC' \
+  'MITHRIL_AGENT_OBSERVE=WATCH_ONLY_ADDRESS' | \
+  sudo install -o root -g root -m 0600 /dev/stdin /etc/mithril-agent/market-jto.env
+printf '%s\n' 'MITHRIL_AGENT_MARKET=PYTH/USDC' \
+  'MITHRIL_AGENT_OBSERVE=WATCH_ONLY_ADDRESS' | \
+  sudo install -o root -g root -m 0600 /dev/stdin /etc/mithril-agent/market-pyth.env
+sudo install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
+  /var/lib/mithril-agent-research/market-admission-jto \
+  /var/lib/mithril-agent-research/market-admission-pyth
+sudo install -o root -g root -m 0644 \
+  systemd/mithril-agent-market-candidate@.service /etc/systemd/system/
+sudo systemd-analyze verify \
+  /etc/systemd/system/mithril-agent-market-candidate@.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now \
+  mithril-agent-market-candidate@jto.service \
+  mithril-agent-market-candidate@pyth.service
+```
+
+PUMP remains excluded. Its canonical mint uses Token-2022 while the current
+collector deliberately validates the legacy fixed-size mint layout; treating
+those layouts as interchangeable would weaken the mint and authority checks.
+
 After at least 30 complete days, stop the collector briefly and evaluate a new,
 date-named immutable artifact. Qualification proves current source and route
-quality only; it neither starts trading nor proves profit. A WIF paper policy
-must use that artifact's exact `$25` notional, `100` bps slippage, observer,
-source limits, and journal prefix. The admitted runner closes at the next UTC
+quality only; it neither starts trading nor proves profit. A candidate paper
+policy must use that artifact's exact `$25` notional, `100` bps slippage,
+observer, source limits, mint, decimals, and journal prefix. The admitted
+runner closes at the next UTC
 boundary and refuses another day until a newly reviewed rolling-window
 artifact and policy are supplied. Keep that handoff operator-reviewed; do not
 silently auto-promote a token because a timer ran.

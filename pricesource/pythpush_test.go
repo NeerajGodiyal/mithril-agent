@@ -111,6 +111,10 @@ func TestPythPushReadsAnAdmissionBoundFeed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	derived, err := NewPythPushSpecFromFeed("WIF/USD", feedID)
+	if err != nil || derived != spec {
+		t.Fatalf("derived spec = %+v, %v; want %+v", derived, err, spec)
+	}
 	if spec.UpgradedAccount == "" || spec.UpgradedAccount == spec.LegacyAccount {
 		t.Fatalf("derived spec = %+v", spec)
 	}
