@@ -58,7 +58,7 @@ e588c5821442434ea24841a27e2d4557013f5d00f76b45302c14d540c1a82c57  ./cmd/mithril-
 d53ac9839fbe784a1655a799f97c843bf9fcd4c5dd8d71838010f0b41dddf903  ./cmd/mithril-agent/doctor_telegram_test.go
 52084607d80293db7a84216e4d9d13f381ccd3f187c0045ac11cbc6480fbeb95  ./cmd/mithril-agent/doctor_test.go
 519267fdaa4647298c383b54cb24127010e9bb600ae334317012d3db45b12cd6  ./cmd/mithril-agent/doctor_trading_test.go
-8caea8c0a71c360d3a13e7d409c0b4051a2cc2455ab4b22275a5bbe4c27b46a5  ./cmd/mithril-agent/documentation_test.go
+15d3a740a7a38253c3b32a7c632fb759faf5148752b7b4d21937387ea813b250  ./cmd/mithril-agent/documentation_test.go
 4aad63196ecf6d68dd4047804cac2943ee4ece9a5cb7273878915b2983836d42  ./cmd/mithril-agent/explain.go
 f1a080ac99ba19b1a6cf9602d0bd65cd081145b8bcf620616a24b4ab7299923e  ./cmd/mithril-agent/explain_stage.go
 3358177400d3b66329c3510c8274e37c3fce8990ba48975eadf58fcead630cd6  ./cmd/mithril-agent/explain_stage_test.go
@@ -207,8 +207,8 @@ ef9e6ddbc0a8bad3a111cd9157d7aaf0c3e9f4593c47c10b476c7f3a23c18629  ./deploy/herme
 6ee849fc118b4e0f8196b05c31334a8c01818ad3cebffc543144c8894d1087f9  ./deploy/hermes-research/compose.yaml
 24aa7f6f14a23c6cc7aef77eb4439f9411e4088c8877fb63e260e835455a1b92  ./deploy/hermes-research/config.yaml
 cd719fafedb55c7e82922f92d230368561b3a2340af1d95061a609f36cc6017e  ./deploy/hermes-research/env.example
-06079372c44694b0f48174d27637bd5067ce4c86caf18ebdd2c120a3932b68fa  ./deploy/hermes-research/prompts/market-scout.md
-52a7df2f6c6f9a004e1f372e235d3ee9f03df5bea9fbbdd233c70dcb4c209f02  ./deploy/hermes-research/run-market-scout.sh
+38315334749a3758714c7e56783de4c11016b15dd597111e01764e3201d96783  ./deploy/hermes-research/prompts/market-scout.md
+2043d5d00f5c2e56f19cc4c3197270e43d3e84128b2536480081f5c62709537b  ./deploy/hermes-research/run-market-scout.sh
 43df10ef5192a5bc6fa52796612132de5235c7ea42b068e05ccceb4457ea1dee  ./deploy/prometheus/mithril-agent.rules.test.yml
 7fc42a6028da27674219166fef22a1aa53db0e39f88b0c273b47804b76f6d44f  ./deploy/prometheus/mithril-agent.rules.yml
 9facf6d1cc9e384b5245ea21950323b39405c793914fe355063b4f0cfb1cbd1b  ./deploy/systemd/mithril-agent-demo.service

@@ -426,6 +426,8 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"Never resolve an asset by ticker alone",
 		"hypothesis_id", "verified_facts", "no_trade_case", "risk_veto",
 		"candidate_parameter_diff", "two independent timestamped",
+		"trusted run-time anchor", "single_source` requires exactly one source",
+		"`unverified`", "requires an empty sources array",
 		"https://www.coinbase.com/cbbtc", "https://www.circle.com/transparency",
 		"not all-in execution guarantees",
 	} {
@@ -683,6 +685,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"/var/lib/mithril-agent-dashboard/instruction.json",
 		"--render-instruction \"$instruction\"",
 		"query_file=/run/mithril-hermes-research/market-scout.md",
+		"Trusted run-time anchor", "/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ",
 		"/usr/bin/chmod 0644 \"$query_file\"",
 		"export MITHRIL_HERMES_QUERY_FILE=\"$query_file\"",
 		"ulimit -f 128",

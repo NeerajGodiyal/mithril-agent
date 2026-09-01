@@ -21,16 +21,17 @@ fi
 export MITHRIL_HERMES_TOOLSETS="$toolsets"
 base_query=/opt/mithril-hermes-research/prompts/market-scout.md
 instruction=/var/lib/mithril-agent-dashboard/instruction.json
-query_file=$base_query
+query_file=/run/mithril-hermes-research/market-scout.md
+/usr/bin/cp "$base_query" "$query_file"
+/usr/bin/printf '\n\nTrusted run-time anchor: %s. Use this exact value for `created_at`; do not invent or round a timestamp. Set `valid_until` no more than 12 hours after this anchor.\n' \
+  "$(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$query_file"
 if [ -f "$instruction" ]; then
   rendered=$(/usr/sbin/runuser -u mithril-agent-dashboard -- \
     /usr/local/libexec/mithril-agent/mithril-agent-paper-dashboard \
       --render-instruction "$instruction")
-  query_file=/run/mithril-hermes-research/market-scout.md
-  /usr/bin/cp "$base_query" "$query_file"
   /usr/bin/printf '%s' "$rendered" >>"$query_file"
-  /usr/bin/chmod 0644 "$query_file"
 fi
+/usr/bin/chmod 0644 "$query_file"
 export MITHRIL_HERMES_QUERY_FILE="$query_file"
 
 packet=/run/mithril-hermes-research/packet.raw
