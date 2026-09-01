@@ -171,7 +171,7 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	case "/":
 		serveAsset(writer, request, "text/html; charset=utf-8", indexHTML)
 	case "/app.css":
-		serveAsset(writer, request, "text/css; charset=utf-8", appCSS+mobileCSS+refinedCSS+finishingCSS+narrowCSS+observabilityCSS+qaCSS+finalCSS+clarityCSS+controlCSS)
+		serveAsset(writer, request, "text/css; charset=utf-8", appCSS+mobileCSS+refinedCSS+finishingCSS+narrowCSS+observabilityCSS+qaCSS+finalCSS+clarityCSS+controlCSS+cockpitCSS+cockpitAccessibilityCSS+cockpitChoreographyCSS)
 	case "/app.js":
 		serveAsset(writer, request, "text/javascript; charset=utf-8", appJS)
 	case "/api/v1/status":

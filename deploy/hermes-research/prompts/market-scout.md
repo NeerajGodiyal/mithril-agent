@@ -103,8 +103,9 @@ The entire final response must be exactly one JSON object with no Markdown,
 code fence, prose before or after it, or `[SILENT]` sentinel. Use this exact
 schema; do not add fields:
 
-Use the trusted run-time anchor appended to this prompt as `created_at` and do
-not invent, round, or reuse an older timestamp. For each fact, `verified` and
+Use the two trusted run-time anchors appended to this prompt as `created_at`
+and `valid_until`. Copy both exact values and do not invent, round, reuse, or
+calculate either timestamp. For each fact, `verified` and
 `contradicted` require two to four organization-independent sources that support
 the same claim, `single_source` requires exactly one source, and `unverified`
 requires an empty sources array. Use the retrieval time returned by each source

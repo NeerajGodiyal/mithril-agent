@@ -313,7 +313,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for path, wants := range map[string][]string{
-		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "Automation setup", "Reviewed scope", "WIF, JTO, and PYTH", "View recent paper orders", "Plan the next paper experiment", "Largest order", "Paper loss stop", "Activation:"},
+		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "Automation setup", "Reviewed scope", "WIF, JTO, and PYTH", "are review candidates", "7-day checkpoint", "30 complete collector days", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Largest order", "Paper loss stop", "Activation:"},
 		"/app.css": {
 			".help:focus", ".help[aria-expanded=\"true\"]", ".button.loading:before", "@keyframes spin",
 			".market-overview", ".market-price{font-size:1.3rem}", "--line-strong:#51647a", "--subtle:#7f8b9a",
@@ -321,6 +321,9 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			".badge.green{background:var(--green-bg)!important}", ".controls .button{padding-inline:6px",
 			"@media(max-width:520px){.automation-grid", "@media(max-width:430px){.topbar",
 			"@media(max-width:390px){.tabs", "@media(max-width:360px){.metrics",
+			".coverage-ring", "#overview #markets>.market", "@keyframes cockpit-enter",
+			".chart-toggle:focus-visible{outline:2px solid var(--blue)", ".coverage-ring .ring-label{font-size:5.4px}",
+			".market-meta", ".market-bottom", ".decision-sequence", "@media(max-width:600px){.header-state{grid-column:1/-1;grid-row:2",
 		},
 		"/app.js": {
 			"Paper value now", "Started today with", "Today's result", "Compared with holding", "Filled paper orders",
@@ -342,6 +345,8 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"Orders paused for today", "Orders paused until tomorrow",
 			"Total traded today", "Modeled fees today", "renderActiveLimits",
 			"High concentration", "Save experiment request", "validInstructionRequest",
+			"coverageRing", "Usable price data ", "portfolio-card",
+			"Paper rule status", "Decision sequence", "Trade opportunities", "decisionReason", "marketStatus", "Fixed paper plan", "Evaluate the saved fixed paper-price rules", "Paper bounds",
 		},
 	} {
 		request := httptest.NewRequest(http.MethodGet, "http://localhost"+path, nil)

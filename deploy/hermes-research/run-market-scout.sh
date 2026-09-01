@@ -23,8 +23,10 @@ base_query=/opt/mithril-hermes-research/prompts/market-scout.md
 instruction=/var/lib/mithril-agent-dashboard/instruction.json
 query_file=/run/mithril-hermes-research/market-scout.md
 /usr/bin/cp "$base_query" "$query_file"
-/usr/bin/printf '\n\nTrusted run-time anchor: %s. Use this exact value for `created_at`; do not invent or round a timestamp. Set `valid_until` no more than 12 hours after this anchor.\n' \
-  "$(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$query_file"
+created_at=$(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ)
+valid_until=$(/usr/bin/date -u -d '6 hours' +%Y-%m-%dT%H:%M:%SZ)
+/usr/bin/printf '\n\nTrusted run-time anchors: `created_at` is %s and `valid_until` is %s. Copy both exact values; do not invent, round, reuse an older value, or calculate either timestamp.\n' \
+  "$created_at" "$valid_until" >>"$query_file"
 if [ -f "$instruction" ]; then
   rendered=$(/usr/sbin/runuser -u mithril-agent-dashboard -- \
     /usr/local/libexec/mithril-agent/mithril-agent-paper-dashboard \
@@ -34,12 +36,13 @@ fi
 /usr/bin/chmod 0644 "$query_file"
 export MITHRIL_HERMES_QUERY_FILE="$query_file"
 
+raw=/run/mithril-hermes-research/hermes.raw
 packet=/run/mithril-hermes-research/packet.raw
 dashboard_packet=/run/mithril-hermes-research/packet-dashboard.raw
 latest=/var/lib/mithril-agent-research/latest-research.json
 projection=/var/lib/mithril-agent-dashboard/research.json
 cleanup() {
-  /usr/bin/rm -f "$packet" "$dashboard_packet"
+	/usr/bin/rm -f "$raw" "$packet" "$dashboard_packet"
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -47,7 +50,8 @@ trap cleanup EXIT HUP INT TERM
 # POSIX ulimit -f uses 512-byte blocks, matching the packet's 64 KiB ceiling.
 ulimit -f 128
 cd /opt/mithril-hermes-research
-/usr/bin/docker compose run --rm --no-TTY hermes-research >"$packet"
+/usr/bin/docker compose run --rm --no-TTY hermes-research >"$raw"
+/usr/bin/sed -n '/^[[:space:]]*{/,$p' "$raw" >"$packet"
 /usr/bin/chmod 0600 "$packet"
 /usr/bin/chown mithril-agent-research:mithril-agent-research "$packet"
 /usr/sbin/runuser -u mithril-agent-research -- \
