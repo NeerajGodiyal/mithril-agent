@@ -30,8 +30,9 @@ const shadowSearchUsage = `Usage: mithril-agent shadow search --policy PATH --di
 Chooses bounded strategy parameters from one completed UTC day's recorded
 prices, then scores that exact candidate on a later completed, untouched UTC
 day using a fresh reset book on each day. Fixed policies search sell/buy
-thresholds; adaptive policies search only windows and tighter signal hurdles.
-The pool is modelled at the
+thresholds; adaptive policies search windows, tighter signal hurdles, and a
+post-fill cooldown from one-half to twice the base value. The signal hurdle is
+never lowered and risk limits remain fixed. The pool is modelled at the
 named spread. The result is research_only and can never authorize a trade.
 When --candidate-out is set, it also writes one immutable, paper-only policy
 bound to the base policy and both journals' verified chain heads.`
@@ -597,25 +598,34 @@ func adaptiveSearchPolicies(policy shadow.Policy) []shadow.Policy {
 			signalValues = append(signalValues, base.MinimumSignalBPS+extra)
 		}
 	}
+	cooldownValues := []uint64{base.CooldownSeconds}
+	if base.CooldownSeconds > 0 {
+		cooldownValues = append(cooldownValues,
+			max(policy.TickSeconds, base.CooldownSeconds/2),
+			min(uint64(86_400), base.CooldownSeconds*2),
+		)
+	}
 	seen := make(map[shadow.AdaptivePolicy]struct{})
 	var candidates []shadow.Policy
 	for _, fast := range fastValues {
 		for _, slow := range slowValues {
 			for _, signal := range signalValues {
-				adaptive := base
-				adaptive.FastWindow, adaptive.SlowWindow = fast, slow
-				adaptive.MinimumSignalBPS = signal
-				if _, duplicate := seen[adaptive]; duplicate ||
-					validateAdaptiveCandidateDelta(base, adaptive) != nil {
-					continue
+				for _, cooldown := range cooldownValues {
+					adaptive := base
+					adaptive.FastWindow, adaptive.SlowWindow = fast, slow
+					adaptive.MinimumSignalBPS, adaptive.CooldownSeconds = signal, cooldown
+					if _, duplicate := seen[adaptive]; duplicate ||
+						validateAdaptiveCandidateDelta(base, adaptive) != nil {
+						continue
+					}
+					candidate := policy
+					candidate.Adaptive = &adaptive
+					if candidate.Validate() != nil {
+						continue
+					}
+					seen[adaptive] = struct{}{}
+					candidates = append(candidates, candidate)
 				}
-				candidate := policy
-				candidate.Adaptive = &adaptive
-				if candidate.Validate() != nil {
-					continue
-				}
-				seen[adaptive] = struct{}{}
-				candidates = append(candidates, candidate)
 			}
 		}
 	}
@@ -631,9 +641,11 @@ func validateAdaptiveCandidateDelta(base, candidate shadow.AdaptivePolicy) error
 		candidate.MaxVolatilityBPS != base.MaxVolatilityBPS ||
 		candidate.MaxQuoteImpactBPS != base.MaxQuoteImpactBPS ||
 		candidate.MaxDrawdownBPS != base.MaxDrawdownBPS ||
-		candidate.CooldownSeconds != base.CooldownSeconds ||
+		base.CooldownSeconds == 0 && candidate.CooldownSeconds != 0 ||
+		base.CooldownSeconds > 0 && (candidate.CooldownSeconds < base.CooldownSeconds/2 ||
+			candidate.CooldownSeconds > min(uint64(86_400), base.CooldownSeconds*2)) ||
 		candidate.MaxObservationGapSeconds != base.MaxObservationGapSeconds {
-		return errors.New("adaptive candidate may change only windows or tighten its signal hurdle")
+		return errors.New("adaptive candidate may change only windows, a bounded cooldown, or tighten its signal hurdle")
 	}
 	return nil
 }

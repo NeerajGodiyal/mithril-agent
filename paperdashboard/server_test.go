@@ -55,7 +55,8 @@ func TestStatusCombinesMarketsWithoutExposingIDsOrHTML(t *testing.T) {
 				HoldBenchmarkMicros: hold, Checks: checks, Trades: 1, Signals: 1,
 				AccountingTracked: true, RealizedMicros: pnl / 4,
 				UnrealizedMicros: pnl - pnl/4,
-				Unobservable:     unavailable, PriceMicros: 100_000_000,
+				FeesMicros:       15_000, TurnoverMicros: opening * 3,
+				Unobservable: unavailable, PriceMicros: 100_000_000,
 				State: "range", Strategy: "adaptive", NextAction: "buy",
 				DecisionReason:  "signal_below_cost_hurdle",
 				InitialLotUnits: 250_000_000, InitialLotDecimals: 6, InitialLotAsset: "USDC",
@@ -99,12 +100,14 @@ func TestStatusCombinesMarketsWithoutExposingIDsOrHTML(t *testing.T) {
 	if !view.Complete || view.Overview.EquityMicros != 150_000_000 ||
 		view.Overview.Signals != 2 || view.Overview.CoverageBPS != 5_000 ||
 		!view.Overview.AccountingTracked || view.Overview.RealizedMicros != 0 ||
-		view.Overview.UnrealizedMicros != 0 || view.Markets[0].History[0].PriceMicros != 99_000_000 ||
+		view.Overview.UnrealizedMicros != 0 || view.Overview.FeesMicros != 30_000 ||
+		view.Overview.TurnoverMicros != 450_000_000 || view.Markets[0].History[0].PriceMicros != 99_000_000 ||
 		len(view.Markets) != 2 || len(view.Markets[0].History) != 2 ||
 		len(view.Activity) != 2 || view.ActivityOmitted != 3 {
 		t.Fatalf("view = %+v", view)
 	}
 	if view.Markets[0].InitialLotUnits != 250_000_000 ||
+		view.Markets[0].FeesMicros != 15_000 || view.Markets[0].TurnoverMicros != 300_000_000 ||
 		view.Markets[0].InitialLotAsset != "USDC" || view.Markets[0].MaxDrawdownBPS != 300 ||
 		!view.Markets[0].FeeBudgetTracked ||
 		view.Markets[0].RemainingFeeReserveLamports != 29_000_000 ||
@@ -310,7 +313,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for path, wants := range map[string][]string{
-		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "Automation setup", "Reviewed scope", "WIF, JTO, and PYTH", "View recent paper orders", "Guide what the research agent explores next", "Why budget is separate"},
+		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "Automation setup", "Reviewed scope", "WIF, JTO, and PYTH", "View recent paper orders", "Plan the next paper experiment", "Largest order", "Paper loss stop", "Activation:"},
 		"/app.css": {
 			".help:focus", ".help[aria-expanded=\"true\"]", ".button.loading:before", "@keyframes spin",
 			".market-overview", ".market-price{font-size:1.3rem}", "--line-strong:#51647a", "--subtle:#7f8b9a",
@@ -337,6 +340,8 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"Minimum opportunity", "saveInstruction", "X-Mithril-Paper-Request",
 			"Fee budget left", "Orders left today", "No more orders today",
 			"Orders paused for today", "Orders paused until tomorrow",
+			"Total traded today", "Modeled fees today", "renderActiveLimits",
+			"High concentration", "Save experiment request", "validInstructionRequest",
 		},
 	} {
 		request := httptest.NewRequest(http.MethodGet, "http://localhost"+path, nil)

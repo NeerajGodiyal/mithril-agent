@@ -17,8 +17,12 @@ import (
 )
 
 const (
-	instructionVersion  = 1
-	maxInstructionBytes = int64(1024)
+	legacyInstructionVersion = 1
+	instructionVersion       = 2
+	maxInstructionBytes      = int64(2048)
+	minimumPaperCapital      = uint64(10_000_000)
+	maximumPaperCapital      = uint64(1_000_000_000_000)
+	minimumPaperOrder        = uint64(1_000_000)
 )
 
 type Instruction struct {
@@ -26,11 +30,23 @@ type Instruction struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 	Market     string    `json:"market"`
 	Preference string    `json:"preference"`
+	// These are paper-only constraints for the next validated experiment. They
+	// do not mutate an in-flight policy or grant order authority to research.
+	PaperCapitalMicros uint64 `json:"paper_capital_micros,omitempty"`
+	MinimumOrderMicros uint64 `json:"minimum_order_micros,omitempty"`
+	MaximumOrderMicros uint64 `json:"maximum_order_micros,omitempty"`
+	CadenceSeconds     uint64 `json:"cadence_seconds,omitempty"`
+	MaxDrawdownBPS     uint16 `json:"max_drawdown_bps,omitempty"`
 }
 
 type instructionRequest struct {
-	Market     string `json:"market"`
-	Preference string `json:"preference"`
+	Market             string `json:"market"`
+	Preference         string `json:"preference"`
+	PaperCapitalMicros uint64 `json:"paper_capital_micros"`
+	MinimumOrderMicros uint64 `json:"minimum_order_micros"`
+	MaximumOrderMicros uint64 `json:"maximum_order_micros"`
+	CadenceSeconds     uint64 `json:"cadence_seconds"`
+	MaxDrawdownBPS     uint16 `json:"max_drawdown_bps"`
 }
 
 func (s *Server) serveInstruction(writer http.ResponseWriter, request *http.Request) {
@@ -68,6 +84,11 @@ func (s *Server) serveInstruction(writer http.ResponseWriter, request *http.Requ
 	instruction := Instruction{
 		Version: instructionVersion, UpdatedAt: s.now().UTC(),
 		Market: wanted.Market, Preference: wanted.Preference,
+		PaperCapitalMicros: wanted.PaperCapitalMicros,
+		MinimumOrderMicros: wanted.MinimumOrderMicros,
+		MaximumOrderMicros: wanted.MaximumOrderMicros,
+		CadenceSeconds:     wanted.CadenceSeconds,
+		MaxDrawdownBPS:     wanted.MaxDrawdownBPS,
 	}
 	s.mu.Lock()
 	err = writeInstruction(s.instructionPath, instruction)
@@ -90,6 +111,11 @@ func (s *Server) validInstructionRequest(request instructionRequest) bool {
 	instruction := Instruction{
 		Version: instructionVersion, UpdatedAt: time.Unix(1, 0).UTC(),
 		Market: request.Market, Preference: request.Preference,
+		PaperCapitalMicros: request.PaperCapitalMicros,
+		MinimumOrderMicros: request.MinimumOrderMicros,
+		MaximumOrderMicros: request.MaximumOrderMicros,
+		CadenceSeconds:     request.CadenceSeconds,
+		MaxDrawdownBPS:     request.MaxDrawdownBPS,
 	}
 	if !validInstruction(instruction) {
 		return false
@@ -148,12 +174,37 @@ func writeInstruction(path string, instruction Instruction) error {
 }
 
 func validInstruction(instruction Instruction) bool {
-	return instruction.Version == instructionVersion &&
-		!instruction.UpdatedAt.IsZero() && instruction.UpdatedAt.Equal(instruction.UpdatedAt.UTC()) &&
-		(instruction.Market == "all" || validLabel(instruction.Market)) &&
-		(instruction.Preference == "more-opportunities" ||
-			instruction.Preference == "balanced" ||
-			instruction.Preference == "more-selective")
+	if instruction.Version != legacyInstructionVersion && instruction.Version != instructionVersion ||
+		instruction.UpdatedAt.IsZero() || !instruction.UpdatedAt.Equal(instruction.UpdatedAt.UTC()) ||
+		instruction.Market != "all" && !validLabel(instruction.Market) {
+		return false
+	}
+	if instruction.Preference != "more-opportunities" &&
+		instruction.Preference != "balanced" &&
+		instruction.Preference != "more-selective" {
+		return false
+	}
+	if instruction.Version == legacyInstructionVersion {
+		return instruction.PaperCapitalMicros == 0 && instruction.MinimumOrderMicros == 0 &&
+			instruction.MaximumOrderMicros == 0 && instruction.CadenceSeconds == 0 &&
+			instruction.MaxDrawdownBPS == 0
+	}
+	return instruction.PaperCapitalMicros >= minimumPaperCapital &&
+		instruction.PaperCapitalMicros <= maximumPaperCapital &&
+		instruction.MinimumOrderMicros >= minimumPaperOrder &&
+		instruction.MinimumOrderMicros <= instruction.MaximumOrderMicros &&
+		instruction.MaximumOrderMicros <= instruction.PaperCapitalMicros &&
+		validInstructionCadence(instruction.CadenceSeconds) &&
+		instruction.MaxDrawdownBPS >= 10 && instruction.MaxDrawdownBPS <= 5000
+}
+
+func validInstructionCadence(seconds uint64) bool {
+	switch seconds {
+	case 5, 15, 30, 60, 300:
+		return true
+	default:
+		return false
+	}
 }
 
 func cleanAbsolutePath(path string) bool {
@@ -180,5 +231,17 @@ func RenderInstruction(path string) (string, error) {
 		"balanced":           "balance opportunity frequency with the current conservative evidence requirements",
 		"more-selective":     "prefer fewer, higher-confidence opportunities and tighter evidence",
 	}[instruction.Preference]
-	return fmt.Sprintf("\n\nOperator research preference (not trade authority): for %s, %s. Treat this as a research priority only. It cannot change the live paper policy, budget, safety limits, selection gate, or execution permissions.\n", market, goal), nil
+	if instruction.Version == legacyInstructionVersion {
+		return fmt.Sprintf("\n\nOperator research preference (not trade authority): for %s, %s. Treat this as a research priority only. It cannot change the live paper policy, budget, safety limits, selection gate, or execution permissions.\n", market, goal), nil
+	}
+	return fmt.Sprintf("\n\nOperator paper-experiment request (not trade authority): for %s, %s. Test with $%s paper capital, orders from $%s to $%s, price checks every %d seconds, and a %.2f%% maximum drawdown. Treat these as bounded constraints for the next validated paper experiment only. They cannot change an active paper policy, skip selection evidence, place an order, or grant wallet permissions.\n",
+		market, goal,
+		formatInstructionUSD(instruction.PaperCapitalMicros),
+		formatInstructionUSD(instruction.MinimumOrderMicros),
+		formatInstructionUSD(instruction.MaximumOrderMicros),
+		instruction.CadenceSeconds, float64(instruction.MaxDrawdownBPS)/100), nil
+}
+
+func formatInstructionUSD(micros uint64) string {
+	return fmt.Sprintf("%d.%02d", micros/1_000_000, (micros%1_000_000)/10_000)
 }

@@ -88,13 +88,17 @@ const indexHTML = `<!doctype html>
         </aside>
       </div>
       <div id="strategy-markets" class="market-grid small"></div>
-      <article id="research-instruction" class="card instruction-card" hidden>
+      <article id="research-instruction" class="card instruction-card experiment-card" hidden>
         <div class="instruction-copy">
           <span class="badge violet">Nous Hermes research</span>
-          <h3>Guide what the research agent explores next.</h3>
-          <p>This preference reaches the next scheduled research run. It cannot place an order, resize today's paper account, weaken a safety limit, or skip the forward paper test.</p>
+          <h3>Plan the next paper experiment</h3>
+          <p>Set the simulated budget and risk envelope Hermes should research. Saving updates the next research run without restarting the dashboard.</p>
         </div>
-        <div class="instruction-controls" aria-label="Paper research preference">
+        <section class="active-limits" aria-labelledby="active-limits-title">
+          <div class="subsection-head"><span class="badge green">Active now</span><h4 id="active-limits-title">Current paper plans</h4></div>
+          <div id="active-limit-list" class="active-limit-list">Waiting for current limits…</div>
+        </section>
+        <div class="instruction-controls" aria-label="Next paper experiment request">
           <label>Market
             <select id="instruction-market"><option value="all">All paper markets</option></select>
           </label>
@@ -105,10 +109,37 @@ const indexHTML = `<!doctype html>
               <option value="more-selective">Be more selective</option>
             </select>
           </label>
-          <button id="save-instruction" class="button" type="button">Save preference</button>
+          <label>Paper capital
+            <span class="money-input"><span aria-hidden="true">$</span><input id="instruction-capital" type="number" min="10" max="1000000" step="0.01" inputmode="decimal"></span>
+            <small>Requested simulated money for the next experiment</small>
+          </label>
+          <label>Smallest order
+            <span class="money-input"><span aria-hidden="true">$</span><input id="instruction-minimum" type="number" min="1" max="1000000" step="0.01" inputmode="decimal"></span>
+            <small>Request to skip smaller paper trades</small>
+          </label>
+          <label>Largest order
+            <span class="money-input"><span aria-hidden="true">$</span><input id="instruction-maximum" type="number" min="1" max="1000000" step="0.01" inputmode="decimal"></span>
+            <small>Requested cap for the next experiment</small>
+          </label>
+          <label>Price-check speed
+            <select id="instruction-cadence">
+              <option value="5">Every 5 seconds</option>
+              <option value="15">Every 15 seconds</option>
+              <option value="30">Every 30 seconds</option>
+              <option value="60">Every minute</option>
+              <option value="300">Every 5 minutes</option>
+            </select>
+            <small>Faster checks do not force more trades</small>
+          </label>
+          <label>Paper loss stop
+            <span class="percent-input"><input id="instruction-drawdown" type="number" min="0.1" max="50" step="0.1" inputmode="decimal"><span aria-hidden="true">%</span></span>
+            <small>Pause new buys after this drawdown</small>
+          </label>
+          <div id="instruction-warning" class="instruction-warning" role="status" aria-live="polite"></div>
+          <button id="save-instruction" class="button" type="button">Save experiment request</button>
           <span id="instruction-status" role="status" aria-live="polite">No preference saved yet.</span>
         </div>
-        <p class="instruction-boundary"><strong>Why budget is separate:</strong> resizing the base paper mandate starts a new clean comparison book. It should never happen silently in the middle of today's results.</p>
+        <p class="instruction-boundary"><strong>Activation:</strong> this changes the next Hermes research brief immediately. It does not resize an order already running. A requested plan becomes active only as a new paper-policy version after deterministic checks and a clean experiment boundary.</p>
       </article>
     </section>
     <section id="system" class="panel" role="tabpanel" aria-labelledby="tab-system" tabindex="0" hidden>
@@ -158,6 +189,8 @@ const finalCSS = `.help:focus-visible:not([aria-expanded="true"]) .help-tip{disp
 
 const clarityCSS = `.daily-note{margin:-5px 0 16px;padding:11px 13px;border-left:3px solid var(--blue);background:var(--blue-bg);color:#cad8ea;font-size:.78rem;line-height:1.5}.market-metrics{grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line)}.market-metrics>div{padding:12px;background:var(--bg)}.market-result-note{margin:13px 0 0;color:var(--muted);font-size:.75rem;line-height:1.5}.chart.market-price-chart{border-top:0;margin-top:12px;padding:15px;background:var(--bg);border:1px solid var(--line)}.chart.market-price-chart svg{height:72px}.chart-market{fill:none;stroke:var(--amber);stroke-width:2;vector-effect:non-scaling-stroke}.chart-market-dot{fill:var(--amber)}.chart.market-price-chart .chart-legend span:before{background:var(--amber)}.chart.market-price-chart .chart-legend span:last-child:before{display:none}.chart-title{color:var(--text);font-weight:650}.chart-change{font-weight:650}.chart-change.positive{color:var(--green)}.chart-change.negative{color:var(--red)}@media(max-width:700px){.market-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:380px){.market-metrics{grid-template-columns:1fr}.market-metrics>div{padding:11px}}`
 
+const controlCSS = `.experiment-card{grid-template-columns:minmax(250px,.72fr) minmax(480px,1.28fr);padding:0;overflow:hidden}.experiment-card>.instruction-copy,.active-limits{padding:22px 24px}.experiment-card>.instruction-copy{border-bottom:1px solid var(--line)}.experiment-card>.instruction-controls{grid-column:2;grid-row:1/3;padding:24px;background:var(--raised)}.experiment-card>.instruction-boundary{margin:0;padding:16px 24px;border-top:1px solid var(--line);background:var(--bg)}.active-limits{align-self:stretch}.subsection-head{display:flex;align-items:center;gap:10px;margin-bottom:14px}.subsection-head h4{margin:0;font-size:.86rem}.active-limit-list{display:grid;gap:8px}.active-limit{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 12px;padding:11px 12px;border:1px solid var(--line);background:var(--bg)}.active-limit strong{font-size:.82rem}.active-limit span{color:var(--muted);font-size:.72rem;text-align:right}.active-limit small{grid-column:1/-1;color:var(--muted);font-size:.7rem;line-height:1.4}.instruction-controls{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.instruction-controls label{align-content:start}.instruction-controls label>small{color:var(--subtle);font-size:.68rem;line-height:1.35}.instruction-controls input,.instruction-controls select{width:100%;min-height:44px;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--text)}.instruction-controls input{padding:0 11px}.money-input,.percent-input{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface);color:var(--muted)}.money-input>span,.percent-input>span{padding:0 0 0 11px}.money-input input,.percent-input input{border:0;background:transparent}.percent-input{grid-template-columns:minmax(0,1fr) auto}.percent-input>span{padding:0 11px 0 0}.instruction-warning{grid-column:1/-1;min-height:0;color:var(--muted);font-size:.75rem;line-height:1.45}.instruction-warning:not(:empty){padding:10px 12px;border-left:3px solid var(--amber);background:var(--amber-bg);color:#efd3a5}.instruction-controls .button{justify-self:start}.instruction-controls #instruction-status{align-self:center}.metrics .metric.trade-volume{border-color:#3a4656}@media(min-width:1100px){.metrics{grid-template-columns:minmax(240px,1.35fr) repeat(2,minmax(0,1fr));grid-template-rows:repeat(2,minmax(86px,auto))}.metric:first-child{grid-column:1;grid-row:1/3}.metric:nth-child(2){grid-column:2;grid-row:1}.metric:nth-child(3){grid-column:3;grid-row:1}.metric:nth-child(4){grid-column:2;grid-row:2}.metric:nth-child(5){grid-column:3;grid-row:2}.metric:not(:first-child){min-height:86px;padding-block:15px}}@media(max-width:900px){.experiment-card{grid-template-columns:1fr}.experiment-card>.instruction-controls{grid-column:1;grid-row:auto;border-top:1px solid var(--line)}.experiment-card>.instruction-boundary{grid-column:1}.active-limits{border-top:0}}@media(max-width:600px){.instruction-controls{grid-template-columns:1fr}.instruction-warning{grid-column:1}.experiment-card>.instruction-copy,.active-limits,.experiment-card>.instruction-controls{padding:18px}.experiment-card>.instruction-boundary{padding:14px 18px}.active-limit{grid-template-columns:1fr}.active-limit span{text-align:left}.metrics .metric:last-child{grid-column:1/-1}}`
+
 const appJS = `const $=id=>document.getElementById(id);
 let current=null;
 let refreshReset;
@@ -171,6 +204,11 @@ const money=micros=>integer(micros)>0n&&integer(micros)<10000n?'<$0.01':'$'+deci
 const price=micros=>{const amount=integer(micros),places=amount>=1000000n?2:amount>=10000n?4:6;return '$'+decimal(amount,2,places);};
 const paperValue=(micros,unit)=>unit==='USD'?money(micros):decimal(micros,2,6)+' '+(unit||'units');
 const assetAmount=(units,places,asset)=>{const amount=integer(units),digits=Math.max(0,Math.min(18,Number(places||0))),base=10n**BigInt(digits),whole=amount/base;let fraction=(amount%base).toString().padStart(digits,'0').replace(/0+$/,'');if(fraction.length>9)fraction=fraction.slice(0,9).replace(/0+$/,'');return whole.toLocaleString()+(fraction?'.'+fraction:'')+' '+safe(asset||'units');};
+const unitsAsMicros=(units,places)=>{const digits=Math.max(0,Math.min(18,Number(places||0))),amount=integer(units);return digits>=6?amount/(10n**BigInt(digits-6)):amount*(10n**BigInt(6-digits));};
+const initialLotValue=m=>{const asset=String(m.initial_lot_asset||'').toUpperCase(),base=String(m.name||'').split('/')[0].toUpperCase();if(asset==='USD'||asset.endsWith('USDC'))return unitsAsMicros(m.initial_lot_units,m.initial_lot_decimals);if(asset===base&&integer(m.price_micros)>0n)return integer(m.initial_lot_units)*integer(m.price_micros)/(10n**BigInt(Number(m.initial_lot_decimals||0)));return 0n;};
+const exposure=(lot,capital)=>integer(capital)>0n?(Number(integer(lot)*10000n/integer(capital))/100).toFixed(1)+'%':'—';
+const microsFromInput=id=>Math.round(Number($(id).value)*1000000);
+const inputFromMicros=value=>(Number(integer(value))/1000000).toFixed(2);
 const percent=bps=>(Number(bps||0)/100).toFixed(2).replace(/\.00$/,'')+'%';
 const duration=seconds=>Number(seconds||0)>=60&&Number(seconds||0)%60===0?(Number(seconds)/60)+' min':Number(seconds||0)+' sec';
 const deltaValue=(micros,unit)=>unit==='USD'&&integer(micros)<10000n?'<$0.01':unit==='USD'?money(micros):paperValue(micros,unit);
@@ -253,16 +291,17 @@ $('activity-filter').addEventListener('change',renderActivity);
 $('open-order-history').addEventListener('click',()=>{$('activity-filter').value='orders';renderActivity();selectTab($('tab-activity'),true);});
 $('instruction-market').addEventListener('change',()=>instructionDirty=true);
 $('instruction-preference').addEventListener('change',()=>instructionDirty=true);
+['instruction-capital','instruction-minimum','instruction-maximum','instruction-cadence','instruction-drawdown'].forEach(id=>$(id).addEventListener('input',()=>{instructionDirty=true;renderInstructionWarning();}));
 $('save-instruction').addEventListener('click',saveInstruction);
 document.addEventListener('click',event=>{const selected=event.target.closest('.help');document.querySelectorAll('.help[aria-expanded="true"]').forEach(button=>{if(button!==selected)button.setAttribute('aria-expanded','false');});if(selected)selected.setAttribute('aria-expanded',String(selected.getAttribute('aria-expanded')!=='true'));else if(document.activeElement?.classList.contains('help'))document.activeElement.blur();});
 document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;document.querySelectorAll('.help[aria-expanded="true"]').forEach(button=>button.setAttribute('aria-expanded','false'));});
 
 function help(label,text){const id='help-'+label.toLowerCase().replace(/[^a-z0-9]+/g,'-');return '<button type="button" class="help" aria-label="Explain '+safe(label)+'" aria-describedby="'+id+'" aria-expanded="false">?<span id="'+id+'" class="help-tip" role="tooltip">'+safe(text)+'</span></button>';}
-function metric(label,value,foot,klass='',explanation=''){
-  return '<article class="metric"><span class="metric-label"><span>'+safe(label)+'</span>'+help(label,explanation)+'</span><strong class="metric-value '+klass+'">'+safe(value)+'</strong><span class="metric-foot">'+safe(foot)+'</span></article>';
+function metric(label,value,foot,klass='',explanation='',cardClass=''){
+  return '<article class="metric '+cardClass+'"><span class="metric-label"><span>'+safe(label)+'</span>'+help(label,explanation)+'</span><strong class="metric-value '+klass+'">'+safe(value)+'</strong><span class="metric-foot">'+safe(foot)+'</span></article>';
 }
 function renderMetrics(){
-  if(!current.complete){$('metrics').innerHTML=metric('Paper value now','—','Waiting for all markets','','Current value of all simulated cash and coins. It is not a real wallet balance.')+metric('Started today with','—','Waiting for current data','','Value assigned to today’s independent paper test when its books opened.')+metric("Today's result",'—','Waiting for current data','','Change across every paper market since today started. It includes sold and unsold positions.')+metric('Filled paper orders','—','Waiting for current data','','Simulated buy or sell orders that finished. More filled orders do not necessarily mean more profit.');return;}
+  if(!current.complete){$('metrics').innerHTML=metric('Paper value now','—','Waiting for all markets','','Current value of all simulated cash and coins. It is not a real wallet balance.')+metric('Started today with','—','Waiting for current data','','Value assigned to today’s independent paper test when its books opened.')+metric("Today's result",'—','Waiting for current data','','Change across every paper market since today started. It includes sold and unsold positions.')+metric('Total traded today','—','Waiting for current data','','Sum of every filled buy and sell. This is activity, not profit.','trade-volume')+metric('Filled paper orders','—','Waiting for current data','','Simulated buy or sell orders that finished. More filled orders do not necessarily mean more profit.');return;}
   const o=current.overview||{};
   const pnl=integer(o.equity_micros)-integer(o.opening_equity_micros);
   const hold=integer(o.equity_micros)-integer(o.hold_benchmark_micros);
@@ -272,6 +311,7 @@ function renderMetrics(){
   $('metrics').innerHTML=metric('Paper value now',paperValue(o.equity_micros,o.value_unit),'Simulated cash + coins','neutral','Current value of all simulated cash and coins. It is not a real wallet balance.')+
     metric('Started today with',paperValue(o.opening_equity_micros,o.value_unit),'Daily test opening value','neutral','Value assigned to today’s independent paper test when its books opened.')+
     metric("Today's result",resultWithPercent(o.opening_equity_micros,o.equity_micros,o.value_unit),breakdown+' · '+holdingText,tone(pnl),'Change across every paper market since today started. Closed means inventory already sold; open means the mark-to-market result still held. The holding comparison asks what happened if the starting assets were left untouched.')+
+    metric('Total traded today',paperValue(o.turnover_micros,o.value_unit),'Across buys and sells · Modeled fees '+paperValue(o.fees_micros,o.value_unit),'neutral','Turnover adds the value of every filled buy and sell. It can be much larger than the paper account because the same money can be reused. It is not profit.','trade-volume')+
     metric('Filled paper orders',String(o.trades||0),coverage+' · '+attempts(o.signals),'neutral','The plan checked '+Number(o.signals||0)+' possible trades; only filled orders changed the paper account. Price-data coverage shows how much of today had usable independent prices. More filled orders do not necessarily mean more profit.');
 }
 function marketCard(m){
@@ -301,6 +341,7 @@ function strategyCard(m){
   const trades=unavailable||!m.ready?'—':(m.trades||0)+' filled paper orders · '+attempts(m.signals).toLowerCase()+' '+(m.fresh?'today':'in the last recorded session');
   if(unavailable||!m.ready)return '<article class="market"><div class="market-head"><h3>'+safe(m.name)+'</h3><span class="badge '+(unavailable?'red':'amber')+'">'+safe(label)+'</span></div><p class="strategy-next">'+safe(next)+'</p><div class="market-state"><strong>'+safe(status)+'</strong><span>'+safe(trades)+'</span></div></article>';
   const lot=m.initial_lot_units?assetAmount(m.initial_lot_units,m.initial_lot_decimals,m.initial_lot_asset):'Updating';
+  const lotValue=initialLotValue(m),lotUSD=lotValue?paperValue(lotValue,m.value_unit):'Value updating';
   const reserve=m.fee_reserve_lamports?assetAmount(m.fee_reserve_lamports,9,'SOL'):'None';
   const feeLeft=m.fee_budget_tracked?(m.estimated_fills_remaining?String(m.estimated_fills_remaining)+' estimated orders':'No more orders today'):'Not tracked';
 	const feeReserveLeft=m.fee_budget_tracked?assetAmount(m.remaining_fee_reserve_lamports||0,9,'SOL'):'Not tracked';
@@ -309,7 +350,9 @@ function strategyCard(m){
 	const why={'watching':'Watching the next price update','collecting_history':'Still learning recent prices','drawdown_limit':'Reducing risk after the loss limit','risk_halt':'New buys are paused by the loss limit','drawdown_halt':'New buys are paused by the loss limit','volatility_limit':'The market is moving too quickly','cooldown':'Taking a short break after a fill','trend_aligned_buy':'The trend supported a buy','sell_leg_waiting':'Waiting for a better sell move','trend_aligned_sell':'The trend supported a sell','buy_leg_waiting':'Waiting for a better buy move','range_high_sell':'Price reached the plan’s sell range','range_low_buy':'Price reached the plan’s buy range','signal_below_cost_hurdle':'The move is too small after costs','data_unavailable':'Fresh prices are unavailable','fee_budget_used':'Today’s simulated fee budget is used up','route_cost_limit':'The route was too expensive','order_pending':'A paper order is waiting to fill','order_filled':'The latest paper order filled','fill_limit':'Price moved beyond the fill limit','trade_unavailable':'The paper trade could not be priced or funded'}[m.decision_reason]||'Watching the market';
   const limits='<dl class="limit-grid">'+
     '<div><dt>Today\'s starting paper value</dt><dd>'+safe(paperValue(m.opening_equity_micros,m.value_unit))+'</dd></div>'+
-    '<div><dt>Starting trade lot</dt><dd>'+lot+'</dd></div>'+
+    '<div><dt>Starting trade lot</dt><dd>'+lot+' · '+safe(lotUSD)+' ('+safe(exposure(lotValue,m.opening_equity_micros))+' of this market)</dd></div>'+
+    '<div><dt>Total traded today</dt><dd>'+safe(paperValue(m.turnover_micros,m.value_unit))+'</dd></div>'+
+    '<div><dt>Modeled fees today</dt><dd>'+safe(paperValue(m.fees_micros,m.value_unit))+'</dd></div>'+
     '<div><dt>Fee reserve</dt><dd>'+reserve+'</dd></div>'+
 		'<div><dt>Fee budget left</dt><dd>'+feeReserveLeft+'</dd></div>'+
 		'<div><dt>Orders left today</dt><dd>'+safe(feeLeft)+'</dd></div>'+
@@ -325,31 +368,61 @@ function strategyCard(m){
   const note='<p class="limit-note"><strong>Why now:</strong> '+safe(why)+'</p><p class="limit-note">Later orders use the simulated proceeds, so the lot is not a fixed dollar order. Absolute profit is the percentage return multiplied by this paper capital; a larger mandate scales gains and losses, not strategy quality.</p>';
   return '<article class="market"><div class="market-head"><h3>'+safe(m.name)+'</h3><span class="badge blue">'+safe(label)+'</span></div><p class="strategy-next">'+safe(next)+'</p><div class="market-state"><strong>'+safe(status)+'</strong><span>'+safe(trades)+'</span></div>'+limits+note+'</article>';
 }
-function instructionLabel(value){return {'more-opportunities':'Look for more opportunities',balanced:'Keep it balanced','more-selective':'Be more selective'}[value]||'Saved preference';}
+function experimentDefaults(){
+  let capital=integer(current?.overview?.opening_equity_micros||0);
+  if(capital<10000000n)capital=100000000n;
+  const minimum=capital/100n>1000000n?capital/100n:1000000n;
+  const maximum=capital/4n>minimum?capital/4n:minimum;
+  return {paper_capital_micros:capital,minimum_order_micros:minimum,maximum_order_micros:maximum,cadence_seconds:60,max_drawdown_bps:300};
+}
+function instructionRequest(){
+  return {market:$('instruction-market').value,preference:$('instruction-preference').value,paper_capital_micros:microsFromInput('instruction-capital'),minimum_order_micros:microsFromInput('instruction-minimum'),maximum_order_micros:microsFromInput('instruction-maximum'),cadence_seconds:Number($('instruction-cadence').value),max_drawdown_bps:Math.round(Number($('instruction-drawdown').value)*100)};
+}
+function validInstructionRequest(request){return Number.isSafeInteger(request.paper_capital_micros)&&request.paper_capital_micros>=10000000&&request.paper_capital_micros<=1000000000000&&Number.isSafeInteger(request.minimum_order_micros)&&request.minimum_order_micros>=1000000&&Number.isSafeInteger(request.maximum_order_micros)&&request.maximum_order_micros>=request.minimum_order_micros&&request.maximum_order_micros<=request.paper_capital_micros&&[5,15,30,60,300].includes(request.cadence_seconds)&&Number.isInteger(request.max_drawdown_bps)&&request.max_drawdown_bps>=10&&request.max_drawdown_bps<=5000;}
+function renderActiveLimits(){
+  const markets=(current?.markets||[]).filter(m=>m.available&&m.ready);
+  $('active-limit-list').innerHTML=markets.length?markets.map(m=>{const lot=initialLotValue(m),share=exposure(lot,m.opening_equity_micros);return '<div class="active-limit"><strong>'+safe(m.name)+'</strong><span>'+safe(paperValue(m.opening_equity_micros,m.value_unit))+' paper capital</span><small>First leg '+safe(lot?paperValue(lot,m.value_unit):'updating')+' · '+safe(share)+' concentration · checks '+safe(m.tick_seconds?'every '+duration(m.tick_seconds):'updating')+' · '+safe(paperValue(m.turnover_micros,m.value_unit))+' traded today</small></div>';}).join(''):'<span class="market-context">Waiting for current paper-plan limits.</span>';
+}
+function renderInstructionWarning(){
+  const warning=$('instruction-warning'),request=instructionRequest();
+  if(!validInstructionRequest(request)){warning.textContent='Check the limits: $10 or more capital, $1 or more per order, smallest ≤ largest ≤ capital, a listed check speed, and a 0.1%–50% loss stop.';return;}
+  const concentration=request.maximum_order_micros*100/request.paper_capital_micros,onePercent=Math.round(request.paper_capital_micros/100);
+  warning.textContent=(concentration>50?'High concentration: one order could use '+concentration.toFixed(1)+'% of the paper account. ':'Largest order is '+concentration.toFixed(1)+'% of the paper account. ')+'A 1% net move on this capital is about '+money(onePercent)+' up or down.'+(request.max_drawdown_bps>1000?' A loss stop above 10% is also a high-risk paper test.':'');
+}
 function renderInstruction(){
 	const card=$('research-instruction');
 	card.hidden=!current.instructions_enabled;
 	card.style.display=card.hidden?'none':'';
 	if(card.hidden)return;
+  renderActiveLimits();
   const market=$('instruction-market'),selected=market.value||'all';
   const options=[...new Set(['all',...current.markets.map(item=>item.name),...(current.research_markets||[])])];
   if([...market.options].map(option=>option.value).join('|')!==options.join('|'))market.innerHTML=options.map(value=>'<option value="'+safe(value)+'">'+(value==='all'?'All paper markets':safe(value))+'</option>').join('');
-  if(instructionDirty){if(options.includes(selected))market.value=selected;return;}
+  if(instructionDirty){if(options.includes(selected))market.value=selected;renderInstructionWarning();return;}
   const saved=current.instruction;
   market.value=saved&&options.includes(saved.market)?saved.market:'all';
   $('instruction-preference').value=saved?.preference||'balanced';
-  $('instruction-status').textContent=current.instruction_error?'Saved preference is unavailable and will not be used.':saved?'Saved for the next research run: '+instructionLabel(saved.preference)+'.':'No preference saved yet.';
+  const requested=saved&&Number(saved.version)>=2?saved:experimentDefaults();
+  $('instruction-capital').value=inputFromMicros(requested.paper_capital_micros);
+  $('instruction-minimum').value=inputFromMicros(requested.minimum_order_micros);
+  $('instruction-maximum').value=inputFromMicros(requested.maximum_order_micros);
+  $('instruction-cadence').value=String(requested.cadence_seconds||60);
+  $('instruction-drawdown').value=(Number(requested.max_drawdown_bps||300)/100).toFixed(1);
+  $('instruction-status').textContent=current.instruction_error?'Saved request is unavailable and will not be used.':saved&&Number(saved.version)>=2?'Saved for the next validated paper experiment. The active plans above have not changed.':saved?'Older research preference loaded. Add experiment limits to update it.':'No experiment request saved yet.';
+  renderInstructionWarning();
 }
 async function saveInstruction(){
   const button=$('save-instruction'),status=$('instruction-status');
   if(!current){status.textContent='Wait for the first dashboard update, then try again.';return;}
-  button.disabled=true;button.textContent='Saving…';status.textContent='Saving research preference…';
+  const wanted=instructionRequest();
+  if(!validInstructionRequest(wanted)){status.textContent='Nothing was saved. Fix the highlighted limits first.';renderInstructionWarning();return;}
+  button.disabled=true;button.textContent='Saving…';status.textContent='Saving the next paper-experiment request…';
   try{
-    const response=await fetch('/api/v1/instruction',{method:'POST',headers:{'Content-Type':'application/json','X-Mithril-Paper-Request':'1'},body:JSON.stringify({market:$('instruction-market').value,preference:$('instruction-preference').value})});
+    const response=await fetch('/api/v1/instruction',{method:'POST',headers:{'Content-Type':'application/json','X-Mithril-Paper-Request':'1'},body:JSON.stringify(wanted)});
     if(!response.ok)throw new Error('save failed');
     current.instruction=await response.json();current.instruction_error=false;instructionDirty=false;renderInstruction();
-  }catch(error){status.textContent='Could not save. The live paper plans were not changed.';}
-  finally{button.disabled=false;button.textContent='Save preference';}
+  }catch(error){status.textContent='Could not save. The active paper plans were not changed.';}
+  finally{button.disabled=false;button.textContent='Save experiment request';}
 }
 function renderMarkets(){
   $('markets').innerHTML=current.markets.length?current.markets.map(marketCard).join(''):'<div class="empty">No paper markets configured.</div>';

@@ -21,7 +21,8 @@ import (
 const (
 	legacyVersion       = 1
 	settingsVersion     = 2
-	Version             = 3
+	accountingVersion   = 3
+	Version             = 4
 	MaxEvents           = 64
 	MaxHistoryPoints    = 144
 	MaxMessageBytes     = 3000
@@ -86,6 +87,8 @@ type CurrentSummary struct {
 	AccountingTracked bool   `json:"accounting_tracked,omitempty"`
 	RealizedMicros    int64  `json:"realized_micros,omitempty"`
 	UnrealizedMicros  int64  `json:"unrealized_micros,omitempty"`
+	FeesMicros        int64  `json:"fees_micros,omitempty"`
+	TurnoverMicros    uint64 `json:"turnover_micros,omitempty"`
 	DrawdownMicros    uint64 `json:"drawdown_micros,omitempty"`
 	MaxDrawdownMicros uint64 `json:"max_drawdown_micros,omitempty"`
 	Checks            uint64 `json:"checks"`
@@ -271,6 +274,7 @@ func TruncationEvent(snapshot Snapshot) (Event, bool) {
 
 func ValidateSnapshot(snapshot Snapshot) error {
 	if snapshot.Version != legacyVersion && snapshot.Version != settingsVersion &&
+		snapshot.Version != accountingVersion &&
 		snapshot.Version != Version ||
 		snapshot.ObservedAt.IsZero() ||
 		!snapshot.ObservedAt.Equal(snapshot.ObservedAt.UTC()) ||
@@ -330,6 +334,7 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 		summary.DrawdownMicros > summary.MaxDrawdownMicros ||
 		summary.Signals > summary.Checks || summary.Trades > summary.Signals ||
 		summary.Unobservable > summary.Checks || summary.Missed > summary.Signals ||
+		summary.FeesMicros < 0 ||
 		!validValueUnit(summary.ValueUnit) ||
 		!validAccounting(*summary) ||
 		!validCurrentState(summary.State) || !validCurrentStrategy(summary.Strategy) ||
@@ -354,7 +359,8 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 
 func validAccounting(summary CurrentSummary) bool {
 	if !summary.AccountingTracked {
-		return summary.RealizedMicros == 0 && summary.UnrealizedMicros == 0
+		return summary.RealizedMicros == 0 && summary.UnrealizedMicros == 0 &&
+			summary.FeesMicros == 0
 	}
 	if summary.OpeningEquityMicros > math.MaxInt64 || summary.EquityMicros > math.MaxInt64 ||
 		summary.UnrealizedMicros > 0 && summary.RealizedMicros > math.MaxInt64-summary.UnrealizedMicros ||

@@ -114,6 +114,7 @@ func TestWriterUpdatesCurrentWithoutCreatingAnAlert(t *testing.T) {
 		OpeningEquityMicros: 100_000_000, EquityMicros: 101_000_000,
 		HoldBenchmarkMicros: 100_500_000, Checks: 10, Signals: 2, Trades: 1,
 		AccountingTracked: true, RealizedMicros: 400_000, UnrealizedMicros: 600_000,
+		FeesMicros: 12_500, TurnoverMicros: 195_000_000,
 		Unobservable: 1, Missed: 1, PriceMicros: 106_550_000, State: "range",
 		DrawdownMicros: 250_000, MaxDrawdownMicros: 500_000,
 		Strategy: "adaptive", NextAction: "sell", DecisionReason: "signal_below_cost_hurdle",
@@ -138,6 +139,7 @@ func TestWriterUpdatesCurrentWithoutCreatingAnAlert(t *testing.T) {
 	}
 	if snapshot.Current != current || snapshot.Summary == nil ||
 		snapshot.Summary.Market != "SOL/USDC" || len(snapshot.Events) != 1 ||
+		snapshot.Summary.FeesMicros != 12_500 || snapshot.Summary.TurnoverMicros != 195_000_000 ||
 		len(snapshot.History) != 1 || snapshot.History[0].EquityMicros != 101_000_000 ||
 		snapshot.History[0].PriceMicros != 106_550_000 ||
 		!snapshot.ObservedAt.Equal(start.Add(time.Second)) {
@@ -191,6 +193,17 @@ func TestWriterUpdatesCurrentWithoutCreatingAnAlert(t *testing.T) {
 	bad.UnrealizedMicros++
 	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
 		t.Fatal("accepted accounting that does not reconcile to the paper account")
+	}
+	bad = *summary
+	bad.FeesMicros = -1
+	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
+		t.Fatal("accepted negative modeled fees")
+	}
+	bad = *summary
+	bad.AccountingTracked = false
+	bad.RealizedMicros, bad.UnrealizedMicros = 0, 0
+	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
+		t.Fatal("accepted fees without accounting")
 	}
 	bad = *summary
 	bad.TickSeconds = 0

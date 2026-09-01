@@ -3486,8 +3486,9 @@ mithril-agent shadow run --policy PATH --dir /absolute/private/runs \
 ```
 
 For a fixed policy, selection changes only the searched sell and buy thresholds.
-For an adaptive policy, it may change only the fast/slow windows or raise the
-minimum signal hurdle; starting inventory and every risk/evidence boundary stay fixed. A process with no
+For an adaptive policy, it may change the fast/slow windows, raise the minimum
+signal hurdle, or test a post-fill cooldown between one-half and twice the base
+value. It never lowers the signal hurdle; starting inventory and every risk/evidence boundary stay fixed. A process with no
 journal for the current UTC day loads it at startup; a mid-day restart resumes
 the one policy already pinned by today's journal. A running process checks the
 pointer after closing the UTC day and before its next observation. The lifecycle lock serializes automated

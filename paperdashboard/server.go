@@ -67,6 +67,8 @@ type Overview struct {
 	AccountingTracked   bool   `json:"accounting_tracked,omitempty"`
 	RealizedMicros      int64  `json:"realized_micros,omitempty,string"`
 	UnrealizedMicros    int64  `json:"unrealized_micros,omitempty,string"`
+	FeesMicros          int64  `json:"fees_micros,omitempty,string"`
+	TurnoverMicros      uint64 `json:"turnover_micros,omitempty,string"`
 	Signals             uint64 `json:"signals"`
 	Trades              uint64 `json:"trades"`
 	CoverageBPS         uint64 `json:"coverage_bps,omitempty"`
@@ -89,6 +91,8 @@ type Market struct {
 	AccountingTracked           bool               `json:"accounting_tracked,omitempty"`
 	RealizedMicros              int64              `json:"realized_micros,omitempty,string"`
 	UnrealizedMicros            int64              `json:"unrealized_micros,omitempty,string"`
+	FeesMicros                  int64              `json:"fees_micros,omitempty,string"`
+	TurnoverMicros              uint64             `json:"turnover_micros,omitempty,string"`
 	DrawdownMicros              uint64             `json:"drawdown_micros,omitempty,string"`
 	MaxDrawdownMicros           uint64             `json:"max_drawdown_micros,omitempty,string"`
 	PriceMicros                 uint64             `json:"price_micros,omitempty,string"`
@@ -167,7 +171,7 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	case "/":
 		serveAsset(writer, request, "text/html; charset=utf-8", indexHTML)
 	case "/app.css":
-		serveAsset(writer, request, "text/css; charset=utf-8", appCSS+mobileCSS+refinedCSS+finishingCSS+narrowCSS+observabilityCSS+qaCSS+finalCSS+clarityCSS)
+		serveAsset(writer, request, "text/css; charset=utf-8", appCSS+mobileCSS+refinedCSS+finishingCSS+narrowCSS+observabilityCSS+qaCSS+finalCSS+clarityCSS+controlCSS)
 	case "/app.js":
 		serveAsset(writer, request, "text/javascript; charset=utf-8", appJS)
 	case "/api/v1/status":
@@ -359,6 +363,8 @@ func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Mark
 		market.AccountingTracked = summary.AccountingTracked
 		market.RealizedMicros = summary.RealizedMicros
 		market.UnrealizedMicros = summary.UnrealizedMicros
+		market.FeesMicros = summary.FeesMicros
+		market.TurnoverMicros = summary.TurnoverMicros
 		market.DrawdownMicros = summary.DrawdownMicros
 		market.MaxDrawdownMicros = summary.MaxDrawdownMicros
 		market.PriceMicros = summary.PriceMicros
@@ -412,6 +418,7 @@ func addOverview(overview *Overview, summary paperstatus.CurrentSummary) bool {
 	if overview.OpeningEquityMicros > math.MaxUint64-summary.OpeningEquityMicros ||
 		overview.EquityMicros > math.MaxUint64-summary.EquityMicros ||
 		overview.HoldBenchmarkMicros > math.MaxUint64-summary.HoldBenchmarkMicros ||
+		overview.TurnoverMicros > math.MaxUint64-summary.TurnoverMicros ||
 		overview.Signals > math.MaxUint64-summary.Signals ||
 		overview.Trades > math.MaxUint64-summary.Trades {
 		return false
@@ -421,16 +428,18 @@ func addOverview(overview *Overview, summary paperstatus.CurrentSummary) bool {
 		tracked = overview.AccountingTracked && tracked
 	}
 	if tracked && (!addSigned(&overview.RealizedMicros, summary.RealizedMicros) ||
-		!addSigned(&overview.UnrealizedMicros, summary.UnrealizedMicros)) {
+		!addSigned(&overview.UnrealizedMicros, summary.UnrealizedMicros) ||
+		!addSigned(&overview.FeesMicros, summary.FeesMicros)) {
 		return false
 	}
 	if !tracked {
-		overview.RealizedMicros, overview.UnrealizedMicros = 0, 0
+		overview.RealizedMicros, overview.UnrealizedMicros, overview.FeesMicros = 0, 0, 0
 	}
 	overview.AccountingTracked = tracked
 	overview.OpeningEquityMicros += summary.OpeningEquityMicros
 	overview.EquityMicros += summary.EquityMicros
 	overview.HoldBenchmarkMicros += summary.HoldBenchmarkMicros
+	overview.TurnoverMicros += summary.TurnoverMicros
 	overview.Signals += summary.Signals
 	overview.Trades += summary.Trades
 	overview.ValueUnit = summary.ValueUnit

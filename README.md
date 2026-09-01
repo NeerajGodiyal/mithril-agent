@@ -125,17 +125,17 @@ changes, and latches risk-off after a drawdown exit for the rest of the run.
 Every decision and raw signal is journaled and recomputed during replay. This is
 a paper heuristic, not a profitability claim. `InputAmount` is the initial lot;
 later legs spend only the preceding simulated proceeds, so paper profits or
-losses change the next lot within that UTC day. The learner cannot inject funds,
-add leverage, short, or change fees, sources, quote limits, cooldown,
-volatility, or drawdown boundaries. A risk exit may sell the full simulated
-base-asset inventory because that reduces exposure rather than increasing it.
+losses change the next lot within that UTC day. The learner cannot inject funds, add
+leverage, short, or change fees, sources, quote limits, volatility, or drawdown
+boundaries. A risk exit may sell the full simulated base-asset inventory because that reduces exposure rather than increasing it.
 
 Candidate changes are deliberate and bounded. `shadow search` can write an
 immutable candidate, `shadow select` can stage it, and a running observer adopts
 it only at a UTC boundary. `shadow challenge` compares preselected champion and
 challenger runs. For adaptive policies the chronological train/validation search
-may change only the fast/slow windows or raise the minimum signal hurdle. A
-separate deterministic timer may select an exact challenger only after its fixed
+may change the fast/slow windows, raise the minimum signal hurdle, or test a
+post-fill cooldown between one-half and twice the base value. It never lowers
+the signal hurdle. A separate deterministic timer may select an exact challenger only after its fixed
 seven-day forward paper gate passes; it preserves the previous champion for
 rollback and still cannot authorize real trading. This is controlled parameter
 learning, not unrestricted model-weight self-training.

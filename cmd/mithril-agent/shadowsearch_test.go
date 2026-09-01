@@ -60,8 +60,8 @@ func TestAdaptiveShadowSearchKeepsRiskLimitsFixedAndBuildsAReplayableCandidate(t
 	}
 	wantRisk := *policy.Adaptive
 	gotRisk := *result.Candidate.Adaptive
-	wantRisk.FastWindow, wantRisk.SlowWindow, wantRisk.MinimumSignalBPS =
-		gotRisk.FastWindow, gotRisk.SlowWindow, gotRisk.MinimumSignalBPS
+	wantRisk.FastWindow, wantRisk.SlowWindow, wantRisk.MinimumSignalBPS, wantRisk.CooldownSeconds =
+		gotRisk.FastWindow, gotRisk.SlowWindow, gotRisk.MinimumSignalBPS, gotRisk.CooldownSeconds
 	if gotRisk != wantRisk {
 		t.Fatalf("adaptive search changed a risk boundary: got %+v want %+v", gotRisk, wantRisk)
 	}
@@ -86,6 +86,31 @@ func TestAdaptiveShadowSearchKeepsRiskLimitsFixedAndBuildsAReplayableCandidate(t
 		policy, tampered, provenance(result.TrainDay), provenance(result.ValidationDay),
 	); err == nil {
 		t.Fatal("adaptive search accepted a changed drawdown boundary")
+	}
+}
+
+func TestAdaptiveShadowSearchTestsBoundedCooldownWithoutLoweringTheCostHurdle(t *testing.T) {
+	policy := adaptiveShadowSearchPolicy()
+	adaptive := *policy.Adaptive
+	adaptive.CooldownSeconds = 300
+	policy.Adaptive = &adaptive
+	policies := adaptiveSearchPolicies(policy)
+	seen := make(map[uint64]bool)
+	for _, candidate := range policies {
+		if candidate.Adaptive.MinimumSignalBPS < policy.Adaptive.MinimumSignalBPS {
+			t.Fatalf("candidate lowered the cost hurdle: %+v", candidate.Adaptive)
+		}
+		seen[candidate.Adaptive.CooldownSeconds] = true
+	}
+	for _, cooldown := range []uint64{150, 300, 600} {
+		if !seen[cooldown] {
+			t.Errorf("search omitted %d-second cooldown", cooldown)
+		}
+	}
+	tampered := *policy.Adaptive
+	tampered.CooldownSeconds = 601
+	if err := validateAdaptiveCandidateDelta(*policy.Adaptive, tampered); err == nil {
+		t.Fatal("candidate accepted a cooldown beyond the bounded search range")
 	}
 }
 
