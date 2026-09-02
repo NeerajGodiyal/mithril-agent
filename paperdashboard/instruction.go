@@ -1,6 +1,7 @@
 package paperdashboard
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,16 +14,19 @@ import (
 
 	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
 	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
-	"github.com/Overclock-Validator/mithril-agent/marketadmission"
 )
 
 const (
 	legacyInstructionVersion = 1
-	instructionVersion       = 2
-	maxInstructionBytes      = int64(2048)
-	minimumPaperCapital      = uint64(10_000_000)
-	maximumPaperCapital      = uint64(1_000_000_000_000)
-	minimumPaperOrder        = uint64(1_000_000)
+	sizingInstructionVersion = 2
+	exactInstructionVersion  = 3
+	// InstructionVersion is the canonical operator requirement schema.
+	InstructionVersion  = 4
+	instructionVersion  = InstructionVersion
+	maxInstructionBytes = int64(2048)
+	minimumPaperCapital = uint64(10_000_000)
+	maximumPaperCapital = uint64(1_000_000_000_000)
+	minimumPaperOrder   = uint64(1_000_000)
 )
 
 type Instruction struct {
@@ -30,8 +34,8 @@ type Instruction struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 	Market     string    `json:"market"`
 	Preference string    `json:"preference"`
-	// These are paper-only constraints for the next validated experiment. They
-	// do not mutate an in-flight policy or grant order authority to research.
+	// Dollar fields are paper-only allocation requirements. Version 4 binds them
+	// to immutable policies and a portfolio before a paper runner may use them.
 	PaperCapitalMicros uint64 `json:"paper_capital_micros,omitempty"`
 	MinimumOrderMicros uint64 `json:"minimum_order_micros,omitempty"`
 	MaximumOrderMicros uint64 `json:"maximum_order_micros,omitempty"`
@@ -120,20 +124,7 @@ func (s *Server) validInstructionRequest(request instructionRequest) bool {
 	if !validInstruction(instruction) {
 		return false
 	}
-	if request.Market == "all" {
-		return true
-	}
-	for _, source := range s.sources {
-		if source.SourceLabel() == request.Market {
-			return true
-		}
-	}
-	for _, market := range marketadmission.Markets() {
-		if market == request.Market {
-			return true
-		}
-	}
-	return false
+	return request.Market == "all"
 }
 
 func (s *Server) EnableInstructions(path string) error {
@@ -145,36 +136,64 @@ func (s *Server) EnableInstructions(path string) error {
 }
 
 func readInstruction(path string) (*Instruction, error) {
+	instruction, _, err := LoadInstruction(path)
+	return instruction, err
+}
+
+// LoadInstruction reads one canonical, private operator instruction and returns
+// the digest that another paper-only service can bind into an immutable artifact.
+func LoadInstruction(path string) (*Instruction, string, error) {
 	if !cleanAbsolutePath(path) {
-		return nil, errors.New("paper instruction path must be a clean absolute path")
+		return nil, "", errors.New("paper instruction path must be a clean absolute path")
 	}
 	data, err := securefile.ReadPrivate(path, maxInstructionBytes)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	var instruction Instruction
 	if err := strictjson.Decode(data, &instruction); err != nil || !validInstruction(instruction) {
-		return nil, errors.New("paper instruction is invalid")
+		return nil, "", errors.New("paper instruction is invalid")
 	}
-	return &instruction, nil
+	canonical, err := encodeInstruction(instruction)
+	if err != nil || string(data) != string(canonical) {
+		return nil, "", errors.New("paper instruction is not canonical")
+	}
+	digest := sha256.Sum256(data)
+	return &instruction, fmt.Sprintf("%x", digest), nil
+}
+
+// ExportInstruction returns canonical bytes from one validated operator-owned
+// source so a privileged wrapper can publish a fixed runtime snapshot.
+func ExportInstruction(source string) ([]byte, error) {
+	instruction, _, err := LoadInstruction(source)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := encodeInstruction(*instruction)
+	if err != nil {
+		return nil, err
+	}
+	return encoded, nil
 }
 
 func writeInstruction(path string, instruction Instruction) error {
 	if !cleanAbsolutePath(path) || !validInstruction(instruction) {
 		return errors.New("paper instruction is invalid")
 	}
-	encoded, err := json.Marshal(instruction)
+	encoded, err := encodeInstruction(instruction)
 	if err != nil {
 		return errors.New("encode paper instruction")
 	}
-	if err := securefile.ReplacePrivate(path, append(encoded, '\n'), maxInstructionBytes); err != nil {
+	if err := securefile.ReplacePrivate(path, encoded, maxInstructionBytes); err != nil {
 		return errors.New("write paper instruction")
 	}
 	return nil
 }
 
 func validInstruction(instruction Instruction) bool {
-	if instruction.Version != legacyInstructionVersion && instruction.Version != instructionVersion ||
+	if instruction.Version != legacyInstructionVersion &&
+		instruction.Version != sizingInstructionVersion &&
+		instruction.Version != exactInstructionVersion && instruction.Version != instructionVersion ||
 		instruction.UpdatedAt.IsZero() || !instruction.UpdatedAt.Equal(instruction.UpdatedAt.UTC()) ||
 		instruction.Market != "all" && !validLabel(instruction.Market) {
 		return false
@@ -189,6 +208,11 @@ func validInstruction(instruction Instruction) bool {
 			instruction.MaximumOrderMicros == 0 && instruction.CadenceSeconds == 0 &&
 			instruction.MaxDrawdownBPS == 0
 	}
+	if instruction.Version == exactInstructionVersion {
+		return instruction.PaperCapitalMicros == 0 && instruction.MinimumOrderMicros == 0 &&
+			instruction.MaximumOrderMicros == 0 && validInstructionCadence(instruction.CadenceSeconds) &&
+			instruction.MaxDrawdownBPS >= 10 && instruction.MaxDrawdownBPS <= 5000
+	}
 	return instruction.PaperCapitalMicros >= minimumPaperCapital &&
 		instruction.PaperCapitalMicros <= maximumPaperCapital &&
 		instruction.MinimumOrderMicros >= minimumPaperOrder &&
@@ -196,6 +220,27 @@ func validInstruction(instruction Instruction) bool {
 		instruction.MaximumOrderMicros <= instruction.PaperCapitalMicros &&
 		validInstructionCadence(instruction.CadenceSeconds) &&
 		instruction.MaxDrawdownBPS >= 10 && instruction.MaxDrawdownBPS <= 5000
+}
+
+// InstructionSHA256 returns the digest of the canonical instruction encoding.
+func InstructionSHA256(instruction Instruction) (string, error) {
+	encoded, err := encodeInstruction(instruction)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", digest), nil
+}
+
+func encodeInstruction(instruction Instruction) ([]byte, error) {
+	if !validInstruction(instruction) {
+		return nil, errors.New("paper instruction is invalid")
+	}
+	encoded, err := json.Marshal(instruction)
+	if err != nil {
+		return nil, err
+	}
+	return append(encoded, '\n'), nil
 }
 
 func validInstructionCadence(seconds uint64) bool {
@@ -233,6 +278,11 @@ func RenderInstruction(path string) (string, error) {
 	}[instruction.Preference]
 	if instruction.Version == legacyInstructionVersion {
 		return fmt.Sprintf("\n\nOperator research preference (not trade authority): for %s, %s. Treat this as a research priority only. It cannot change the live paper policy, budget, safety limits, selection gate, or execution permissions.\n", market, goal), nil
+	}
+	if instruction.Version == exactInstructionVersion {
+		return fmt.Sprintf("\n\nOperator paper-experiment requirement (not trade authority): for %s, %s. The next candidate must keep price checks at exactly every %d seconds and the maximum drawdown at exactly %.2f%%. Capital and order sizing remain fixed by the reviewed policy because the current replay model cannot enforce dollar sizing across future prices and fills. This cannot change an active policy, skip selection evidence, place an order, or grant wallet permissions.\n",
+			market, goal, instruction.CadenceSeconds,
+			float64(instruction.MaxDrawdownBPS)/100), nil
 	}
 	return fmt.Sprintf("\n\nOperator paper-experiment request (not trade authority): for %s, %s. Test with $%s paper capital, orders from $%s to $%s, price checks every %d seconds, and a %.2f%% maximum drawdown. Treat these as bounded constraints for the next validated paper experiment only. They cannot change an active paper policy, skip selection evidence, place an order, or grant wallet permissions.\n",
 		market, goal,

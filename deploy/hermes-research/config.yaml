@@ -92,6 +92,7 @@ platform_toolsets:
     - web
     - mithril_index
     - mithril_paper
+    - mithril_paper_jup
     - solana_docs
   telegram:
     - web
@@ -101,12 +102,13 @@ platform_toolsets:
     - web
     - mithril_index
     - mithril_paper
+    - mithril_paper_jup
     - solana_docs
 
 mcp_servers:
   # Keep Hermes external secret sources disabled for this profile. In v2026.8.27,
   # their variables are forwarded to every stdio MCP child.
-  # Full trust is intentional for these three exact include-filtered servers:
+  # Full trust is intentional for these four exact include-filtered servers:
   # pinned Hermes misclassifies MCP read-only annotations, and the paper server's
   # bounded challenger creation must run unattended. Re-audit on every upgrade.
   mithril_index:
@@ -140,19 +142,67 @@ mcp_servers:
       - shadow
       - research-mcp
       - --policy
-      - /var/lib/mithril-agent-research/policy/policy.json
+      - /etc/mithril-agent/paper-active/sol-policy.json
+      - --instruction
+      - /run/mithril-hermes-research/instruction.json
+      - --research-packet
+      - /run/mithril-hermes-research/research-state/validated.json
       - --journal-dir
-      - /var/lib/mithril-agent-research/journals
+      - /etc/mithril-agent/paper-active/runs/sol/base
       - --candidate-dir
-      - /var/lib/mithril-agent-research/challenger/candidates
+      - /etc/mithril-agent/paper-active/selection/sol/challenger/candidates
       - --challenger-pointer
-      - /var/lib/mithril-agent-research/challenger/active.json
+      - /etc/mithril-agent/paper-active/selection/sol/challenger/active.json
       - --champion-pointer
-      - /var/lib/mithril-agent-research/champion/active.json
+      - /etc/mithril-agent/paper-active/selection/sol/champion/active.json
       - --champion-dir
-      - /var/lib/mithril-agent-research/runs/champion
+      - /etc/mithril-agent/paper-active/runs/sol/champion
       - --challenger-dir
-      - /var/lib/mithril-agent-research/runs/challenger
+      - /etc/mithril-agent/paper-active/runs/sol/challenger
+      - --challenge-days
+      - "7"
+      - --spread-bps
+      - "100"
+      - --max-candidates
+      - "64"
+    enabled: true
+    trust: full
+    timeout: 60
+    connect_timeout: 15
+    tools:
+      include:
+        - mithril_paper_create_challenger
+        - mithril_paper_challenge_status
+      resources: false
+      prompts: false
+    sampling:
+      enabled: false
+    elicitation:
+      enabled: false
+
+  mithril_paper_jup:
+    command: /opt/mithril/bin/mithril-agent
+    args:
+      - shadow
+      - research-mcp
+      - --policy
+      - /etc/mithril-agent/paper-active/jup-policy.json
+      - --instruction
+      - /run/mithril-hermes-research/instruction.json
+      - --research-packet
+      - /run/mithril-hermes-research/research-state/validated.json
+      - --journal-dir
+      - /etc/mithril-agent/paper-active/runs/jup/base
+      - --candidate-dir
+      - /etc/mithril-agent/paper-active/selection/jup/challenger/candidates
+      - --challenger-pointer
+      - /etc/mithril-agent/paper-active/selection/jup/challenger/active.json
+      - --champion-pointer
+      - /etc/mithril-agent/paper-active/selection/jup/champion/active.json
+      - --champion-dir
+      - /etc/mithril-agent/paper-active/runs/jup/champion
+      - --challenger-dir
+      - /etc/mithril-agent/paper-active/runs/jup/challenger
       - --challenge-days
       - "7"
       - --spread-bps

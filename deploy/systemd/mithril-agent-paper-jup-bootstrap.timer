@@ -1,0 +1,13 @@
+[Unit]
+Description=Check whether the first Mithril JUP/USDC paper champion can be selected
+PartOf=mithril-agent-paper-generation.target
+
+[Timer]
+OnCalendar=*-*-* *:30:00 UTC
+Persistent=true
+RandomizedDelaySec=5min
+AccuracySec=1min
+Unit=mithril-agent-paper-jup-bootstrap.service
+
+[Install]
+WantedBy=timers.target

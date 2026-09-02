@@ -1,7 +1,7 @@
 [Unit]
 Description=Mithril bounded JUP/USDC paper status bridge
 Requires=mithril-agent-paper-jup-status.socket
-After=mithril-agent-paper-jup-status.socket mithril-agent-paper-jup.service
+After=mithril-agent-paper-jup-status.socket mithril-agent-paper-jup-pre-champion.service mithril-agent-paper-jup-champion.service
 StartLimitIntervalSec=30s
 StartLimitBurst=12
 
@@ -10,7 +10,7 @@ Type=simple
 User=mithril-agent-status-bridge
 Group=mithril-agent-status-bridge
 UMask=0077
-LoadCredential=paper-status:/var/lib/mithril-agent-research/status/jup/alerts.json
+LoadCredential=paper-status:/etc/mithril-agent/paper-active/status/jup/alerts.json
 InaccessiblePaths=/var/lib/mithril-agent
 InaccessiblePaths=/var/lib/mithril-agent-research
 InaccessiblePaths=-/etc/mithril-agent

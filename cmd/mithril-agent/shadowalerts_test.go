@@ -79,7 +79,7 @@ func TestShadowAlertsAreBoundedExplicitAndContainNoLiveAuthority(t *testing.T) {
 		t.Fatalf("unreadable open-order alert: %q", message)
 	}
 	if message := snapshot.Events[2].Message; message !=
-		"PAPER · 🔵 SOLD\nSold 0.001 SOL\nReceived 0.2 USDC\nTotal paper account: $1.25" {
+		"PAPER · 🔵 SOLD\nSold 0.001 SOL\nReceived 0.2 USDC\nTotal paper value now: $1.25\nPaper cash + current value of paper holdings" {
 		t.Fatalf("unreadable filled-order alert: %q", message)
 	}
 }
@@ -114,6 +114,8 @@ func TestPaperSettingsExposeOnlyBoundedUserFacingLimits(t *testing.T) {
 	policy.Market = shadow.MarketJUPUSDC
 	policy.Trigger.Direction = pricetrigger.BuyAtOrBelow
 	policy.InputAmount = 250_000_000
+	policy.MinimumOrderValueMicros = 10_000_000
+	policy.MaximumOrderValueMicros = 250_000_000
 	policy.InputDecimals = 6
 	policy.OutputDecimals = 6
 	policy.FeeLamports = 100_000
@@ -131,6 +133,8 @@ func TestPaperSettingsExposeOnlyBoundedUserFacingLimits(t *testing.T) {
 	addPaperFeeBudget(summary, policy, shadow.Ledger{FeeReserveLamports: 32_000_000})
 	if summary.InitialLotUnits != 250_000_000 || summary.InitialLotDecimals != 6 ||
 		summary.InitialLotAsset != "USDC" || summary.FeeReserveLamports != 32_000_000 ||
+		summary.MinimumOrderValueMicros != 10_000_000 ||
+		summary.MaximumOrderValueMicros != 250_000_000 ||
 		summary.FeeLamports != 100_000 || !summary.FeeBudgetTracked ||
 		summary.RemainingFeeReserveLamports != 29_000_000 ||
 		summary.EstimatedFillsRemaining != 290 ||
@@ -215,6 +219,7 @@ func TestPaperCurrentMakesAQuietAdaptiveLoopVisible(t *testing.T) {
 	}
 	buy := policy.Trigger
 	buy.Direction = pricetrigger.BuyAtOrBelow
+	buy.ThresholdMicros = policy.Trigger.ThresholdMicros - 1
 	policy.ReturnTrigger = &buy
 	if got := paperCurrentMessage(policy, shadow.Tick{
 		At: tick.At, Event: shadow.EventSignal, PriceMicros: 106_550_000,
@@ -226,7 +231,7 @@ func TestPaperCurrentMakesAQuietAdaptiveLoopVisible(t *testing.T) {
 	if got := paperCurrentMessage(policy, shadow.Tick{
 		At: tick.At, Event: shadow.EventFilled, EquityMicros: 900_000,
 		Decision: risk, Fill: &shadow.Fill{Filled: true, Sell: true},
-	}, true); got != "PAPER · ⏸ PAUSED\nLast action: sold\nTotal paper account: $0.9" {
+	}, true); got != "PAPER · ⏸ PAUSED\nLast action: sold\nTotal paper value now: $0.9\nPaper cash + current value of paper holdings" {
 		t.Fatalf("risk-exit fill status = %q", got)
 	}
 	if got := paperCurrentMessage(policy, shadow.Tick{
@@ -271,11 +276,11 @@ func TestPaperSummaryStateIsBoundedAndOperatorReadable(t *testing.T) {
 	}
 }
 
-func TestPaperCurrentPutsTodayResultBeforeStrategyDetail(t *testing.T) {
+func TestPaperCurrentPutsRunResultBeforeStrategyDetail(t *testing.T) {
 	status := "PAPER · 👀 LOOKING TO SELL\nSOL $106.55 · no good price yet"
 	status = addPaperPerformance(status, "123 price checks · 1 filled paper order")
 	performance := paperPerformanceLine(100_000_000, 101_250_000, 101_000_000, "USD")
-	want := "PAPER · 👀 LOOKING TO SELL\nPaper gain/loss today: up $1.25 · $0.25 better than holding\n" +
+	want := "PAPER · 👀 LOOKING TO SELL\nPaper result this run: up $1.25 · $0.25 better than holding\n" +
 		"123 price checks · 1 filled paper order\n" +
 		"SOL $106.55 · no good price yet"
 	if got := addPaperPerformance(status, performance); got != want {
@@ -322,8 +327,44 @@ func TestPaperFillAndAccountLinesSeparateAmountsFromGainLoss(t *testing.T) {
 		t.Fatalf("paper fill prices = %q", got)
 	}
 	if got := paperAccountLine(policy, 100_000_000, 101_000_000); got !=
-		"Total paper account: $101\nGain/loss today: up $1" {
+		"Total paper value now: $101\nPaper cash + current value of paper holdings\nPaper result this run: up $1" {
 		t.Fatalf("paper account line = %q", got)
+	}
+	if got := paperBalanceLines(policy, shadow.Ledger{
+		BaseUnits: 320_000_000, QuoteUnits: 26_000_000,
+	}); got != "Paper cash left: 26 USDC\nTrading position: 0.32 SOL" {
+		t.Fatalf("paper balance lines = %q", got)
+	}
+	if got := paperBalanceLines(policy, shadow.Ledger{
+		BaseUnits: 320_000_000, QuoteUnits: 26_000_000,
+		FeeReserveLamports: 1_000_000, LockedRentLamports: 2_000_000,
+	}); got != "Paper cash left: 26 USDC\nTrading position: 0.32 SOL\n"+
+		"SOL set aside for paper fees/setup: 0.003 SOL" {
+		t.Fatalf("SOL paper balance lines = %q", got)
+	}
+	policy.Market = shadow.MarketJUPUSDC
+	policy.InputDecimals = 6
+	policy.OutputDecimals = 6
+	if got := paperBalanceLines(policy, shadow.Ledger{
+		BaseUnits: 320_000_000, QuoteUnits: 26_000_000,
+		FeeReserveLamports: 1_000_000, LockedRentLamports: 2_000_000,
+	}); got != "Paper cash left: 26 USDC\nTrading position: 320 JUP\n"+
+		"SOL set aside for paper fees/setup: 0.003 SOL" {
+		t.Fatalf("JUP paper balance lines = %q", got)
+	}
+	positive, negative, flat := int64(2_140_000), int64(-750_000), int64(0)
+	for _, test := range []struct {
+		result *int64
+		want   string
+	}{
+		{nil, "Trade result: still open\nProfit or loss appears after the matching order"},
+		{&positive, "This completed buy + sell: up $2.14"},
+		{&negative, "This completed buy + sell: down $0.75"},
+		{&flat, "This completed buy + sell: unchanged"},
+	} {
+		if got := paperRoundTripLine(test.result, "USD"); got != test.want {
+			t.Errorf("round-trip result line = %q, want %q", got, test.want)
+		}
 	}
 }
 
@@ -452,7 +493,7 @@ func TestAdaptiveShadowAlertReportsTheRiskPauseOnce(t *testing.T) {
 	}
 	event := snapshot.Events[0]
 	if event.Kind != paperstatus.KindRiskHalted ||
-		event.Message != "PAPER · ⏸ NEW BUYS PAUSED\nToday's paper safety limit was reached\nSells can still reduce risk" {
+		event.Message != "PAPER · ⏸ NEW BUYS PAUSED\nThis run's paper safety limit was reached\nSells can still reduce risk" {
 		t.Fatalf("risk alert = %+v", event)
 	}
 
@@ -486,7 +527,7 @@ func TestAdaptiveShadowAlertReportsTheRiskPauseOnce(t *testing.T) {
 	}
 	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 4 ||
 		snapshot.Events[0].Kind != paperstatus.KindRiskHalted ||
-		snapshot.Events[0].Message != "PAPER · 🛡 SAFETY SELL ACTIVE\nToday's paper safety limit was reached\nSelling to reduce risk" {
+		snapshot.Events[0].Message != "PAPER · 🛡 SAFETY SELL ACTIVE\nThis run's paper safety limit was reached\nSelling to reduce risk" {
 		t.Fatalf("risk-exit pause snapshot=%+v err=%v", snapshot, err)
 	}
 	for index, kind := range []string{
@@ -697,6 +738,117 @@ func TestShadowAlertReconciliationRecoversACommittedFillOnce(t *testing.T) {
 	}
 }
 
+func TestRecoveredFillDoesNotClaimTheFinalLedgerBalance(t *testing.T) {
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := paperstatus.OpenWriter(filepath.Join(directory, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := validShadowPolicy()
+	primary := &shadowSearchReader{identity: policy.Trigger.PrimarySourceSHA256}
+	secondary := &shadowSearchReader{identity: policy.Trigger.SecondarySourceSHA256}
+	quotePrimary := &shadowSearchReader{identity: policy.QuotePeg.PrimarySourceSHA256}
+	quoteSecondary := &shadowSearchReader{identity: policy.QuotePeg.SecondarySourceSHA256}
+	roll, err := newDailyJournal(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer roll.Close()
+	runner, err := shadow.NewRunner(
+		policy, primary, secondary, shadowSearchUnavailableQuoter{}, roll,
+		quotePrimary, quoteSecondary,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := shadowRun{
+		policy: policy, policySHA256: fingerprint, alerts: writer, runner: runner,
+		reconcilingAlerts: true,
+	}
+	fill := shadow.Fill{
+		Filled: true, Sell: true, SpentUnits: 1_000_000, ReceivedUnits: 200_000,
+	}
+	if err := run.alertTick(shadow.Tick{
+		At: time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC), Event: shadow.EventFilled,
+		EquityMicros: 1_250_000, Fill: &fill,
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(directory, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot paperstatus.Snapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 1 {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+	}
+	message := snapshot.Events[0].Message
+	if strings.Contains(message, "Paper cash left:") || strings.Contains(message, "Trading position:") {
+		t.Fatalf("recovered fill claimed a later ledger balance: %q", message)
+	}
+	if !strings.Contains(message, "Total paper value now: $1.25") {
+		t.Fatalf("recovered fill lost its recorded value: %q", message)
+	}
+}
+
+func TestLegacyRecoveredRoundTripSaysItsResultIsUnavailable(t *testing.T) {
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := paperstatus.OpenWriter(filepath.Join(directory, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := validShadowPolicy()
+	buy := policy.Trigger
+	buy.Direction = pricetrigger.BuyAtOrBelow
+	buy.ThresholdMicros = policy.Trigger.ThresholdMicros - 1
+	policy.ReturnTrigger = &buy
+	fingerprint, err := policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := shadowRun{policy: policy, policySHA256: fingerprint, alerts: writer}
+	now := time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC)
+	ticks := []shadow.Tick{
+		{At: now, Event: shadow.EventFilled, EquityMicros: 1_250_000, Fill: &shadow.Fill{
+			Filled: true, Sell: true, SpentUnits: 1_000_000, ReceivedUnits: 200_000,
+		}},
+		{At: now.Add(time.Second), Event: shadow.EventFilled, EquityMicros: 1_260_000, Fill: &shadow.Fill{
+			Filled: true, Sell: false, SpentUnits: 200_000, ReceivedUnits: 1_000_000,
+		}},
+	}
+	if err := run.reconcileAlertTicks(ticks); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(directory, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot paperstatus.Snapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 2 {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+	}
+	if !strings.Contains(snapshot.Events[0].Message, "Trade result: still open") ||
+		!strings.Contains(snapshot.Events[1].Message, "result unavailable for this recovered older record") {
+		t.Fatalf("legacy recovered round trip = %+v", snapshot.Events)
+	}
+}
+
 func TestShadowAlertReconciliationDoesNotRepeatAPeriodCloseMiss(t *testing.T) {
 	directory, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -818,8 +970,8 @@ func TestPartialAndCompletePeriodReportsHaveDistinctAlerts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(snapshot.Events) != 2 ||
-		snapshot.Events[0].Message != "PAPER · ⚠️ STOPPED\nPaper gain/loss: unchanged · same as holding · 0 filled paper orders\nPrice data 0.00% · some data missing" ||
-		snapshot.Events[1].Message != "PAPER · ⚠️ DAY FINISHED\nPaper gain/loss: unchanged · same as holding · 0 filled paper orders\nPrice data 0.00% · some data missing" {
+		snapshot.Events[0].Message != "PAPER · ⚠️ STOPPED\nPaper gain/loss: unchanged · same as holding · 0 filled paper orders\nNot enough price information · 0.00% available" ||
+		snapshot.Events[1].Message != "PAPER · ⚠️ DAY FINISHED\nPaper gain/loss: unchanged · same as holding · 0 filled paper orders\nNot enough price information · 0.00% available" {
 		t.Fatalf("period alerts = %+v", snapshot.Events)
 	}
 }
@@ -859,7 +1011,7 @@ func TestMainnetDayAlertShowsTrustworthyPnLAndCoverage(t *testing.T) {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 	want := "PAPER · 📊 DAY FINISHED\nPaper gain/loss: up $0.8 · $0.2 better than holding · 3 filled paper orders\n" +
-		"Price data 100.00%"
+		"Price information available: 100.00%"
 	if snapshot.Events[0].Message != want {
 		t.Fatalf("day alert = %q, want %q", snapshot.Events[0].Message, want)
 	}

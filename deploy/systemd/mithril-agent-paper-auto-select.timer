@@ -1,5 +1,6 @@
 [Unit]
 Description=Check qualified Mithril paper challengers hourly
+PartOf=mithril-agent-paper-generation.target
 
 [Timer]
 OnCalendar=*-*-* *:20:00 UTC

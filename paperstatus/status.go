@@ -32,6 +32,7 @@ const (
 	messagePrefix       = "PAPER ·"
 	legacyMessagePrefix = "PAPER SIMULATION —"
 	legacyDisclaimer    = "No transaction was signed or submitted."
+	UnconfiguredCurrent = "PAPER · NOT ENABLED"
 )
 
 const (
@@ -78,6 +79,7 @@ type CurrentSummary struct {
 	Market              string `json:"market"`
 	ValueUnit           string `json:"value_unit,omitempty"`
 	Day                 string `json:"day"`
+	InstructionSHA256   string `json:"instruction_sha256,omitempty"`
 	TickSeconds         uint64 `json:"tick_seconds"`
 	OpeningEquityMicros uint64 `json:"opening_equity_micros"`
 	EquityMicros        uint64 `json:"equity_micros"`
@@ -105,11 +107,13 @@ type CurrentSummary struct {
 	// InitialLot is the configured first paper leg. Later legs use the
 	// simulated proceeds, so it is deliberately not described as a fixed order
 	// size. These fields expose no address, provider, policy path, or key.
-	InitialLotUnits    uint64 `json:"initial_lot_units,omitempty"`
-	InitialLotDecimals uint8  `json:"initial_lot_decimals,omitempty"`
-	InitialLotAsset    string `json:"initial_lot_asset,omitempty"`
-	FeeReserveLamports uint64 `json:"fee_reserve_lamports,omitempty"`
-	FeeLamports        uint64 `json:"fee_lamports,omitempty"`
+	InitialLotUnits         uint64 `json:"initial_lot_units,omitempty"`
+	InitialLotDecimals      uint8  `json:"initial_lot_decimals,omitempty"`
+	InitialLotAsset         string `json:"initial_lot_asset,omitempty"`
+	MinimumOrderValueMicros uint64 `json:"minimum_order_value_micros,omitempty"`
+	MaximumOrderValueMicros uint64 `json:"maximum_order_value_micros,omitempty"`
+	FeeReserveLamports      uint64 `json:"fee_reserve_lamports,omitempty"`
+	FeeLamports             uint64 `json:"fee_lamports,omitempty"`
 	// RemainingFeeReserveLamports excludes setup rent that has not yet been
 	// locked, so it is the native amount still available for paper attempts.
 	FeeBudgetTracked            bool   `json:"fee_budget_tracked,omitempty"`
@@ -329,6 +333,7 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 		return nil
 	}
 	if len(summary.Market) == 0 || len(summary.Market) > 32 ||
+		!validOptionalSHA256(summary.InstructionSHA256) ||
 		summary.TickSeconds < 5 || summary.TickSeconds > 3600 ||
 		summary.OpeningEquityMicros == 0 || summary.HoldBenchmarkMicros == 0 ||
 		summary.DrawdownMicros > summary.MaxDrawdownMicros ||
@@ -355,6 +360,14 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 		return errors.New("paper current summary is invalid")
 	}
 	return nil
+}
+
+func validOptionalSHA256(value string) bool {
+	if value == "" {
+		return true
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && value == strings.ToLower(value)
 }
 
 func validAccounting(summary CurrentSummary) bool {
@@ -388,6 +401,7 @@ func validDecisionReason(reason string) bool {
 func validPaperSettings(summary CurrentSummary) bool {
 	commonPresent := summary.InitialLotUnits != 0 || summary.InitialLotDecimals != 0 ||
 		summary.InitialLotAsset != "" || summary.FeeReserveLamports != 0 ||
+		summary.MinimumOrderValueMicros != 0 || summary.MaximumOrderValueMicros != 0 ||
 		summary.FeeLamports != 0 || summary.FeeBudgetTracked ||
 		summary.RemainingFeeReserveLamports != 0 ||
 		summary.EstimatedFillsRemaining != 0 ||
@@ -403,6 +417,10 @@ func validPaperSettings(summary CurrentSummary) bool {
 		!validAsset(summary.InitialLotAsset) || summary.SlippageBPS == 0 ||
 		summary.SlippageBPS > 500 || summary.SettleSeconds == 0 ||
 		summary.SettleSeconds > 600 ||
+		(summary.MinimumOrderValueMicros != 0 || summary.MaximumOrderValueMicros != 0) &&
+			(summary.MinimumOrderValueMicros < 1_000_000 ||
+				summary.MinimumOrderValueMicros > summary.MaximumOrderValueMicros ||
+				summary.MaximumOrderValueMicros > 1_000_000_000_000) ||
 		adaptivePresent != (summary.Strategy == "adaptive") ||
 		summary.FeeBudgetTracked != (summary.FeeReserveLamports != 0) ||
 		(!summary.FeeBudgetTracked && (summary.RemainingFeeReserveLamports != 0 ||

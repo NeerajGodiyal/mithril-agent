@@ -42,10 +42,16 @@ signed and nothing is submitted; no wallet signing key is loaded at any point.
   --candidate-pointer PATH
                         selected paper candidate; checked only at startup and
                         UTC-day boundaries
+  --portfolio PATH      private shared paper-capital manifest
+  --portfolio-book ID   book in that manifest bound to this base policy
   --admission-artifact PATH
                         qualified market evidence required by WIF/USDC policies
   --admission-journal PATH
                         exact journal bound by that artifact
+  --provisional-artifact PATH
+                        six-hour paper-only evidence for a candidate market
+  --provisional-journal PATH
+                        exact journal bound by that checkpoint
   --alert-status PATH   private bounded paper-event snapshot for Telegram
   --quote-provider NAME optional compatibility check; must match the policy
   --node-command PATH   Node.js runtime for the read-only quote adapter
@@ -75,19 +81,23 @@ const (
 )
 
 type shadowRunOptions struct {
-	policyPath        string
-	directory         string
-	candidatePointer  string
-	admissionArtifact string
-	admissionJournal  string
-	alertStatus       string
-	quoteSource       string
-	nodeCommand       string
-	quoteScript       string
-	pool              string
-	inputMint         string
-	outputMint        string
-	once              bool
+	policyPath          string
+	directory           string
+	candidatePointer    string
+	portfolioPath       string
+	portfolioBook       string
+	admissionArtifact   string
+	admissionJournal    string
+	provisionalArtifact string
+	provisionalJournal  string
+	alertStatus         string
+	quoteSource         string
+	nodeCommand         string
+	quoteScript         string
+	pool                string
+	inputMint           string
+	outputMint          string
+	once                bool
 }
 
 func runShadowRun(ctx context.Context, args []string, output io.Writer) error {
@@ -97,8 +107,12 @@ func runShadowRun(ctx context.Context, args []string, output io.Writer) error {
 	flags.StringVar(&options.policyPath, "policy", "", "shadow policy JSON")
 	flags.StringVar(&options.directory, "dir", "", "journal and report directory")
 	flags.StringVar(&options.candidatePointer, "candidate-pointer", "", "selected paper candidate")
+	flags.StringVar(&options.portfolioPath, "portfolio", "", "shared paper-capital manifest")
+	flags.StringVar(&options.portfolioBook, "portfolio-book", "", "paper-capital book ID")
 	flags.StringVar(&options.admissionArtifact, "admission-artifact", "", "qualified market evidence")
 	flags.StringVar(&options.admissionJournal, "admission-journal", "", "market evidence journal")
+	flags.StringVar(&options.provisionalArtifact, "provisional-artifact", "", "six-hour paper-only market evidence")
+	flags.StringVar(&options.provisionalJournal, "provisional-journal", "", "provisional market evidence journal")
 	flags.StringVar(&options.alertStatus, "alert-status", "", "private paper-event snapshot")
 	flags.StringVar(&options.quoteSource, "quote-provider", "", "must match policy when set")
 	flags.StringVar(&options.nodeCommand, "node-command", "", "Node.js runtime")
@@ -121,7 +135,7 @@ func runShadowRun(ctx context.Context, args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	run, err := openShadowRun(policy, options)
+	run, err := openShadowRun(ctx, policy, options)
 	if err != nil {
 		return err
 	}
@@ -198,15 +212,21 @@ type shadowRun struct {
 	activationSequence uint64
 	// lastPrice is the most recent price actually observed. The report closes
 	// on it rather than on a cost basis, which would not be a market price.
-	lastPrice              uint64
-	consecutiveUnavailable uint8
-	dataUnavailable        bool
-	admissionThrough       time.Time
+	lastPrice                   uint64
+	consecutiveUnavailable      uint8
+	dataUnavailable             bool
+	admissionThrough            time.Time
+	portfolioMaxSOL             uint64
+	portfolioBound              bool
+	portfolioPaperCapitalMicros uint64
+	portfolioInstructionSHA256  string
 }
 
-func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, error) {
+func openShadowRun(ctx context.Context, policy shadow.Policy, options shadowRunOptions) (*shadowRun, error) {
 	now := time.Now().UTC()
 	basePolicy := policy
+	var candidateInstructionSHA256 string
+	var candidatePaperCapitalMicros uint64
 	policyFingerprint, err := policy.Fingerprint()
 	if err != nil {
 		return nil, err
@@ -217,6 +237,10 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 			return nil, err
 		}
 		policy, policyFingerprint = candidate.Policy, candidate.CandidatePolicySHA256
+		if candidate.Experiment != nil {
+			candidateInstructionSHA256 = candidate.Experiment.InstructionSHA256
+			candidatePaperCapitalMicros = candidate.Experiment.Instruction.PaperCapitalMicros
+		}
 		policy, policyFingerprint, err = resolveStartupShadowPolicy(
 			basePolicy, policy, policyFingerprint, options.directory, now,
 		)
@@ -227,19 +251,67 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 	if err := validateActiveShadowPolicy(policy); err != nil {
 		return nil, err
 	}
-	var admission *marketadmission.Artifact
-	if policy.Version == shadow.AdmittedVersion {
-		artifact, err := loadQualifiedMarketAdmission(
-			options.admissionArtifact, options.admissionJournal, now,
+	if (options.portfolioPath == "") != (options.portfolioBook == "") {
+		return nil, errors.New("shadow run requires --portfolio and --portfolio-book together")
+	}
+	portfolioMaxSOL := uint64(0)
+	portfolioInstructionSHA256 := ""
+	portfolioPaperCapitalMicros := uint64(0)
+	if options.portfolioPath != "" {
+		portfolioMaxSOL, portfolioInstructionSHA256, portfolioPaperCapitalMicros, err = loadShadowPortfolioBindingForBook(
+			options.portfolioPath, options.portfolioBook, options.policyPath, basePolicy,
 		)
 		if err != nil {
 			return nil, err
 		}
-		if !admittedPolicyMatchesArtifact(policy, artifact) {
-			return nil, errors.New("market admission evidence does not match the active policy")
+		if err := validateShadowPortfolioCandidateBinding(
+			options.candidatePointer != "", portfolioInstructionSHA256,
+			portfolioPaperCapitalMicros, candidateInstructionSHA256,
+			candidatePaperCapitalMicros,
+		); err != nil {
+			return nil, err
 		}
-		admission = &artifact
-	} else if options.admissionArtifact != "" || options.admissionJournal != "" {
+	} else if policy.Version == shadow.AdmittedVersion {
+		return nil, errors.New("admitted market paper runs require a shared portfolio manifest")
+	}
+	var admissionCandidate *marketadmission.Candidate
+	var admissionThrough time.Time
+	qualifiedEvidence := options.admissionArtifact != "" || options.admissionJournal != ""
+	provisionalEvidence := options.provisionalArtifact != "" || options.provisionalJournal != ""
+	if qualifiedEvidence && provisionalEvidence {
+		return nil, errors.New("choose qualified or provisional market evidence, not both")
+	}
+	if policy.Version == shadow.AdmittedVersion {
+		if policy.MarketEvidenceClass == shadow.MarketEvidenceDevelopmentProvisional {
+			if qualifiedEvidence {
+				return nil, errors.New("development paper policy requires provisional market evidence")
+			}
+			artifact, err := loadProvisionalMarketAdmission(
+				options.provisionalArtifact, options.provisionalJournal, now,
+			)
+			if err != nil {
+				return nil, err
+			}
+			if !provisionalPolicyMatchesArtifact(policy, artifact) {
+				return nil, errors.New("provisional market evidence does not match the active policy")
+			}
+			admissionCandidate, admissionThrough = &artifact.Candidate, artifact.Through
+		} else {
+			if provisionalEvidence {
+				return nil, errors.New("qualified paper policy requires long-run market evidence")
+			}
+			artifact, err := loadQualifiedMarketAdmission(
+				options.admissionArtifact, options.admissionJournal, now,
+			)
+			if err != nil {
+				return nil, err
+			}
+			if !admittedPolicyMatchesArtifact(policy, artifact) {
+				return nil, errors.New("market admission evidence does not match the active policy")
+			}
+			admissionCandidate, admissionThrough = &artifact.Candidate, artifact.Through
+		}
+	} else if qualifiedEvidence || provisionalEvidence {
 		return nil, errors.New("market admission flags require an admitted candidate-market policy")
 	}
 	endpoint := os.Getenv(shadowEndpointEnvironment)
@@ -249,14 +321,14 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 	reader := publicAccountReader(endpoint)
 	var primary shadow.PriceReader
 	var secondary shadow.PriceReader
-	if admission != nil {
+	if admissionCandidate != nil {
 		primary, err = pricesource.NewPythPushFromSpec(
-			reader, time.Now, admission.Candidate.Pyth,
+			reader, time.Now, admissionCandidate.Pyth,
 		)
 		if err != nil {
 			return nil, err
 		}
-		secondary, err = pricesource.NewKrakenFromSpec(nil, admission.Candidate.Kraken)
+		secondary, err = pricesource.NewKrakenFromSpec(nil, admissionCandidate.Kraken)
 	} else if policy.Market == shadow.MarketJUPUSDC {
 		primary, err = pricesource.NewPythPushJUP(reader, time.Now)
 		secondary = pricesource.NewKrakenJUP(nil)
@@ -284,6 +356,19 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 			return nil, err
 		}
 		nativeSecondary = pricesource.NewKrakenSOL(nil)
+	}
+	if portfolioMaxSOL != 0 {
+		ceilingPolicy := policy.Trigger
+		ceilingPrimary, ceilingSecondary := primary, secondary
+		if policy.NativeFeePrice != nil {
+			ceilingPolicy = *policy.NativeFeePrice
+			ceilingPrimary, ceilingSecondary = nativePrimary, nativeSecondary
+		}
+		if err := validateShadowPortfolioSOLPrice(
+			ctx, ceilingPolicy, ceilingPrimary, ceilingSecondary, portfolioMaxSOL,
+		); err != nil {
+			return nil, err
+		}
 	}
 	quoter, err := newShadowQuoter(policy, options)
 	if err != nil {
@@ -318,9 +403,13 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 		quotePrimary: quotePrimary, quoteSecondary: quoteSecondary,
 		nativePrimary: nativePrimary, nativeSecondary: nativeSecondary,
 		quoter: quoter, roll: roll, alerts: alerts,
+		portfolioMaxSOL:             portfolioMaxSOL,
+		portfolioBound:              options.portfolioPath != "",
+		portfolioPaperCapitalMicros: portfolioPaperCapitalMicros,
+		portfolioInstructionSHA256:  portfolioInstructionSHA256,
 	}
-	if admission != nil {
-		run.admissionThrough = admission.Through
+	if !admissionThrough.IsZero() {
+		run.admissionThrough = admissionThrough
 	}
 	if err := run.reconcileMissingShadowReports(); err != nil {
 		roll.Close()
@@ -363,22 +452,66 @@ func openShadowRun(policy shadow.Policy, options shadowRunOptions) (*shadowRun, 
 	return run, nil
 }
 
+func validateShadowPortfolioSOLPrice(
+	ctx context.Context,
+	policy pricetrigger.Policy,
+	primary, secondary shadow.PriceReader,
+	maximum uint64,
+) error {
+	left, err := primary.Latest(ctx, policy.Feed)
+	if err != nil {
+		return errors.New("paper portfolio SOL/USD evidence is unavailable")
+	}
+	right, err := secondary.Latest(ctx, policy.Feed)
+	if err != nil {
+		return errors.New("paper portfolio SOL/USD evidence is unavailable")
+	}
+	policy.Direction = pricetrigger.BuyAtOrBelow
+	policy.ThresholdMicros = pricetrigger.MaxPriceMicros
+	evidence, err := pricetrigger.Evaluate(policy, left, right, time.Now().UTC())
+	if err != nil || evidence.ConservativePrice > maximum {
+		return errors.New("paper portfolio SOL/USD evidence exceeds its planning ceiling")
+	}
+	return nil
+}
+
 func admittedPolicyMatchesArtifact(policy shadow.Policy, artifact marketadmission.Artifact) bool {
-	primary, primaryErr := artifact.Candidate.Pyth.IdentitySHA256()
-	secondary, secondaryErr := artifact.Candidate.Kraken.IdentitySHA256()
-	limits := artifact.Thresholds
+	return policy.MarketEvidenceClass != shadow.MarketEvidenceDevelopmentProvisional &&
+		marketPolicyMatchesEvidence(
+			policy, artifact.Candidate, artifact.Observe, artifact.ContentSHA256, artifact.Thresholds,
+		)
+}
+
+func provisionalPolicyMatchesArtifact(
+	policy shadow.Policy,
+	artifact marketadmission.ProvisionalArtifact,
+) bool {
+	return policy.MarketEvidenceClass == shadow.MarketEvidenceDevelopmentProvisional &&
+		marketPolicyMatchesEvidence(
+			policy, artifact.Candidate, artifact.Observe, artifact.ContentSHA256, artifact.Thresholds,
+		)
+}
+
+func marketPolicyMatchesEvidence(
+	policy shadow.Policy,
+	candidate marketadmission.Candidate,
+	observe, digest string,
+	limits marketadmission.Thresholds,
+) bool {
+	primary, primaryErr := candidate.Pyth.IdentitySHA256()
+	secondary, secondaryErr := candidate.Kraken.IdentitySHA256()
 	if primaryErr != nil || secondaryErr != nil || policy.Adaptive == nil ||
 		policy.ReturnTrigger == nil || policy.NativeFeePrice == nil || policy.QuotePeg == nil ||
-		artifact.Candidate.Market != policy.Market ||
-		artifact.ContentSHA256 != policy.MarketEvidenceSHA256 ||
-		artifact.Observe != policy.Observe ||
-		artifact.Candidate.Pyth.Feed != policy.Trigger.Feed ||
+		candidate.Market != policy.Market ||
+		digest != policy.MarketEvidenceSHA256 ||
+		observe != policy.Observe ||
+		candidate.Pyth.Feed != policy.Trigger.Feed ||
 		primary != policy.Trigger.PrimarySourceSHA256 ||
 		secondary != policy.Trigger.SecondarySourceSHA256 ||
-		artifact.Candidate.QuoteMint != policy.QuoteRoute.InputMint ||
-		artifact.Candidate.BaseMint != policy.QuoteRoute.OutputMint ||
-		artifact.Candidate.QuoteNotionalUSDC != policy.InputAmount ||
-		artifact.Candidate.QuoteSlippageBPS != policy.SlippageBPS ||
+		candidate.QuoteMint != policy.QuoteRoute.InputMint ||
+		candidate.BaseMint != policy.QuoteRoute.OutputMint ||
+		candidate.QuoteNotionalUSDC != policy.InputAmount ||
+		candidate.QuoteSlippageBPS != policy.SlippageBPS ||
 		policy.Adaptive.MaxQuoteImpactBPS > limits.MaximumQuoteImpactBPS {
 		return false
 	}
@@ -581,6 +714,20 @@ func (s *shadowRun) refreshSelectedCandidate(now time.Time) error {
 	if err != nil {
 		return err
 	}
+	if s.portfolioBound {
+		candidateInstructionSHA256 := ""
+		candidatePaperCapitalMicros := uint64(0)
+		if candidate.Experiment != nil {
+			candidateInstructionSHA256 = candidate.Experiment.InstructionSHA256
+			candidatePaperCapitalMicros = candidate.Experiment.Instruction.PaperCapitalMicros
+		}
+		if err := validateShadowPortfolioCandidateBinding(
+			true, s.portfolioInstructionSHA256, s.portfolioPaperCapitalMicros,
+			candidateInstructionSHA256, candidatePaperCapitalMicros,
+		); err != nil {
+			return err
+		}
+	}
 	if err := validateActiveShadowPolicy(candidate.Policy); err != nil {
 		return err
 	}
@@ -692,6 +839,7 @@ func (s *shadowRun) drive(ctx context.Context, once bool, output io.Writer) erro
 		if rolled {
 			continue
 		}
+		observation = s.runner.ApplyNativePriceCeiling(now, observation, s.portfolioMaxSOL)
 		nextSell := s.runner.NextSell()
 		tick, err := s.runner.StepObservation(ctx, now, observation)
 		if err != nil {

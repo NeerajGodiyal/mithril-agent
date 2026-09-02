@@ -1,15 +1,15 @@
 # Nous Hermes research profile
 
-This deploys Nous Research Hermes Agent as a scheduled research process with two
-bounded paper-only outputs: mature one-shot sessions may create an immutable
-challenger and update its dedicated challenger pointer, and every run must emit
-one strict source-cited JSON packet that deterministic Mithril code validates,
-hashes, archives, and projects to the dashboard. It can also
-read the local rooted index, current paper challenge state, official Solana
-documentation, and public web sources. It cannot change the
-champion or a live policy, build, sign, submit, authorize, or promote a
-transaction or strategy. Hermes Telegram is disabled; the deterministic
-Mithril Telegram service remains the only operator notification path.
+This deploys Nous Research Hermes Agent as a scheduled two-phase paper research
+process. The first container may delegate up to three leaf source reviews but
+has no policy, journal, challenger, wallet, or writable trading mount. Mithril
+validates that phase's strict source-cited JSON before a separate
+non-delegating session may create one immutable paper challenger through the
+existing bounded MCP gate. The validated packet is hashed, archived, and
+projected to the dashboard. Neither phase can change the champion or live
+policy, build, sign, submit, authorize, or promote a transaction or strategy.
+Hermes Telegram is disabled; deterministic Mithril remains the notification
+path.
 
 The image is pinned to tag `v2026.8.27` and OCI index digest
 `sha256:e0df6adebddf29b91112aefc999d4aaf6846c9eb544faca5672a16a13590ff79`.
@@ -17,7 +17,7 @@ Do not replace it with `latest` or a tag without this digest. Hermes
 configuration allowlists are defense in depth; the whole container or VM is
 the security boundary.
 
-All three MCP entries deliberately use `trust: full`. Pinned Hermes has an
+All four MCP entries deliberately use `trust: full`. Pinned Hermes has an
 [open read-only annotation bug](https://github.com/NousResearch/hermes-agent/issues/88858):
 it reads the Python MCP annotation by its wire-format name, so read-only tools
 on an untrusted server enter the interactive approval path. That path can wait
@@ -27,9 +27,11 @@ under `trust: untrusted` even after the annotation bug is fixed.
 
 In this Hermes release, `full` removes the per-call approval gate for a server;
 it does not add tools, mounts, credentials, network access, or signer authority.
-The effective boundary remains the exact include filters, the post-filter
-registry assertion proving exactly 7 MCP tools, the platform toolsets, and the
-container mounts. Any newly included tool would inherit unattended approval,
+The finalizer boundary remains the exact include filters, the post-filter
+registry assertion proving exactly 9 MCP tools after both champions exist, the
+platform toolsets, and the container mounts. The delegated phase uses
+`config-delegated.yaml`, two read-only MCP servers, and a separate ephemeral
+state directory. Any newly included tool would inherit unattended approval,
 so do not add or rename a server or tool without reviewing the resulting
 authority. On every Hermes upgrade, recheck the upstream issue and repeat the
 closed-stdin unattended canary. Even when the read-only bug is fixed, the paper
@@ -41,13 +43,33 @@ change this profile back to an approval mode that makes unattended runs hang.
 Use a dedicated host or container account and a dedicated `state/` directory.
 Hermes writes its own profile, sessions, and web-result cache beneath that state
 directory; the container itself is not filesystem-read-only.
-Mount only:
+The non-delegating finalizer may mount only:
 
 - the pinned Linux `mithril-agent` binary, read-only;
 - the rooted index directory, read-only; and
 - the paper policy, completed journals, champion, and paired run evidence,
   read-only;
 - one dedicated challenger-control directory, read-write.
+
+The delegated research container may mount only its ephemeral state, the shared
+OAuth file read-only, its research-only config and SOUL read-only, the Mithril
+binary read-only, the rooted index read-only, and the generated query read-only.
+It must never mount a policy, journal, champion, or challenger path.
+
+The research phase uses Hermes stateless one-shot mode (`hermes -z`). Pinned
+Hermes runs delegation inline on that channel, so the parent waits for all
+three leaf results before emitting one JSON packet. Do not replace it with
+`hermes chat --query-file`: that mode exits while its children are still
+running.
+
+After the one-shot completes, the wrapper uses the pinned image's supported
+`hermes sessions export --format jsonl --redact` command. It archives that full
+redacted trace privately with mode `0600` and records its SHA-256 in a small
+sidecar. The sidecar counts tool calls and successful page retrievals. A packet
+citation is rejected unless its exact URL appears in a successful
+`web_extract` result. The dashboard deliberately separates cited official pages
+that were actually retrieved from two-source claims labelled by Hermes. Console
+prose is never treated as retrieval evidence.
 
 The Compose bind mounts deliberately set `create_host_path: false`. A typo or
 missing source therefore stops startup instead of silently creating a directory
@@ -110,6 +132,7 @@ sudo systemd-sysusers \
 sudo install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
   /var/lib/mithril-agent-research \
   /var/lib/mithril-agent-research/index \
+  /var/lib/mithril-agent-research/evidence \
   /var/lib/mithril-agent-research/reports \
   /var/lib/mithril-agent-research/runs \
   /var/lib/mithril-agent-research/status \
@@ -117,6 +140,9 @@ sudo install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
   /var/lib/mithril-agent-research/journals-jup \
   /var/lib/mithril-agent-research/challenger/candidates \
   /var/lib/mithril-agent-research/runs/{champion,challenger} \
+  /var/lib/mithril-agent-research/jup/{champion,challenger} \
+  /var/lib/mithril-agent-research/jup/challenger/candidates \
+  /var/lib/mithril-agent-research/runs/jup/{pre-champion,champion,challenger} \
   /var/lib/mithril-agent-research/status/{champion,jup}
 sudo install -d -o mithril-agent-dashboard -g mithril-agent-dashboard -m 0700 \
   /var/lib/mithril-agent-dashboard
@@ -156,11 +182,18 @@ sudo install -d -o root -g root -m 0755 \
 sudo install -o root -g root -m 0644 \
   deploy/hermes-research/compose.yaml \
   deploy/hermes-research/config.yaml \
+  deploy/hermes-research/config-delegated.yaml \
+  deploy/hermes-research/build-research-evidence.py \
+  deploy/hermes-research/AGENTS.md \
+  deploy/hermes-research/AGENTS-research.md \
   deploy/hermes-research/SOUL.md \
+  deploy/hermes-research/SOUL-research.md \
   /opt/mithril-hermes-research/
 sudo install -o root -g root -m 0755 \
+  deploy/hermes-research/apply-paper-instruction.sh \
   deploy/hermes-research/check-network.sh \
   deploy/hermes-research/bootstrap-first-champion.sh \
+  deploy/hermes-research/run-paper-generation.sh \
   deploy/hermes-research/run-market-scout.sh \
   /opt/mithril-hermes-research/
 sudo install -o root -g root -m 0644 \
@@ -176,6 +209,24 @@ sudo install -o root -g root -m 0644 \
   deploy/systemd/mithril-agent-paper-bootstrap.timer \
   deploy/systemd/mithril-agent-paper-auto-select.service \
   deploy/systemd/mithril-agent-paper-auto-select.timer \
+  deploy/systemd/mithril-agent-paper-generation.target \
+  deploy/systemd/mithril-agent-paper-instruction.path \
+  deploy/systemd/mithril-agent-paper-instruction.service \
+  deploy/systemd/mithril-agent-paper-pre-champion.service \
+  deploy/systemd/mithril-agent-paper-status-handoff.service \
+  deploy/systemd/mithril-agent-paper-jup.service \
+  deploy/systemd/mithril-agent-paper-jup-pre-champion.service \
+  deploy/systemd/mithril-agent-paper-jup-champion.service \
+  deploy/systemd/mithril-agent-paper-jup-champion.path \
+  deploy/systemd/mithril-agent-paper-jup-challenger.service \
+  deploy/systemd/mithril-agent-paper-jup-challenger.path \
+  deploy/systemd/mithril-agent-paper-jup-bootstrap.service \
+  deploy/systemd/mithril-agent-paper-jup-bootstrap.timer \
+  deploy/systemd/mithril-agent-paper-jup-auto-select.service \
+  deploy/systemd/mithril-agent-paper-jup-auto-select.timer \
+  deploy/systemd/mithril-agent-paper-jup-status-handoff.service \
+  deploy/systemd/mithril-agent-paper-jup-status.socket \
+  deploy/systemd/mithril-agent-paper-jup-status-bridge.service \
   deploy/systemd/mithril-hermes-research-egress.service \
   deploy/systemd/mithril-hermes-research.service \
   deploy/systemd/mithril-hermes-research.timer \
@@ -191,6 +242,8 @@ sudo install -o mithril-agent-research -g mithril-agent-research -m 0600 \
   /opt/mithril-hermes-research/state/config.yaml
 sudo install -o mithril-agent-research -g mithril-agent-research -m 0600 \
   deploy/hermes-research/SOUL.md /opt/mithril-hermes-research/state/SOUL.md
+sudo install -o mithril-agent-research -g mithril-agent-research -m 0600 \
+  deploy/hermes-research/AGENTS.md /opt/mithril-hermes-research/state/AGENTS.md
 cd /opt/mithril-hermes-research
 ```
 
@@ -263,18 +316,19 @@ Fill `.env`: use `id -u mithril-agent-research` for `MITHRIL_UID` and
 `id -g mithril-agent-research` for `MITHRIL_GID`.
 Both values must contain decimal digits only. Do not add a Telegram token to
 this container. Paper alerts continue through the separately supervised,
-deterministic Mithril Telegram service.
+deterministic mithril-agent Telegram service.
 The agent binary, index, policy, journals, champion, challenger, and run-tree
 sources are literal paths in `compose.yaml`; `.env` cannot redirect them after
 the systemd preflights validate those paths.
 
 Install a reviewed Mainnet paper policy as
-`/var/lib/mithril-agent-research/policy/policy.json`. Put its completed daily
+`/etc/mithril-agent/paper-active/sol-policy.json`. Put its completed daily
 journals in `journals/`, its automatically bootstrapped or later paper-selected
 immutable champion artifacts and `active.json` pointer in
 `champion/`, and the two
 policy-fingerprinted observer run trees below `runs/champion/` and
-`runs/challenger/`. Only `challenger/` is writable by Hermes. Its candidate
+`runs/challenger/`. Only the SOL and JUP `challenger/` trees are writable by
+Hermes. Their candidate
 files are content-addressed and its `active.json` pointer records selection,
 next-UTC-day eligibility, challenge duration, and evaluator version. Keep every
 directory mode `0700` and regular private
@@ -282,7 +336,7 @@ file mode `0600`.
 
 Keep observer-written delivery state outside the operator-owned champion tree:
 pre-create `status/champion/` for
-`/var/lib/mithril-agent-research/status/champion/alerts.json`. The
+`/etc/mithril-agent/paper-active/status/sol/alerts.json`. The
 champion observer may write only its run tree and that status directory; it
 must not be able to rewrite the champion pointer or artifacts.
 
@@ -302,7 +356,18 @@ root-owned mode-`0600` policy into this tree:
 ```sh
 sudo install -o mithril-agent-research -g mithril-agent-research -m 0600 \
   /absolute/reviewed/policy.json /var/lib/mithril-agent-research/policy/policy.json
+sudo -u mithril-agent-research env HOME=/var/lib/mithril-agent-research \
+  /usr/local/libexec/mithril-agent/mithril-agent shadow portfolio \
+  --out /var/lib/mithril-agent-research/policy/portfolio.json \
+  --limit-usd 150 --max-sol-usd 300 \
+  --book sol=/var/lib/mithril-agent-research/policy/policy.json
 ```
+
+The portfolio manifest counts one economic book once even when base, champion,
+and challenger observers run counterfactual copies. The conservative $300/SOL
+planning ceiling makes the initial 0.25 SOL mandate count as $75. If validated
+SOL/USD evidence exceeds that ceiling, the observers fail closed before opening
+a journal or announcing a strategy.
 
 The tracked `mithril-agent-paper-base.service`,
 `mithril-agent-paper-champion.service`, and
@@ -328,35 +393,48 @@ sudo install -o root -g root -m 0644 \
   systemd/mithril-agent-paper-bootstrap.timer \
   systemd/mithril-agent-paper-auto-select.service \
   systemd/mithril-agent-paper-auto-select.timer \
+  systemd/mithril-agent-paper-generation.target \
+  systemd/mithril-agent-paper-instruction.path \
+  systemd/mithril-agent-paper-instruction.service \
+  systemd/mithril-agent-paper-pre-champion.service \
+  systemd/mithril-agent-paper-status-handoff.service \
   /etc/systemd/system/
+sudo install -d -o root -g root -m 0755 \
+  /var/lib/mithril-agent-research/allocations
 sudo systemd-analyze verify \
   /etc/systemd/system/mithril-agent-paper-{base,champion,challenger}.service \
+  /etc/systemd/system/mithril-agent-paper-{pre-champion,status-handoff,instruction}.service \
   /etc/systemd/system/mithril-agent-paper-{bootstrap,auto-select}.service \
-  /etc/systemd/system/mithril-agent-paper-{champion.path,challenger.path,bootstrap.timer,auto-select.timer}
+  /etc/systemd/system/mithril-agent-paper-{champion.path,challenger.path,instruction.path,bootstrap.timer,auto-select.timer} \
+  /etc/systemd/system/mithril-agent-paper-generation.target
 sudo systemctl enable --now systemd-time-wait-sync.service
 test "$(timedatectl show -p NTPSynchronized --value)" = yes
 sudo systemctl daemon-reload
-sudo systemctl enable --now mithril-agent-paper-base.service \
-  mithril-agent-paper-champion.service \
-  mithril-agent-paper-champion.path \
-  mithril-agent-paper-challenger.service \
-  mithril-agent-paper-challenger.path \
-  mithril-agent-paper-bootstrap.timer \
-  mithril-agent-paper-auto-select.timer
+sudo systemctl enable mithril-agent-paper-generation.target \
+  mithril-agent-paper-instruction.service
+sudo systemctl enable --now mithril-agent-paper-instruction.path
 ```
 
+These commands install supervision but do not start a legacy journal. Complete
+the optional JUP portfolio setup below, save the dashboard instruction, and use
+the atomic activation procedure before expecting paper observers to run.
+
 The hourly bootstrap remains a no-op until the prior two UTC journals are both
-complete and replayable. It then searches those exact chronological days,
-writes one immutable initial candidate, and selects it only if no champion
-pointer already exists. `shadow select --initial` checks that condition under
-the shared lifecycle lock, so this automation cannot replace an existing
-champion. After the pointer appears, verify the already-enabled paper observers
-and later challenger selector:
+complete and replayable. It then searches those exact chronological days and
+writes one immutable initial candidate. `shadow select --initial` rereads the
+bound journals, requires at least 95% observable coverage on both days, at least
+two validation round trips, positive validation return, an advantage over
+holding, and compliance with the adaptive drawdown limit. It repeats the same
+validation at twice the candidate's modelled spread, then selects only if no
+champion pointer already exists. The pointer check remains under the shared
+lifecycle lock, so this automation cannot replace an existing champion. After
+the pointer appears, verify the already-enabled paper observers and later
+challenger selector:
 
 ```sh
 sudo systemctl status mithril-agent-paper-bootstrap.timer
 sudo journalctl -u mithril-agent-paper-bootstrap.service
-test -f /var/lib/mithril-agent-research/champion/active.json
+test -f /etc/mithril-agent/paper-active/selection/sol/champion/active.json
 sudo systemctl is-active mithril-agent-paper-champion.service
 ```
 
@@ -389,12 +467,12 @@ Manual `shadow select` remains available when the auto-selector timer is disable
 ```sh
 sudo -u mithril-agent-research env HOME=/var/lib/mithril-agent-research \
   /usr/local/libexec/mithril-agent/mithril-agent shadow restore \
-  --policy /var/lib/mithril-agent-research/policy/policy.json \
-  --champion-pointer /var/lib/mithril-agent-research/champion/active.json \
-  --rollback-pointer /var/lib/mithril-agent-research/champion/previous.json \
-  --challenger-pointer /var/lib/mithril-agent-research/challenger/active.json \
-  --challenger-candidate-dir /var/lib/mithril-agent-research/challenger/candidates \
-  --lifecycle-lock /var/lib/mithril-agent-research/challenger/lifecycle.lock
+  --policy /etc/mithril-agent/paper-active/sol-policy.json \
+  --champion-pointer /etc/mithril-agent/paper-active/selection/sol/champion/active.json \
+  --rollback-pointer /etc/mithril-agent/paper-active/selection/sol/champion/previous.json \
+  --challenger-pointer /etc/mithril-agent/paper-active/selection/sol/challenger/active.json \
+  --challenger-candidate-dir /etc/mithril-agent/paper-active/selection/sol/challenger/candidates \
+  --lifecycle-lock /etc/mithril-agent/paper-active/selection/sol/challenger/lifecycle.lock
 ```
 
 Restore also rebinds the challenger observer to the restored champion under the
@@ -410,7 +488,7 @@ generated units using the normal service-install runbook:
 ```sh
 sudo -u mithril-agent env HOME=/var/lib/mithril-agent \
   /usr/local/libexec/mithril-agent/mithril-agent service install \
-  --paper-alert-status /var/lib/mithril-agent-research/status/champion/alerts.json \
+  --paper-alert-status /etc/mithril-agent/paper-active/status/sol/alerts.json \
   --output /var/lib/mithril-agent/.mithril-agent/mithril-agent-run.service
 ```
 
@@ -418,26 +496,62 @@ The first attachment may deliver retained bounded history. Verify every new mess
 starts with `PAPER ·` and that the bridge never exposes the source
 path or any live transaction authority.
 
-### Optional JUP/USDC observer
+### Optional JUP/USDC lifecycle
 
-JUP/USDC is a second isolated paper observer, not a second full-budget
-champion. Divide the total simulated capital explicitly between the SOL and JUP
-policies. Generate the JUP policy with a USDC budget and a separate native SOL
-fee reserve; use `--fee-lamports` as a reviewed conservative all-in recurring
-attempt cost. Setup rent is modeled separately as locked, recoverable capital;
-it is neither a recurring fee nor paper profit. Funded execution must still use
-`proposalcheck` to simulate the built transaction and verify its exact fee,
-actual account-rent requirements, and blockheight expiry.
+JUP/USDC is a second isolated paper mandate, not another full-budget observer.
+Set its USDC lot as an explicit minority of the combined paper capital before
+starting it; the example below assigns 50 USDC, not the former 250 USDC
+full-size lot. Its native SOL fee reserve is separate. Candidate search,
+selection, observation, and automatic promotion all fingerprint that base
+policy, so no JUP challenger may enlarge the lot, opening inventory, fee
+reserve, or setup-rent reserve.
+
+Generate or replace the JUP policy only at a UTC journal boundary. An existing
+deployment must stop the old observer before replacing its policy. Keep the old
+journals as audit evidence, but collect two new complete UTC days under the
+reduced policy before expecting the bootstrap to select a champion. The
+separate pre-champion observer owns bounded status during that evidence window;
+the always-on base observer remains journal-only.
+
+Before replacing an existing deployment, archive its old full-size status so
+the reduced pre-champion observer cannot inherit old fills, P/L, or chart
+history. The guarded moves are no-ops for a fresh install; numbered backups
+prevent a repeated migration from overwriting earlier audit evidence.
 
 ```sh
+sudo systemctl stop mithril-agent-paper-jup.service
+sudo install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
+  /var/lib/mithril-agent-research/archive/jup-status-before-reallocation
+sudo test ! -e /var/lib/mithril-agent-research/status/jup/alerts.json || \
+  sudo mv --backup=numbered /var/lib/mithril-agent-research/status/jup/alerts.json \
+    /var/lib/mithril-agent-research/archive/jup-status-before-reallocation/alerts.json
+sudo test ! -e /var/lib/mithril-agent-research/status/jup/champion-owned || \
+  sudo mv --backup=numbered /var/lib/mithril-agent-research/status/jup/champion-owned \
+    /var/lib/mithril-agent-research/archive/jup-status-before-reallocation/champion-owned
 sudo -u mithril-agent-research env HOME=/var/lib/mithril-agent-research \
   /usr/local/libexec/mithril-agent/mithril-agent shadow policy \
   --out /var/lib/mithril-agent-research/policy/jup-policy.json \
   --observe WATCH_ONLY_ADDRESS --adaptive --market JUP/USDC \
-  --budget-usdc 250 --fee-reserve-sol 0.080 --setup-rent-sol 0.003 \
+  --budget-usdc 50 --fee-reserve-sol 0.080 --setup-rent-sol 0.003 \
   --drawdown-stop-bps 300 --fee-lamports 100000
+sudo -u mithril-agent-research env HOME=/var/lib/mithril-agent-research \
+  /usr/local/libexec/mithril-agent/mithril-agent shadow portfolio \
+  --out /var/lib/mithril-agent-research/policy/portfolio.json \
+  --limit-usd 150 --max-sol-usd 300 \
+  --book sol=/var/lib/mithril-agent-research/policy/policy.json \
+  --book jup=/var/lib/mithril-agent-research/policy/jup-policy.json
 sudo install -o root -g root -m 0644 \
   systemd/mithril-agent-paper-jup.service \
+  systemd/mithril-agent-paper-jup-pre-champion.service \
+  systemd/mithril-agent-paper-jup-champion.service \
+  systemd/mithril-agent-paper-jup-champion.path \
+  systemd/mithril-agent-paper-jup-challenger.service \
+  systemd/mithril-agent-paper-jup-challenger.path \
+  systemd/mithril-agent-paper-jup-bootstrap.service \
+  systemd/mithril-agent-paper-jup-bootstrap.timer \
+  systemd/mithril-agent-paper-jup-auto-select.service \
+  systemd/mithril-agent-paper-jup-auto-select.timer \
+  systemd/mithril-agent-paper-jup-status-handoff.service \
   systemd/mithril-agent-paper-jup-status.socket \
   systemd/mithril-agent-paper-jup-status-bridge.service \
   /etc/systemd/system/
@@ -448,20 +562,103 @@ sudo install -o root -g root -m 0644 \
   /etc/systemd/system/mithril-agent-telegram.service.d/paper.conf
 sudo systemd-analyze verify \
   /etc/systemd/system/mithril-agent-paper-jup.service \
+  /etc/systemd/system/mithril-agent-paper-jup-{pre-champion,champion,challenger,bootstrap,auto-select,status-handoff}.service \
+  /etc/systemd/system/mithril-agent-paper-jup-{champion.path,challenger.path,bootstrap.timer,auto-select.timer} \
   /etc/systemd/system/mithril-agent-paper-jup-status.socket \
   /etc/systemd/system/mithril-agent-paper-jup-status-bridge.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now mithril-agent-paper-jup.service \
-  mithril-agent-paper-jup-status.socket
+sudo systemctl enable --now mithril-agent-paper-jup-status.socket
 sudo systemctl restart mithril-agent-telegram.service
 ```
 
-`/paper` then returns one compact view with combined P&L, versus-hold, one line
-per market, trade and signal counts, verified-data coverage, and the oldest
-source timestamp. Alerts remain limited to strategy changes, fills, risk
-pauses, period closes, and sustained market-data loss or recovery. JUP has its
-own journal, status directory, notional budget, and fee reserve; it does not
-enter the SOL champion/challenger lifecycle yet.
+The base observer writes only `journals-jup/`; the pre-champion observer writes
+its independent run tree and the bounded status snapshot, so `/paper` remains
+available while bootstrap evidence accumulates. The bootstrap uses the same
+immutable candidate format and lifecycle lock as SOL but separate JUP control
+and run trees. It remains a no-op until the immediately preceding two journals
+are complete and replayable, then applies the same coverage, validation return,
+round-trip, versus-holding, drawdown, and doubled-spread initial gate.
+
+When the first pointer appears, the champion service conflicts with and stops
+the pre-champion owner. Its required offline handoff archives the bounded old
+snapshot as `pre-champion-alerts.json` and creates the persistent
+`champion-owned` marker before the champion starts. The new champion therefore
+writes a fresh `alerts.json` without inheriting pre-champion events or chart
+history. Verify the handoff:
+
+```sh
+test -f /etc/mithril-agent/paper-active/selection/jup/champion/active.json
+test -f /etc/mithril-agent/paper-active/status/jup/alerts.json
+test -f /etc/mithril-agent/paper-active/status/jup/champion-owned
+sudo systemctl is-active mithril-agent-paper-jup-champion.service
+test "$(systemctl is-active mithril-agent-paper-jup-pre-champion.service)" = inactive
+```
+
+`/paper` then reads JUP status from the immutable champion, never the base or
+challenger observer. Alerts remain limited to strategy changes, newly opened orders, fills, risk
+pauses, period closes, and sustained market-data loss or recovery. Once the JUP
+base and champion observers, challenger path, and auto-selector timer are all
+healthy, the wrapper exposes the separate `mithril_paper_jup` server. Hermes may
+then trigger the same deterministic bounded search as SOL, but only the JUP
+challenger tree is writable. The dedicated selector applies the same seven-day
+fixed forward gate and rollback-pointer rules without sharing either market's
+capital or control files.
+
+### Apply dashboard paper settings without restarting Mithril
+
+Paper budget, minimum and maximum order size, price-check speed, and the paper
+loss stop are one atomic configuration. A dashboard save is only a request.
+The root-owned apply service exports its canonical bytes, builds a new immutable
+allocation generation, prepares empty generation-local journals and
+champion/challenger state, and then replaces the single
+`/etc/mithril-agent/paper-active` symlink. It stops and restarts only
+`mithril-agent-paper-generation.target`; it never restarts Mithril, carries a
+paper journal into a new configuration, signs, or submits a transaction. If a
+new base or pre-champion observer does not start, the service restores the old
+selector and old paper target. Old generations remain available for audit.
+On the first apply there is no old selector to restore, so failure leaves paper
+services stopped and the selector absent instead of presenting legacy files as
+an active generation.
+
+Install the two root-owned helpers and the generation units, then create the
+root-owned allocation parent before enabling activation:
+
+```sh
+sudo install -o root -g root -m 0755 \
+  deploy/hermes-research/apply-paper-instruction.sh \
+  deploy/hermes-research/run-paper-generation.sh \
+  /opt/mithril-hermes-research/
+sudo install -d -o root -g root -m 0755 \
+  /var/lib/mithril-agent-research/allocations
+sudo install -o root -g root -m 0644 \
+  deploy/systemd/mithril-agent-paper-generation.target \
+  deploy/systemd/mithril-agent-paper-instruction.path \
+  deploy/systemd/mithril-agent-paper-instruction.service \
+  deploy/systemd/mithril-agent-paper-pre-champion.service \
+  deploy/systemd/mithril-agent-paper-status-handoff.service \
+  /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable mithril-agent-paper-generation.target \
+  mithril-agent-paper-instruction.service
+sudo systemctl enable --now mithril-agent-paper-instruction.path
+```
+
+The first apply uses the reviewed legacy portfolio only as its immutable input.
+After saving a current request in the dashboard, start the apply once; later
+saves trigger it through the path unit:
+
+```sh
+sudo systemctl start mithril-agent-paper-instruction.service
+sudo systemctl status mithril-agent-paper-instruction.service \
+  mithril-agent-paper-generation.target
+readlink -e /etc/mithril-agent/paper-active
+```
+
+The dashboard reports a request as active only when both current market status
+snapshots carry the exact saved instruction SHA-256. A matching dollar amount
+or cadence is not treated as proof. Every new generation begins with fresh base
+and pre-champion journals; its selectors can promote only candidates created
+for that generation.
 
 ### Solana market-admission collectors
 
@@ -473,6 +670,61 @@ mandate on the strength of a ticker or a short favorable sample. JTO/USDC and
 PYTH/USDC use the same gate with their own pinned mint, decimals, Pyth feed,
 Kraken pair, and Jupiter routes. They do not share evidence or become active
 paper markets merely because their collectors are running.
+
+For fast operational feedback, stop one collector briefly and run a diagnostic
+over 6 hours, 24 hours, or up to 168 hours. It reports missing and rejected
+buckets, bidirectional availability, route cost, and quote latency to stdout.
+It is explicitly `diagnostic_only`, never writes an artifact, and cannot qualify
+or start a market. This checks plumbing quickly while stronger admission
+evidence continues collecting in the background.
+
+```sh
+sudo systemctl stop mithril-agent-market-wif.service
+sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
+  shadow market diagnose \
+  --journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl \
+  --hours 6
+sudo systemctl start mithril-agent-market-wif.service
+```
+
+After at least six complete hours, development can create a short-lived,
+paper-only checkpoint instead of waiting 30 days before exercising the runner.
+The command refuses a live collector and refuses to replace an existing file.
+The resulting artifact is only the evidence checkpoint; it is not a strategy.
+Use it to generate a `development_provisional` policy and pass the same artifact
+and journal to the runner. The first paper run creates the strategy journal that
+the replay and stress checks evaluate. Neither the artifact nor that policy can
+authorize a proposal or real-money execution.
+
+```sh
+sudo systemctl stop mithril-agent-market-wif.service
+sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
+  shadow market provisional \
+  --journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl \
+  --out /var/lib/mithril-agent-research/market-admission-wif/provisional.json
+sudo systemctl start mithril-agent-market-wif.service
+
+# Use the exact watch-only address, quote notional, and slippage recorded in
+# provisional.json. The command refuses values that do not match the artifact.
+sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
+  shadow policy --adaptive --market WIF/USDC \
+  --observe WATCH_ONLY_ADDRESS --budget-usdc QUOTE_NOTIONAL \
+  --slippage-bps RECORDED_SLIPPAGE_BPS --drawdown-stop-bps 500 \
+  --provisional-artifact /var/lib/mithril-agent-research/market-admission-wif/provisional.json \
+  --provisional-journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl \
+  --out /var/lib/mithril-agent-research/market-admission-wif/paper-policy.json
+
+sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
+  shadow run \
+  --policy /var/lib/mithril-agent-research/market-admission-wif/paper-policy.json \
+  --dir /var/lib/mithril-agent-research/market-admission-wif/paper-run \
+  --provisional-artifact /var/lib/mithril-agent-research/market-admission-wif/provisional.json \
+  --provisional-journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl
+```
+
+This is a faster development gate, not evidence that a strategy is profitable.
+The 30-day artifact remains the stronger market-admission evidence and continues
+to be required before any later real-money review.
 
 Create a root-owned environment file containing only the public watch-only
 quote address, then install the collector. The address cannot sign or spend.
@@ -569,12 +821,16 @@ sudo install -o mithril-agent-research -g mithril-agent-research -m 0600 \
   config.yaml state/config.yaml
 sudo install -o mithril-agent-research -g mithril-agent-research -m 0600 \
   SOUL.md state/SOUL.md
+sudo install -o mithril-agent-research -g mithril-agent-research -m 0600 \
+  AGENTS.md state/AGENTS.md
 ```
 
 Keep the root `.no-bundled-skills` marker created above. Hermes retains its
 essential `hermes-agent` operating-manual skill, but must not seed or install
 any other skill in this deployment. The `skills` toolset remains disabled. Do
-not share this state directory with another Hermes process.
+not share this writable state directory with another Hermes process; the
+delegated phase receives only `auth.json` read-only and uses ephemeral runtime
+state.
 
 Authenticate with the approved ChatGPT/Codex subscription using the pinned
 container. `--no-browser` prints a URL and one-time device code for the operator;
@@ -596,9 +852,18 @@ this file owner-only and back it up separately from public source.
 Run the base checks through pinned one-off containers before starting the
 timer. The index and paper MCP checks require a healthy rooted index and an
 automatically bootstrapped paper champion respectively; run the gated checks only after those
-inputs exist:
+inputs exist. The static Compose bind intentionally cannot create its host
+runtime directory. Create that directory for this manual preflight; the normal
+systemd service creates it automatically and removes its ephemeral files.
 
 ```sh
+sudo install -d -o root -g root -m 0711 /run/mithril-hermes-research
+sudo install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
+  /run/mithril-hermes-research/research-state
+sudo install -o mithril-agent-research -g mithril-agent-research -m 0600 \
+  /dev/null /run/mithril-hermes-research/research-state/.no-bundled-skills
+sudo docker compose run --rm hermes-research-parallel config check
+sudo docker compose run --rm hermes-research-parallel doctor
 sudo docker compose run --rm hermes-research id
 sudo docker compose run --rm hermes-research config check
 sudo docker compose run --rm hermes-research doctor
@@ -608,16 +873,33 @@ sudo docker compose run --rm hermes-research tools list --platform cli
 sudo docker compose run --rm hermes-research tools list --platform telegram
 sudo docker compose run --rm hermes-research tools list --platform cron
 sudo docker compose run --rm hermes-research python -c \
-  'from hermes_cli.config import load_config; from hermes_cli.tools_config import _get_platform_tools; c = load_config(); expected = {"cli": {"web", "mithril_index", "mithril_paper", "solana_docs"}, "telegram": {"web", "mithril_index", "solana_docs"}, "cron": {"web", "mithril_index", "mithril_paper", "solana_docs"}}; got = {p: set(_get_platform_tools(c, p)) for p in expected}; assert got == expected, got; print({p: sorted(v) for p, v in got.items()})'
+  'from hermes_cli.config import load_config; from hermes_cli.tools_config import _get_platform_tools; c = load_config(); expected = {"cli": {"web", "mithril_index", "mithril_paper", "mithril_paper_jup", "solana_docs"}, "telegram": {"web", "mithril_index", "solana_docs"}, "cron": {"web", "mithril_index", "mithril_paper", "mithril_paper_jup", "solana_docs"}}; got = {p: set(_get_platform_tools(c, p)) for p in expected}; assert got == expected, got; print({p: sorted(v) for p, v in got.items()})'
 sudo docker compose run --rm hermes-research python -c \
   'from hermes_cli.config import load_config; from hermes_cli.tools_config import _get_platform_tools; from model_tools import get_tool_definitions; c = load_config(); disabled = c.get("agent", {}).get("disabled_toolsets", []); names = {p: {d["function"]["name"] for d in get_tool_definitions(sorted(_get_platform_tools(c, p)), disabled, quiet_mode=True, skip_tool_search_assembly=True)} for p in ("cli", "telegram", "cron")}; assert all({"web_search", "web_extract"} <= value for value in names.values()), names; assert not any(name.startswith("browser_") or name == "browser_exec" for value in names.values() for name in value), names; print({p: sorted({"web_search", "web_extract"} & value) for p, value in names.items()})'
 sudo docker compose run --rm hermes-research python -c \
   'import logging; from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build; ensure_mcp_discovery_before_agent_build(logger=logging.getLogger(__name__), single_query=True); from hermes_cli.config import load_config; from model_tools import get_tool_definitions; c = load_config(); disabled = c.get("agent", {}).get("disabled_toolsets", []); want = {"web_search", "web_extract", "mcp__solana_docs__list_sections", "mcp__solana_docs__get_documentation"}; got = {d["function"]["name"] for d in get_tool_definitions(enabled_toolsets=["web", "solana_docs"], disabled_toolsets=disabled, quiet_mode=True, skip_tool_search_assembly=True)}; assert got == want, sorted(got ^ want); print("pre-champion tools:", len(got))'
-# After the rooted index and first champion exist:
+sudo docker compose run --rm hermes-research-parallel python -c \
+  'import logging; from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build; ensure_mcp_discovery_before_agent_build(logger=logging.getLogger(__name__), single_query=True); from hermes_cli.config import load_config; from model_tools import get_tool_definitions; c = load_config(); disabled = c.get("agent", {}).get("disabled_toolsets", []); got = {d["function"]["name"] for d in get_tool_definitions(enabled_toolsets=["web", "solana_docs", "delegation"], disabled_toolsets=disabled, quiet_mode=True, skip_tool_search_assembly=True)}; assert "delegate_task" in got and not any("mithril_paper" in name for name in got), sorted(got); print("delegated research tools:", len(got))'
+test "$(sudo find /run/mithril-hermes-research/research-state/skills \
+  -name SKILL.md -printf '%P\n')" = \
+  'autonomous-ai-agents/hermes-agent/SKILL.md'
+# After the rooted index and SOL champion exist:
 sudo docker compose run --rm hermes-research mcp test mithril_index
+# Adaptive policies only; fixed policies need no instruction snapshot.
+if sudo test -e /var/lib/mithril-agent-dashboard/instruction.json; then
+  sudo sh -c '/usr/sbin/runuser -u mithril-agent-dashboard -- \
+    /usr/local/libexec/mithril-agent/mithril-agent-paper-dashboard \
+    --export-instruction /var/lib/mithril-agent-dashboard/instruction.json \
+    > /run/mithril-hermes-research/instruction.json'
+  sudo chown mithril-agent-research:mithril-agent-research \
+    /run/mithril-hermes-research/instruction.json
+  sudo chmod 0600 /run/mithril-hermes-research/instruction.json
+fi
 sudo docker compose run --rm hermes-research mcp test mithril_paper
+# After the separate JUP champion also exists:
+sudo docker compose run --rm hermes-research mcp test mithril_paper_jup
 sudo docker compose run --rm hermes-research python -c \
-  'from tools.mcp_tool import discover_mcp_tools, shutdown_mcp_servers; expected = {"mithril_index": {"mithril_index_status", "mithril_index_accounts", "mithril_index_transactions"}, "mithril_paper": {"mithril_paper_create_challenger", "mithril_paper_challenge_status"}, "solana_docs": {"list_sections", "get_documentation"}}; want = {f"mcp__{server}__{tool}" for server, tools in expected.items() for tool in tools}; got = set(discover_mcp_tools()); assert got == want, sorted(got ^ want); print("effective MCP tools:", len(got)); shutdown_mcp_servers()'
+  'from tools.mcp_tool import discover_mcp_tools, shutdown_mcp_servers; expected = {"mithril_index": {"mithril_index_status", "mithril_index_accounts", "mithril_index_transactions"}, "mithril_paper": {"mithril_paper_create_challenger", "mithril_paper_challenge_status"}, "mithril_paper_jup": {"mithril_paper_create_challenger", "mithril_paper_challenge_status"}, "solana_docs": {"list_sections", "get_documentation"}}; want = {f"mcp__{server}__{tool}" for server, tools in expected.items() for tool in tools}; got = set(discover_mcp_tools()); assert got == want, sorted(got ^ want); print("effective MCP tools:", len(got)); shutdown_mcp_servers()'
 sudo test ! -d state/cache/web || \
   test -z "$(sudo find state/cache/web -type f -print -quit)"
 sudo docker compose run --rm hermes-research python -c \
@@ -639,6 +921,7 @@ for requested, domain, markers in cases:
     assert any(marker in result.get("content", "") for marker in markers), result
 print("single-URL extraction canary: pass")'
 sudo find state/skills -name SKILL.md -print
+sudo rm -f /run/mithril-hermes-research/instruction.json
 ```
 
 Pinned Hermes v2026.8.27 has an
@@ -662,10 +945,11 @@ model-visible. The paper test's raw catalog must contain exactly the create-chal
 read-only status tools. In Hermes v2026.8.27, `mcp test` shows the server's raw
 catalog before `tools.include` filtering: Solana currently advertises five
 tools. Review that upstream surface, but use the registry assertion to prove
-that the model receives exactly the configured 7 MCP tools. An
+that the model receives exactly the configured 9 MCP tools after both paper
+champions exist. An
 authentication failure, a missing tool, or an extra effective tool is a failed
 deployment.
-The three explicit `trust: full` entries are authorization for only that
+The four explicit `trust: full` entries are authorization for only that
 post-filtered registry. Run the canary with stdin closed and no TTY, require it
 to finish before the configured approval timeout, and compare writable state
 before and after. Only a new immutable challenger and
@@ -678,10 +962,19 @@ fresh web-cache state; if an older
 deployment ever used batched extraction, preserve that state for audit and
 create a fresh dedicated state directory instead of trusting its cache.
 
-The scheduled one-shot's explicit pre-champion registry must contain exactly
-four tools: web search/extraction and the two read-only Solana documentation
-tools. The wrapper adds the two paper tools only after a champion exists and
-the three index tools only after `index doctor --max-record-age 15m` passes.
+The scheduled one-shot snapshots the dashboard-owned canonical experiment
+requirement into its private runtime directory. Both paper policies deployed by
+this profile are adaptive, so their paper toolsets fail closed unless that
+snapshot and the matching champion exist. The `research-mcp` command still
+supports a separately invoked fixed policy when no adaptive research packet is
+configured; that is outside this profile. Every adaptive candidate binds the
+snapshot digest and rejects unsupported dollar sizing or mismatched cadence and
+drawdown. The delegated research registry contains web
+search/extraction, the two read-only Solana documentation tools, and
+`delegate_task`; it may add the three index tools only after
+`index doctor --max-record-age 15m` passes. It never contains a paper tool. The
+separate finalizer receives each market's paper tools only after its champion
+and supervised lifecycle are healthy, and never receives `delegate_task`.
 The index MCP server repeats that same check at startup and before every tool
 call. Repeat the exact
 post-filter registry assertion after each gate opens. The static CLI, Telegram,
@@ -693,18 +986,19 @@ platform. Use those listings to inspect the built-in toolsets and global MCP
 filters only.
 `mcp test` remains the raw discovery/schema check; neither it nor a toolset
 summary substitutes for the post-filter registry assertion.
-It must not contain terminal, process, file mutation, code execution, browser
-automation, skills, memory mutation, delegation, cron mutation, messaging,
-wallet, signer, submitter, program build, signing, sending, submission, or
-service-control tools.
+Neither phase may contain terminal, process, file mutation, code execution,
+browser automation, skills, memory mutation, cron mutation, messaging, wallet,
+signer, submitter, program build, signing, sending, submission, or
+service-control tools. Delegation exists only in the mount-isolated research
+phase.
 
 Only after that review should the systemd-owned one-shot start. Do not run
 `docker compose up` directly and do not add a Docker restart policy: the unit
 orders every run after the egress boundary and requires the OAuth file and
-paper policy. The wrapper starts with only `web,solana_docs`, adds
-`mithril_paper` when the first champion pointer exists, and adds
-`mithril_index` only when the index file exists and the bounded-age doctor
-passes.
+paper policy. The wrapper starts the isolated research phase with
+`web,solana_docs,delegation`, adds `mithril_index` only after the bounded-age
+doctor passes, validates its packet, and then starts the non-delegating
+finalizer only when a healthy paper champion makes a paper toolset available.
 
 ```sh
 sudo systemctl start mithril-hermes-research.service
@@ -724,7 +1018,7 @@ sudo systemctl enable --now mithril-hermes-research.timer
 sudo systemctl list-timers mithril-hermes-research.timer
 ```
 
-The timer starts at 00:15, 06:15, 12:15, and 18:15 UTC with up to 15 minutes of
+The paper-testing timer starts hourly at minute 15 with up to five minutes of
 jitter, and catches up after downtime. Research output is retained in the
 systemd journal rather than sent to Telegram. Once the paper tool becomes
 available, a successful research call may change only the dedicated paper
@@ -733,7 +1027,8 @@ paper champion after the fixed forward gate; Hermes cannot call it. An identical
 digest in the champion pointer is the durable paper-selection acknowledgement and permits the next research cycle without
 deleting or resetting either observer.
 
-Six-hour scans stay within the intended research cadence. Monitor the pinned
+Hourly scans accelerate paper experiments without granting control over a
+wallet, policy, or selector. Monitor the pinned
 provider/model, timer age, service result, Codex usage-limit errors, and keyless
 search/extraction failures. Before upgrade validation against this state, stop
 the timer and wait for the one-shot service to become inactive:

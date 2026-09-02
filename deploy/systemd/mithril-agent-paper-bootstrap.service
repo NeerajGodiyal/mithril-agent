@@ -1,17 +1,18 @@
 [Unit]
 Description=Select the first Mithril paper champion from completed evidence
 After=time-sync.target mithril-agent-paper-base.service
-ConditionPathExists=/var/lib/mithril-agent-research/policy/policy.json
-ConditionPathExists=!/var/lib/mithril-agent-research/champion/active.json
+PartOf=mithril-agent-paper-generation.target
+ConditionPathExists=/etc/mithril-agent/paper-active/sol-policy.json
+ConditionPathExists=!/etc/mithril-agent/paper-active/selection/sol/champion/active.json
 
 [Service]
 Type=oneshot
 User=mithril-agent-research
 Group=mithril-agent-research
 UMask=0077
-ExecStart=/opt/mithril-hermes-research/bootstrap-first-champion.sh
-ReadOnlyPaths=/var/lib/mithril-agent-research/policy /var/lib/mithril-agent-research/journals
-ReadWritePaths=/var/lib/mithril-agent-research/champion /var/lib/mithril-agent-research/challenger
+ExecStart=/opt/mithril-hermes-research/run-paper-generation.sh bootstrap sol
+ReadOnlyPaths=/var/lib/mithril-agent-research/allocations
+ReadWritePaths=/etc/mithril-agent/paper-active/selection/sol/champion /etc/mithril-agent/paper-active/selection/sol/challenger
 InaccessiblePaths=/proc
 NoNewPrivileges=yes
 CapabilityBoundingSet=

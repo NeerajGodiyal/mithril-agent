@@ -902,7 +902,7 @@ func TestProposalCanaryCheckBindsStoppedControlAndPreparedReadiness(t *testing.T
 		result.ActionID != actionID || result.ControlRevision != revision ||
 		!result.StrategyEvidence || result.ShadowPolicy != shadowHash ||
 		result.ShadowDays != 7 || result.RecoveryMode != submission.RecoveryMode ||
-		result.ControlEnabled || !result.StrategyApproved ||
+		result.ControlEnabled || result.StrategyApproved ||
 		result.ApprovedRequest != review.RequestSHA256 || result.ProductionReady ||
 		!result.RouteUpgradeAtomic ||
 		result.RouteProtection != "immutable_guard_exact_code_pinned" ||

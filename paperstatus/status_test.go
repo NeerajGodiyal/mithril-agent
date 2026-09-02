@@ -111,6 +111,7 @@ func TestWriterUpdatesCurrentWithoutCreatingAnAlert(t *testing.T) {
 	current := "PAPER · 👀 Watching\nRange · signal -2 bps · need 14 · SOL $106.55"
 	summary := &CurrentSummary{
 		Market: "SOL/USDC", ValueUnit: "USD", Day: "2026-08-30", TickSeconds: 60,
+		InstructionSHA256:   strings.Repeat("a", 64),
 		OpeningEquityMicros: 100_000_000, EquityMicros: 101_000_000,
 		HoldBenchmarkMicros: 100_500_000, Checks: 10, Signals: 2, Trades: 1,
 		AccountingTracked: true, RealizedMicros: 400_000, UnrealizedMicros: 600_000,
@@ -119,6 +120,7 @@ func TestWriterUpdatesCurrentWithoutCreatingAnAlert(t *testing.T) {
 		DrawdownMicros: 250_000, MaxDrawdownMicros: 500_000,
 		Strategy: "adaptive", NextAction: "sell", DecisionReason: "signal_below_cost_hurdle",
 		InitialLotUnits: 246_000_000, InitialLotDecimals: 9, InitialLotAsset: "SOL",
+		MinimumOrderValueMicros: 10_000_000, MaximumOrderValueMicros: 75_000_000,
 		FeeReserveLamports: 32_000_000, FeeLamports: 100_000, FeeBudgetTracked: true,
 		RemainingFeeReserveLamports: 29_000_000, EstimatedFillsRemaining: 290,
 		SlippageBPS: 100, SettleSeconds: 60,
@@ -140,6 +142,8 @@ func TestWriterUpdatesCurrentWithoutCreatingAnAlert(t *testing.T) {
 	if snapshot.Current != current || snapshot.Summary == nil ||
 		snapshot.Summary.Market != "SOL/USDC" || len(snapshot.Events) != 1 ||
 		snapshot.Summary.FeesMicros != 12_500 || snapshot.Summary.TurnoverMicros != 195_000_000 ||
+		snapshot.Summary.MinimumOrderValueMicros != 10_000_000 ||
+		snapshot.Summary.MaximumOrderValueMicros != 75_000_000 ||
 		len(snapshot.History) != 1 || snapshot.History[0].EquityMicros != 101_000_000 ||
 		snapshot.History[0].PriceMicros != 106_550_000 ||
 		!snapshot.ObservedAt.Equal(start.Add(time.Second)) {
@@ -206,6 +210,11 @@ func TestWriterUpdatesCurrentWithoutCreatingAnAlert(t *testing.T) {
 		t.Fatal("accepted fees without accounting")
 	}
 	bad = *summary
+	bad.InstructionSHA256 = "not-a-digest"
+	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
+		t.Fatal("accepted an invalid instruction digest")
+	}
+	bad = *summary
 	bad.TickSeconds = 0
 	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
 		t.Fatal("accepted a current summary with no observation cadence")
@@ -244,6 +253,11 @@ func TestWriterUpdatesCurrentWithoutCreatingAnAlert(t *testing.T) {
 	bad.MaxDrawdownBPS = 5_001
 	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
 		t.Fatal("accepted paper settings outside the policy bounds")
+	}
+	bad = *summary
+	bad.MinimumOrderValueMicros = bad.MaximumOrderValueMicros + 1
+	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
+		t.Fatal("accepted an inverted paper order range")
 	}
 	bad = *summary
 	bad.EstimatedFillsRemaining++

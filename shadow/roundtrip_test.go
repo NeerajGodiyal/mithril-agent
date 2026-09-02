@@ -96,6 +96,64 @@ func TestRoundTripClosingMarkUsesTheCandidateFinalDirection(t *testing.T) {
 	}
 }
 
+func TestRoundTripComparisonMarksPartialInventoryAtOneSellPrice(t *testing.T) {
+	policy := roundTripPolicy(t, 100)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	makeTick := func(at time.Time, sourcePrice uint64) Tick {
+		primary := pricetrigger.Sample{
+			SourceSHA256: policy.Trigger.PrimarySourceSHA256, Feed: policy.Trigger.Feed,
+			PriceMicros: sourcePrice, ConfidenceMicros: 100_000, PublishedAt: at,
+		}
+		secondary := primary
+		secondary.SourceSHA256 = policy.Trigger.SecondarySourceSHA256
+		return Tick{
+			At: at, Event: EventWaiting, PriceMicros: sourcePrice - 100_000,
+			PrimaryPrice: &primary, SecondaryPrice: &secondary,
+		}
+	}
+	ticks := []Tick{
+		makeTick(now, 22_200_000),
+		makeTick(now.Add(policy.Settle()), 22_200_000),
+		makeTick(now.Add(2*policy.Settle()), 18_200_000),
+	}
+	var directionalQuotes, liquidationQuotes []uint64
+	pool := tightQuote()
+	directional, err := ReplayRoundTripTicks(policy, ticks, func(price uint64, sell bool, amount uint64) (Quote, error) {
+		directionalQuotes = append(directionalQuotes, price)
+		return pool(price, sell, amount)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	liquidation, err := ReplayRoundTripTicksWithLiquidationMarks(policy, ticks, func(price uint64, sell bool, amount uint64) (Quote, error) {
+		liquidationQuotes = append(liquidationQuotes, price)
+		return pool(price, sell, amount)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(directionalQuotes) != len(liquidationQuotes) {
+		t.Fatalf("comparison changed quote count: directional=%v liquidation=%v", directionalQuotes, liquidationQuotes)
+	}
+	for index := range directionalQuotes {
+		if directionalQuotes[index] != liquidationQuotes[index] {
+			t.Fatalf("comparison changed decision price: directional=%v liquidation=%v", directionalQuotes, liquidationQuotes)
+		}
+	}
+	if liquidation.Counts.Sells != 1 || liquidation.Ledger.BaseUnits == 0 ||
+		liquidation.Ledger.BaseUnits == policy.StartingInputUnits {
+		t.Fatalf("test did not retain partial inventory after a sell: counts=%+v base=%d", liquidation.Counts, liquidation.Ledger.BaseUnits)
+	}
+	if directional.ClosingPrice != 18_300_000 || liquidation.ClosingPrice != directional.ClosingPrice ||
+		liquidation.Ledger.MaxDrawdownMicros != directional.Ledger.MaxDrawdownMicros {
+		t.Fatalf("comparison changed production replay: directional=%+v liquidation=%+v", directional, liquidation)
+	}
+	if liquidation.LiquidationMaxDrawdownMicros <= directional.Ledger.MaxDrawdownMicros {
+		t.Fatalf("sell liquidation mark did not reach comparison accounting: directional=%d liquidation=%d",
+			directional.Ledger.MaxDrawdownMicros, liquidation.LiquidationMaxDrawdownMicros)
+	}
+}
+
 // A round trip is not the sum of two independent decisions: the second leg
 // spends exactly what the first produced, and the spread plus two fees comes
 // out of one book. Running the legs separately cannot show that, which is why

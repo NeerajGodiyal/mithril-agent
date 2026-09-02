@@ -109,7 +109,7 @@ func Parse(data []byte, now time.Time) (Packet, error) {
 		return Packet{}, errors.New("research packet JSON is invalid")
 	}
 	if packet.ContentSHA256 != "" {
-		return Packet{}, errors.New("research packet digest must be assigned by Mithril")
+		return Packet{}, errors.New("research packet digest must be assigned by mithril-agent")
 	}
 	if err := packet.validate(now.UTC(), true); err != nil {
 		return Packet{}, err
@@ -187,6 +187,10 @@ func (packet Packet) validate(now time.Time, fresh bool) error {
 	}
 	allVerified := len(packet.VerifiedFacts) != 0
 	seenFacts := make(map[string]struct{}, len(packet.VerifiedFacts))
+	latestSourceTime := packet.ValidUntil
+	if fresh && now.Add(2*time.Minute).Before(latestSourceTime) {
+		latestSourceTime = now.Add(2 * time.Minute)
+	}
 	for _, fact := range packet.VerifiedFacts {
 		if !safeID(fact.ID) || !boundedText(fact.Claim, 800) || len(fact.Sources) > 4 {
 			return errors.New("research packet fact is invalid")
@@ -195,7 +199,7 @@ func (packet Packet) validate(now time.Time, fresh bool) error {
 			return errors.New("research packet fact is duplicated")
 		}
 		seenFacts[fact.ID] = struct{}{}
-		if err := validateFact(fact, packet.CreatedAt); err != nil {
+		if err := validateFact(fact, packet.CreatedAt, latestSourceTime); err != nil {
 			return err
 		}
 		allVerified = allVerified && fact.Status == FactVerified
@@ -207,7 +211,7 @@ func (packet Packet) validate(now time.Time, fresh bool) error {
 	case DispositionCandidate:
 		if packet.RiskVeto.Decision != VetoPass || len(packet.CandidateParameterDiff) == 0 ||
 			!allVerified {
-			return errors.New("research candidate lacks verified facts or an independent pass")
+			return errors.New("research candidate lacks two-source claims or a Hermes-reported pass")
 		}
 	case DispositionNoChange, DispositionBlocked:
 		if packet.RiskVeto.Decision != VetoReject || len(packet.CandidateParameterDiff) != 0 {
@@ -219,7 +223,7 @@ func (packet Packet) validate(now time.Time, fresh bool) error {
 	return nil
 }
 
-func validateFact(fact Fact, createdAt time.Time) error {
+func validateFact(fact Fact, createdAt, latestSourceTime time.Time) error {
 	switch fact.Status {
 	case FactVerified:
 		if len(fact.Sources) < 2 {
@@ -242,7 +246,7 @@ func validateFact(fact Fact, createdAt time.Time) error {
 	}
 	owners := make(map[string]struct{}, len(fact.Sources))
 	for _, source := range fact.Sources {
-		owner, err := validateSource(source, createdAt)
+		owner, err := validateSource(source, createdAt, latestSourceTime)
 		if err != nil {
 			return err
 		}
@@ -254,7 +258,7 @@ func validateFact(fact Fact, createdAt time.Time) error {
 	return nil
 }
 
-func validateSource(source Source, createdAt time.Time) (string, error) {
+func validateSource(source Source, createdAt, latestSourceTime time.Time) (string, error) {
 	parsed, err := url.Parse(source.URL)
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" ||
 		parsed.User != nil || parsed.Fragment != "" || net.ParseIP(parsed.Hostname()) != nil {
@@ -264,7 +268,7 @@ func validateSource(source Source, createdAt time.Time) (string, error) {
 	if host == "localhost" || strings.HasSuffix(host, ".local") ||
 		source.RetrievedAt.IsZero() || !source.RetrievedAt.Equal(source.RetrievedAt.UTC()) ||
 		source.RetrievedAt.Before(createdAt.Add(-12*time.Hour)) ||
-		source.RetrievedAt.After(createdAt.Add(2*time.Minute)) ||
+		source.RetrievedAt.After(latestSourceTime) ||
 		!source.PublishedAt.IsZero() && (!source.PublishedAt.Equal(source.PublishedAt.UTC()) ||
 			source.PublishedAt.After(source.RetrievedAt.Add(2*time.Minute))) {
 		return "", errors.New("research source timing or host is invalid")
@@ -292,14 +296,10 @@ func validateSource(source Source, createdAt time.Time) (string, error) {
 
 func validateChanges(changes []ParameterChange) error {
 	limits := map[string][2]uint64{
-		"fast_window":          {2, 120},
-		"slow_window":          {3, 240},
-		"minimum_signal_bps":   {1, 5_000},
-		"max_volatility_bps":   {1, 5_000},
-		"max_quote_impact_bps": {1, 5_000},
-		"max_drawdown_bps":     {1, 5_000},
-		"cooldown_seconds":     {0, 86_400},
-		"settle_seconds":       {1, 600},
+		"fast_window":        {2, 120},
+		"slow_window":        {3, 240},
+		"minimum_signal_bps": {1, 5_000},
+		"cooldown_seconds":   {0, 86_400},
 	}
 	seen := make(map[string]struct{}, len(changes))
 	proposed := make(map[string]uint64, len(changes))

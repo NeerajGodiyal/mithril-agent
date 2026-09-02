@@ -2,7 +2,9 @@
 Description=Mithril agent challenger paper observer
 Wants=network-online.target
 After=network-online.target time-sync.target
-ConditionPathExists=/var/lib/mithril-agent-research/challenger/active.json
+PartOf=mithril-agent-paper-generation.target
+ConditionPathExists=/etc/mithril-agent/paper-active/selection/sol/challenger/active.json
+ConditionPathExists=/etc/mithril-agent/paper-active/portfolio.json
 
 [Service]
 Type=simple
@@ -11,14 +13,16 @@ Group=mithril-agent-research
 UMask=0077
 EnvironmentFile=/etc/mithril-agent/paper.env
 Environment=MITHRIL_AGENT_KRAKEN_RATE_STATE=/run/mithril-agent-research/kraken-rate
+Environment=MITHRIL_AGENT_JUPITER_RATE_STATE=/run/mithril-agent-research/jupiter-rate
 RuntimeDirectory=mithril-agent-research
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
-ExecStart=/usr/local/libexec/mithril-agent/mithril-agent shadow run --policy /var/lib/mithril-agent-research/policy/policy.json --dir /var/lib/mithril-agent-research/runs/challenger --candidate-pointer /var/lib/mithril-agent-research/challenger/active.json
+ExecStart=/opt/mithril-hermes-research/run-paper-generation.sh observe sol challenger
 Restart=always
 RestartSec=15s
 TimeoutStopSec=30s
-ReadWritePaths=/var/lib/mithril-agent-research/runs/challenger
+ReadOnlyPaths=/var/lib/mithril-agent-research/allocations
+ReadWritePaths=/etc/mithril-agent/paper-active/runs/sol/challenger
 InaccessiblePaths=/proc
 NoNewPrivileges=yes
 CapabilityBoundingSet=

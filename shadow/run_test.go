@@ -212,12 +212,15 @@ func TestContinuousRunnerAlternatesARoundTripAndReplaysIt(t *testing.T) {
 	if _, err = runner.Step(t.Context(), now); err != nil {
 		t.Fatal(err)
 	}
+	cycleOpening := runner.Ledger()
 	settledSell := now.Add(policy.Settle())
 	primary.at, secondary.at = settledSell, settledSell
 	if tick, stepErr := runner.Step(t.Context(), settledSell); stepErr != nil {
 		t.Fatal(stepErr)
 	} else if tick.Fill == nil || !tick.Fill.Sell || !tick.Fill.Filled {
 		t.Fatalf("first leg did not settle as a sell: %+v", tick)
+	} else if tick.RoundTripResultMicros != nil {
+		t.Fatalf("opening leg reported a completed result: %+v", tick)
 	}
 
 	buyAt := settledSell.Add(time.Second)
@@ -228,10 +231,30 @@ func TestContinuousRunnerAlternatesARoundTripAndReplaysIt(t *testing.T) {
 	}
 	settledBuy := buyAt.Add(policy.Settle())
 	primary.at, secondary.at = settledBuy, settledBuy
+	var closing Tick
 	if tick, stepErr := runner.Step(t.Context(), settledBuy); stepErr != nil {
 		t.Fatal(stepErr)
 	} else if tick.Fill == nil || tick.Fill.Sell || !tick.Fill.Filled {
 		t.Fatalf("return leg did not settle as a buy: %+v", tick)
+	} else {
+		closing = tick
+	}
+	// Independently calculated from the exact fixture amounts at the
+	// direction-aware closing mark: floor(200,526 lamports * $19.0019).
+	const wantResult = int64(3_810)
+	if closing.RoundTripResultMicros == nil {
+		t.Fatal("closing fill omitted the round-trip result")
+	}
+	for index, tick := range recorder.ticks {
+		if tick.RecordVersion != 1 {
+			t.Fatalf("tick %d record version = %d, want 1", index, tick.RecordVersion)
+		}
+	}
+	if *closing.RoundTripResultMicros != wantResult {
+		t.Fatalf("round-trip result = %d, want %d at mark %d; opening=%+v closing=%+v", *closing.RoundTripResultMicros, wantResult, closing.PriceMicros, cycleOpening, runner.Ledger())
+	}
+	if wantResult == runner.Ledger().RealizedMicros-cycleOpening.RealizedMicros {
+		t.Fatal("round-trip fixture did not distinguish whole-account result from realized-only P/L")
 	}
 
 	if len(quoter.directions) != 4 || !quoter.directions[0] || !quoter.directions[1] ||
@@ -252,6 +275,26 @@ func TestContinuousRunnerAlternatesARoundTripAndReplaysIt(t *testing.T) {
 		replayed.Ledger.RealizedMicros != runner.Ledger().RealizedMicros {
 		t.Fatalf("replayed ledger %+v does not match live ledger %+v",
 			replayed.Ledger, runner.Ledger())
+	}
+	tampered := append([]Tick(nil), recorder.ticks...)
+	last := len(tampered) - 1
+	wrong := *tampered[last].RoundTripResultMicros + 1
+	tampered[last].RoundTripResultMicros = &wrong
+	if _, replayErr := Replay(policy, tampered); replayErr == nil ||
+		!strings.Contains(replayErr.Error(), "round-trip result") {
+		t.Fatalf("tampered round-trip result replay error = %v", replayErr)
+	}
+	tampered = append([]Tick(nil), recorder.ticks...)
+	tampered[last].RoundTripResultMicros = nil
+	if _, replayErr := Replay(policy, tampered); replayErr == nil ||
+		!strings.Contains(replayErr.Error(), "omitted its round-trip result") {
+		t.Fatalf("missing new-format round-trip result replay error = %v", replayErr)
+	}
+	for index := range tampered {
+		tampered[index].RecordVersion = 0
+	}
+	if _, replayErr := Replay(policy, tampered); replayErr != nil {
+		t.Fatalf("legacy round-trip record without display result was rejected: %v", replayErr)
 	}
 }
 
@@ -347,6 +390,23 @@ func TestResumeRestoresRoundTripDirectionAmountAndBooks(t *testing.T) {
 	if len(secondRecord.types) != 1 || secondRecord.types[0] != EventSignal {
 		t.Fatalf("resume wrote a second opening header: %v", secondRecord.types)
 	}
+	if tick, stepErr := first.Step(t.Context(), restartedAt); stepErr != nil || tick.Event != EventSignal {
+		t.Fatalf("uninterrupted return signal = %+v, %v", tick, stepErr)
+	}
+	completedAt := restartedAt.Add(policy.Settle())
+	primary.at, secondary.at = completedAt, completedAt
+	uninterrupted, uninterruptedErr := first.Step(t.Context(), completedAt)
+	restarted, restartedErr := resumed.Step(t.Context(), completedAt)
+	if uninterruptedErr != nil || restartedErr != nil || uninterrupted.RoundTripResultMicros == nil ||
+		restarted.RoundTripResultMicros == nil ||
+		*uninterrupted.RoundTripResultMicros != *restarted.RoundTripResultMicros {
+		t.Fatalf("resume result %+v/%v does not match uninterrupted %+v/%v",
+			restarted, restartedErr, uninterrupted, uninterruptedErr)
+	}
+	if got, want := resumed.Ledger(), first.Ledger(); got.BaseUnits != want.BaseUnits || got.QuoteUnits != want.QuoteUnits ||
+		got.FeeReserveLamports != want.FeeReserveLamports || got.RealizedMicros != want.RealizedMicros {
+		t.Fatalf("resumed closing ledger %+v does not match uninterrupted %+v", got, want)
+	}
 }
 
 func TestBuyHandoffReservesSellAndFollowingBuyFeesAcrossLiveReplayAndResume(t *testing.T) {
@@ -421,6 +481,16 @@ func TestBuyHandoffReservesSellAndFollowingBuyFeesAcrossLiveReplayAndResume(t *t
 	}
 	if len(resumedQuoter.amounts) != 1 || resumedQuoter.amounts[0] != wantSell {
 		t.Fatalf("resumed sell amounts = %v, want [%d]", resumedQuoter.amounts, wantSell)
+	}
+	sellSettled := sellAt.Add(policy.Settle())
+	primary.at, secondary.at = sellSettled, sellSettled
+	liveClosing, liveErr := live.Step(t.Context(), sellSettled)
+	resumedClosing, resumedErr := resumed.Step(t.Context(), sellSettled)
+	if liveErr != nil || resumedErr != nil || liveClosing.RoundTripResultMicros == nil ||
+		resumedClosing.RoundTripResultMicros == nil ||
+		*liveClosing.RoundTripResultMicros != *resumedClosing.RoundTripResultMicros {
+		t.Fatalf("buy-first resume result %+v/%v does not match live %+v/%v",
+			resumedClosing, resumedErr, liveClosing, liveErr)
 	}
 }
 
@@ -974,6 +1044,41 @@ func TestResumeRejectsAClosedTickCarryingADecisionQuote(t *testing.T) {
 	}
 }
 
+func TestResumeValidatesVersionsWithoutAnObservableTick(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	runner, primary, secondary, quoter, recorder := newTestRunner(t, 23_000_000, now)
+	unobservable := func(at time.Time, version uint8) Tick {
+		return Tick{
+			RecordVersion: version, At: at, Event: EventUnobservable,
+			Reason: ReasonMarketPriceUnavailable,
+		}
+	}
+	for name, ticks := range map[string][]Tick{
+		"future version": {unobservable(now, currentTickRecordVersion+1)},
+		"downgrade": {
+			unobservable(now, currentTickRecordVersion),
+			unobservable(now.Add(time.Second), 0),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ResumeRunner(
+				runner.policy, primary, secondary, quoter, recorder, ticks,
+			); err == nil || !strings.Contains(err.Error(), "record version") {
+				t.Fatalf("invalid versions were accepted: %v", err)
+			}
+		})
+	}
+	if _, err := ResumeRunner(
+		runner.policy, primary, secondary, quoter, recorder,
+		[]Tick{
+			unobservable(now, 0),
+			unobservable(now.Add(time.Second), currentTickRecordVersion),
+		},
+	); err != nil {
+		t.Fatalf("legacy-to-current upgrade was rejected: %v", err)
+	}
+}
+
 // A signal that cannot be quoted is a missed signal, and must be counted. Not
 // counting it is how a shadow result claims a trade rate it never had.
 func TestAnUnquotableSignalIsCountedAsMissed(t *testing.T) {
@@ -1210,9 +1315,42 @@ func TestJUPRunnerJournalsAndReplaysIndependentSOLFeeEvidence(t *testing.T) {
 	}
 }
 
+func TestPortfolioNativePriceCeilingFailsClosedBeforeOpeningTheBook(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	policy := jupBuyPolicy(t)
+	primary := &stubSource{identity: policy.Trigger.PrimarySourceSHA256, price: 1_000_000, at: now}
+	secondary := &stubSource{identity: policy.Trigger.SecondarySourceSHA256, price: 1_000_000, at: now}
+	quotePrimary := &stubSource{identity: policy.QuotePeg.PrimarySourceSHA256, price: 1_000_000, at: now}
+	quoteSecondary := &stubSource{identity: policy.QuotePeg.SecondarySourceSHA256, price: 1_000_000, at: now}
+	nativePrimary := &stubSource{identity: policy.NativeFeePrice.PrimarySourceSHA256, price: 200_000_000, at: now}
+	nativeSecondary := &stubSource{identity: policy.NativeFeePrice.SecondarySourceSHA256, price: 200_000_000, at: now}
+	runner, err := NewRunner(
+		policy, primary, secondary, &stubQuoter{estimated: 100_000_000}, &stubRecorder{},
+		quotePrimary, quoteSecondary, nativePrimary, nativeSecondary,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := runner.Observe(t.Context())
+	if got := runner.ApplyNativePriceCeiling(now, observation, 201_000_000); got.unavailable != "" {
+		t.Fatalf("valid native price was refused: %s", got.unavailable)
+	}
+	blocked := runner.ApplyNativePriceCeiling(now, observation, 200_000_000)
+	tick, err := runner.StepObservation(t.Context(), now, blocked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tick.Event != EventUnobservable || tick.Reason != ReasonMarketPriceInvalid || runner.opened {
+		t.Fatalf("ceiling breach tick=%+v opened=%v", tick, runner.opened)
+	}
+}
+
 func TestMainnetRunnerFailsClosedOnUSDCDepegAndRecordsItsBound(t *testing.T) {
 	now := time.Now().UTC()
 	policy := mainnetPolicy()
+	policy.InputAmount = 900_000_000
+	policy.MinimumOrderValueMicros = 5_000_000
+	policy.MaximumOrderValueMicros = 10_000_000
 	policy.Trigger.ThresholdMicros = 22_000_000
 	primary := &stubSource{
 		identity: policy.Trigger.PrimarySourceSHA256, price: 23_000_000, at: now,
@@ -1250,7 +1388,9 @@ func TestMainnetRunnerFailsClosedOnUSDCDepegAndRecordsItsBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tick.Event != EventSignal || tick.QuoteLowerMicros < policy.QuotePeg.MinimumMicros ||
+	if tick.Event != EventSignal || tick.DecisionQuote == nil ||
+		tick.DecisionQuote.InputAmount >= policy.InputAmount ||
+		tick.QuoteLowerMicros < policy.QuotePeg.MinimumMicros ||
 		tick.QuoteUpperMicros > policy.QuotePeg.MaximumMicros {
 		t.Fatalf("healthy peg evidence was not journalled: %+v", tick)
 	}

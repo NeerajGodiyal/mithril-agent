@@ -1,4 +1,75 @@
 services:
+  hermes-research-parallel:
+    image: nousresearch/hermes-agent:v2026.8.27@sha256:e0df6adebddf29b91112aefc999d4aaf6846c9eb544faca5672a16a13590ff79
+    cpus: 2.0
+    mem_limit: 4g
+    pids_limit: 512
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "5"
+    command:
+      - /bin/sh
+      - -ec
+      - >-
+        exec hermes -z "$$(cat /opt/mithril/prompts/market-scout.md)"
+        --provider openai-codex --model gpt-5.6-terra --reasoning high
+        --toolsets "$${MITHRIL_HERMES_TOOLSETS:-web,solana_docs,delegation}"
+    environment:
+      HERMES_UID: "${MITHRIL_UID:?set MITHRIL_UID}"
+      HERMES_GID: "${MITHRIL_GID:?set MITHRIL_GID}"
+      HERMES_HOME: /opt/research-data
+      HERMES_WRITE_SAFE_ROOT: /opt/research-data
+    volumes:
+      - type: bind
+        source: /run/mithril-hermes-research/research-state
+        target: /opt/research-data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./state/auth.json
+        target: /opt/research-data/auth.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./config-delegated.yaml
+        target: /opt/research-data/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./SOUL-research.md
+        target: /opt/research-data/SOUL.md
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./AGENTS-research.md
+        target: /opt/research-data/AGENTS.md
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /usr/local/libexec/mithril-agent/mithril-agent
+        target: /opt/mithril/bin/mithril-agent
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MITHRIL_HERMES_QUERY_FILE:-/opt/mithril-hermes-research/prompts/market-scout.md}
+        target: /opt/mithril/prompts/market-scout.md
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /var/lib/mithril-agent-research/index
+        target: /var/lib/mithril-agent/index
+        read_only: true
+        bind:
+          create_host_path: false
+
   hermes-research:
     image: nousresearch/hermes-agent:v2026.8.27@sha256:e0df6adebddf29b91112aefc999d4aaf6846c9eb544faca5672a16a13590ff79
     container_name: hermes-research
@@ -50,38 +121,25 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: /var/lib/mithril-agent-research/policy
-        target: /var/lib/mithril-agent-research/policy
+        source: /etc/mithril-agent/paper-active
+        target: /etc/mithril-agent/paper-active
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: /var/lib/mithril-agent-research/journals
-        target: /var/lib/mithril-agent-research/journals
+        source: /run/mithril-hermes-research
+        target: /run/mithril-hermes-research
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: /var/lib/mithril-agent-research/champion
-        target: /var/lib/mithril-agent-research/champion
-        read_only: true
+        source: /etc/mithril-agent/paper-active/selection/sol/challenger
+        target: /etc/mithril-agent/paper-active/selection/sol/challenger
         bind:
           create_host_path: false
       - type: bind
-        source: /var/lib/mithril-agent-research/challenger
-        target: /var/lib/mithril-agent-research/challenger
-        bind:
-          create_host_path: false
-      - type: bind
-        source: /var/lib/mithril-agent-research/runs/champion
-        target: /var/lib/mithril-agent-research/runs/champion
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: /var/lib/mithril-agent-research/runs/challenger
-        target: /var/lib/mithril-agent-research/runs/challenger
-        read_only: true
+        source: /etc/mithril-agent/paper-active/selection/jup/challenger
+        target: /etc/mithril-agent/paper-active/selection/jup/challenger
         bind:
           create_host_path: false
 

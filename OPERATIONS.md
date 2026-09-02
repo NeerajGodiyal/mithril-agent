@@ -932,7 +932,7 @@ sudo cp -a adapters/orca/node_modules/. \
 sudo chown -R root:root /usr/local/libexec/mithril-agent
 sudo chmod -R go-w /usr/local/libexec/mithril-agent
 
-sudo install -d -o root -g root -m 0700 /etc/mithril-agent
+sudo install -d -o root -g root -m 0711 /etc/mithril-agent
 sudo install -d -o mithril-agent -g mithril-agent -m 0700 \
   /var/lib/mithril-agent /var/lib/mithril-agent/private
 
@@ -2532,10 +2532,10 @@ length, and code SHA-256 through Mithril and both independent providers.
 Success reports the public
 action ID, approved request hash, control revision, shadow policy fingerprint, and complete-day count
 as `mainnet_canary_evidence_ready_not_enabled`. It explicitly reports
-`strategy_approved: true`, `production_ready: false`,
+`strategy_approved: false`, `production_ready: false`,
 `route_upgrade_atomic: true`, and
 `route_upgrade_protection: "immutable_guard_exact_code_pinned"`; reads no key;
-cannot enable, sign, or submit; and does not judge profitability. Those route
+cannot enable, sign, or submit; and does not approve or judge profitability. Those route
 fields are emitted only after the guarded v7 policy, exact candidate, and live
 three-source deployment/readiness checks all pass. They do not mean this
 repository contains an approved deployment or that Mainnet is production-ready.
@@ -3341,8 +3341,10 @@ and must be regenerated explicitly to use version 2. The controller rewarms
 after a data gap and remains risk-off after a filled drawdown exit. `shadow
 backtest` uses the policy directly; do not pass `--buy-at-usd` for
 an adaptive policy. Search and Hermes candidate generation may tune only the
-fast/slow windows or raise the minimum signal hurdle; starting inventory and all
-risk, quote, source, timing, and fee boundaries stay unchanged. `InputAmount`
+fast/slow windows, raise the minimum signal hurdle, or choose a bounded
+post-fill cooldown. The operator's research preference filters that safe
+candidate universe without changing its fee-aware score or admission gates;
+starting inventory and all risk, quote, source, timing, and fee boundaries stay unchanged. `InputAmount`
 is the first lot. Each later leg spends only the previous simulated proceeds,
 so gains and losses resize the paper lot within one reset-daily UTC run; no
 outside funds, leverage, or shorts are introduced. A drawdown risk exit sells
@@ -3408,8 +3410,8 @@ How it avoids flattering itself:
 Every report ends by stating that nothing was traded, no wallet signing key was loaded, and
 nothing was signed.
 
-Telegram keeps the paper stream deliberately quiet. It pushes only settled
-paper fills, risk pauses, strategy lifecycle changes, and one short period
+Telegram keeps the paper stream deliberately quiet. It pushes newly opened
+paper orders, settled fills, risk pauses, strategy lifecycle changes, and one short period
 result with P&L versus the opening book and versus holding. Raw signals,
 refused or missed attempts, warm-up, and ordinary waiting remain in the
 hash-chained journal and the on-demand `/paper` view; they do not interrupt the
@@ -3417,8 +3419,10 @@ operator.
 
 The optional dashboard shows the same bounded paper projection without reading
 the journal, strategy files, research output, Telegram configuration, wallet,
-or signing services. It is read-only and served from a private Unix socket; it
-does not open a TCP port on the host. Install and enable the supplied dashboard
+or signing services. Its status projection is read-only; the private dashboard
+can also write a bounded paper-only configuration request for the separate
+root activator to validate. It is served from a private Unix socket and does
+not open a TCP port on the host. Install and enable the supplied dashboard
 service and socket after the two paper status sockets are available. Add only
 the intended SSH login user to `mithril-agent-dashboard`, then reconnect that
 SSH session so the new group applies:
@@ -3441,12 +3445,12 @@ ssh -N -L 127.0.0.1:8787:/run/mithril-agent-paper-dashboard.sock ubuntu@HOST
 ```
 
 Open `http://127.0.0.1:8787/` locally. The page labels simulation, stale or
-unavailable markets, paper value, daily P&L, comparison with holding, fills,
+unavailable markets, paper value, current-run P&L, comparison with holding, fills,
 signal counts, current and worst drawdown, a bounded gap-aware current-day
-paper-versus-holding chart, current strategy, and retained activity. It has no
-trade or configuration buttons. Candidate evaluation and selection remain in
-the existing immutable, next-UTC paper lifecycle rather than a browser control
-surface.
+paper-versus-holding chart, current strategy, and retained activity. Its plan
+dialog can change only paper capital, order bounds, cadence, drawdown limit,
+and research preference. Candidate evaluation and selection remain in the
+existing immutable paper lifecycle; the browser never signs or submits a trade.
 
 The report is not something you take on trust. It is derived by replaying the
 day's hash-chained journal, and it can be recomputed independently at any time:
@@ -3532,6 +3536,8 @@ The pinned Hermes research profile can automate only challenger preparation:
 
 ```bash
 mithril-agent shadow research-mcp --policy /var/lib/mithril-agent-research/policy/policy.json \
+  --instruction /run/mithril-hermes-research/instruction.json \
+  --research-packet /run/mithril-hermes-research/research-state/validated.json \
   --journal-dir /var/lib/mithril-agent-research/journals \
   --candidate-dir /var/lib/mithril-agent-research/challenger/candidates \
   --challenger-pointer /var/lib/mithril-agent-research/challenger/active.json \
@@ -3541,8 +3547,17 @@ mithril-agent shadow research-mcp --policy /var/lib/mithril-agent-research/polic
   --challenge-days 7
 ```
 
-Its input contains cited prose plus yesterday and the day before as a date
-anchor, never paths, policy parameters, keys, or grants. The server derives and
+The `--instruction` and `--research-packet` requirements apply to adaptive
+policies; fixed-policy MCP use remains available without either. Its tool input
+contains only the exact packet digest and date anchors, never paths, policy
+parameters, keys, or grants. A separate private,
+canonical operator instruction is required at startup and its SHA-256 digest,
+exact cadence, exact adaptive drawdown, and bounded candidate-universe
+preference are bound into the candidate and receipt. The full validated packet
+is retained so its digest, market, exact parameter diff, and every fold's policy
+lineage can be rechecked later. Dollar capital and order-size requests fail
+closed because the current replay cannot enforce them across future prices and
+fills. The server derives and
 requires the full eight-day completed window, runs seven chronological
 train/out-of-sample folds, writes a content-addressed paper candidate only when
 that admission gate passes, and updates only the

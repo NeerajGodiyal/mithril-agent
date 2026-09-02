@@ -1278,8 +1278,8 @@ func runProposalCanaryCheck(ctx context.Context, args []string, output io.Writer
 	}{
 		Status: "mainnet_canary_evidence_ready_not_enabled", ActionID: actionID,
 		ControlRevision: revision, StrategyEvidence: true,
-		ShadowPolicy: strategyEvidence.PolicySHA256,
-		ShadowDays:   strategyEvidence.CompleteDays, StrategyApproved: true,
+		ShadowPolicy:    strategyEvidence.PolicySHA256,
+		ShadowDays:      strategyEvidence.CompleteDays,
 		ApprovedRequest: approved.RequestSHA256, RecoveryMode: submission.RecoveryMode,
 		RouteUpgradeAtomic: routeAtomic, RouteProtection: routeProtection,
 	})

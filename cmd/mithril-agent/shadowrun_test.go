@@ -125,7 +125,7 @@ func TestShadowPolicyIsValidatedAtLoad(t *testing.T) {
 func TestShadowEndpointIsNeverEchoed(t *testing.T) {
 	const secret = "https://rpc.invalid/path?api-key=super-secret"
 	t.Setenv(shadowEndpointEnvironment, "http://insecure.invalid")
-	_, err := openShadowRun(validShadowPolicy(), shadowRunOptions{directory: "/tmp/x"})
+	_, err := openShadowRun(t.Context(), validShadowPolicy(), shadowRunOptions{directory: "/tmp/x"})
 	if err == nil {
 		t.Fatal("a plain http endpoint was accepted")
 	}
@@ -134,7 +134,7 @@ func TestShadowEndpointIsNeverEchoed(t *testing.T) {
 	}
 
 	t.Setenv(shadowEndpointEnvironment, secret)
-	_, err = openShadowRun(validShadowPolicy(), shadowRunOptions{directory: "/tmp/x"})
+	_, err = openShadowRun(t.Context(), validShadowPolicy(), shadowRunOptions{directory: "/tmp/x"})
 	if err == nil {
 		t.Fatal("a run opened with no quote adapter configured")
 	}

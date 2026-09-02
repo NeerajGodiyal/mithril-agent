@@ -1,7 +1,7 @@
 [Unit]
 Description=Mithril bounded paper simulation status bridge
 Requires=mithril-agent-paper-status.socket
-After=mithril-agent-paper-status.socket
+After=mithril-agent-paper-status.socket mithril-agent-paper-pre-champion.service mithril-agent-paper-champion.service
 StartLimitIntervalSec=30s
 StartLimitBurst=12
 
@@ -10,7 +10,7 @@ Type=simple
 User=mithril-agent-status-bridge
 Group=mithril-agent-status-bridge
 UMask=0077
-LoadCredential=paper-status:/var/lib/mithril-agent-research/status/champion/alerts.json
+LoadCredential=paper-status:/etc/mithril-agent/paper-active/status/sol/alerts.json
 InaccessiblePaths=/var/lib/mithril-agent
 InaccessiblePaths=/var/lib/mithril-agent-research
 InaccessiblePaths=-/etc/mithril-agent

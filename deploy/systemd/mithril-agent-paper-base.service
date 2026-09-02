@@ -2,7 +2,10 @@
 Description=Mithril agent base paper observer
 Wants=network-online.target
 After=network-online.target time-sync.target
+PartOf=mithril-agent-paper-generation.target
 StartLimitIntervalSec=0
+ConditionPathExists=/etc/mithril-agent/paper-active/sol-policy.json
+ConditionPathExists=/etc/mithril-agent/paper-active/portfolio.json
 
 [Service]
 Type=simple
@@ -11,14 +14,16 @@ Group=mithril-agent-research
 UMask=0077
 EnvironmentFile=/etc/mithril-agent/paper.env
 Environment=MITHRIL_AGENT_KRAKEN_RATE_STATE=/run/mithril-agent-research/kraken-rate
+Environment=MITHRIL_AGENT_JUPITER_RATE_STATE=/run/mithril-agent-research/jupiter-rate
 RuntimeDirectory=mithril-agent-research
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
-ExecStart=/usr/local/libexec/mithril-agent/mithril-agent shadow run --policy /var/lib/mithril-agent-research/policy/policy.json --dir /var/lib/mithril-agent-research/journals
+ExecStart=/opt/mithril-hermes-research/run-paper-generation.sh observe sol base
 Restart=always
 RestartSec=15s
 TimeoutStopSec=30s
-ReadWritePaths=/var/lib/mithril-agent-research/journals
+ReadOnlyPaths=/var/lib/mithril-agent-research/allocations
+ReadWritePaths=/etc/mithril-agent/paper-active/runs/sol/base
 InaccessiblePaths=/proc
 NoNewPrivileges=yes
 CapabilityBoundingSet=

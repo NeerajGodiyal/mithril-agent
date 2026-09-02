@@ -13,6 +13,7 @@ UMask=0077
 EnvironmentFile=/etc/mithril-agent/paper.env
 EnvironmentFile=/etc/mithril-agent/market-%i.env
 Environment=MITHRIL_AGENT_KRAKEN_RATE_STATE=/run/mithril-agent-research/kraken-rate
+Environment=MITHRIL_AGENT_JUPITER_RATE_STATE=/run/mithril-agent-research/jupiter-rate
 RuntimeDirectory=mithril-agent-research
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes

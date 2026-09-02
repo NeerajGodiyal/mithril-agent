@@ -1,0 +1,23 @@
+[Unit]
+Description=One immutable Mithril paper allocation generation
+Wants=mithril-agent-paper-base.service
+Wants=mithril-agent-paper-pre-champion.service
+Wants=mithril-agent-paper-champion.service
+Wants=mithril-agent-paper-challenger.service
+Wants=mithril-agent-paper-champion.path
+Wants=mithril-agent-paper-challenger.path
+Wants=mithril-agent-paper-bootstrap.timer
+Wants=mithril-agent-paper-auto-select.timer
+Wants=mithril-agent-paper-jup.service
+Wants=mithril-agent-paper-jup-pre-champion.service
+Wants=mithril-agent-paper-jup-champion.service
+Wants=mithril-agent-paper-jup-challenger.service
+Wants=mithril-agent-paper-jup-champion.path
+Wants=mithril-agent-paper-jup-challenger.path
+Wants=mithril-agent-paper-jup-bootstrap.timer
+Wants=mithril-agent-paper-jup-auto-select.timer
+After=network-online.target time-sync.target
+ConditionPathExists=/etc/mithril-agent/paper-active/portfolio.json
+
+[Install]
+WantedBy=multi-user.target

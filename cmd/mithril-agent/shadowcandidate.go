@@ -15,22 +15,28 @@ import (
 
 	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
 	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
+	"github.com/Overclock-Validator/mithril-agent/researchpacket"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
 
 const (
 	shadowPaperCandidateVersion = uint32(1)
 	shadowCandidatePointerBytes = int64(4096)
+	shadowInitialCoverageBPS    = int32(9_500)
+	shadowInitialRoundTrips     = uint64(2)
 )
 
 const shadowSelectUsage = `Usage: mithril-agent shadow select --policy PATH
                                            --candidate PATH --pointer PATH
-                                           --lifecycle-lock PATH [--initial]
+                                           --lifecycle-lock PATH
+                                           [--initial --evidence-dir PATH]
 
 Validates one immutable paper candidate against its base policy, then atomically
 records it for a shadow runner. A running observer applies the selection only at
 the next UTC-day boundary. A restarted observer resumes the policy already
 pinned by today's journal; a fresh UTC day applies the latest selection.
+Initial selection replays both bound evidence days and a doubled-spread stress
+case before it can create the first paper champion.
 This command cannot authorize, sign, submit, or modify a live strategy.`
 
 // shadowJournalProvenance identifies the exact verified journal stream used by
@@ -56,6 +62,8 @@ type shadowPaperCandidate struct {
 	TrainingJournal       shadowJournalProvenance `json:"training_journal"`
 	ValidationJournal     shadowJournalProvenance `json:"validation_journal"`
 	Hypothesis            *shadowPaperHypothesis  `json:"hypothesis,omitempty"`
+	ResearchPacket        *researchpacket.Packet  `json:"research_packet,omitempty"`
+	Experiment            *shadowPaperExperiment  `json:"experiment,omitempty"`
 	Research              shadowSearchResult      `json:"research"`
 	Policy                shadow.Policy           `json:"policy"`
 }
@@ -146,6 +154,29 @@ func (candidate shadowPaperCandidate) validateAgainst(base shadow.Policy) error 
 	if candidate.Hypothesis != nil {
 		if err := candidate.Hypothesis.validate(); err != nil {
 			return errors.New("shadow paper candidate hypothesis is invalid")
+		}
+	}
+	if candidate.ResearchPacket != nil {
+		if candidate.Hypothesis == nil || validateShadowResearchPacketBinding(
+			*candidate.ResearchPacket, base, candidate.Policy, candidate.Research,
+		) != nil {
+			return errors.New("shadow paper candidate research packet binding is invalid")
+		}
+	}
+	if candidate.Experiment != nil {
+		if err := candidate.Experiment.validate(candidate.Policy); err != nil {
+			return err
+		}
+		if err := candidate.Experiment.validatePreference(base, candidate.Policy); err != nil {
+			return err
+		}
+		if candidate.Research.WalkForward != nil {
+			for _, fold := range candidate.Research.WalkForward.Folds {
+				policy, err := shadowSearchCandidatePolicy(base, fold.Candidate)
+				if err != nil || candidate.Experiment.validatePreference(base, policy) != nil {
+					return errors.New("shadow paper experiment preference does not bind every walk-forward fold")
+				}
+			}
 		}
 	}
 	trainAt, _ := time.Parse("2006-01-02", candidate.TrainingJournal.Day)
@@ -299,6 +330,7 @@ func runShadowSelect(args []string, output io.Writer) error {
 	pointerPath := flags.String("pointer", "", "paper candidate pointer")
 	lifecycleLock := flags.String("lifecycle-lock", "", "shared paper lifecycle lock")
 	initial := flags.Bool("initial", false, "refuse to replace an existing paper selection")
+	evidenceDir := flags.String("evidence-dir", "", "completed journals for initial admission")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, shadowSelectUsage)
@@ -316,6 +348,12 @@ func runShadowSelect(args []string, output io.Writer) error {
 		*lifecycleLock == *pointerPath {
 		return errors.New("shadow select requires distinct absolute policy, candidate, pointer, and lifecycle lock paths")
 	}
+	if *initial && !absoluteClean(*evidenceDir) {
+		return errors.New("shadow select --initial requires an absolute clean --evidence-dir")
+	}
+	if !*initial && *evidenceDir != "" {
+		return errors.New("shadow select --evidence-dir requires --initial")
+	}
 	base, err := loadActiveShadowPolicy(*policyPath)
 	if err != nil {
 		return err
@@ -326,6 +364,11 @@ func runShadowSelect(args []string, output io.Writer) error {
 	}
 	if err := validateActiveShadowPolicy(candidate.Policy); err != nil {
 		return err
+	}
+	if *initial {
+		if err := validateInitialShadowCandidate(base, candidate, *evidenceDir); err != nil {
+			return err
+		}
 	}
 	if err := withShadowLifecycleLock(*lifecycleLock, func() error {
 		if *initial {
@@ -352,6 +395,97 @@ func runShadowSelect(args []string, output io.Writer) error {
 		CandidatePolicySHA256: candidate.CandidatePolicySHA256,
 		Effective:             "runner_start_or_next_utc_day",
 	})
+}
+
+func validateInitialShadowCandidate(
+	base shadow.Policy, candidate shadowPaperCandidate, evidenceDir string,
+) error {
+	ticks := make([][]shadow.Tick, 2)
+	for index, provenance := range []shadowJournalProvenance{
+		candidate.TrainingJournal, candidate.ValidationJournal,
+	} {
+		dayStart, err := time.Parse("2006-01-02", provenance.Day)
+		if err != nil {
+			return errors.New("initial shadow candidate evidence day is invalid")
+		}
+		observed, current, err := readShadowSearchJournal(
+			filepath.Join(evidenceDir, "shadow-"+provenance.Day+".jsonl"), provenance.Day, base,
+		)
+		if err != nil {
+			return fmt.Errorf("replay initial shadow candidate evidence: %w", err)
+		}
+		if current != provenance {
+			return errors.New("initial shadow candidate evidence no longer matches its bound journal")
+		}
+		if coverage := shadowWalkForwardObservableBPS(observed, dayStart, base.Tick()); coverage < shadowInitialCoverageBPS {
+			return fmt.Errorf(
+				"initial shadow candidate evidence has only %d.%02d%% observable coverage",
+				coverage/100, coverage%100,
+			)
+		}
+		ticks[index] = observed
+	}
+
+	training, err := shadow.ReplayRoundTripTicks(
+		candidate.Policy, ticks[0],
+		modelledPool(candidate.Policy, candidate.Research.AssumedSpreadBPS, candidate.Policy.SlippageBPS),
+	)
+	if err != nil {
+		return fmt.Errorf("replay initial shadow candidate training evidence: %w", err)
+	}
+	trainingScore, err := scoreShadowRoundTripResult(training)
+	if err != nil || trainingScore != candidate.Research.Training {
+		return errors.New("initial shadow candidate training result does not match its evidence")
+	}
+
+	spread := candidate.Research.AssumedSpreadBPS
+	if spread > 4_999 {
+		return errors.New("initial shadow candidate spread is too large for the required doubled-spread stress")
+	}
+	for index, testedSpread := range []uint64{spread, spread * 2} {
+		validation, err := shadow.ReplayRoundTripTicks(
+			candidate.Policy, ticks[1],
+			modelledPool(candidate.Policy, testedSpread, candidate.Policy.SlippageBPS),
+		)
+		if err != nil {
+			return fmt.Errorf("replay initial shadow candidate validation evidence at %d bps: %w", testedSpread, err)
+		}
+		score, err := scoreShadowRoundTripResult(validation)
+		if err != nil {
+			return err
+		}
+		if index == 0 && score != candidate.Research.Validation {
+			return errors.New("initial shadow candidate validation result does not match its evidence")
+		}
+		closing, err := validation.Ledger.EquityMicros(validation.ClosingPrice)
+		if err != nil {
+			return err
+		}
+		hold, err := validation.Ledger.HoldBenchmarkMicros(validation.ClosingPrice)
+		if err != nil {
+			return err
+		}
+		if score.FullRoundTrips < shadowInitialRoundTrips {
+			return fmt.Errorf("initial shadow candidate completed fewer than two validation round trips at %d bps", testedSpread)
+		}
+		if closing <= validation.Ledger.OpeningEquityMicros {
+			return fmt.Errorf("initial shadow candidate validation net return is not positive at %d bps", testedSpread)
+		}
+		if closing <= hold {
+			return fmt.Errorf("initial shadow candidate validation did not beat holding at %d bps", testedSpread)
+		}
+		if !initialShadowDrawdownCompliant(candidate.Policy, validation.Ledger) {
+			return fmt.Errorf("initial shadow candidate exceeded its adaptive drawdown limit at %d bps", testedSpread)
+		}
+	}
+	return nil
+}
+
+func initialShadowDrawdownCompliant(policy shadow.Policy, ledger shadow.Ledger) bool {
+	if policy.Adaptive == nil {
+		return true
+	}
+	return ledger.MaxDrawdownBPS <= policy.Adaptive.MaxDrawdownBPS
 }
 
 func replaceShadowCandidatePointer(

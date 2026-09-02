@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -52,6 +55,7 @@ func TestRunServesOnlyFromActivatedUnixSocket(t *testing.T) {
 			"--paper-status-socket", "SOL/USDC=/run/mithril-agent-paper-status.sock",
 			"--paper-status-socket", "JUP/USDC=/run/mithril-agent-paper-jup-status.sock",
 			"--research-packet-path", "/var/lib/mithril-agent-dashboard/research.json",
+			"--mithril-evidence-status-path", "/var/lib/mithril-agent-dashboard/mithril-evidence.json",
 		}, &bytes.Buffer{})
 	}()
 	select {
@@ -67,6 +71,36 @@ func TestRunServesOnlyFromActivatedUnixSocket(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("HTTP server did not stop")
+	}
+}
+
+func TestRecordMithrilEvidenceModeDoesNotOpenAListener(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := activatedListener
+	activatedListener = func() (net.Listener, error) {
+		t.Fatal("record mode opened a listener")
+		return nil, errors.New("unexpected listener")
+	}
+	t.Cleanup(func() { activatedListener = previous })
+	path := filepath.Join(root, "mithril.json")
+	if err := run(t.Context(), []string{
+		"--record-mithril-evidence", path, "--mithril-evidence", "unavailable",
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("recorded status info=%v err=%v", info, err)
+	}
+	if err := run(t.Context(), []string{
+		"--record-mithril-evidence", path, "--mithril-evidence", "invented",
+	}, &bytes.Buffer{}); err == nil {
+		t.Fatal("unknown evidence status was accepted")
 	}
 }
 
@@ -127,5 +161,38 @@ func TestRenderInstructionModeDoesNotOpenAListener(t *testing.T) {
 		"--research-packet-path", "/tmp/research.json",
 	}, &output); err == nil {
 		t.Fatal("render mode accepted a research projection")
+	}
+}
+
+func TestExportInstructionModeDoesNotOpenAListener(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(root, "dashboard.json")
+	content := []byte("{\"version\":3,\"updated_at\":\"2026-09-01T01:00:00Z\",\"market\":\"all\",\"preference\":\"balanced\",\"cadence_seconds\":60,\"max_drawdown_bps\":300}\n")
+	if err := os.WriteFile(source, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := activatedListener
+	activatedListener = func() (net.Listener, error) {
+		t.Fatal("copy mode opened a listener")
+		return nil, errors.New("unexpected listener")
+	}
+	t.Cleanup(func() { activatedListener = previous })
+	var output bytes.Buffer
+	if err := run(t.Context(), []string{"--export-instruction", source}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(output.Bytes(), content) {
+		t.Fatalf("exported instruction = %q", output.Bytes())
+	}
+	if err := run(t.Context(), []string{
+		"--export-instruction", source, "--research-packet-path", filepath.Join(root, "research.json"),
+	}, io.Discard); err == nil {
+		t.Fatal("export mode accepted a server flag")
 	}
 }

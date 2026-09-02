@@ -82,7 +82,7 @@ func TestPaperAnnouncementsAreCompactPersistentAndReadOnly(t *testing.T) {
 	}
 	for _, sent := range bot.sent {
 		if sent.Text != "PAPER\n\n🔵 SOLD\n"+
-			"Sold: 0.001 SOL\nReceived: 0.2 USDC\nPaper account: $1.25" ||
+			"Sold: 0.001 SOL\nReceived: 0.2 USDC\nTotal paper value now: $1.25" ||
 			strings.Contains(sent.Text, "explorer.solana.com") ||
 			strings.Contains(sent.Text, "UTC") || strings.Contains(sent.Text, "→") {
 			t.Fatalf("ambiguous paper alert = %q", sent.Text)
@@ -434,6 +434,40 @@ func TestMarketAnnouncementDoesNotLookLikeTheCombinedPaperAccount(t *testing.T) 
 	}
 }
 
+func TestMarketFillExplainsEstimatedAndActualUnitPrices(t *testing.T) {
+	event := paperstatus.Event{
+		ID: strings.Repeat("a", 64), At: time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC),
+		Kind: paperstatus.KindOrderFilled,
+		Message: "PAPER · 🟢 BOUGHT\nBought 320 JUP\nPaid 69 USDC\n" +
+			"Expected price: $0.214878\nFilled price: $0.214826\n" +
+			"Paper cash left: 26 USDC\nJUP held now: 320 JUP\n" +
+			"This completed buy + sell: up $2.14",
+	}
+	message := paperAnnouncement(event, "JUP/USDC")
+	for _, want := range []string{
+		"Bought: 320 JUP",
+		"Paid: 69 USDC",
+		"Estimated price for 1 JUP: $0.214878",
+		"Actual paper price for 1 JUP: $0.214826",
+		"Paper cash left: 26 USDC",
+		"JUP held now: 320 JUP",
+		"This completed buy + sell: 🟢 ▲ $2.14 (profit)",
+	} {
+		if !strings.Contains(message, want) {
+			t.Errorf("paper fill omits %q: %q", want, message)
+		}
+	}
+	unlabeled := paperAnnouncement(event, "")
+	for _, want := range []string{
+		"Estimated price for 1 JUP: $0.214878",
+		"Actual paper price for 1 JUP: $0.214826",
+	} {
+		if !strings.Contains(unlabeled, want) {
+			t.Errorf("single-market fill omits %q: %q", want, unlabeled)
+		}
+	}
+}
+
 func TestFilledMarketAnnouncementIncludesOnlyACompletePortfolioTotal(t *testing.T) {
 	now := time.Date(2026, time.August, 30, 1, 2, 3, 0, time.UTC)
 	build := func(sourceID, market string, opening, equity uint64, event *paperstatus.Event) *paperStatusStub {
@@ -474,14 +508,15 @@ func TestFilledMarketAnnouncementIncludesOnlyACompletePortfolioTotal(t *testing.
 	}
 	for _, want := range []string{
 		"PAPER\n\n🔵 SOLD\nMarket: SOL/USDC",
-		"TOTAL PAPER ACCOUNT\n$278.20",
-		"TODAY'S TOTAL RESULT\n🟢 ▲ $2.11 (profit)",
+		"TOTAL PAPER VALUE NOW\n$278.20\nCash + current value of all paper holdings",
+		"COMBINED RESULT THIS RUN\n🟢 ▲ $2.11 (profit)",
 	} {
 		if !strings.Contains(bot.sent[0].Text, want) {
 			t.Errorf("portfolio fill alert omits %q:\n%s", want, bot.sent[0].Text)
 		}
 	}
-	if strings.Contains(bot.sent[0].Text, "Market value:") {
+	if strings.Contains(bot.sent[0].Text, "Market value:") ||
+		strings.Contains(bot.sent[0].Text, "Paper cash + current value of paper holdings") {
 		t.Fatalf("portfolio fill alert retained a confusing local account total:\n%s", bot.sent[0].Text)
 	}
 
@@ -490,8 +525,8 @@ func TestFilledMarketAnnouncementIncludesOnlyACompletePortfolioTotal(t *testing.
 	first.snapshot.Events = []paperstatus.Event{*event}
 	bot.sent = nil
 	service.announce(t.Context())
-	if len(bot.sent) != 1 || strings.Contains(bot.sent[0].Text, "TOTAL PAPER ACCOUNT") ||
-		strings.Contains(bot.sent[0].Text, "TODAY'S TOTAL RESULT") {
+	if len(bot.sent) != 1 || strings.Contains(bot.sent[0].Text, "TOTAL PAPER VALUE NOW") ||
+		strings.Contains(bot.sent[0].Text, "COMBINED RESULT THIS RUN") {
 		t.Fatalf("partial portfolio was labeled as complete: %+v", bot.sent)
 	}
 }
@@ -500,7 +535,7 @@ func TestReadablePaperMessageUpgradesRetainedCopyWithoutChangingHistory(t *testi
 	legacy := "PAPER · 🟢 BUY filled\n25 USDC → 0.25 SOL · ref $100\n" +
 		"Equity $25.25\nToday's result: up $0.25\nCompared with no trading: $0.10 better"
 	want := "PAPER · 🟢 BOUGHT\nPaid: 25 USDC\nBought: 0.25 SOL\nref $100.00\n" +
-		"Paper account: $25.25\nGain/loss today: 🟢 ▲ $0.25 (profit)\nCompared with holding: $0.10 better"
+		"Total paper value now: $25.25\nPaper result this run: 🟢 ▲ $0.25 (profit)\nCompared with holding: $0.10 better"
 	if got := readablePaperMessage(legacy); got != want {
 		t.Fatalf("readable retained paper message = %q, want %q", got, want)
 	}
@@ -677,10 +712,10 @@ func TestPaperCommandShowsCombinedCurrentPortfolioPnL(t *testing.T) {
 	}
 	report := service.paperReports()
 	for _, want := range []string{
-		"PAPER\n\n📊 ACCOUNT TODAY", "Total paper value: $150.50", "Today's total result: 🟢 ▲ $0.50 (profit)",
+		"PAPER\n\n📊 ACCOUNT NOW", "Total paper value: $150.50", "Combined result this run: 🟢 ▲ $0.50 (profit)",
 		"Compared with just holding: $1.00 better",
-		"SOL/USDC\nMarket price: $100.25\nPlan: waiting to sell\nThis market's result today: 🟢 ▲ $1.00 (profit)",
-		"JUP/USDC\nMarket price: $100.25\nPlan: waiting to buy\nThis market's result today: 🔴 ▼ $0.50 (loss)",
+		"SOL/USDC\nMarket price: $100.25\nPlan: waiting to sell\nPaper result this run: 🟢 ▲ $1.00 (profit)",
+		"JUP/USDC\nMarket price: $100.25\nPlan: waiting to buy\nPaper result this run: 🔴 ▼ $0.50 (loss)",
 		"3 filled paper orders · the plan tried to trade 3 times",
 		"Plan · follows strong moves and rebounds · daily safety limit",
 	} {
@@ -774,13 +809,26 @@ func TestPaperPortfolioDoesNotMixValueUnits(t *testing.T) {
 	}
 }
 
+func TestPaperPortfolioDoesNotMixInstructionGenerations(t *testing.T) {
+	summaries := []paperstatus.CurrentSummary{
+		{Market: "SOL/USDC", ValueUnit: "USD", InstructionSHA256: strings.Repeat("a", 64), OpeningEquityMicros: 1, EquityMicros: 1, HoldBenchmarkMicros: 1},
+		{Market: "JUP/USDC", ValueUnit: "USD", InstructionSHA256: strings.Repeat("b", 64), OpeningEquityMicros: 1, EquityMicros: 1, HoldBenchmarkMicros: 1},
+	}
+	if got := paperPortfolioSummary(summaries, time.Time{}); got != "" {
+		t.Fatalf("mixed-generation portfolio = %q", got)
+	}
+	if got := paperPortfolioAlertSummary(summaries); got != "" {
+		t.Fatalf("mixed-generation alert portfolio = %q", got)
+	}
+}
+
 func TestPaperPortfolioSupportsUnsignedTotalsAboveMaxInt64(t *testing.T) {
 	value := uint64(math.MaxInt64)/2 + 1
 	got := paperPortfolioSummary([]paperstatus.CurrentSummary{
 		{Market: "SOL/USDC", ValueUnit: "USD", OpeningEquityMicros: value, EquityMicros: value, HoldBenchmarkMicros: value},
 		{Market: "JUP/USDC", ValueUnit: "USD", OpeningEquityMicros: value, EquityMicros: value, HoldBenchmarkMicros: value},
 	}, time.Time{})
-	if got == "" || !strings.Contains(got, "Today's total result: ⚪ → unchanged") {
+	if got == "" || !strings.Contains(got, "Combined result this run: ⚪ → unchanged") {
 		t.Fatalf("large unsigned portfolio = %q", got)
 	}
 }
@@ -862,7 +910,7 @@ func TestPaperCommandTreatsMissingPricesAsDelayed(t *testing.T) {
 	}
 	reply, ok := service.Reply(t.Context(), 123, "/paper")
 	if !ok || !strings.Contains(reply, "PRICE DATA DELAYED") ||
-		!strings.Contains(reply, "Last recorded gain/loss: 🟢 ▲ $1.00 (profit)") ||
+		!strings.Contains(reply, "Last recorded run result: 🟢 ▲ $1.00 (profit)") ||
 		strings.Contains(reply, "📊 TODAY") {
 		t.Fatalf("delayed price reply = %q", reply)
 	}
@@ -895,7 +943,7 @@ func TestPaperCommandExcludesAStoppedSameDayObserverFromCurrentPortfolio(t *test
 	report := service.paperReports()
 	if strings.Contains(report, "📊 TODAY") ||
 		!strings.Contains(report, "PAPER\n\n⚠️ LATEST UPDATE DELAYED\nMarket: JUP/USDC") ||
-		!strings.Contains(report, "Last recorded gain/loss: 🟢 ▲ $1.00 (profit)") {
+		!strings.Contains(report, "Last recorded run result: 🟢 ▲ $1.00 (profit)") {
 		t.Fatalf("stopped observer was shown as current:\n%s", report)
 	}
 }
@@ -917,7 +965,7 @@ func TestPaperCommandDoesNotCallYesterdayToday(t *testing.T) {
 		t.Fatal(err)
 	}
 	reply, ok := service.Reply(t.Context(), 123, "/paper")
-	if !ok || !strings.Contains(reply, "Last recorded gain/loss: 🟢 ▲ $1.25 (profit)") ||
+	if !ok || !strings.Contains(reply, "Last recorded run result: 🟢 ▲ $1.25 (profit)") ||
 		strings.Contains(reply, "Today's result:") || strings.Contains(reply, "UTC") {
 		t.Fatalf("stale paper reply = %q", reply)
 	}

@@ -97,7 +97,10 @@ Other supported tools:
   mithril-agent index query --dir ABSOLUTE_PATH [--owner ADDRESS] [--account ADDRESS]
   mithril-agent index transactions --dir ABSOLUTE_PATH [--signature SIGNATURE] [--mention ADDRESS]
   mithril-agent shadow policy --out PATH --observe ADDR (--adaptive | --sell-at-usd N [--buy-at-usd N])
+  mithril-agent shadow portfolio --out PATH --limit-usd N --max-sol-usd N --book SPEC
+  mithril-agent shadow allocation --portfolio PATH --instruction PATH --out-dir PATH
   mithril-agent shadow run --policy PATH --dir PATH
+  mithril-agent shadow perps-paper-run --state-dir PATH
   mithril-agent shadow report --policy PATH --dir PATH
   mithril-agent shadow review --policy PATH --dir PATH --days N
   mithril-agent shadow search --policy PATH --dir PATH --train-day DATE --validation-day DATE
@@ -322,6 +325,15 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		// is the older single-shot shadow, kept working for existing scripts.
 		if len(args) > 1 && args[1] == "market" {
 			return runShadowMarket(ctx, args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "portfolio" {
+			return runShadowPortfolio(args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "allocation" {
+			return runShadowAllocation(args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "perps-paper-run" {
+			return runShadowPerpsPaper(ctx, args[2:], output)
 		}
 		if len(args) > 1 && args[1] == "run" {
 			return runShadowRun(ctx, args[2:], output)
@@ -1795,6 +1807,9 @@ func runShadow(args []string, output io.Writer) error {
   mithril-agent shadow run --policy PATH --dir PATH
                                        watch a live market, record what the rule
                                        would have done. Holds no key.
+  mithril-agent shadow perps-paper-run --state-dir PATH
+                                       run bounded, signer-free SOL/BTC/ETH perps
+                                       paper scenarios from public market data
   mithril-agent shadow market collect --market NAME --observe ADDR --journal PATH
                                        collect immutable market-admission evidence
   mithril-agent shadow market evaluate --journal PATH --out PATH

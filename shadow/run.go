@@ -12,15 +12,16 @@ import (
 // handle both, but nothing here can ever produce a swap.signed or
 // swap.submitted record — those stages do not exist in this package.
 const (
-	EventOpened       = "shadow.opened"
-	EventWaiting      = "shadow.waiting"
-	EventSignal       = "shadow.signal"
-	EventFiltered     = "shadow.filtered"
-	EventFilled       = "shadow.filled"
-	EventRefused      = "shadow.refused"
-	EventMissed       = "shadow.missed"
-	EventUnobservable = "shadow.unobservable"
-	EventClosed       = "shadow.closed"
+	EventOpened                    = "shadow.opened"
+	EventWaiting                   = "shadow.waiting"
+	EventSignal                    = "shadow.signal"
+	EventFiltered                  = "shadow.filtered"
+	EventFilled                    = "shadow.filled"
+	EventRefused                   = "shadow.refused"
+	EventMissed                    = "shadow.missed"
+	EventUnobservable              = "shadow.unobservable"
+	EventClosed                    = "shadow.closed"
+	currentTickRecordVersion uint8 = 1
 )
 
 // UnobservableReason identifies the failed stage without retaining a provider
@@ -149,6 +150,7 @@ type Runner struct {
 	resumePending         bool
 	nextSell              bool
 	nextAmount            uint64
+	cycleOpeningLedger    *Ledger
 	quoteLowerMicros      uint64
 	quoteUpperMicros      uint64
 	primaryPublishedAt    time.Time
@@ -162,10 +164,14 @@ type Runner struct {
 // Tick is the outcome of one observation, for a caller that wants to print
 // progress without reading the journal back.
 type Tick struct {
-	At          time.Time `json:"at"`
-	Event       string    `json:"event"`
-	PriceMicros uint64    `json:"price_micros,omitempty"`
-	Triggered   bool      `json:"triggered"`
+	// RecordVersion distinguishes current ticks from compatible older journals.
+	// Replay permits one forward transition during an in-day binary upgrade,
+	// then refuses a downgrade.
+	RecordVersion uint8     `json:"record_version,omitempty"`
+	At            time.Time `json:"at"`
+	Event         string    `json:"event"`
+	PriceMicros   uint64    `json:"price_micros,omitempty"`
+	Triggered     bool      `json:"triggered"`
 	// Decision explains an adaptive observation and is absent for fixed price
 	// policies. Replay recomputes it from prior prices rather than trusting it.
 	Decision *AdaptiveDecision `json:"decision,omitempty"`
@@ -185,7 +191,11 @@ type Tick struct {
 	// later fill to the exact quote already recorded with the decision.
 	DecisionQuote *Quote `json:"decision_quote,omitempty"`
 	Fill          *Fill  `json:"fill,omitempty"`
-	EquityMicros  uint64 `json:"equity_micros,omitempty"`
+	// Current writers include RoundTripResultMicros only on the second successful
+	// leg of a repeating paper round trip. Replay recomputes it from the ledger;
+	// compatible older records may omit it.
+	RoundTripResultMicros *int64 `json:"round_trip_result_micros,omitempty"`
+	EquityMicros          uint64 `json:"equity_micros,omitempty"`
 	// QuoteLowerMicros and QuoteUpperMicros are the widest independently
 	// supported USDC/USD interval on a Mainnet observation. USD accounting is
 	// valid only while this whole interval remains inside policy.
@@ -288,6 +298,9 @@ func ResumeRunner(
 	if len(ticks) == 0 {
 		return runner, nil
 	}
+	if err := validateTickRecordVersions(ticks); err != nil {
+		return nil, err
+	}
 
 	observable := false
 	for _, tick := range ticks {
@@ -306,7 +319,8 @@ func ResumeRunner(
 			if tick.Event == EventClosed {
 				if !tick.PeriodClose || tick.PriceMicros != 0 || tick.EquityMicros != 0 ||
 					tick.Triggered || tick.Deferred || tick.DecisionQuote != nil ||
-					tick.Decision != nil || tick.Fill != nil || tick.DecisionMissed || tick.Reason != "" ||
+					tick.Decision != nil || tick.Fill != nil || tick.RoundTripResultMicros != nil ||
+					tick.DecisionMissed || tick.Reason != "" ||
 					tick.NativeFeePriceMicros != 0 || tick.NativeFeePrimary != nil || tick.NativeFeeSecondary != nil ||
 					tick.QuoteLowerMicros != 0 || tick.QuoteUpperMicros != 0 {
 					return nil, errors.New("a period-close record is malformed")
@@ -339,6 +353,7 @@ func ResumeRunner(
 	runner.strategy = replayed.strategy
 	runner.primaryPublishedAt = replayed.primaryPublishedAt
 	runner.secondaryPublishedAt = replayed.secondaryPublishedAt
+	runner.cycleOpeningLedger = replayed.cycleOpeningLedger
 
 	if policy.RoundTrip() {
 		runner.nextSell, runner.nextAmount = replayed.nextSell, replayed.nextAmount
@@ -412,6 +427,29 @@ func (r *Runner) Observe(ctx context.Context) Observation {
 			return observation
 		}
 		observation.nativePrimary, observation.nativeSecondary = nativePrimary, nativeSecondary
+	}
+	return observation
+}
+
+// ApplyNativePriceCeiling refuses a snapshot when its SOL/USD evidence exceeds
+// the shared portfolio's planning ceiling.
+func (r *Runner) ApplyNativePriceCeiling(
+	now time.Time, observation Observation, maximum uint64,
+) Observation {
+	if maximum == 0 || observation.unavailable != "" {
+		return observation
+	}
+	policy := r.activeTrigger()
+	primary, secondary := observation.primary, observation.secondary
+	if r.policy.NativeFeePrice != nil {
+		policy = *r.policy.NativeFeePrice
+		primary, secondary = observation.nativePrimary, observation.nativeSecondary
+	}
+	policy.Direction = pricetrigger.BuyAtOrBelow
+	policy.ThresholdMicros = pricetrigger.MaxPriceMicros
+	evidence, err := pricetrigger.Evaluate(policy, primary, secondary, now.UTC())
+	if err != nil || evidence.ConservativePrice > maximum {
+		observation.unavailable = ReasonMarketPriceInvalid
 	}
 	return observation
 }
@@ -557,7 +595,7 @@ func (r *Runner) StepObservation(
 		}, nil)
 	}
 	attemptAmount, feeReserve := paperAttempt(
-		r.policy, r.ledger, r.nextSell, r.nextAmount, r.decision,
+		r.policy, r.ledger, r.nextSell, r.nextAmount, price, r.decision,
 	)
 	if !canFundAttempt(r.ledger, r.nextSell, attemptAmount, feeReserve) {
 		r.counts.Missed++
@@ -743,7 +781,11 @@ func (r *Runner) settle(
 		}, nil)
 		return tick, true, emitErr
 	}
+	priorLedger := r.ledger
 	r.ledger = updated
+	if fill.Filled && r.policy.RoundTrip() && r.counts.Fills%2 == 0 {
+		r.cycleOpeningLedger = &priorLedger
+	}
 	if fill.Filled && r.policy.RoundTrip() {
 		r.nextSell = !decision.sell
 		r.nextAmount = fill.ReceivedUnits
@@ -761,6 +803,24 @@ func (r *Runner) settle(
 		if r.strategy != nil {
 			r.strategy.filled(now, decision.riskExit)
 		}
+	}
+	var roundTripResult *int64
+	if fill.Filled && r.policy.RoundTrip() && r.counts.Fills%2 == 1 {
+		if r.cycleOpeningLedger == nil {
+			return Tick{}, false, errors.New("paper round trip has no opening ledger")
+		}
+		nativeMark := price
+		if len(nativePrice) == 1 {
+			nativeMark = nativePrice[0]
+		}
+		result, differenceErr := paperCycleResult(
+			*r.cycleOpeningLedger, r.ledger, price, nativeMark,
+		)
+		if differenceErr != nil {
+			return Tick{}, false, differenceErr
+		}
+		roundTripResult = &result
+		r.cycleOpeningLedger = nil
 	}
 
 	r.stats.Settled++
@@ -783,6 +843,7 @@ func (r *Runner) settle(
 	tick, emitErr := r.emit(now, Tick{
 		At: now, Event: event, PriceMicros: price,
 		Triggered: triggered, Deferred: triggered,
+		RoundTripResultMicros: roundTripResult,
 	}, &fill)
 	return tick, true, emitErr
 }
@@ -830,6 +891,7 @@ func (r *Runner) readNativeFeePrice(ctx context.Context) (pricetrigger.Sample, p
 // emit records the tick and returns it, so every outcome reaches the journal by
 // exactly one path.
 func (r *Runner) emit(now time.Time, tick Tick, fill *Fill) (Tick, error) {
+	tick.RecordVersion = currentTickRecordVersion
 	tick.Fill = fill
 	if r.strategy != nil && tick.PriceMicros != 0 && !tick.PeriodClose {
 		tick.Decision = r.decision

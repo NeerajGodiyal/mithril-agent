@@ -27,7 +27,7 @@ func (s *shadowRun) alertStrategy(at time.Time, kind string) error {
 	detail := "Starts with " + paperStartingSize(s.policy)
 	if s.policy.Adaptive != nil {
 		detail += " · safety limit " +
-			formatShadowAmount(uint64(s.policy.Adaptive.MaxDrawdownBPS), 2) + "% below today's high"
+			formatShadowAmount(uint64(s.policy.Adaptive.MaxDrawdownBPS), 2) + "% below this run's high"
 	}
 	message := fmt.Sprintf("PAPER · 🧠 %s\n%s\n%s",
 		title, paperStrategyLine(s.policy), detail)
@@ -35,6 +35,12 @@ func (s *shadowRun) alertStrategy(at time.Time, kind string) error {
 }
 
 func (s *shadowRun) alertTick(tick shadow.Tick, nextSell bool) error {
+	return s.alertTickWithRoundTrip(tick, nextSell, tick.RoundTripResultMicros != nil)
+}
+
+func (s *shadowRun) alertTickWithRoundTrip(
+	tick shadow.Tick, nextSell, roundTripComplete bool,
+) error {
 	if s.alerts == nil {
 		return nil
 	}
@@ -47,9 +53,9 @@ func (s *shadowRun) alertTick(tick shadow.Tick, nextSell bool) error {
 	key := s.policySHA256 + "/" + tick.At.Format(time.RFC3339Nano) + "/" + tick.Event
 	if tick.Decision != nil && tick.Decision.Regime == shadow.RegimeRisk &&
 		tick.Event != shadow.EventFilled {
-		message := "PAPER · ⏸ NEW BUYS PAUSED\nToday's paper safety limit was reached\nSells can still reduce risk"
+		message := "PAPER · ⏸ NEW BUYS PAUSED\nThis run's paper safety limit was reached\nSells can still reduce risk"
 		if tick.Decision.Strategy == shadow.StrategyRiskExit {
-			message = "PAPER · 🛡 SAFETY SELL ACTIVE\nToday's paper safety limit was reached\nSelling to reduce risk"
+			message = "PAPER · 🛡 SAFETY SELL ACTIVE\nThis run's paper safety limit was reached\nSelling to reduce risk"
 		}
 		riskKey := s.policySHA256 + "/" + dayKey(tick.At) + "/risk-halt"
 		if err := s.appendAlert(tick.At, paperstatus.KindRiskHalted, riskKey, message); err != nil {
@@ -80,12 +86,21 @@ func (s *shadowRun) alertTick(tick shadow.Tick, nextSell bool) error {
 		if prices := paperFillPriceLines(s.policy, *tick.Fill, input, output); prices != "" {
 			fill += "\n" + prices
 		}
+		account := paperAccountLine(s.policy, opening, tick.EquityMicros)
+		if s.runner != nil && !s.reconcilingAlerts {
+			account = paperBalanceLines(s.policy, s.runner.Ledger()) + "\n" + account
+		}
 		message := fmt.Sprintf(
 			"PAPER · %s %s\n%s\n%s",
 			paperFilledIcon(tick.Fill.Sell), shadowFilledSide(tick.Fill.Sell),
 			fill,
-			paperAccountLine(s.policy, opening, tick.EquityMicros),
+			account,
 		)
+		if s.policy.RoundTrip() {
+			message += "\n" + paperRoundTripLineForFill(
+				tick.RoundTripResultMicros, paperValueUnit(s.policy), roundTripComplete,
+			)
+		}
 		return s.appendAlert(tick.At, paperstatus.KindOrderFilled, key, message)
 	case tick.Event == shadow.EventRefused:
 		message := fmt.Sprintf("PAPER · ⚪ %s NOT FILLED\nPrice moved past the limit",
@@ -93,7 +108,7 @@ func (s *shadowRun) alertTick(tick shadow.Tick, nextSell bool) error {
 		return s.appendAlert(tick.At, paperstatus.KindOrderRefused, key, message)
 	case tick.Event == shadow.EventMissed:
 		if s.paperFeeBudgetUsed() {
-			message := "PAPER · ⏸ ORDERS PAUSED\nSimulated SOL for fees is used up today"
+			message := "PAPER · ⏸ ORDERS PAUSED\nSimulated SOL for fees is used up for this run"
 			budgetKey := s.policySHA256 + "/" + dayKey(tick.At) + "/fee-budget-used"
 			return s.appendAlert(tick.At, paperstatus.KindOrderMissed, budgetKey, message)
 		}
@@ -161,6 +176,7 @@ func (s *shadowRun) updatePaperCurrent(tick shadow.Tick, nextSell bool) error {
 			))
 			summary = &paperstatus.CurrentSummary{
 				Market: shadowMarketPair(s.policy), ValueUnit: paperValueUnit(s.policy),
+				InstructionSHA256:   s.portfolioInstructionSHA256,
 				Day:                 dayKey(tick.At),
 				TickSeconds:         s.policy.TickSeconds,
 				OpeningEquityMicros: ledger.OpeningEquityMicros,
@@ -218,6 +234,8 @@ func addPaperSettings(summary *paperstatus.CurrentSummary, policy shadow.Policy)
 	summary.InitialLotUnits = policy.InputAmount
 	summary.InitialLotDecimals = uint8(initial.decimals)
 	summary.InitialLotAsset = initial.name
+	summary.MinimumOrderValueMicros = policy.MinimumOrderValueMicros
+	summary.MaximumOrderValueMicros = policy.MaximumOrderValueMicros
 	summary.FeeReserveLamports = policy.StartingFeeReserveLamports
 	summary.FeeLamports = policy.FeeLamports
 	summary.SlippageBPS = policy.SlippageBPS
@@ -299,7 +317,7 @@ func addPaperPerformance(message, performance string) string {
 }
 
 func paperPerformanceLine(opening, current, hold uint64, unit string) string {
-	return "Paper gain/loss today: " + formatPaperChange(opening, current, unit) +
+	return "Paper result this run: " + formatPaperChange(opening, current, unit) +
 		" · " + formatPaperComparison(hold, current, unit)
 }
 
@@ -394,8 +412,14 @@ func (s *shadowRun) reconcileAlertTicks(ticks []shadow.Tick) error {
 	s.consecutiveUnavailable = 0
 	s.dataUnavailable = false
 	nextSell := s.policy.IsSell()
+	completedFills := uint64(0)
 	for _, tick := range ticks {
-		if err := s.alertTick(tick, nextSell); err != nil {
+		if tick.Event == shadow.EventFilled && tick.Fill != nil && tick.Fill.Filled && s.policy.RoundTrip() {
+			completedFills++
+		}
+		if err := s.alertTickWithRoundTrip(
+			tick, nextSell, completedFills != 0 && completedFills%2 == 0,
+		); err != nil {
 			return err
 		}
 		if tick.Event == shadow.EventFilled && tick.Fill != nil && tick.Fill.Filled && s.policy.RoundTrip() {
@@ -626,9 +650,11 @@ func shadowEquityLine(policy shadow.Policy, equity uint64) string {
 
 func paperValueLine(policy shadow.Policy, equity uint64) string {
 	if policy.Cluster == shadow.Mainnet {
-		return "Total paper account: $" + formatShadowAmount(equity, 6)
+		return "Total paper value now: $" + formatShadowAmount(equity, 6) +
+			"\nPaper cash + current value of paper holdings"
 	}
-	return "Total paper account: " + formatShadowAmount(equity, 6) + " devUSDC"
+	return "Total paper value now: " + formatShadowAmount(equity, 6) + " devUSDC" +
+		"\nPaper cash + current value of paper holdings"
 }
 
 func paperFillLine(fill shadow.Fill, input, output shadowAsset) string {
@@ -683,9 +709,45 @@ func paperMarketPrice(policy shadow.Policy, price uint64) string {
 func paperAccountLine(policy shadow.Policy, opening, equity uint64) string {
 	line := paperValueLine(policy, equity)
 	if opening != 0 {
-		line += "\nGain/loss today: " + formatPaperChange(opening, equity, paperValueUnit(policy))
+		line += "\nPaper result this run: " +
+			formatPaperChange(opening, equity, paperValueUnit(policy))
 	}
 	return line
+}
+
+func paperBalanceLines(policy shadow.Policy, ledger shadow.Ledger) string {
+	base, quote := shadowAssets(policy, true)
+	lines := fmt.Sprintf("Paper cash left: %s %s\nTrading position: %s %s",
+		formatShadowAmount(ledger.QuoteUnits, quote.decimals), quote.name,
+		formatShadowAmount(ledger.BaseUnits, base.decimals), base.name)
+	if reserve := ledger.FeeReserveLamports + ledger.LockedRentLamports; reserve != 0 {
+		lines += "\nSOL set aside for paper fees/setup: " + formatShadowAmount(reserve, 9) + " SOL"
+	}
+	return lines
+}
+
+func paperRoundTripLine(result *int64, unit string) string {
+	if result == nil {
+		return "Trade result: still open\nProfit or loss appears after the matching order"
+	}
+	return "This completed buy + sell: " + formatPaperSignedChange(*result, unit)
+}
+
+func paperRoundTripLineForFill(result *int64, unit string, complete bool) string {
+	if result == nil && complete {
+		return "This completed buy + sell: result unavailable for this recovered older record"
+	}
+	return paperRoundTripLine(result, unit)
+}
+
+func formatPaperSignedChange(value int64, unit string) string {
+	if value == 0 {
+		return "unchanged"
+	}
+	if value > 0 {
+		return "up " + formatPaperAmount(uint64(value), unit)
+	}
+	return "down " + formatPaperAmount(uint64(-(value+1))+1, unit)
 }
 
 func paperValueUnit(policy shadow.Policy) string {
@@ -745,11 +807,10 @@ func formatPaperAmount(value uint64, unit string) string {
 }
 
 func shadowCoverageLine(report shadow.Report) string {
-	line := fmt.Sprintf("Price data %d.%02d%%", report.ObservableBPS/100, report.ObservableBPS%100)
 	if !report.Trustworthy() {
-		line += " · some data missing"
+		return fmt.Sprintf("Not enough price information · %d.%02d%% available", report.ObservableBPS/100, report.ObservableBPS%100)
 	}
-	return line
+	return fmt.Sprintf("Price information available: %d.%02d%%", report.ObservableBPS/100, report.ObservableBPS%100)
 }
 
 func shadowReportIcon(report shadow.Report) string {

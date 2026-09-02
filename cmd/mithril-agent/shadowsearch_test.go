@@ -89,6 +89,50 @@ func TestAdaptiveShadowSearchKeepsRiskLimitsFixedAndBuildsAReplayableCandidate(t
 	}
 }
 
+func TestJUPAdaptiveCandidateKeepsPaperCapitalBoundToItsBasePolicy(t *testing.T) {
+	base, err := buildAdaptiveJUPPolicy(
+		250_000_000, 80_000_000, 3_000_000, 100, 100_000,
+		"So11111111111111111111111111111111111111112", 60,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adaptive := *base.Adaptive
+	adaptive.FastWindow++
+	candidate, err := shadowSearchCandidatePolicy(base, shadowSearchCandidate{Adaptive: &adaptive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.Market != shadow.MarketJUPUSDC ||
+		candidate.InputAmount != base.InputAmount ||
+		candidate.StartingInputUnits != base.StartingInputUnits ||
+		candidate.StartingFeeReserveLamports != base.StartingFeeReserveLamports ||
+		candidate.OneTimeSetupRentLamports != base.OneTimeSetupRentLamports {
+		t.Fatalf("candidate changed its JUP paper capital: %+v", candidate)
+	}
+	if err := validateShadowSearchLineage(base, candidate); err != nil {
+		t.Fatalf("candidate does not retain its JUP base lineage: %v", err)
+	}
+
+	for name, mutate := range map[string]func(*shadow.Policy){
+		"quote lot": func(policy *shadow.Policy) {
+			policy.InputAmount++
+			policy.StartingInputUnits++
+		},
+		"opening inventory":  func(policy *shadow.Policy) { policy.StartingInputUnits++ },
+		"native fee reserve": func(policy *shadow.Policy) { policy.StartingFeeReserveLamports++ },
+		"setup rent":         func(policy *shadow.Policy) { policy.OneTimeSetupRentLamports++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			drifted := candidate
+			mutate(&drifted)
+			if err := validateShadowSearchLineage(base, drifted); err == nil {
+				t.Fatal("candidate accepted changed paper capital")
+			}
+		})
+	}
+}
+
 func TestAdaptiveShadowSearchTestsBoundedCooldownWithoutLoweringTheCostHurdle(t *testing.T) {
 	policy := adaptiveShadowSearchPolicy()
 	adaptive := *policy.Adaptive
@@ -111,6 +155,42 @@ func TestAdaptiveShadowSearchTestsBoundedCooldownWithoutLoweringTheCostHurdle(t 
 	tampered.CooldownSeconds = 601
 	if err := validateAdaptiveCandidateDelta(*policy.Adaptive, tampered); err == nil {
 		t.Fatal("candidate accepted a cooldown beyond the bounded search range")
+	}
+}
+
+func TestAdaptivePaperPreferenceFiltersOnlyTheBoundedCandidateUniverse(t *testing.T) {
+	base := adaptiveShadowSearchPolicy()
+	adaptive := *base.Adaptive
+	adaptive.CooldownSeconds = 300
+	base.Adaptive = &adaptive
+
+	balanced, err := adaptiveSearchPoliciesForPreference(base, base, "balanced")
+	if err != nil || len(balanced) == 0 {
+		t.Fatalf("balanced candidates = %d, %v", len(balanced), err)
+	}
+	for _, preference := range []string{"more-opportunities", "more-selective"} {
+		candidates, err := adaptiveSearchPoliciesForPreference(base, base, preference)
+		if err != nil || len(candidates) == 0 || len(candidates) >= len(balanced) {
+			t.Fatalf("%s candidates = %d of %d, %v", preference, len(candidates), len(balanced), err)
+		}
+		for _, candidate := range candidates {
+			if !adaptivePolicyMatchesPreference(*base.Adaptive, *candidate.Adaptive, preference) {
+				t.Fatalf("%s accepted opposite candidate: %+v", preference, candidate.Adaptive)
+			}
+			if validateAdaptiveCandidateDelta(*base.Adaptive, *candidate.Adaptive) != nil ||
+				candidate.StartingInputUnits != base.StartingInputUnits ||
+				candidate.StartingOutputUnits != base.StartingOutputUnits ||
+				candidate.StartingFeeReserveLamports != base.StartingFeeReserveLamports ||
+				candidate.OneTimeSetupRentLamports != base.OneTimeSetupRentLamports ||
+				candidate.FeeLamports != base.FeeLamports || candidate.TickSeconds != base.TickSeconds ||
+				candidate.SlippageBPS != base.SlippageBPS || candidate.Trigger != base.Trigger ||
+				candidate.QuotePeg != base.QuotePeg || candidate.QuoteRoute != base.QuoteRoute {
+				t.Fatalf("%s changed fields outside the bounded strategy universe", preference)
+			}
+		}
+	}
+	if _, err := adaptiveSearchPoliciesForPreference(base, base, "maximize-profit"); err == nil {
+		t.Fatal("unknown paper research preference was accepted")
 	}
 }
 
@@ -508,6 +588,13 @@ func TestShadowSearchRejectsLeakyOrUnusableInputs(t *testing.T) {
 		"--validation-day", today.Format("2006-01-02"),
 	}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "complete UTC days") {
 		t.Fatalf("open validation day error = %v", err)
+	}
+	if err := runShadowSearch([]string{
+		"--policy", "/tmp/policy", "--dir", "/tmp/journals",
+		"--train-day", "2026-08-17", "--validation-day", "2026-08-18",
+		"--instruction", "/tmp/instruction.json",
+	}, io.Discard); err == nil || !strings.Contains(err.Error(), "--candidate-out") {
+		t.Fatalf("unbound experiment instruction error = %v", err)
 	}
 }
 

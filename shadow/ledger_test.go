@@ -267,7 +267,7 @@ func TestJUPSetupRentLocksCapitalOnlyAfterTheFirstSuccessfulBuy(t *testing.T) {
 		t.Fatal(err)
 	}
 	opening := ledger.OpeningEquityMicros
-	if amount, reserve := paperAttempt(policy, ledger, false, policy.InputAmount, nil); amount != policy.InputAmount || reserve != policy.OneTimeSetupRentLamports+policy.FeeLamports {
+	if amount, reserve := paperAttempt(policy, ledger, false, policy.InputAmount, 1_000_000, nil); amount != policy.InputAmount || reserve != policy.OneTimeSetupRentLamports+policy.FeeLamports {
 		t.Fatalf("initial JUP attempt reserve = amount %d reserve %d", amount, reserve)
 	}
 	buy := Fill{
@@ -283,7 +283,7 @@ func TestJUPSetupRentLocksCapitalOnlyAfterTheFirstSuccessfulBuy(t *testing.T) {
 		afterBuy.FeesMicros != 1_000 {
 		t.Fatalf("first JUP buy setup accounting = %+v", afterBuy)
 	}
-	if _, reserve := paperAttempt(policy, afterBuy, true, afterBuy.BaseUnits, nil); reserve != policy.FeeLamports {
+	if _, reserve := paperAttempt(policy, afterBuy, true, afterBuy.BaseUnits, 1_000_000, nil); reserve != policy.FeeLamports {
 		t.Fatalf("separate JUP fee reserve stranded the sell: reserve=%d", reserve)
 	}
 	if reserve := nextSellFeeReserve(policy); reserve != policy.FeeLamports ||
@@ -336,13 +336,80 @@ func TestAdmittedBuyNeverExceedsTheQualifiedNotional(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	amount, _ := paperAttempt(policy, ledger, false, policy.InputAmount*2, nil)
+	amount, _ := paperAttempt(policy, ledger, false, policy.InputAmount*2, 1_000_000, nil)
 	if amount != policy.InputAmount {
 		t.Fatalf("admitted buy amount = %d, want %d", amount, policy.InputAmount)
 	}
-	amount, _ = paperAttempt(policy, ledger, true, policy.InputAmount*2, nil)
+	amount, _ = paperAttempt(policy, ledger, true, policy.InputAmount*2, 1_000_000, nil)
 	if amount != policy.InputAmount*2 {
 		t.Fatalf("risk-reducing sell amount = %d, want %d", amount, policy.InputAmount*2)
+	}
+}
+
+func TestMaximumPaperOrderCapsNormalBuysAndSellsButNotRiskExit(t *testing.T) {
+	buyPolicy := jupBuyPolicy(t)
+	buyPolicy.MinimumOrderValueMicros = 5_000_000
+	buyPolicy.MaximumOrderValueMicros = 25_000_000
+	buyPolicy.InputAmount = 25_000_000
+	buyPolicy.StartingInputUnits = 80_000_000
+	buyReturn := buyPolicy.Trigger
+	buyReturn.Direction = pricetrigger.SellAtOrAbove
+	buyReturn.ThresholdMicros = pricetrigger.MaxPriceMicros
+	buyPolicy.ReturnTrigger = &buyReturn
+	buyAdaptive, err := DefaultAdaptiveQuotePolicy(
+		buyPolicy.SlippageBPS, buyPolicy.FeeLamports,
+		buyPolicy.NativeFeePriceCeilingMicros, buyPolicy.InputAmount,
+		buyPolicy.InputDecimals, buyPolicy.TickSeconds,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buyPolicy.Adaptive = &buyAdaptive
+	if err := buyPolicy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	buyLedger, err := NewLedger(buyPolicy, 1_000_000, 200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if amount, _ := paperAttempt(buyPolicy, buyLedger, false, 80_000_000, 1_000_000, nil); amount != 25_000_000 {
+		t.Fatalf("capped buy = %d, want 25000000", amount)
+	}
+	if amount, _ := paperAttempt(buyPolicy, buyLedger, false, 2_000_000, 1_000_000, nil); amount != 0 {
+		t.Fatalf("undersized buy = %d, want refusal", amount)
+	}
+
+	sellPolicy := mainnetPolicy()
+	sellPolicy.MinimumOrderValueMicros = 5_000_000
+	sellPolicy.MaximumOrderValueMicros = 25_000_000
+	sellPolicy.StartingInputUnits = 1_000_000_000
+	sellPolicy.InputAmount = 1_000_000_000
+	sellPolicy.StartingFeeReserveLamports = 2 * sellPolicy.FeeLamports
+	sellReturn := sellPolicy.Trigger
+	sellReturn.Direction = pricetrigger.BuyAtOrBelow
+	sellReturn.ThresholdMicros = 1
+	sellPolicy.ReturnTrigger = &sellReturn
+	sellAdaptive, err := DefaultAdaptivePolicy(
+		sellPolicy.SlippageBPS, sellPolicy.FeeLamports,
+		sellPolicy.InputAmount, sellPolicy.TickSeconds,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sellPolicy.Adaptive = &sellAdaptive
+	if err := sellPolicy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	sellLedger, err := NewLedger(sellPolicy, 200_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if amount, _ := paperAttempt(sellPolicy, sellLedger, true, 1_000_000_000, 200_000_000, nil); amount != 125_000_000 {
+		t.Fatalf("capped sell = %d, want 125000000", amount)
+	}
+	riskExit := &AdaptiveDecision{Strategy: StrategyRiskExit}
+	if amount, _ := paperAttempt(sellPolicy, sellLedger, true, 1_000_000_000, 200_000_000, riskExit); amount != sellLedger.BaseUnits {
+		t.Fatalf("risk exit = %d, want full %d", amount, sellLedger.BaseUnits)
 	}
 }
 
@@ -392,7 +459,7 @@ func TestSOLRoundTripReplenishesBothFeesAcrossCycles(t *testing.T) {
 		t.Fatal(err)
 	}
 	for cycle := 0; cycle < 2; cycle++ {
-		sellAmount, sellReserve := paperAttempt(policy, ledger, true, policy.InputAmount, nil)
+		sellAmount, sellReserve := paperAttempt(policy, ledger, true, policy.InputAmount, 200_000_000, nil)
 		if !canFundAttempt(ledger, true, sellAmount, sellReserve) {
 			t.Fatalf("cycle %d sell was not funded: %+v", cycle, ledger)
 		}
@@ -403,7 +470,7 @@ func TestSOLRoundTripReplenishesBothFeesAcrossCycles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		buyAmount, buyReserve := paperAttempt(policy, ledger, false, 200_000, nil)
+		buyAmount, buyReserve := paperAttempt(policy, ledger, false, 200_000, 200_000_000, nil)
 		if !canFundAttempt(ledger, false, buyAmount, buyReserve) {
 			t.Fatalf("cycle %d buy was not funded: %+v", cycle, ledger)
 		}
@@ -593,6 +660,28 @@ func TestMaxDrawdownRemembersTheWorstMoment(t *testing.T) {
 	}
 	if ledger.PeakEquityMicros != 26_000_000 {
 		t.Errorf("peak equity = %d, want 26000000", ledger.PeakEquityMicros)
+	}
+	if ledger.MaxDrawdownBPS != 4_000 {
+		t.Errorf("max drawdown = %d bps, want 4000", ledger.MaxDrawdownBPS)
+	}
+}
+
+func TestMaxDrawdownPercentUsesTheHighWaterMark(t *testing.T) {
+	policy := sellPolicy()
+	policy.StartingInputUnits = 1_000_000_000
+	ledger, err := NewLedger(policy, 100_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, price := range []uint64{200_000_000, 180_000_000, 150_000_000} {
+		ledger, err = ledger.Mark(price)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ledger.MaxDrawdownMicros != 50_000_000 || ledger.MaxDrawdownBPS != 2_500 {
+		t.Fatalf("max drawdown = $%.2f/%d bps, want $50/2500 bps",
+			float64(ledger.MaxDrawdownMicros)/1_000_000, ledger.MaxDrawdownBPS)
 	}
 }
 

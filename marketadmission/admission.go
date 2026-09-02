@@ -24,6 +24,10 @@ import (
 const (
 	Version = uint32(1)
 
+	ProvisionalStatus                 = "development_provisional"
+	ProvisionalWindowHours            = uint16(6)
+	ProvisionalMinimumAvailabilityBPS = uint16(9_500)
+
 	mainnetUSDCMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 	tokenProgram    = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
@@ -337,6 +341,308 @@ type Artifact struct {
 	OperationallyQualified bool                  `json:"operationally_qualified"`
 	Reasons                []string              `json:"reasons,omitempty"`
 	ContentSHA256          string                `json:"content_sha256"`
+}
+
+// Diagnostic summarizes a recent partial window without changing the 30-day
+// qualification contract. It is intentionally not an admission artifact and
+// has no digest or loader accepted by policy code.
+type Diagnostic struct {
+	Version                  uint32            `json:"version"`
+	Market                   string            `json:"market"`
+	From                     time.Time         `json:"from"`
+	Through                  time.Time         `json:"through"`
+	DiagnosticOnly           bool              `json:"diagnostic_only"`
+	OperationallyQualified   bool              `json:"operationally_qualified"`
+	ExpectedBuckets          uint64            `json:"expected_buckets"`
+	ObservedBuckets          uint64            `json:"observed_buckets"`
+	AvailableBuckets         uint64            `json:"available_buckets"`
+	AvailabilityBPS          uint16            `json:"availability_bps"`
+	MedianRouteCostBPS       uint16            `json:"median_route_cost_bps,omitempty"`
+	P95RouteCostBPS          uint16            `json:"p95_route_cost_bps,omitempty"`
+	MedianQuoteLatencyMillis uint32            `json:"median_quote_latency_millis,omitempty"`
+	P95QuoteLatencyMillis    uint32            `json:"p95_quote_latency_millis,omitempty"`
+	FailureCounts            map[string]uint64 `json:"failure_counts"`
+}
+
+// ProvisionalArtifact is a short, current paper-testing checkpoint. It is
+// deliberately a different type from Artifact: six hours can expose broken
+// sources, rate limits, and unusable routes, but it cannot establish long-run
+// reliability or authorize an executable proposal.
+type ProvisionalArtifact struct {
+	Version               uint32                `json:"version"`
+	Status                string                `json:"status"`
+	PaperOnly             bool                  `json:"paper_only"`
+	Authorized            bool                  `json:"authorized"`
+	ProvisionalPaperReady bool                  `json:"provisional_paper_ready"`
+	WindowHours           uint16                `json:"window_hours"`
+	Candidate             Candidate             `json:"candidate"`
+	CandidateSHA256       string                `json:"candidate_sha256"`
+	Observe               string                `json:"observe"`
+	OpeningSHA256         string                `json:"opening_sha256"`
+	Thresholds            Thresholds            `json:"thresholds"`
+	From                  time.Time             `json:"from"`
+	Through               time.Time             `json:"through"`
+	Journal               journal.DurablePrefix `json:"journal"`
+	ExpectedBuckets       uint64                `json:"expected_buckets"`
+	ObservedBuckets       uint64                `json:"observed_buckets"`
+	AvailableBuckets      uint64                `json:"available_buckets"`
+	AvailabilityBPS       uint16                `json:"availability_bps"`
+	MedianRouteCostBPS    uint16                `json:"median_route_cost_bps,omitempty"`
+	P95RouteCostBPS       uint16                `json:"p95_route_cost_bps,omitempty"`
+	Reasons               []string              `json:"reasons,omitempty"`
+	ContentSHA256         string                `json:"content_sha256"`
+}
+
+// EvaluateProvisionalJournal derives the most recent six complete hours from
+// one exact durable prefix. It never creates a long-run admission artifact.
+func EvaluateProvisionalJournal(
+	path string,
+	prefix journal.DurablePrefix,
+	now time.Time,
+) (ProvisionalArtifact, error) {
+	records, err := journal.ReadDurablePrefix(path, prefix)
+	if err != nil {
+		return ProvisionalArtifact{}, err
+	}
+	opening, observations, err := decodeRecords(records)
+	if err != nil {
+		return ProvisionalArtifact{}, err
+	}
+	if now.IsZero() {
+		return ProvisionalArtifact{}, errors.New("provisional market evidence evaluation time is required")
+	}
+	cadence := time.Duration(opening.Thresholds.CadenceSeconds) * time.Second
+	through := now.UTC().Truncate(cadence)
+	return evaluateProvisional(
+		opening, through.Add(-time.Duration(ProvisionalWindowHours)*time.Hour),
+		through, prefix, observations,
+	)
+}
+
+func evaluateProvisional(
+	opening Opening,
+	from, through time.Time,
+	prefix journal.DurablePrefix,
+	observations []Observation,
+) (ProvisionalArtifact, error) {
+	if err := opening.Validate(); err != nil {
+		return ProvisionalArtifact{}, err
+	}
+	cadence := time.Duration(opening.Thresholds.CadenceSeconds) * time.Second
+	from, through = from.UTC(), through.UTC()
+	window := time.Duration(ProvisionalWindowHours) * time.Hour
+	if from.IsZero() || from != from.Truncate(cadence) ||
+		through != through.Truncate(cadence) || through.Sub(from) != window {
+		return ProvisionalArtifact{}, errors.New("provisional market evidence must cover exactly six complete hours")
+	}
+	expected := uint64(window / cadence)
+	selected := make([]Observation, 0, expected)
+	for _, observation := range observations {
+		if !observation.Bucket.Before(from) && observation.Bucket.Before(through) {
+			selected = append(selected, observation)
+		}
+	}
+	costs := make([]uint16, 0, len(selected))
+	available := uint64(0)
+	for _, observation := range selected {
+		if cost, ok := usableObservation(opening, observation); ok {
+			available++
+			costs = append(costs, cost)
+		}
+	}
+	artifact := ProvisionalArtifact{
+		Version: Version, Status: ProvisionalStatus, PaperOnly: true,
+		WindowHours: ProvisionalWindowHours, Candidate: opening.Candidate,
+		CandidateSHA256: opening.CandidateSHA256, Observe: opening.Observe,
+		OpeningSHA256: opening.ContentSHA256, Thresholds: opening.Thresholds,
+		From: from, Through: through, Journal: prefix,
+		ExpectedBuckets: expected, ObservedBuckets: uint64(len(selected)),
+		AvailableBuckets: available, AvailabilityBPS: availabilityBPS(available, expected),
+	}
+	if len(costs) != 0 {
+		sort.Slice(costs, func(left, right int) bool { return costs[left] < costs[right] })
+		artifact.MedianRouteCostBPS = percentile(costs, 50)
+		artifact.P95RouteCostBPS = percentile(costs, 95)
+	}
+	artifact.Reasons = provisionalReasons(artifact)
+	artifact.ProvisionalPaperReady = len(artifact.Reasons) == 0
+	contentSHA256, err := provisionalFingerprint(artifact)
+	if err != nil {
+		return ProvisionalArtifact{}, err
+	}
+	artifact.ContentSHA256 = contentSHA256
+	return artifact, nil
+}
+
+func provisionalReasons(artifact ProvisionalArtifact) []string {
+	var reasons []string
+	if artifact.AvailabilityBPS < ProvisionalMinimumAvailabilityBPS {
+		reasons = append(reasons, "six-hour bidirectional availability is below the paper-testing minimum")
+	}
+	if artifact.AvailableBuckets == 0 {
+		reasons = append(reasons, "no complete bidirectional quote evidence is available")
+	} else {
+		if artifact.MedianRouteCostBPS > artifact.Thresholds.MedianRouteCostBPS {
+			reasons = append(reasons, "median round-trip route cost exceeds the limit")
+		}
+		if artifact.P95RouteCostBPS > artifact.Thresholds.P95RouteCostBPS {
+			reasons = append(reasons, "p95 round-trip route cost exceeds the limit")
+		}
+	}
+	return reasons
+}
+
+func (artifact ProvisionalArtifact) Validate() error {
+	cadence := time.Duration(DefaultThresholds().CadenceSeconds) * time.Second
+	window := time.Duration(ProvisionalWindowHours) * time.Hour
+	if artifact.Version != Version || artifact.Status != ProvisionalStatus ||
+		!artifact.PaperOnly || artifact.Authorized || artifact.ContentSHA256 == "" ||
+		artifact.WindowHours != ProvisionalWindowHours ||
+		artifact.ProvisionalPaperReady != (len(artifact.Reasons) == 0) ||
+		artifact.From != artifact.From.UTC().Truncate(cadence) ||
+		artifact.Through != artifact.Through.UTC().Truncate(cadence) ||
+		artifact.Through.Sub(artifact.From) != window {
+		return errors.New("provisional market evidence artifact is invalid")
+	}
+	opening, err := NewOpening(artifact.Candidate, artifact.Observe, artifact.Thresholds)
+	if err != nil || opening.CandidateSHA256 != artifact.CandidateSHA256 ||
+		opening.ContentSHA256 != artifact.OpeningSHA256 ||
+		artifact.Journal.Format != journal.Format || artifact.Journal.Bytes <= 0 ||
+		artifact.Journal.Records <= 0 || !validDigest(artifact.Journal.ChainHeadSHA256) {
+		return errors.New("provisional market evidence identity is invalid")
+	}
+	expected := uint64(window / cadence)
+	if artifact.ExpectedBuckets != expected || artifact.ObservedBuckets > expected ||
+		artifact.AvailableBuckets > artifact.ObservedBuckets ||
+		artifact.AvailabilityBPS != availabilityBPS(artifact.AvailableBuckets, expected) ||
+		!equalStrings(artifact.Reasons, provisionalReasons(artifact)) {
+		return errors.New("provisional market evidence counters are invalid")
+	}
+	want, err := provisionalFingerprint(artifact)
+	if err != nil || want != artifact.ContentSHA256 {
+		return errors.New("provisional market evidence digest does not match")
+	}
+	return nil
+}
+
+// Current reports whether a paper-only artifact is still usable at startup.
+// It expires after two collection cadences and never crosses a UTC day.
+func (artifact ProvisionalArtifact) Current(now time.Time) bool {
+	if artifact.Validate() != nil || now.IsZero() {
+		return false
+	}
+	now = now.UTC()
+	cadence := time.Duration(artifact.Thresholds.CadenceSeconds) * time.Second
+	return !now.Before(artifact.Through) && now.Sub(artifact.Through) <= 2*cadence &&
+		artifact.Through.Truncate(24*time.Hour).Equal(now.Truncate(24*time.Hour))
+}
+
+func (artifact ProvisionalArtifact) VerifyJournal(path string) error {
+	if err := artifact.Validate(); err != nil {
+		return err
+	}
+	records, err := journal.ReadDurablePrefix(path, artifact.Journal)
+	if err != nil {
+		return err
+	}
+	opening, observations, err := decodeRecords(records)
+	if err != nil {
+		return err
+	}
+	want, err := evaluateProvisional(
+		opening, artifact.From, artifact.Through, artifact.Journal, observations,
+	)
+	if err != nil || want.ContentSHA256 != artifact.ContentSHA256 {
+		return errors.New("provisional market evidence artifact does not match its journal")
+	}
+	return nil
+}
+
+// DiagnoseJournal derives a recent read-only operational summary from one
+// exact durable prefix. It cannot produce evidence that policy loading accepts.
+func DiagnoseJournal(
+	path string,
+	prefix journal.DurablePrefix,
+	now time.Time,
+	window time.Duration,
+) (Diagnostic, error) {
+	records, err := journal.ReadDurablePrefix(path, prefix)
+	if err != nil {
+		return Diagnostic{}, err
+	}
+	opening, observations, err := decodeRecords(records)
+	if err != nil {
+		return Diagnostic{}, err
+	}
+	return diagnose(opening, observations, now, window)
+}
+
+func diagnose(
+	opening Opening,
+	observations []Observation,
+	now time.Time,
+	window time.Duration,
+) (Diagnostic, error) {
+	if err := opening.Validate(); err != nil {
+		return Diagnostic{}, err
+	}
+	cadence := time.Duration(opening.Thresholds.CadenceSeconds) * time.Second
+	if now.IsZero() || window < time.Hour || window > 7*24*time.Hour ||
+		window%time.Hour != 0 || window%cadence != 0 {
+		return Diagnostic{}, errors.New("market diagnostic window must be 1 to 168 whole hours")
+	}
+	through := now.UTC().Truncate(cadence)
+	from := through.Add(-window)
+	expected := uint64(window / cadence)
+	diagnostic := Diagnostic{
+		Version: Version, Market: opening.Candidate.Market,
+		From: from, Through: through, DiagnosticOnly: true,
+		ExpectedBuckets: expected, FailureCounts: make(map[string]uint64),
+	}
+	costs := make([]uint16, 0, len(observations))
+	latencies := make([]uint32, 0, len(observations))
+	for _, observation := range observations {
+		if observation.Bucket.Before(from) || !observation.Bucket.Before(through) {
+			continue
+		}
+		diagnostic.ObservedBuckets++
+		cost, usable := usableObservation(opening, observation)
+		if !usable {
+			reason := observation.Failure
+			if reason == "" {
+				reason = "evidence_rejected"
+			}
+			diagnostic.FailureCounts[reason]++
+			continue
+		}
+		diagnostic.AvailableBuckets++
+		costs = append(costs, cost)
+		latencies = append(latencies, observation.Buy.LatencyMillis+observation.Sell.LatencyMillis)
+	}
+	if missing := expected - min(expected, diagnostic.ObservedBuckets); missing != 0 {
+		diagnostic.FailureCounts["missing_bucket"] = missing
+	}
+	diagnostic.AvailabilityBPS = availabilityBPS(diagnostic.AvailableBuckets, expected)
+	if len(costs) != 0 {
+		sort.Slice(costs, func(left, right int) bool { return costs[left] < costs[right] })
+		sort.Slice(latencies, func(left, right int) bool { return latencies[left] < latencies[right] })
+		diagnostic.MedianRouteCostBPS = percentile(costs, 50)
+		diagnostic.P95RouteCostBPS = percentile(costs, 95)
+		diagnostic.MedianQuoteLatencyMillis = percentileUint32(latencies, 50)
+		diagnostic.P95QuoteLatencyMillis = percentileUint32(latencies, 95)
+	}
+	return diagnostic, nil
+}
+
+func percentileUint32(values []uint32, wanted uint64) uint32 {
+	if len(values) == 0 {
+		return 0
+	}
+	index := (uint64(len(values))*wanted + 99) / 100
+	if index == 0 {
+		index = 1
+	}
+	return values[index-1]
 }
 
 // EvaluateJournal derives the latest complete UTC window from an exact durable
@@ -795,6 +1101,11 @@ func openingFingerprint(opening Opening) (string, error) {
 }
 
 func artifactFingerprint(artifact Artifact) (string, error) {
+	artifact.ContentSHA256 = ""
+	return digest(artifact)
+}
+
+func provisionalFingerprint(artifact ProvisionalArtifact) (string, error) {
 	artifact.ContentSHA256 = ""
 	return digest(artifact)
 }

@@ -12,7 +12,7 @@ SupplementaryGroups=mithril-agent-status
 UMask=0077
 StateDirectory=mithril-agent-dashboard
 StateDirectoryMode=0700
-ExecStart=/usr/local/libexec/mithril-agent/mithril-agent-paper-dashboard --paper-status-socket SOL/USDC=/run/mithril-agent-paper-status.sock --paper-status-socket JUP/USDC=/run/mithril-agent-paper-jup-status.sock --instruction-path /var/lib/mithril-agent-dashboard/instruction.json --research-packet-path /var/lib/mithril-agent-dashboard/research.json
+ExecStart=/usr/local/libexec/mithril-agent/mithril-agent-paper-dashboard --paper-status-socket SOL/USDC=/run/mithril-agent-paper-status.sock --paper-status-socket JUP/USDC=/run/mithril-agent-paper-jup-status.sock --instruction-path /var/lib/mithril-agent-dashboard/instruction.json --research-packet-path /var/lib/mithril-agent-dashboard/research.json --mithril-evidence-status-path /var/lib/mithril-agent-dashboard/mithril-evidence.json
 Restart=on-failure
 RestartSec=5s
 TimeoutStartSec=10s

@@ -13,6 +13,11 @@ func Trusted(info os.FileInfo) bool {
 	return ok && (stat.Uid == 0 || stat.Uid == uint32(os.Geteuid()))
 }
 
+func CurrentOwned(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Uid == uint32(os.Geteuid())
+}
+
 // TrustedGroup reports whether a file is controlled by one of this process's
 // groups. Callers must still enforce the exact group permission bits they need.
 func TrustedGroup(info os.FileInfo) bool {

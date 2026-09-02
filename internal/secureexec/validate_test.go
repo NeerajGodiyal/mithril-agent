@@ -5,11 +5,16 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Overclock-Validator/mithril-agent/internal/fileowner"
 )
 
 func TestProtectedExecutablesAndFilesRejectReplaceableAncestry(t *testing.T) {
 	directory, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	command := filepath.Join(directory, "command")
@@ -64,7 +69,16 @@ func TestProtectedExecutablesAndFilesRejectReplaceableAncestry(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(actual, "command"), []byte("test"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateExecutable(linkedCommand); err == nil {
+	linkedInfo, err := os.Lstat(linked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ValidateExecutable(linkedCommand)
+	if fileowner.RootOwned(linkedInfo) {
+		if err != nil {
+			t.Fatalf("protected root-owned symlink was rejected: %v", err)
+		}
+	} else if err == nil {
 		t.Fatal("command below a symlinked directory was accepted")
 	}
 }

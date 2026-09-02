@@ -136,7 +136,7 @@ verify-source:
 	fi
 	@expected=$$(mktemp); listed=$$(mktemp); \
 	 trap 'rm -f "$$expected" "$$listed"' EXIT; \
-	find . -type f \( -name '*.go' -o -name '*.rs' -o -name '*.js' -o -name '*.mjs' -o -name '*.html' -o -name '*.json' \
+	find . -type f \( -name '*.go' -o -name '*.rs' -o -name '*.js' -o -name '*.mjs' -o -name '*.py' -o -name '*.html' -o -name '*.json' \
 	      -o -name '*.svg' -o -name '*.woff2' \
 	      -o -name '*.yaml' -o -name '*.sh' -o -name '*.example' -o -name 'Dockerfile' -o -name '.dockerignore' \
 	      -o -name '*.md' -o -name 'Makefile' -o -name '*.service' \
@@ -173,7 +173,7 @@ verify-source:
 # a manifest that silently regenerates itself proves nothing about the source.
 .PHONY: manifest
 manifest:
-	@find . -type f \( -name '*.go' -o -name '*.rs' -o -name '*.js' -o -name '*.mjs' -o -name '*.html' -o -name '*.json' \
+	@find . -type f \( -name '*.go' -o -name '*.rs' -o -name '*.js' -o -name '*.mjs' -o -name '*.py' -o -name '*.html' -o -name '*.json' \
 	     -o -name '*.svg' -o -name '*.woff2' \
 	     -o -name '*.yaml' -o -name '*.sh' -o -name '*.example' -o -name 'Dockerfile' -o -name '.dockerignore' \
 	     -o -name '*.md' -o -name 'Makefile' -o -name '*.service' \

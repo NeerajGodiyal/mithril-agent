@@ -232,6 +232,34 @@ func TestCanaryShadowEvidenceReplaysAndBindsTheProtectedRoute(t *testing.T) {
 	}
 }
 
+func TestCanaryShadowEvidenceRejectsAValidProvisionalPolicyBeforeReplay(t *testing.T) {
+	artifactPath, journalPath, now := writeReadyProvisionalEvidence(t)
+	artifact, err := loadProvisionalMarketAdmission(artifactPath, journalPath, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := buildAdaptiveProvisionalPolicy(
+		artifact,
+		artifact.Candidate.QuoteNotionalUSDC,
+		80_000_000,
+		3_000_000,
+		artifact.Candidate.QuoteSlippageBPS,
+		100_000,
+		artifact.Observe,
+		60,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, signing, _ := testJupiterPolicySet(t)
+	_, err = checkProposalShadowEvidence(
+		signing, writeShadowPolicy(t, policy), filepath.Join(t.TempDir(), "missing"), 1, now,
+	)
+	if err == nil || !strings.Contains(err.Error(), "development paper evidence") {
+		t.Fatalf("provisional proposal evidence error = %v", err)
+	}
+}
+
 func TestFormatSignedMicrosHandlesMinimumInt64(t *testing.T) {
 	if got := formatSignedMicros(math.MinInt64); got != "-9223372036854.775808" {
 		t.Fatalf("minimum int64 formatted as %q", got)

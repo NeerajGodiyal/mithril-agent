@@ -20,11 +20,17 @@ import (
 
 const shadowMarketUsage = `Usage:
   mithril-agent shadow market collect --market NAME --observe ADDR --journal PATH [--once]
+  mithril-agent shadow market curve --market NAME --observe ADDR
+  mithril-agent shadow market diagnose --journal PATH [--hours 6]
+  mithril-agent shadow market provisional --journal PATH --out PATH
   mithril-agent shadow market evaluate --journal PATH --out PATH
 
 Collect attempts one immutable, hash-chained observation per minute; missed
-buckets count unavailable. Evaluate
-checks the latest 30 complete UTC days from that exact durable journal prefix
+ buckets count unavailable. Curve samples serial $10/$25/$50/$100 Jupiter
+ round trips and emits diagnostic-only size evidence. Diagnose prints a recent 1-168 hour operational
+summary but cannot qualify a market or create an artifact. Provisional writes
+a paper-only six-hour checkpoint which expires quickly and cannot authorize a
+proposal. Evaluate checks the latest 30 complete UTC days from that exact durable journal prefix
 and writes a new artifact without replacing an existing file. Qualification
 covers market-data and route quality only; it does not start a paper strategy.
 
@@ -41,11 +47,110 @@ func runShadowMarket(ctx context.Context, args []string, output io.Writer) error
 	switch args[0] {
 	case "collect":
 		return runShadowMarketCollect(ctx, args[1:], output)
+	case "curve":
+		return runShadowMarketCurve(ctx, args[1:], output)
+	case "diagnose":
+		return runShadowMarketDiagnose(args[1:], output)
+	case "provisional":
+		return runShadowMarketProvisional(args[1:], output)
 	case "evaluate":
 		return runShadowMarketEvaluate(args[1:], output)
 	default:
-		return errors.New("shadow market expects collect or evaluate")
+		return errors.New("shadow market expects collect, curve, diagnose, provisional, or evaluate")
 	}
+}
+
+func runShadowMarketProvisional(args []string, output io.Writer) error {
+	flags := flag.NewFlagSet("shadow market provisional", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	journalPath := flags.String("journal", "", "absolute evidence journal path")
+	outPath := flags.String("out", "", "new paper-only evidence artifact")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			_, writeErr := fmt.Fprintln(output, shadowMarketUsage)
+			return writeErr
+		}
+		return err
+	}
+	if flags.NArg() != 0 || *journalPath == "" || *outPath == "" {
+		return errors.New("shadow market provisional requires --journal and --out")
+	}
+	if err := validateMarketAdmissionPath(*journalPath, "--journal"); err != nil {
+		return err
+	}
+	if err := validateMarketAdmissionPath(*outPath, "--out"); err != nil {
+		return err
+	}
+	verified, err := journal.Verify(*journalPath)
+	if err != nil {
+		if errors.Is(err, journal.ErrLocked) {
+			return errors.New("stop the market collector before creating a provisional checkpoint")
+		}
+		return err
+	}
+	prefix := journal.DurablePrefix{
+		Format: journal.Format, Bytes: verified.Bytes, Records: verified.Records,
+		ChainHeadSHA256: verified.ChainHeadSHA256,
+	}
+	artifact, err := marketadmission.EvaluateProvisionalJournal(
+		*journalPath, prefix, time.Now(),
+	)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(artifact, "", "  ")
+	if err != nil {
+		return err
+	}
+	encoded = append(encoded, '\n')
+	if err := securefile.CreatePrivate(*outPath, encoded, maxMarketAdmissionArtifactBytes); err != nil {
+		return err
+	}
+	return writeShadowMarketJSON(output, struct {
+		Market     string `json:"market"`
+		Status     string `json:"status"`
+		PaperReady bool   `json:"provisional_paper_ready"`
+		Artifact   string `json:"artifact"`
+	}{artifact.Candidate.Market, artifact.Status, artifact.ProvisionalPaperReady, *outPath})
+}
+
+func runShadowMarketDiagnose(args []string, output io.Writer) error {
+	flags := flag.NewFlagSet("shadow market diagnose", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	journalPath := flags.String("journal", "", "absolute evidence journal path")
+	hours := flags.Uint("hours", 6, "recent completed hours, 1..168")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			_, writeErr := fmt.Fprintln(output, shadowMarketUsage)
+			return writeErr
+		}
+		return err
+	}
+	if flags.NArg() != 0 || *journalPath == "" || *hours == 0 || *hours > 168 {
+		return errors.New("shadow market diagnose requires --journal and --hours 1..168")
+	}
+	if err := validateMarketAdmissionPath(*journalPath, "--journal"); err != nil {
+		return err
+	}
+	verified, err := journal.Verify(*journalPath)
+	if err != nil {
+		if errors.Is(err, journal.ErrLocked) {
+			return errors.New("stop the market collector before diagnosing its journal")
+		}
+		return err
+	}
+	diagnostic, err := marketadmission.DiagnoseJournal(
+		*journalPath,
+		journal.DurablePrefix{
+			Format: journal.Format, Bytes: verified.Bytes, Records: verified.Records,
+			ChainHeadSHA256: verified.ChainHeadSHA256,
+		},
+		time.Now(), time.Duration(*hours)*time.Hour,
+	)
+	if err != nil {
+		return err
+	}
+	return writeShadowMarketJSON(output, diagnostic)
 }
 
 func runShadowMarketCollect(ctx context.Context, args []string, output io.Writer) error {
@@ -312,6 +417,32 @@ func loadQualifiedMarketAdmission(
 	}
 	if err := artifact.VerifyJournal(journalPath); err != nil {
 		return marketadmission.Artifact{}, errors.New("market admission artifact does not match its journal")
+	}
+	return artifact, nil
+}
+
+func loadProvisionalMarketAdmission(
+	artifactPath, journalPath string,
+	now time.Time,
+) (marketadmission.ProvisionalArtifact, error) {
+	if err := validateMarketAdmissionPath(artifactPath, "--provisional-artifact"); err != nil {
+		return marketadmission.ProvisionalArtifact{}, err
+	}
+	if err := validateMarketAdmissionPath(journalPath, "--provisional-journal"); err != nil {
+		return marketadmission.ProvisionalArtifact{}, err
+	}
+	var artifact marketadmission.ProvisionalArtifact
+	if err := readStrictJSON(artifactPath, &artifact); err != nil || artifact.Validate() != nil {
+		return marketadmission.ProvisionalArtifact{}, errors.New("provisional market evidence artifact is invalid")
+	}
+	if !artifact.ProvisionalPaperReady {
+		return marketadmission.ProvisionalArtifact{}, errors.New("provisional market evidence is not ready for paper testing")
+	}
+	if !artifact.Current(now) {
+		return marketadmission.ProvisionalArtifact{}, errors.New("provisional market evidence is stale")
+	}
+	if err := artifact.VerifyJournal(journalPath); err != nil {
+		return marketadmission.ProvisionalArtifact{}, errors.New("provisional market evidence does not match its journal")
 	}
 	return artifact, nil
 }

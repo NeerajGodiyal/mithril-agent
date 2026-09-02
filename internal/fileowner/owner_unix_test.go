@@ -52,6 +52,20 @@ func TestTrustedAcceptsCurrentOrRootAndRejectsForeignOwner(t *testing.T) {
 	}
 }
 
+func TestCurrentOwnedOnlyAcceptsTheEffectiveUser(t *testing.T) {
+	current := fileInfoWithUID{uid: uint32(os.Geteuid())}
+	if !CurrentOwned(current) {
+		t.Fatal("current owner was rejected")
+	}
+	foreign := fileInfoWithUID{uid: uint32(os.Geteuid()) + 1}
+	if foreign.uid == uint32(os.Geteuid()) {
+		foreign.uid++
+	}
+	if CurrentOwned(foreign) {
+		t.Fatal("foreign owner was accepted")
+	}
+}
+
 func TestTrustedGroupAcceptsCurrentGroup(t *testing.T) {
 	info := fileInfoWithOwner{uid: uint32(os.Geteuid()) + 1, gid: uint32(os.Getegid())}
 	if !TrustedGroup(info) {

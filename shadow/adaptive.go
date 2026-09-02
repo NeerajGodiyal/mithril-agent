@@ -529,11 +529,7 @@ func currentDrawdownBPS(ledger Ledger, price uint64) (uint16, error) {
 	if equity >= ledger.PeakEquityMicros {
 		return 0, nil
 	}
-	drawdown := float64(ledger.PeakEquityMicros-equity) * 10_000 / float64(ledger.PeakEquityMicros)
-	if drawdown >= math.MaxUint16 {
-		return math.MaxUint16, nil
-	}
-	return uint16(math.Round(drawdown)), nil
+	return drawdownBPS(ledger.PeakEquityMicros, equity), nil
 }
 
 func magnitude32(value int32) uint32 {

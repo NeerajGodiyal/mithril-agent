@@ -1,17 +1,18 @@
 [Unit]
 Description=Mithril qualified paper challenger selector
 After=time-sync.target mithril-agent-paper-champion.service mithril-agent-paper-challenger.service
-ConditionPathExists=/var/lib/mithril-agent-research/champion/active.json
-ConditionPathExists=/var/lib/mithril-agent-research/challenger/active.json
+PartOf=mithril-agent-paper-generation.target
+ConditionPathExists=/etc/mithril-agent/paper-active/selection/sol/champion/active.json
+ConditionPathExists=/etc/mithril-agent/paper-active/selection/sol/challenger/active.json
 
 [Service]
 Type=oneshot
 User=mithril-agent-research
 Group=mithril-agent-research
 UMask=0077
-ExecStart=/usr/local/libexec/mithril-agent/mithril-agent shadow auto-select --policy /var/lib/mithril-agent-research/policy/policy.json --champion-pointer /var/lib/mithril-agent-research/champion/active.json --challenger-pointer /var/lib/mithril-agent-research/challenger/active.json --champion-dir /var/lib/mithril-agent-research/runs/champion --challenger-dir /var/lib/mithril-agent-research/runs/challenger --days 7 --rollback-pointer /var/lib/mithril-agent-research/champion/previous.json --lifecycle-lock /var/lib/mithril-agent-research/challenger/lifecycle.lock
-ReadOnlyPaths=/var/lib/mithril-agent-research/policy /var/lib/mithril-agent-research/runs
-ReadWritePaths=/var/lib/mithril-agent-research/champion /var/lib/mithril-agent-research/challenger
+ExecStart=/opt/mithril-hermes-research/run-paper-generation.sh auto-select sol
+ReadOnlyPaths=/var/lib/mithril-agent-research/allocations
+ReadWritePaths=/etc/mithril-agent/paper-active/selection/sol/champion /etc/mithril-agent/paper-active/selection/sol/challenger
 InaccessiblePaths=/proc
 NoNewPrivileges=yes
 CapabilityBoundingSet=

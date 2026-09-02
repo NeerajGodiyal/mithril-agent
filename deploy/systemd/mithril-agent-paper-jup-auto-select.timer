@@ -1,0 +1,13 @@
+[Unit]
+Description=Check qualified Mithril JUP/USDC paper challengers hourly
+PartOf=mithril-agent-paper-generation.target
+
+[Timer]
+OnCalendar=*-*-* *:20:00 UTC
+Persistent=true
+RandomizedDelaySec=5min
+AccuracySec=1min
+Unit=mithril-agent-paper-jup-auto-select.service
+
+[Install]
+WantedBy=timers.target

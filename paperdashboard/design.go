@@ -905,6 +905,9 @@ footer.shell {
 .instruction-controls input:focus,
 .instruction-controls select:focus { border-color: var(--green); }
 .instruction-controls small { color: var(--subtle); font-size: .68rem; line-height: 1.45; }
+.locked-setting { display: grid; gap: 5px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-raised); }
+.locked-setting > span { color: var(--muted); font-size: .68rem; }
+.locked-setting > strong { color: var(--text); font-size: .86rem; font-weight: 600; }
 .money-input,
 .percent-input {
   display: grid;

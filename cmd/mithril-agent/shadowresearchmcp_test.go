@@ -13,12 +13,22 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/journal"
+	"github.com/Overclock-Validator/mithril-agent/paperdashboard"
+	"github.com/Overclock-Validator/mithril-agent/researchpacket"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestShadowResearchMCPWritesOnlyAnImmutablePaperChallenger(t *testing.T) {
-	policy := validShadowResearchPolicy()
+	policy := adaptiveShadowSearchPolicy()
+	policy.TickSeconds = 300
+	adaptive := *policy.Adaptive
+	adaptive.MaxObservationGapSeconds = 600
+	adaptive.MaxVolatilityBPS = 5_000
+	policy.Adaptive = &adaptive
+	policy.InputAmount = 20_000_000
+	policy.MinimumOrderValueMicros = 1_000_000
+	policy.MaximumOrderValueMicros = 100_000_000
 	policyPath := writeShadowPolicy(t, policy)
 	root := privateTestDirectory(t)
 	journalDir := filepath.Join(root, "journals")
@@ -29,8 +39,8 @@ func TestShadowResearchMCPWritesOnlyAnImmutablePaperChallenger(t *testing.T) {
 		}
 	}
 	prices := []uint64{
-		220_000_000, 220_000_000, 110_000_000, 110_000_000,
-		220_000_000, 220_000_000, 110_000_000, 110_000_000,
+		100_000_000, 98_000_000, 96_000_000, 94_000_000, 94_000_000,
+		96_000_000, 98_000_000, 100_000_000, 102_000_000, 102_000_000,
 	}
 	writeShadowResearchWindow(t, journalDir, policy, "2026-08-29", prices)
 	challengerPointer := filepath.Join(root, "challenger-pointer")
@@ -42,9 +52,44 @@ func TestShadowResearchMCPWritesOnlyAnImmutablePaperChallenger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	instructionPath := writeShadowExperimentInstruction(t, root, paperdashboard.Instruction{
+		Version: paperdashboard.InstructionVersion, UpdatedAt: time.Date(2026, 8, 29, 23, 0, 0, 0, time.UTC),
+		Market: "all", Preference: "balanced", CadenceSeconds: policy.TickSeconds,
+		PaperCapitalMicros: 150_000_000, MinimumOrderMicros: 1_000_000,
+		MaximumOrderMicros: 100_000_000, MaxDrawdownBPS: policy.Adaptive.MaxDrawdownBPS,
+	})
+	controller.experiment, err = loadShadowPaperExperiment(instructionPath, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
 	controller.now = func() time.Time {
 		return time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
 	}
+	days, err := readShadowWalkForwardDays(journalDir, "2026-08-29", policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var proposed shadow.Policy
+	for _, candidate := range adaptiveSearchPolicies(policy) {
+		if len(shadowAdaptiveParameterDiff(*policy.Adaptive, *candidate.Adaptive)) == 0 {
+			continue
+		}
+		if _, candidateErr := searchShadowWalkForwardCandidates(
+			policy, days, 100, []shadow.Policy{candidate},
+		); candidateErr == nil {
+			proposed = candidate
+			break
+		}
+	}
+	if proposed.Adaptive == nil {
+		t.Fatal("fixture has no exact changed candidate that passes walk-forward admission")
+	}
+	packet := boundShadowResearchPacket(t, policy, controller.now(), shadowMarketPair(policy))
+	packet.CandidateParameterDiff = shadowAdaptiveParameterDiff(*policy.Adaptive, *proposed.Adaptive)
+	packet = rehashShadowResearchPacket(t, packet, controller.now())
+	controller.researchPacket = &packet
+	boundInput := validShadowResearchInput()
+	boundInput.ResearchPacketSHA256 = packet.ContentSHA256
 
 	pointerPath := championPointer
 	pointerBefore, err := os.ReadFile(pointerPath)
@@ -123,7 +168,7 @@ func TestShadowResearchMCPWritesOnlyAnImmutablePaperChallenger(t *testing.T) {
 		t.Fatalf("empty paper challenge status = %+v, %v", challengeStatus, err)
 	}
 
-	arguments := shadowResearchMCPArguments(t, validShadowResearchInput())
+	arguments := shadowResearchMCPArguments(t, boundInput)
 	arguments["champion_pointer"] = pointerPath
 	result, callErr := session.CallTool(ctx, &mcpsdk.CallToolParams{
 		Name: "mithril_paper_create_challenger", Arguments: arguments,
@@ -137,10 +182,11 @@ func TestShadowResearchMCPWritesOnlyAnImmutablePaperChallenger(t *testing.T) {
 
 	result, callErr = session.CallTool(ctx, &mcpsdk.CallToolParams{
 		Name:      "mithril_paper_create_challenger",
-		Arguments: shadowResearchMCPArguments(t, validShadowResearchInput()),
+		Arguments: shadowResearchMCPArguments(t, boundInput),
 	})
 	if callErr != nil || result.IsError {
-		t.Fatalf("create paper challenger = %+v, %v", result, callErr)
+		detail, _ := json.Marshal(result.Content)
+		t.Fatalf("create paper challenger = %s, %v", detail, callErr)
 	}
 	encoded, err := json.Marshal(result.StructuredContent)
 	if err != nil {
@@ -155,7 +201,10 @@ func TestShadowResearchMCPWritesOnlyAnImmutablePaperChallenger(t *testing.T) {
 		!receipt.ChallengerPointerUpdated || receipt.ChampionPointerUpdated ||
 		receipt.ArtifactSHA256 == "" || receipt.Research.WalkForward == nil ||
 		len(receipt.Research.WalkForward.Folds) != shadowWalkForwardWindows ||
-		filepath.Base(receipt.Artifact) != receipt.Artifact || strings.Contains(receipt.Artifact, "..") {
+		filepath.Base(receipt.Artifact) != receipt.Artifact || strings.Contains(receipt.Artifact, "..") ||
+		receipt.Experiment == nil || receipt.Experiment.InstructionSHA256 == "" || !receipt.Experiment.PaperOnly ||
+		receipt.ResearchPacket == nil || receipt.ResearchPacket.ContentSHA256 != packet.ContentSHA256 ||
+		receipt.Experiment.Authorized {
 		t.Fatalf("paper receipt = %+v", receipt)
 	}
 	candidatePath := filepath.Join(candidateDir, receipt.Artifact)
@@ -165,7 +214,13 @@ func TestShadowResearchMCPWritesOnlyAnImmutablePaperChallenger(t *testing.T) {
 	}
 	if digest != receipt.ArtifactSHA256 || candidate.Authorized || candidate.Promotable ||
 		!candidate.PaperOnly || candidate.Hypothesis == nil ||
-		candidate.Hypothesis.Thesis != validShadowResearchInput().Hypothesis.Thesis {
+		!strings.HasPrefix(candidate.Hypothesis.Thesis, "Research packet ") ||
+		candidate.ResearchPacket == nil || candidate.ResearchPacket.ContentSHA256 != packet.ContentSHA256 ||
+		validateShadowResearchPacketBinding(
+			*candidate.ResearchPacket, policy, candidate.Policy, candidate.Research,
+		) != nil ||
+		candidate.Experiment == nil ||
+		candidate.Experiment.InstructionSHA256 != receipt.Experiment.InstructionSHA256 {
 		t.Fatalf("paper candidate = %+v digest=%s", candidate, digest)
 	}
 	boundDays := make(map[string]struct{})
@@ -230,6 +285,53 @@ func TestShadowResearchMCPWritesOnlyAnImmutablePaperChallenger(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("shadow research MCP server did not stop")
+	}
+}
+
+func TestShadowResearchPacketBindingRejectsMismatchedLineage(t *testing.T) {
+	policy := adaptiveShadowSearchPolicy()
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	packet := boundShadowResearchPacket(t, policy, now, shadowMarketPair(policy))
+	controller := shadowResearchController{
+		policy: policy, basePolicy: policy, researchPacket: &packet,
+	}
+	candidate, binding, hypothesis, err := controller.bindResearchPacket(packet.ContentSHA256, now)
+	if err != nil || candidate.Adaptive.MinimumSignalBPS != policy.Adaptive.MinimumSignalBPS+100 ||
+		binding.ContentSHA256 != packet.ContentSHA256 || binding.Validate() != nil ||
+		len(hypothesis.Sources) != 2 {
+		t.Fatalf("bound candidate = %+v, binding=%+v, hypothesis=%+v, %v", candidate, binding, hypothesis, err)
+	}
+	if _, _, _, err := controller.bindResearchPacket(strings.Repeat("0", 64), now); err == nil {
+		t.Fatal("research packet accepted the wrong digest")
+	}
+	if _, _, _, err := controller.bindResearchPacket(packet.ContentSHA256, packet.ValidUntil); err == nil {
+		t.Fatal("research packet accepted an expired proposal")
+	}
+
+	badMarket := boundShadowResearchPacket(t, policy, now, shadow.MarketJUPUSDC)
+	controller.researchPacket = &badMarket
+	if _, _, _, err := controller.bindResearchPacket(badMarket.ContentSHA256, now); err == nil {
+		t.Fatal("research packet crossed market boundaries")
+	}
+
+	badCurrent := boundShadowResearchPacket(t, policy, now, shadowMarketPair(policy))
+	badCurrent.CandidateParameterDiff[0].Current--
+	badCurrent.ContentSHA256 = ""
+	raw, _ := json.Marshal(badCurrent)
+	badCurrent, err = researchpacket.Parse(raw, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.researchPacket = &badCurrent
+	if _, _, _, err := controller.bindResearchPacket(badCurrent.ContentSHA256, now); err == nil {
+		t.Fatal("research packet accepted a stale current parameter")
+	}
+
+	tampered := *binding
+	tampered.CandidateParameterDiff = append([]researchpacket.ParameterChange(nil), binding.CandidateParameterDiff...)
+	tampered.CandidateParameterDiff[0].Proposed++
+	if tampered.Validate() == nil {
+		t.Fatal("candidate accepted a tampered research packet diff")
 	}
 }
 
@@ -805,6 +907,147 @@ func validShadowResearchPolicy() shadow.Policy {
 	return policy
 }
 
+func TestFixedShadowResearchPolicyIgnoresStaticInstructionPath(t *testing.T) {
+	experiment, err := loadRequiredShadowPaperExperiment("/not-present", validShadowResearchPolicy())
+	if err != nil || experiment != nil {
+		t.Fatalf("fixed policy experiment = %+v, %v", experiment, err)
+	}
+
+	if _, err := loadRequiredShadowPaperExperiment("", adaptiveShadowSearchPolicy()); err == nil ||
+		!strings.Contains(err.Error(), "requires an operator-fixed") {
+		t.Fatalf("adaptive policy without instruction error = %v", err)
+	}
+
+	packet, err := loadRequiredShadowResearchPacket("", validShadowResearchPolicy())
+	if err != nil || packet != nil {
+		t.Fatalf("fixed policy research packet = %+v, %v", packet, err)
+	}
+	if _, err := loadRequiredShadowResearchPacket("/not-present", validShadowResearchPolicy()); err == nil ||
+		!strings.Contains(err.Error(), "does not accept") {
+		t.Fatalf("fixed policy with research packet error = %v", err)
+	}
+	if _, err := loadRequiredShadowResearchPacket("", adaptiveShadowSearchPolicy()); err == nil ||
+		!strings.Contains(err.Error(), "requires a validated") {
+		t.Fatalf("adaptive policy without research packet error = %v", err)
+	}
+}
+
+func TestShadowPaperExperimentFailsClosedWhenARequirementCannotBeApplied(t *testing.T) {
+	policy := adaptiveShadowSearchPolicy()
+	policy.MinimumOrderValueMicros = 5_000_000
+	policy.MaximumOrderValueMicros = 25_000_000
+	root := privateTestDirectory(t)
+	valid := paperdashboard.Instruction{
+		Version:   paperdashboard.InstructionVersion,
+		UpdatedAt: time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC),
+		Market:    policy.Market, Preference: "balanced", CadenceSeconds: policy.TickSeconds,
+		PaperCapitalMicros: 150_000_000, MinimumOrderMicros: 5_000_000,
+		MaximumOrderMicros: 25_000_000, MaxDrawdownBPS: policy.Adaptive.MaxDrawdownBPS,
+	}
+	path := writeShadowExperimentInstruction(t, root, valid)
+	binding, err := loadShadowPaperExperiment(path, policy)
+	if err != nil || binding.InstructionSHA256 == "" || !binding.PaperOnly ||
+		len(binding.EnforcedFields) != 5 || len(binding.UnsupportedFields) != 0 ||
+		len(binding.PortfolioFields) != 1 || len(binding.AdvisoryFields) != 0 {
+		t.Fatalf("valid paper experiment = %+v, %v", binding, err)
+	}
+	if err := binding.validatePreference(policy, policy); err != nil {
+		t.Fatalf("balanced preference rejected base candidate: %v", err)
+	}
+	selective := valid
+	selective.Preference = "more-selective"
+	selectivePath := writeShadowExperimentInstruction(t, root, selective)
+	selectiveBinding, err := loadShadowPaperExperiment(selectivePath, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := selectiveBinding.validatePreference(policy, policy); err == nil {
+		t.Fatal("selective preference accepted an unchanged base candidate")
+	}
+	selectiveCandidates, err := adaptiveSearchPoliciesForPreference(policy, policy, selective.Preference)
+	if err != nil || len(selectiveCandidates) == 0 ||
+		selectiveBinding.validatePreference(policy, selectiveCandidates[0]) != nil {
+		t.Fatalf("selective candidates = %d, %v", len(selectiveCandidates), err)
+	}
+	legacyInstruction := valid
+	legacyInstruction.Version = 3
+	legacyInstruction.PaperCapitalMicros = 0
+	legacyInstruction.MinimumOrderMicros = 0
+	legacyInstruction.MaximumOrderMicros = 0
+	legacyDigest, err := paperdashboard.InstructionSHA256(legacyInstruction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := *binding
+	legacy.Version = shadowPaperExperimentLegacyVersion
+	legacy.Instruction = legacyInstruction
+	legacy.InstructionSHA256 = legacyDigest
+	legacy.EnforcedFields = append([]string(nil), shadowExperimentLegacyEnforced...)
+	legacy.UnsupportedFields = append([]string(nil), shadowExperimentExactUnsupported...)
+	legacy.PortfolioFields = nil
+	legacy.AdvisoryFields = append([]string(nil), shadowExperimentLegacyAdvisory...)
+	if err := legacy.validate(policy); err != nil || legacy.validatePreference(policy, policy) != nil {
+		t.Fatalf("legacy advisory experiment is unreadable: %v", err)
+	}
+
+	tampered := *binding
+	tampered.EnforcedFields = append([]string(nil), binding.EnforcedFields...)
+	tampered.EnforcedFields[0] = "cadence_seconds_tampered"
+	if err := tampered.validate(policy); err == nil || !strings.Contains(err.Error(), "classification") {
+		t.Fatalf("tampered field classification error = %v", err)
+	}
+
+	for name, instruction := range map[string]paperdashboard.Instruction{
+		"cadence": func() paperdashboard.Instruction {
+			changed := valid
+			changed.CadenceSeconds = 30
+			return changed
+		}(),
+		"drawdown": func() paperdashboard.Instruction {
+			changed := valid
+			changed.MaxDrawdownBPS = 300
+			return changed
+		}(),
+		"market": func() paperdashboard.Instruction {
+			changed := valid
+			changed.Market = shadow.MarketJUPUSDC
+			return changed
+		}(),
+		"old sizing": {
+			Version: 2, UpdatedAt: valid.UpdatedAt, Market: "all", Preference: "balanced",
+			PaperCapitalMicros: 270_000_000, MinimumOrderMicros: 10_000_000,
+			MaximumOrderMicros: 200_000_000, CadenceSeconds: policy.TickSeconds,
+			MaxDrawdownBPS: policy.Adaptive.MaxDrawdownBPS,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			writeShadowExperimentInstruction(t, root, instruction)
+			_, err := loadShadowPaperExperiment(path, policy)
+			if err == nil {
+				t.Fatal("unapplied paper experiment requirement was accepted")
+			}
+			if name == "old sizing" && !strings.Contains(err.Error(), "order sizing is not applied") {
+				t.Fatalf("old sizing error = %v", err)
+			}
+		})
+	}
+}
+
+func writeShadowExperimentInstruction(
+	t *testing.T, root string, instruction paperdashboard.Instruction,
+) string {
+	t.Helper()
+	encoded, err := json.Marshal(instruction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "instruction.json")
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func writeShadowResearchWindow(
 	t *testing.T, directory string, policy shadow.Policy, finalDay string, prices []uint64,
 ) {
@@ -814,9 +1057,58 @@ func writeShadowResearchWindow(
 		t.Fatal(err)
 	}
 	for offset := -shadowWalkForwardWindows; offset <= 0; offset++ {
-		writeShadowResearchDay(
-			t, directory, policy, end.AddDate(0, 0, offset).Format("2006-01-02"), prices,
-		)
+		day := end.AddDate(0, 0, offset).Format("2006-01-02")
+		if policy.Adaptive != nil {
+			writeAdaptiveShadowResearchDay(t, directory, policy, day, prices)
+		} else {
+			writeShadowResearchDay(t, directory, policy, day, prices)
+		}
+	}
+}
+
+func writeAdaptiveShadowResearchDay(
+	t *testing.T, directory string, policy shadow.Policy, day string, prices []uint64,
+) {
+	t.Helper()
+	start, err := time.Parse("2006-01-02", day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primary := &shadowSearchReader{identity: policy.Trigger.PrimarySourceSHA256}
+	secondary := &shadowSearchReader{identity: policy.Trigger.SecondarySourceSHA256}
+	quotePrimary := &shadowSearchReader{
+		identity: policy.QuotePeg.PrimarySourceSHA256, price: 1_000_000,
+	}
+	quoteSecondary := &shadowSearchReader{
+		identity: policy.QuotePeg.SecondarySourceSHA256, price: 1_000_000,
+	}
+	roll, err := newDailyJournal(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := shadow.NewRunner(
+		policy, primary, secondary, shadowSearchUnavailableQuoter{}, roll,
+		quotePrimary, quoteSecondary,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := int(uint64(24*time.Hour/time.Second)/policy.TickSeconds) - 1
+	for index := 0; index < count; index++ {
+		at := start.Add(time.Duration(index+1) * policy.Tick())
+		price := prices[index%len(prices)]
+		primary.price, primary.at = price, at
+		secondary.price, secondary.at = price, at
+		quotePrimary.at, quoteSecondary.at = at, at
+		if _, err := runner.Step(t.Context(), at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := runner.ClosePeriod(start.Add(24*time.Hour-time.Nanosecond), prices[(count-1)%len(prices)]); err != nil {
+		t.Fatal(err)
+	}
+	if err := roll.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -944,6 +1236,64 @@ func validShadowResearchInput() shadowResearchCandidateInput {
 	}
 }
 
+func boundShadowResearchPacket(
+	t *testing.T, policy shadow.Policy, now time.Time, market string,
+) researchpacket.Packet {
+	t.Helper()
+	created := now.Add(-time.Minute)
+	packet := researchpacket.Packet{
+		Version: researchpacket.Version, HypothesisID: "bounded-signal-20260902",
+		CreatedAt: created, ValidUntil: created.Add(6 * time.Hour),
+		Market: market, Disposition: researchpacket.DispositionCandidate,
+		VerifiedFacts: []researchpacket.Fact{{
+			ID: "route_quality", Claim: "Two independent primary sources support testing a stricter paper signal.",
+			Status: researchpacket.FactVerified,
+			Sources: []researchpacket.Source{
+				{URL: "https://solana.com/docs/core", RetrievedAt: created},
+				{URL: "https://github.com/anza-xyz/agave/releases", RetrievedAt: created},
+			},
+		}},
+		BullCase:          "A stricter signal may reduce noise after modelled costs.",
+		BearCase:          "It may remove useful opportunities.",
+		NoTradeCase:       "Keep the current paper policy when the exact candidate fails.",
+		ExecutionCostCase: "Replay fees, impact, slippage, and delayed settlement.",
+		RiskVeto: researchpacket.RiskVeto{
+			Decision: researchpacket.VetoPass, Reason: "The proposal changes only a bounded paper signal.",
+		},
+		CandidateParameterDiff: []researchpacket.ParameterChange{{
+			Name: "minimum_signal_bps", Current: uint64(policy.Adaptive.MinimumSignalBPS),
+			Proposed: uint64(policy.Adaptive.MinimumSignalBPS) + 100,
+		}},
+		RejectionConditions: []string{"Reject if chronological evidence does not beat hold."},
+		OutOfSampleTest:     "Use the existing seven-fold walk-forward and paired forward challenge.",
+	}
+	raw, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err = researchpacket.Parse(raw, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return packet
+}
+
+func rehashShadowResearchPacket(
+	t *testing.T, packet researchpacket.Packet, now time.Time,
+) researchpacket.Packet {
+	t.Helper()
+	packet.ContentSHA256 = ""
+	raw, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err = researchpacket.Parse(raw, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return packet
+}
+
 func TestShadowPaperHypothesisAcceptsOfficialRosterSources(t *testing.T) {
 	for _, sourceURL := range []string{
 		"https://developers.jup.ag/docs/api-reference/swap/build",
@@ -991,7 +1341,30 @@ func shadowResearchLifecycle(
 	t *testing.T, root, policyPath string, base shadow.Policy,
 ) (string, string, string) {
 	t.Helper()
-	champion := candidateForPrices(t, base, 200_000_000, 100_000_000)
+	var champion shadowPaperCandidate
+	if base.Adaptive != nil {
+		prices := []uint64{
+			100_000_000, 98_000_000, 96_000_000, 94_000_000, 94_000_000,
+			96_000_000, 98_000_000, 100_000_000, 102_000_000, 102_000_000,
+			100_000_000, 98_000_000, 96_000_000, 94_000_000, 94_000_000,
+			96_000_000, 98_000_000, 100_000_000, 102_000_000, 102_000_000,
+		}
+		result, err := searchShadowCandidate(base, prices, prices, 25)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result.TrainDay, result.ValidationDay = "2026-08-17", "2026-08-18"
+		champion, err = newShadowPaperCandidate(
+			base, result,
+			shadowJournalProvenance{Day: result.TrainDay, Records: 22, ChainHeadSHA256: strings.Repeat("a", 64)},
+			shadowJournalProvenance{Day: result.ValidationDay, Records: 22, ChainHeadSHA256: strings.Repeat("b", 64)},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		champion = candidateForPrices(t, base, 200_000_000, 100_000_000)
+	}
 	championPath := filepath.Join(root, "champion.json")
 	if err := writeShadowPaperCandidate(championPath, champion); err != nil {
 		t.Fatal(err)

@@ -101,6 +101,9 @@ var checkProposalShadowEvidence = func(
 	if err != nil {
 		return shadowReviewResult{}, errors.New("read Mainnet canary shadow policy")
 	}
+	if policy.MarketEvidenceClass == shadow.MarketEvidenceDevelopmentProvisional {
+		return shadowReviewResult{}, errors.New("development paper evidence cannot support a Mainnet proposal")
+	}
 	if signing.Jupiter == nil || policy.Cluster != shadow.Mainnet ||
 		policy.QuoteRoute.Provider != shadow.QuoteJupiter ||
 		policy.Observe != signing.Source ||

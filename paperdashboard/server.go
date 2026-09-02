@@ -1,5 +1,5 @@
-// Package paperdashboard serves the bounded paper-status projection as a
-// read-only local dashboard. It never reads journals, configuration, or keys.
+// Package paperdashboard serves bounded paper status and accepts validated,
+// paper-only instructions. It never reads journals or keys.
 package paperdashboard
 
 import (
@@ -41,29 +41,36 @@ type Source interface {
 }
 
 type Server struct {
-	sources         []Source
-	instructionPath string
-	researchPath    string
-	now             func() time.Time
-	mu              sync.Mutex
-	cached          View
-	readAt          time.Time
+	sources             []Source
+	instructionPath     string
+	researchPath        string
+	mithrilEvidencePath string
+	now                 func() time.Time
+	mu                  sync.Mutex
+	cached              View
+	readAt              time.Time
 }
 
 type View struct {
-	Mode                string       `json:"mode"`
-	ObservedAt          *time.Time   `json:"observed_at,omitempty"`
-	Complete            bool         `json:"complete"`
-	Overview            Overview     `json:"overview"`
-	Markets             []Market     `json:"markets"`
-	Activity            []Activity   `json:"activity"`
-	InstructionsEnabled bool         `json:"instructions_enabled"`
-	Instruction         *Instruction `json:"instruction,omitempty"`
-	InstructionError    bool         `json:"instruction_error,omitempty"`
-	ResearchEnabled     bool         `json:"research_enabled"`
-	Research            *Research    `json:"research,omitempty"`
-	ResearchError       bool         `json:"research_error,omitempty"`
-	ResearchMarkets     []string     `json:"research_markets"`
+	Mode                    string           `json:"mode"`
+	ObservedAt              *time.Time       `json:"observed_at,omitempty"`
+	Complete                bool             `json:"complete"`
+	Overview                Overview         `json:"overview"`
+	Markets                 []Market         `json:"markets"`
+	Activity                []Activity       `json:"activity"`
+	InstructionsEnabled     bool             `json:"instructions_enabled"`
+	Instruction             *Instruction     `json:"instruction,omitempty"`
+	InstructionSHA256       string           `json:"instruction_sha256,omitempty"`
+	ActiveInstructionSHA256 string           `json:"active_instruction_sha256,omitempty"`
+	InstructionActive       bool             `json:"instruction_active"`
+	InstructionError        bool             `json:"instruction_error,omitempty"`
+	ResearchEnabled         bool             `json:"research_enabled"`
+	Research                *Research        `json:"research,omitempty"`
+	ResearchError           bool             `json:"research_error,omitempty"`
+	MithrilEvidenceEnabled  bool             `json:"mithril_evidence_enabled"`
+	MithrilEvidence         *MithrilEvidence `json:"mithril_evidence,omitempty"`
+	MithrilEvidenceError    bool             `json:"mithril_evidence_error,omitempty"`
+	ResearchMarkets         []string         `json:"research_markets"`
 	// ActivityOmitted counts older bounded status events plus events removed by
 	// the dashboard's own combined-list cap.
 	ActivityOmitted uint64 `json:"activity_omitted"`
@@ -94,6 +101,7 @@ type Market struct {
 	Current                     string             `json:"current,omitempty"`
 	Day                         string             `json:"day,omitempty"`
 	ValueUnit                   string             `json:"value_unit,omitempty"`
+	InstructionSHA256           string             `json:"instruction_sha256,omitempty"`
 	TickSeconds                 uint64             `json:"tick_seconds,omitempty"`
 	OpeningEquityMicros         uint64             `json:"opening_equity_micros,omitempty,string"`
 	EquityMicros                uint64             `json:"equity_micros,omitempty,string"`
@@ -119,6 +127,8 @@ type Market struct {
 	InitialLotUnits             uint64             `json:"initial_lot_units,omitempty,string"`
 	InitialLotDecimals          uint8              `json:"initial_lot_decimals,omitempty"`
 	InitialLotAsset             string             `json:"initial_lot_asset,omitempty"`
+	MinimumOrderValueMicros     uint64             `json:"minimum_order_value_micros,omitempty,string"`
+	MaximumOrderValueMicros     uint64             `json:"maximum_order_value_micros,omitempty,string"`
 	FeeReserveLamports          uint64             `json:"fee_reserve_lamports,omitempty,string"`
 	FeeLamports                 uint64             `json:"fee_lamports,omitempty,string"`
 	FeeBudgetTracked            bool               `json:"fee_budget_tracked,omitempty"`
@@ -264,15 +274,17 @@ func (s *Server) snapshotWithRefresh(force bool) View {
 func (s *Server) readSnapshot(now time.Time) View {
 	view := View{
 		Mode: "paper", Complete: true,
-		InstructionsEnabled: s.instructionPath != "",
-		ResearchEnabled:     s.researchPath != "",
-		ResearchMarkets:     marketadmission.Markets(),
-		Markets:             make([]Market, 0, len(s.sources)), Activity: make([]Activity, 0),
+		InstructionsEnabled:    s.instructionPath != "",
+		ResearchEnabled:        s.researchPath != "",
+		MithrilEvidenceEnabled: s.mithrilEvidencePath != "",
+		ResearchMarkets:        marketadmission.Markets(),
+		Markets:                make([]Market, 0, len(s.sources)), Activity: make([]Activity, 0),
 	}
 	if s.instructionPath != "" {
-		instruction, err := readInstruction(s.instructionPath)
+		instruction, digest, err := LoadInstruction(s.instructionPath)
 		if err == nil {
 			view.Instruction = instruction
+			view.InstructionSHA256 = digest
 		} else if !errors.Is(err, os.ErrNotExist) {
 			view.InstructionError = true
 		}
@@ -281,12 +293,21 @@ func (s *Server) readSnapshot(now time.Time) View {
 		research, err := readResearch(s.researchPath, now)
 		if err == nil {
 			view.Research = research
-		} else if !errors.Is(err, os.ErrNotExist) {
+		} else if !errors.Is(err, os.ErrNotExist) || errors.Is(err, errResearchEvidenceUnavailable) {
 			view.ResearchError = true
+		}
+	}
+	if s.mithrilEvidencePath != "" {
+		evidence, err := readMithrilEvidence(s.mithrilEvidencePath, now)
+		if err == nil {
+			view.MithrilEvidence = evidence
+		} else if !errors.Is(err, os.ErrNotExist) {
+			view.MithrilEvidenceError = true
 		}
 	}
 	minimumCoverage := uint64(10_000)
 	coverageReady := true
+	activeInstructions := make(map[string]struct{})
 	for _, source := range s.sources {
 		label := source.SourceLabel()
 		snapshot, err := source.Read()
@@ -294,6 +315,10 @@ func (s *Server) readSnapshot(now time.Time) View {
 			view.Complete = false
 			view.Markets = append(view.Markets, Market{Name: label})
 			coverageReady = false
+			continue
+		}
+		if snapshot.Summary == nil && snapshot.Current == paperstatus.UnconfiguredCurrent {
+			view.Markets = append(view.Markets, Market{Name: label})
 			continue
 		}
 		if snapshot.Summary != nil && snapshot.Summary.Market != label {
@@ -304,6 +329,9 @@ func (s *Server) readSnapshot(now time.Time) View {
 		}
 		market := marketView(label, snapshot, now)
 		view.Markets = append(view.Markets, market)
+		if snapshot.Summary != nil {
+			activeInstructions[snapshot.Summary.InstructionSHA256] = struct{}{}
+		}
 		if !market.Fresh {
 			view.Complete = false
 		}
@@ -334,6 +362,15 @@ func (s *Server) readSnapshot(now time.Time) View {
 	if coverageReady {
 		view.Overview.CoverageBPS = minimumCoverage
 	}
+	if len(activeInstructions) == 1 {
+		for digest := range activeInstructions {
+			view.ActiveInstructionSHA256 = digest
+		}
+	} else if len(activeInstructions) > 1 {
+		view.Complete = false
+	}
+	view.InstructionActive = view.Complete && view.InstructionSHA256 != "" &&
+		view.InstructionSHA256 == view.ActiveInstructionSHA256
 	sort.SliceStable(view.Activity, func(i, j int) bool {
 		return view.Activity[i].At.After(view.Activity[j].At)
 	})
@@ -372,6 +409,7 @@ func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Mark
 			summary.Day == now.UTC().Format("2006-01-02") && fresh(snapshot, now)
 		market.Day = summary.Day
 		market.ValueUnit = summary.ValueUnit
+		market.InstructionSHA256 = summary.InstructionSHA256
 		market.TickSeconds = summary.TickSeconds
 		market.OpeningEquityMicros = summary.OpeningEquityMicros
 		market.EquityMicros = summary.EquityMicros
@@ -396,6 +434,8 @@ func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Mark
 		market.InitialLotUnits = summary.InitialLotUnits
 		market.InitialLotDecimals = summary.InitialLotDecimals
 		market.InitialLotAsset = summary.InitialLotAsset
+		market.MinimumOrderValueMicros = summary.MinimumOrderValueMicros
+		market.MaximumOrderValueMicros = summary.MaximumOrderValueMicros
 		market.FeeReserveLamports = summary.FeeReserveLamports
 		market.FeeLamports = summary.FeeLamports
 		market.FeeBudgetTracked = summary.FeeBudgetTracked

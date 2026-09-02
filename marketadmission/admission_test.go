@@ -38,30 +38,30 @@ func TestCatalogPinsCanonicalCandidateMetadata(t *testing.T) {
 func TestEvaluateCountsMissingAndFailedBuckets(t *testing.T) {
 	candidate, _ := Lookup(MarketWIFUSDC)
 	thresholds := DefaultThresholds()
-	thresholds.CadenceSeconds = 3600
 	opening := testOpening(t, candidate, thresholds)
 	from := time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
 	through := from.Add(30 * 24 * time.Hour)
 	observations := observationsFor(t, opening, from, through, 10)
-	observations = observations[:len(observations)-4]
-	for index := 0; index < 4; index++ {
+	observations = observations[:len(observations)-220]
+	for index := 0; index < 220; index++ {
 		observations[index].Failure = FailureBuyQuote
 	}
 	artifact, err := evaluate(opening, from, through, testPrefix(), observations)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if artifact.OperationallyQualified || artifact.ObservedBuckets != 716 ||
-		artifact.AvailableBuckets != 712 || artifact.AvailabilityBPS != 9_888 {
+	if artifact.OperationallyQualified || artifact.ObservedBuckets != 42_980 ||
+		artifact.AvailableBuckets != 42_760 || artifact.AvailabilityBPS != 9_898 {
 		t.Fatalf("artifact = %+v", artifact)
 	}
 }
 
 func TestEvaluateMeasuresBidirectionalRouteCost(t *testing.T) {
 	candidate, _ := Lookup(MarketWIFUSDC)
-	thresholds := DefaultThresholds()
-	thresholds.CadenceSeconds = 3600
-	opening := testOpening(t, candidate, thresholds)
+	opening, err := NewOpening(candidate, testObserve, DefaultThresholds())
+	if err != nil {
+		t.Fatal(err)
+	}
 	from := time.Date(2026, time.August, 1, 0, 0, 0, 0, time.UTC)
 	through := from.Add(30 * 24 * time.Hour)
 	artifact, err := evaluate(
@@ -71,9 +71,84 @@ func TestEvaluateMeasuresBidirectionalRouteCost(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !artifact.OperationallyQualified || artifact.AvailabilityBPS != 10_000 ||
-		artifact.ExpectedBuckets != 720 || artifact.MedianRouteCostBPS != 10 ||
+		artifact.ExpectedBuckets != 43_200 || artifact.MedianRouteCostBPS != 10 ||
 		artifact.P95RouteCostBPS != 10 {
 		t.Fatalf("artifact = %+v", artifact)
+	}
+}
+
+func TestDiagnoseMeasuresAPartialWindowWithoutQualifyingIt(t *testing.T) {
+	candidate, _ := Lookup(MarketWIFUSDC)
+	opening, err := NewOpening(candidate, testObserve, DefaultThresholds())
+	if err != nil {
+		t.Fatal(err)
+	}
+	through := time.Date(2026, time.September, 2, 12, 45, 0, 0, time.UTC)
+	from := through.Truncate(time.Minute).Add(-6 * time.Hour)
+	observations := observationsFor(t, opening, from, through.Truncate(time.Minute), 12)
+	observations[0].Failure = FailureSellQuote
+	observations = observations[:len(observations)-1]
+	diagnostic, err := diagnose(opening, observations, through, 6*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !diagnostic.DiagnosticOnly || diagnostic.OperationallyQualified ||
+		diagnostic.From != from || diagnostic.Through != through.Truncate(time.Minute) ||
+		diagnostic.ExpectedBuckets != 360 || diagnostic.ObservedBuckets != 359 ||
+		diagnostic.AvailableBuckets != 358 || diagnostic.AvailabilityBPS != 9_944 ||
+		diagnostic.MedianRouteCostBPS != 12 || diagnostic.P95RouteCostBPS != 12 ||
+		diagnostic.FailureCounts["missing_bucket"] != 1 ||
+		diagnostic.FailureCounts[FailureSellQuote] != 1 {
+		t.Fatalf("diagnostic = %+v", diagnostic)
+	}
+	if _, err := diagnose(opening, observations, through, 30*time.Minute); err == nil {
+		t.Fatal("sub-hour diagnostic window was accepted")
+	}
+	if _, err := diagnose(opening, observations, through, 90*time.Minute); err == nil {
+		t.Fatal("fractional-hour diagnostic window was accepted")
+	}
+}
+
+func TestProvisionalArtifactIsSixHoursPaperOnlyAndExpiresQuickly(t *testing.T) {
+	candidate, _ := Lookup(MarketWIFUSDC)
+	opening, err := NewOpening(candidate, testObserve, DefaultThresholds())
+	if err != nil {
+		t.Fatal(err)
+	}
+	through := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
+	from := through.Add(-6 * time.Hour)
+	observations := observationsFor(t, opening, from, through, 10)
+	for index := 0; index < 18; index++ {
+		observations[index].Failure = FailureBuyQuote
+	}
+	artifact, err := evaluateProvisional(opening, from, through, testPrefix(), observations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Status != ProvisionalStatus || !artifact.PaperOnly || artifact.Authorized ||
+		!artifact.ProvisionalPaperReady || artifact.ExpectedBuckets != 360 ||
+		artifact.ObservedBuckets != 360 || artifact.AvailableBuckets != 342 ||
+		artifact.AvailabilityBPS != ProvisionalMinimumAvailabilityBPS ||
+		artifact.Validate() != nil {
+		t.Fatalf("provisional artifact = %+v", artifact)
+	}
+	if !artifact.Current(through.Add(30*time.Second)) ||
+		artifact.Current(through.Add(3*time.Minute)) || artifact.Current(through.Add(24*time.Hour)) {
+		t.Fatal("provisional artifact freshness crossed its bounded startup window")
+	}
+	observations[18].Failure = FailureBuyQuote
+	failed, err := evaluateProvisional(opening, from, through, testPrefix(), observations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.ProvisionalPaperReady || failed.AvailabilityBPS >= ProvisionalMinimumAvailabilityBPS ||
+		failed.Validate() != nil {
+		t.Fatalf("under-covered provisional artifact = %+v", failed)
+	}
+	tampered := artifact
+	tampered.Authorized = true
+	if tampered.Validate() == nil {
+		t.Fatal("an authorized provisional artifact was accepted")
 	}
 }
 

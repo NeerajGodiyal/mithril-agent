@@ -1,8 +1,10 @@
 [Unit]
-Description=Mithril agent JUP/USDC paper observer
+Description=Mithril agent JUP/USDC base paper observer
 Wants=network-online.target
 After=network-online.target time-sync.target
-ConditionPathExists=/var/lib/mithril-agent-research/policy/jup-policy.json
+PartOf=mithril-agent-paper-generation.target
+ConditionPathExists=/etc/mithril-agent/paper-active/jup-policy.json
+ConditionPathExists=/etc/mithril-agent/paper-active/portfolio.json
 StartLimitIntervalSec=0
 
 [Service]
@@ -12,14 +14,16 @@ Group=mithril-agent-research
 UMask=0077
 EnvironmentFile=/etc/mithril-agent/paper.env
 Environment=MITHRIL_AGENT_KRAKEN_RATE_STATE=/run/mithril-agent-research/kraken-rate
+Environment=MITHRIL_AGENT_JUPITER_RATE_STATE=/run/mithril-agent-research/jupiter-rate
 RuntimeDirectory=mithril-agent-research
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
-ExecStart=/usr/local/libexec/mithril-agent/mithril-agent shadow run --policy /var/lib/mithril-agent-research/policy/jup-policy.json --dir /var/lib/mithril-agent-research/journals-jup --alert-status /var/lib/mithril-agent-research/status/jup/alerts.json
+ExecStart=/opt/mithril-hermes-research/run-paper-generation.sh observe jup base
 Restart=always
 RestartSec=15s
 TimeoutStopSec=30s
-ReadWritePaths=/var/lib/mithril-agent-research/journals-jup /var/lib/mithril-agent-research/status/jup
+ReadOnlyPaths=/var/lib/mithril-agent-research/allocations
+ReadWritePaths=/etc/mithril-agent/paper-active/runs/jup/base
 InaccessiblePaths=/proc
 NoNewPrivileges=yes
 CapabilityBoundingSet=

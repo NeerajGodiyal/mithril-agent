@@ -1,9 +1,13 @@
 [Unit]
 Description=Mithril agent champion paper observer
 Wants=network-online.target
-After=network-online.target time-sync.target
+Requires=mithril-agent-paper-status-handoff.service
+After=network-online.target time-sync.target mithril-agent-paper-pre-champion.service mithril-agent-paper-status-handoff.service
+Conflicts=mithril-agent-paper-pre-champion.service
+PartOf=mithril-agent-paper-generation.target
 StartLimitIntervalSec=0
-ConditionPathExists=/var/lib/mithril-agent-research/champion/active.json
+ConditionPathExists=/etc/mithril-agent/paper-active/selection/sol/champion/active.json
+ConditionPathExists=/etc/mithril-agent/paper-active/portfolio.json
 
 [Service]
 Type=simple
@@ -12,14 +16,16 @@ Group=mithril-agent-research
 UMask=0077
 EnvironmentFile=/etc/mithril-agent/paper.env
 Environment=MITHRIL_AGENT_KRAKEN_RATE_STATE=/run/mithril-agent-research/kraken-rate
+Environment=MITHRIL_AGENT_JUPITER_RATE_STATE=/run/mithril-agent-research/jupiter-rate
 RuntimeDirectory=mithril-agent-research
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
-ExecStart=/usr/local/libexec/mithril-agent/mithril-agent shadow run --policy /var/lib/mithril-agent-research/policy/policy.json --dir /var/lib/mithril-agent-research/runs/champion --candidate-pointer /var/lib/mithril-agent-research/champion/active.json --alert-status /var/lib/mithril-agent-research/status/champion/alerts.json
+ExecStart=/opt/mithril-hermes-research/run-paper-generation.sh observe sol champion
 Restart=always
 RestartSec=15s
 TimeoutStopSec=30s
-ReadWritePaths=/var/lib/mithril-agent-research/runs/champion /var/lib/mithril-agent-research/status/champion
+ReadOnlyPaths=/var/lib/mithril-agent-research/allocations
+ReadWritePaths=/etc/mithril-agent/paper-active/runs/sol/champion /etc/mithril-agent/paper-active/status/sol
 InaccessiblePaths=/proc
 NoNewPrivileges=yes
 CapabilityBoundingSet=

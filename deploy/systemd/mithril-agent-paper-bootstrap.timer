@@ -1,5 +1,6 @@
 [Unit]
 Description=Check whether the first Mithril paper champion can be selected
+PartOf=mithril-agent-paper-generation.target
 
 [Timer]
 OnCalendar=*-*-* *:30:00 UTC

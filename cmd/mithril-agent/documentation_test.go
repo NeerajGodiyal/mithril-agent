@@ -242,45 +242,50 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"source: /usr/local/libexec/mithril-agent/mithril-agent",
 		"source: ${MITHRIL_HERMES_QUERY_FILE:-/opt/mithril-hermes-research/prompts/market-scout.md}",
 		"source: /var/lib/mithril-agent-research/index",
-		"source: /var/lib/mithril-agent-research/policy",
-		"source: /var/lib/mithril-agent-research/journals",
-		"source: /var/lib/mithril-agent-research/champion",
-		"source: /var/lib/mithril-agent-research/challenger",
-		"source: /var/lib/mithril-agent-research/runs/champion",
-		"source: /var/lib/mithril-agent-research/runs/challenger",
+		"source: /etc/mithril-agent/paper-active",
+		"source: /run/mithril-hermes-research",
+		"source: /etc/mithril-agent/paper-active/selection/sol/challenger",
+		"source: /etc/mithril-agent/paper-active/selection/jup/challenger",
 		"target: /opt/mithril/bin/mithril-agent",
 		"target: /opt/mithril/prompts/market-scout.md",
 		"target: /var/lib/mithril-agent/index",
-		"target: /var/lib/mithril-agent-research/challenger",
-		"target: /var/lib/mithril-agent-research/runs/challenger",
+		"target: /etc/mithril-agent/paper-active",
 		"cpus: 2.0", "mem_limit: 4g", "pids_limit: 512",
 		"driver: local", "max-size: 10m", "max-file: \"5\"",
 		"- hermes", "- chat", "- --query-file", "- /opt/mithril/prompts/market-scout.md",
 		"- --provider", "- openai-codex", "- --model", "- gpt-5.6-terra",
 		"- --reasoning", "- high", "- --toolsets",
+		"hermes-research-parallel:", "source: /run/mithril-hermes-research/research-state",
+		"source: ./state/auth.json", "source: ./config-delegated.yaml",
+		"source: ./SOUL-research.md", "source: ./AGENTS-research.md", "HERMES_HOME: /opt/research-data",
+		"- /bin/sh", "- -ec", "exec hermes -z",
+		"${MITHRIL_HERMES_TOOLSETS:-web,solana_docs,delegation}",
 		"${MITHRIL_HERMES_TOOLSETS:-web,solana_docs}", "- --run-budget", "- \"300\"", "- --quiet",
 	} {
 		if !strings.Contains(compose, want) {
 			t.Errorf("Hermes compose file is missing pinned read-only boundary %q", want)
 		}
 	}
-	if got := strings.Count(compose, "read_only: true"); got != 8 {
-		t.Errorf("Hermes compose has %d read-only mounts; want 8", got)
+	if got := strings.Count(compose, "read_only: true"); got != 12 {
+		t.Errorf("Hermes compose has %d read-only mounts; want 12", got)
 	}
-	if got := strings.Count(compose, "create_host_path: false"); got != 9 {
-		t.Errorf("Hermes compose protects %d host paths; want 9", got)
+	if got := strings.Count(compose, "create_host_path: false"); got != 15 {
+		t.Errorf("Hermes compose protects %d host paths; want 15", got)
 	}
-	challengerMount := strings.Index(compose, "target: /var/lib/mithril-agent-research/challenger\n")
-	championRunMount := strings.Index(compose, "target: /var/lib/mithril-agent-research/runs/champion\n")
-	if challengerMount < 0 || championRunMount <= challengerMount ||
-		strings.Contains(compose[challengerMount:championRunMount], "read_only: true") {
-		t.Fatal("Hermes paper challenger mount must be the one writable Mithril mount")
+	challengerMount := "source: /etc/mithril-agent/paper-active/selection/sol/challenger\n        target: /etc/mithril-agent/paper-active/selection/sol/challenger\n        bind:"
+	if !strings.Contains(compose, challengerMount) {
+		t.Fatal("Hermes SOL paper challenger mount must be writable")
+	}
+	jupChallengerMount := "source: /etc/mithril-agent/paper-active/selection/jup/challenger\n        target: /etc/mithril-agent/paper-active/selection/jup/challenger\n        bind:"
+	if !strings.Contains(compose, jupChallengerMount) {
+		t.Fatal("Hermes JUP paper challenger mount must be writable")
 	}
 	for _, forbidden := range []string{
 		"nousresearch/hermes-agent:latest", "network_mode:", "ports:",
 		"docker.sock", "turnkey", "signer", "submitter", "helius", "secrets:", "build:",
 		"openrouter_api_key", "tavily_api_key", "telegram_bot_token",
 		"restart:", "gateway\n", "gateway run",
+		"MITHRIL_PAPER_GENERATION",
 	} {
 		if strings.Contains(strings.ToLower(compose), forbidden) {
 			t.Errorf("Hermes compose file contains forbidden capability %q", forbidden)
@@ -298,24 +303,27 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"memory_enabled: false", "user_profile_enabled: false",
 		"allow_agent_scheduling: false", "unauthorized_dm_behavior: ignore",
 		"plugins:\n  enabled: []", "telegram:\n    enabled: false",
-		"mithril_index", "mithril_paper", "solana_docs",
+		"mithril_index", "mithril_paper", "mithril_paper_jup", "solana_docs",
 		"mithril_index_transactions",
 		"--max-record-age", "- 15m",
 		"mithril_paper_create_challenger", "mithril_paper_challenge_status",
-		"/var/lib/mithril-agent-research/challenger/active.json",
+		"/etc/mithril-agent/paper-active/selection/sol/challenger/active.json",
+		"/etc/mithril-agent/paper-active/selection/jup/challenger/active.json",
+		"/etc/mithril-agent/paper-active/runs/jup/base",
+		"--instruction", "/run/mithril-hermes-research/instruction.json",
 	} {
 		if !strings.Contains(config, want) {
 			t.Errorf("Hermes config is missing read-only boundary %q", want)
 		}
 	}
-	if got := strings.Count(config, "sampling:\n      enabled: false"); got != 3 {
-		t.Errorf("Hermes config disables sampling for %d MCP servers; want 3", got)
+	if got := strings.Count(config, "sampling:\n      enabled: false"); got != 4 {
+		t.Errorf("Hermes config disables sampling for %d MCP servers; want 4", got)
 	}
-	if got := strings.Count(config, "elicitation:\n      enabled: false"); got != 3 {
-		t.Errorf("Hermes config disables elicitation for %d MCP servers; want 3", got)
+	if got := strings.Count(config, "elicitation:\n      enabled: false"); got != 4 {
+		t.Errorf("Hermes config disables elicitation for %d MCP servers; want 4", got)
 	}
-	if got := strings.Count(config, "\n    trust: full\n"); got != 3 {
-		t.Errorf("Hermes config grants reviewed full trust to %d MCP servers; want 3", got)
+	if got := strings.Count(config, "\n    trust: full\n"); got != 4 {
+		t.Errorf("Hermes config grants reviewed full trust to %d MCP servers; want 4", got)
 	}
 	if strings.Contains(config, "trust: untrusted") {
 		t.Fatal("Hermes config cannot use interactive MCP trust in unattended sessions")
@@ -351,6 +359,32 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		t.Error("Hermes platform allowlists expose the browser toolset")
 	}
 
+	delegatedConfig := readDocumentation(t, "../../deploy/hermes-research/config-delegated.yaml")
+	for _, want := range []string{
+		"max_concurrent_children: 3", "max_spawn_depth: 1", "orchestrator_enabled: false",
+		"run_budget_seconds: 300", "reasoning_effort: high",
+		"    - delegation\n", "mithril_index_transactions", "solana_docs",
+		"allow_private_urls: false", "memory_enabled: false", "plugins:\n  enabled: []",
+	} {
+		if !strings.Contains(delegatedConfig, want) {
+			t.Errorf("delegated Hermes config is missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		"mithril_paper", "/var/lib/mithril-agent-research/policy",
+		"challenger",
+	} {
+		if strings.Contains(delegatedConfig, forbidden) {
+			t.Errorf("delegated Hermes config contains forbidden authority %q", forbidden)
+		}
+	}
+	delegatedDisabledStart := strings.Index(delegatedConfig, "  disabled_toolsets:\n")
+	delegatedSecurityStart := strings.Index(delegatedConfig, "\nsecurity:\n")
+	if delegatedDisabledStart < 0 || delegatedSecurityStart <= delegatedDisabledStart ||
+		strings.Contains(delegatedConfig[delegatedDisabledStart:delegatedSecurityStart], "    - delegation\n") {
+		t.Fatal("delegated Hermes config disables its required delegation toolset")
+	}
+
 	readme := readDocumentation(t, "../../README.md")
 	if !strings.Contains(readme, "deploy/hermes-research") {
 		t.Error("README.md does not route operators to the bounded Hermes profile")
@@ -378,9 +412,12 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"state/.no-bundled-skills",
 		"only the official `hermes-agent/SKILL.md`",
 		"mcp test mithril_paper",
-		"Only `challenger/` is writable by Hermes",
+		"mcp test mithril_paper_jup",
+		"/run/mithril-hermes-research/instruction.json",
+		"archive/jup-status-before-reallocation/alerts.json",
+		"Only the SOL and JUP `challenger/` trees are writable by",
 		"later market days cannot reverse a completed decision",
-		"explicit pre-champion registry must contain exactly",
+		"delegated research registry contains",
 		"pre-champion tools:", "post-filter registry assertion after each gate opens",
 		"_get_platform_tools",
 		"get_tool_definitions",
@@ -389,7 +426,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"exactly one URL per invocation",
 		"browser_exec",
 		"discover_mcp_tools",
-		"the model receives exactly the configured 7 MCP tools",
+		"the model receives exactly the configured 9 MCP tools",
 		"github.com/NousResearch/hermes-agent/issues/88858",
 		"`full` removes the per-call approval gate",
 		"Run the canary with stdin closed and no TTY",
@@ -403,13 +440,24 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"mithril-agent-paper-champion.path",
 		"mithril-agent-paper-bootstrap.timer", "shadow select --initial",
 		"mithril-agent-paper-auto-select.timer", "shadow restore", "champion/previous.json",
-		"/var/lib/mithril-agent-research/status/champion/alerts.json",
+		"mithril-agent-paper-jup-pre-champion.service",
+		"mithril-agent-paper-jup-status-handoff.service",
+		"mithril-agent-paper-jup-status.socket", "status/jup/champion-owned",
+		"/etc/mithril-agent/paper-active/status/sol/alerts.json",
 		"single-URL extraction canary: pass", "state/cache/web",
 		"REVIEWED_SHA256", "'root:root 755'", "--fee-reserve-sol 0.080",
 	} {
 		if !strings.Contains(deployReadme, want) {
 			t.Errorf("Hermes deployment README is missing isolation check %q", want)
 		}
+	}
+	if !strings.Contains(deployReadme, "Both paper policies deployed by") ||
+		!strings.Contains(deployReadme, "supports a separately invoked fixed policy when no adaptive research packet is") ||
+		strings.Contains(deployReadme, "fixed policies ignore the") {
+		t.Fatal("Hermes deployment does not document its adaptive instruction boundary")
+	}
+	if strings.Contains(deployReadme, "disable --now mithril-agent-paper-jup-status.socket") {
+		t.Fatal("JUP status socket is disabled during first-champion evidence collection")
 	}
 	marketScout := readDocumentation(t, "../../deploy/hermes-research/prompts/market-scout.md")
 	for _, want := range []string{
@@ -427,6 +475,8 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"hypothesis_id", "verified_facts", "no_trade_case", "risk_veto",
 		"candidate_parameter_diff", "two independent timestamped",
 		"trusted run-time anchor", "single_source` requires exactly one source",
+		"The SOL server is `mithril_paper`; the JUP server is `mithril_paper_jup`",
+		"infer one market's state", "at most one challenger per market per run",
 		"`unverified`", "requires an empty sources array",
 		"https://www.coinbase.com/cbbtc", "https://www.circle.com/transparency",
 		"not all-in execution guarantees",
@@ -491,8 +541,13 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"./deploy/hermes-research/check-network.sh",
 		"./deploy/hermes-research/bootstrap-first-champion.sh",
 		"./deploy/hermes-research/run-market-scout.sh",
+		"./deploy/hermes-research/build-research-evidence.py",
 		"./deploy/hermes-research/compose.yaml",
 		"./deploy/hermes-research/config.yaml",
+		"./deploy/hermes-research/config-delegated.yaml",
+		"./deploy/hermes-research/AGENTS.md",
+		"./deploy/hermes-research/AGENTS-research.md",
+		"./deploy/hermes-research/SOUL-research.md",
 		"./deploy/hermes-research/env.example",
 		"./deploy/systemd/mithril-agent-paper-base.service",
 		"./deploy/systemd/mithril-agent-paper-champion.service",
@@ -503,6 +558,19 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"./deploy/systemd/mithril-agent-paper-bootstrap.timer",
 		"./deploy/systemd/mithril-agent-paper-auto-select.service",
 		"./deploy/systemd/mithril-agent-paper-auto-select.timer",
+		"./deploy/systemd/mithril-agent-paper-jup.service",
+		"./deploy/systemd/mithril-agent-paper-jup-pre-champion.service",
+		"./deploy/systemd/mithril-agent-paper-jup-champion.service",
+		"./deploy/systemd/mithril-agent-paper-jup-champion.path",
+		"./deploy/systemd/mithril-agent-paper-jup-challenger.service",
+		"./deploy/systemd/mithril-agent-paper-jup-challenger.path",
+		"./deploy/systemd/mithril-agent-paper-jup-bootstrap.service",
+		"./deploy/systemd/mithril-agent-paper-jup-bootstrap.timer",
+		"./deploy/systemd/mithril-agent-paper-jup-auto-select.service",
+		"./deploy/systemd/mithril-agent-paper-jup-auto-select.timer",
+		"./deploy/systemd/mithril-agent-paper-jup-status-handoff.service",
+		"./deploy/systemd/mithril-agent-paper-jup-status.socket",
+		"./deploy/systemd/mithril-agent-paper-jup-status-bridge.service",
 		"./deploy/systemd/mithril-agent-paper-dashboard.service",
 		"./deploy/systemd/mithril-agent-paper-dashboard.socket",
 		"./deploy/systemd/mithril-agent-market-candidate@.service",
@@ -515,8 +583,10 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		}
 	}
 	for _, path := range []string{
+		"../../deploy/hermes-research/apply-paper-instruction.sh",
 		"../../deploy/hermes-research/check-network.sh",
 		"../../deploy/hermes-research/bootstrap-first-champion.sh",
+		"../../deploy/hermes-research/run-paper-generation.sh",
 		"../../deploy/hermes-research/run-market-scout.sh",
 	} {
 		info, err := os.Stat(path)
@@ -530,12 +600,17 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 
 	for _, name := range []string{"base", "champion", "challenger"} {
 		unit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-"+name+".service")
+		role := name
 		for _, want := range []string{
 			"User=mithril-agent-research", "EnvironmentFile=/etc/mithril-agent/paper.env",
 			"InaccessiblePaths=/proc", "NoNewPrivileges=yes", "ProtectSystem=strict",
 			"Restart=always", "RestartSec=15s",
 			"MITHRIL_AGENT_KRAKEN_RATE_STATE=/run/mithril-agent-research/kraken-rate",
 			"RuntimeDirectory=mithril-agent-research", "RuntimeDirectoryPreserve=yes",
+			"PartOf=mithril-agent-paper-generation.target",
+			"ConditionPathExists=/etc/mithril-agent/paper-active/portfolio.json",
+			"ExecStart=/opt/mithril-hermes-research/run-paper-generation.sh observe sol " + role,
+			"ReadOnlyPaths=/var/lib/mithril-agent-research/allocations",
 		} {
 			if !strings.Contains(unit, want) {
 				t.Errorf("paper %s unit is missing %q", name, want)
@@ -552,23 +627,28 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		}
 	}
 	challengerPath := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-challenger.path")
-	if !strings.Contains(challengerPath, "PathChanged=/var/lib/mithril-agent-research/challenger/active.json") ||
+	if !strings.Contains(challengerPath, "PathChanged=/etc/mithril-agent/paper-active/selection/sol/challenger/active.json") ||
 		strings.Contains(challengerPath, "PathExists=") {
 		t.Fatal("challenger path does not watch pointer changes safely")
 	}
 	championPath := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-champion.path")
-	if !strings.Contains(championPath, "PathChanged=/var/lib/mithril-agent-research/champion/active.json") ||
+	if !strings.Contains(championPath, "PathChanged=/etc/mithril-agent/paper-active/selection/sol/champion/active.json") ||
 		strings.Contains(championPath, "PathExists=") {
 		t.Fatal("champion path does not watch pointer changes safely")
 	}
 	championUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-champion.service")
-	if !strings.Contains(championUnit, "ConditionPathExists=/var/lib/mithril-agent-research/champion/active.json") {
+	if !strings.Contains(championUnit, "ConditionPathExists=/etc/mithril-agent/paper-active/selection/sol/champion/active.json") {
 		t.Fatal("champion service does not require its selected pointer")
 	}
 	marketScoutWrapper := readDocumentation(t, "../../deploy/hermes-research/run-market-scout.sh")
 	for _, want := range []string{
 		"systemctl is-active --quiet mithril-agent-paper-base.service",
 		"systemctl is-active --quiet mithril-agent-paper-champion.service",
+		"systemctl is-active --quiet mithril-agent-paper-jup.service",
+		"systemctl is-active --quiet mithril-agent-paper-jup-champion.service",
+		"systemctl is-active --quiet mithril-agent-paper-jup-challenger.path",
+		"systemctl is-active --quiet mithril-agent-paper-jup-auto-select.timer",
+		"finalizer_toolsets=\"${finalizer_toolsets:+$finalizer_toolsets,}mithril_paper_jup\"",
 	} {
 		if !strings.Contains(marketScoutWrapper, want) {
 			t.Errorf("Hermes paper tools are not gated by a healthy observer: %q", want)
@@ -588,9 +668,9 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	}
 	autoSelectUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-auto-select.service")
 	for _, want := range []string{
-		"shadow auto-select", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
-		"--rollback-pointer /var/lib/mithril-agent-research/champion/previous.json",
-		"ReadWritePaths=/var/lib/mithril-agent-research/champion /var/lib/mithril-agent-research/challenger",
+		"run-paper-generation.sh auto-select sol", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
+		"ReadOnlyPaths=/var/lib/mithril-agent-research/allocations",
+		"ReadWritePaths=/etc/mithril-agent/paper-active/selection/sol/champion /etc/mithril-agent/paper-active/selection/sol/challenger",
 	} {
 		if !strings.Contains(autoSelectUnit, want) {
 			t.Errorf("paper auto-selector is missing %q", want)
@@ -607,15 +687,124 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	}
 	bootstrapUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-bootstrap.service")
 	for _, want := range []string{
-		"ConditionPathExists=/var/lib/mithril-agent-research/policy/policy.json",
-		"ConditionPathExists=!/var/lib/mithril-agent-research/champion/active.json",
+		"ConditionPathExists=/etc/mithril-agent/paper-active/sol-policy.json",
+		"ConditionPathExists=!/etc/mithril-agent/paper-active/selection/sol/champion/active.json",
 		"PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
-		"ReadOnlyPaths=/var/lib/mithril-agent-research/policy /var/lib/mithril-agent-research/journals",
-		"ReadWritePaths=/var/lib/mithril-agent-research/champion /var/lib/mithril-agent-research/challenger",
+		"ExecStart=/opt/mithril-hermes-research/run-paper-generation.sh bootstrap sol",
+		"ReadOnlyPaths=/var/lib/mithril-agent-research/allocations",
+		"ReadWritePaths=/etc/mithril-agent/paper-active/selection/sol/champion /etc/mithril-agent/paper-active/selection/sol/challenger",
 	} {
 		if !strings.Contains(bootstrapUnit, want) {
 			t.Errorf("paper bootstrap unit is missing %q", want)
 		}
+	}
+	bootstrapScript := readDocumentation(t, "../../deploy/hermes-research/bootstrap-first-champion.sh")
+	for _, want := range []string{
+		"case \"$#\" in", "policy=/var/lib/mithril-agent-research/policy/policy.json",
+		"journals=/var/lib/mithril-agent-research/journals", "policy=$1", "journals=$2",
+		"champion=$3", "challenger=$4", `--dir "$journals"`, `--evidence-dir "$journals"`,
+	} {
+		if !strings.Contains(bootstrapScript, want) {
+			t.Errorf("paper bootstrap script is missing %q", want)
+		}
+	}
+	generationRunner := readDocumentation(t, "../../deploy/hermes-research/run-paper-generation.sh")
+	for _, want := range []string{
+		"generation=$(/usr/bin/readlink -e -- \"$selector\")",
+		`exec 9<"$allocations"`, `/usr/bin/flock -s 9`,
+		`[ "$(/usr/bin/dirname -- "$generation")" = "$allocations" ]`,
+		`--policy "$policy" --dir "$runs/$role"`,
+		`--portfolio "$portfolio" --portfolio-book "$market"`,
+		`--candidate-pointer "$selection/$role/active.json"`,
+		`"$policy" "$runs/base" "$selection/champion" "$selection/challenger"`,
+		`"$generation/instruction.json"`,
+		`--rollback-pointer "$selection/champion/previous.json"`,
+		`/usr/bin/touch -- "$status/champion-owned"`,
+	} {
+		if !strings.Contains(generationRunner, want) {
+			t.Errorf("paper generation runner is missing %q", want)
+		}
+	}
+	applyInstruction := readDocumentation(t, "../../deploy/hermes-research/apply-paper-instruction.sh")
+	for _, want := range []string{
+		`[ "$(/usr/bin/id -u)" -eq 0 ]`,
+		"/usr/sbin/runuser -u mithril-agent-dashboard",
+		`/usr/bin/install -d -o root -g mithril-agent-research -m 0710 "$runtime"`,
+		`/usr/bin/chown mithril-agent-research:mithril-agent-research "$instruction"`,
+		`/usr/bin/chmod 0400 "$instruction"`,
+		`/usr/bin/install -d -o mithril-agent-research -g mithril-agent-research -m 0700 "$next"`,
+		`/usr/sbin/runuser -u mithril-agent-research -- "$agent" shadow allocation`,
+		`--portfolio "$current" --instruction "$instruction" --out-dir "$next"`,
+		`/usr/bin/ln -- "$next/sol-policy.json" "$next/policy.json"`,
+		`/usr/bin/cmp -s "$instruction" "$old/instruction.json"`,
+		`generation_is_active "$old"`,
+		`generation_stable=$((generation_stable + 1))`,
+		`[ "$generation_stable" -lt 9 ] || return 0`,
+		`start_generation "$old"`,
+		`wait_for_generation "$old"`,
+		`/usr/bin/systemctl stop "$target"`,
+		`exec 8<"$runtime"`, `/usr/bin/flock -n 8`,
+		`exec 9<"$allocations"`, `/usr/bin/flock -x 9`,
+		`/usr/bin/mv -Tf -- "$temporary" "$selector"`,
+		`/usr/bin/systemctl is-active --quiet "$generation_base"`,
+		`/usr/bin/systemctl is-active --quiet "$generation_champion"`,
+		`/usr/bin/systemctl is-active --quiet "$generation_pre"`,
+		`/usr/bin/systemctl start "$generation_base" || true`,
+		`/usr/bin/systemctl start "$generation_champion" || true`,
+		`/usr/bin/systemctl start "$generation_pre" || true`,
+		`start_generation "$next"`,
+		`wait_for_generation "$next"`,
+		`[ "$stopped" = true ] && [ -n "$old" ]`,
+		`/usr/bin/find "$next" -xdev -depth -delete`,
+		"restore_selector",
+	} {
+		if !strings.Contains(applyInstruction, want) {
+			t.Errorf("paper instruction activator is missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"rm -rf", "systemctl restart mithril", "systemctl stop mithril.service"} {
+		if strings.Contains(applyInstruction, forbidden) {
+			t.Errorf("paper instruction activator contains unsafe operation %q", forbidden)
+		}
+	}
+	generationTarget := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-generation.target")
+	for _, want := range []string{
+		"ConditionPathExists=/etc/mithril-agent/paper-active/portfolio.json",
+		"Wants=mithril-agent-paper-base.service",
+		"Wants=mithril-agent-paper-pre-champion.service",
+		"Wants=mithril-agent-paper-jup.service",
+		"Wants=mithril-agent-paper-jup-pre-champion.service",
+	} {
+		if !strings.Contains(generationTarget, want) {
+			t.Errorf("paper generation target is missing %q", want)
+		}
+	}
+	instructionPath := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-instruction.path")
+	if !strings.Contains(instructionPath, "PathChanged=/var/lib/mithril-agent-dashboard/instruction.json") ||
+		strings.Contains(instructionPath, "PathExists=") {
+		t.Fatal("paper instruction watcher does not watch atomic updates safely")
+	}
+	instructionUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-instruction.service")
+	for _, want := range []string{
+		"Conflicts=mithril-hermes-research.service",
+		"Group=mithril-agent-research",
+		"RuntimeDirectoryMode=0710",
+		"ExecStart=/opt/mithril-hermes-research/apply-paper-instruction.sh",
+		"ReadWritePaths=/var/lib/mithril-agent-research/allocations /etc/mithril-agent /run/mithril-agent-paper-instruction",
+		"PrivateNetwork=yes", "ProtectSystem=strict",
+	} {
+		if !strings.Contains(instructionUnit, want) {
+			t.Errorf("paper instruction unit is missing %q", want)
+		}
+	}
+	if strings.Contains(instructionUnit, "InaccessiblePaths=/proc") {
+		t.Fatal("paper instruction unit hides /proc from systemctl")
+	}
+	if strings.Contains(instructionUnit, "User=") {
+		t.Fatal("root-owned paper selector is delegated to an unprivileged unit user")
+	}
+	if switched, moved := strings.Index(applyInstruction, "switched=true"), strings.LastIndex(applyInstruction, `/usr/bin/mv -Tf -- "$temporary" "$selector"`); switched < 0 || moved <= switched {
+		t.Fatal("paper instruction activator does not arm rollback before moving the selector")
 	}
 	bootstrapTimer := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-bootstrap.timer")
 	for _, want := range []string{
@@ -653,14 +842,14 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"BindsTo=docker.service mithril-hermes-research-egress.service",
 		"After=docker.service mithril-hermes-research-egress.service",
 		"ConditionPathExists=/opt/mithril-hermes-research/state/auth.json",
-		"ConditionPathExists=/var/lib/mithril-agent-research/policy/policy.json",
+		"ConditionPathExists=/etc/mithril-agent/paper-active/sol-policy.json",
 		"ConditionPathIsDirectory=/var/lib/mithril-agent-research/reports",
 		"ConditionPathIsDirectory=/var/lib/mithril-agent-dashboard",
 		"Type=oneshot", "UMask=0077",
 		"RuntimeDirectory=mithril-hermes-research", "RuntimeDirectoryMode=0711",
 		"iptables -C DOCKER-USER", "iptables -C INPUT",
 		"ExecStart=/opt/mithril-hermes-research/run-market-scout.sh",
-		"TimeoutStartSec=6min", "TimeoutStopSec=1min",
+		"TimeoutStartSec=12min", "TimeoutStopSec=1min",
 	} {
 		if !strings.Contains(hermesUnit, want) {
 			t.Errorf("Hermes systemd owner is missing %q", want)
@@ -674,40 +863,89 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		}
 	}
 	researchRunner := readDocumentation(t, "../../deploy/hermes-research/run-market-scout.sh")
+	solGate := strings.Index(researchRunner, "if [ \"$has_instruction\" = true ] &&\n  [ -f \"$sol_champion\" ]")
+	jupGate := strings.Index(researchRunner, "if [ \"$has_instruction\" = true ] &&\n  [ -f \"$jup_champion\" ]")
+	if solGate < 0 || jupGate <= solGate {
+		t.Fatal("Hermes wrapper does not fail both adaptive paper toolsets closed without an instruction")
+	}
+	if !strings.Contains(researchRunner, "trap cleanup EXIT") ||
+		!strings.Contains(researchRunner, "trap 'exit 1' HUP INT TERM") ||
+		!strings.Contains(researchRunner, "/usr/bin/rm -f \"$runtime_instruction\"\nhas_instruction=false") {
+		t.Fatal("Hermes wrapper does not remove a stale adaptive instruction before probing its canonical source")
+	}
 	for _, want := range []string{
-		"toolsets='web,solana_docs'",
-		"/var/lib/mithril-agent-research/champion/active.json",
-		"toolsets=\"$toolsets,mithril_paper\"",
+		"research_toolsets='web,solana_docs,delegation'",
+		"finalizer_toolsets=''",
+		"allocations=/var/lib/mithril-agent-research/allocations",
+		"selector=/etc/mithril-agent/paper-active",
+		`exec 9<"$allocations"`, `/usr/bin/flock -s 9`,
+		"generation=$(/usr/bin/readlink -e -- \"$selector\")",
+		`[ "$(/usr/bin/dirname -- "$generation")" = "$allocations" ]`,
+		"source_instruction=$generation/instruction.json",
+		"sol_policy=$generation/sol-policy.json",
+		"sol_journals=$generation/runs/sol/base",
+		"sol_champion=$generation/selection/sol/champion/active.json",
+		"jup_policy=$generation/jup-policy.json",
+		"jup_journals=$generation/runs/jup/base",
+		"jup_champion=$generation/selection/jup/champion/active.json",
+		"finalizer_toolsets='mithril_paper'",
 		"/var/lib/mithril-agent-research/index/events.jsonl",
 		"index doctor", "--max-record-age 15m",
-		"toolsets=\"$toolsets,mithril_index\"",
-		"export MITHRIL_HERMES_TOOLSETS=\"$toolsets\"",
-		"/var/lib/mithril-agent-dashboard/instruction.json",
-		"--render-instruction \"$instruction\"",
-		"query_file=/run/mithril-hermes-research/market-scout.md",
+		"research_toolsets=\"$research_toolsets,mithril_index\"",
+		"*,mithril_paper,*|*,mithril_paper_jup,*) exit 1",
+		"*,delegation,*) exit 1",
+		"export MITHRIL_HERMES_TOOLSETS=\"$research_toolsets\"",
+		"/usr/sbin/runuser -u mithril-agent-research",
+		"--export-instruction \"$source_instruction\" >\"$runtime_instruction\"",
+		"--render-instruction \"$runtime_instruction\"",
+		"research_query=/run/mithril-hermes-research/market-research.md",
+		"finalizer_query=/run/mithril-hermes-research/challenger-finalizer.md",
+		"research_state=/run/mithril-hermes-research/research-state",
+		"/dev/null \"$research_state/.no-bundled-skills\"",
 		"Trusted run-time anchors", "/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ",
 		"/usr/bin/date -u -d '6 hours' +%Y-%m-%dT%H:%M:%SZ",
 		"Copy both exact values; do not invent, round, reuse an older value, or calculate either timestamp.",
-		"raw=/run/mithril-hermes-research/hermes.raw",
-		"/usr/bin/docker compose run --rm --no-TTY hermes-research >\"$raw\"",
-		"/usr/bin/sed -n '/^[[:space:]]*{/,$p' \"$raw\" >\"$packet\"",
-		"/usr/bin/rm -f \"$raw\" \"$packet\" \"$dashboard_packet\"",
-		"/usr/bin/chmod 0644 \"$query_file\"",
-		"export MITHRIL_HERMES_QUERY_FILE=\"$query_file\"",
+		"sol_diagnostics='{\"status\":\"prior_complete_day_unavailable\"}'",
+		"jup_diagnostics='{\"status\":\"prior_complete_day_unavailable\"}'",
+		"mithril-agent shadow review", "--days 1 --json",
+		"Trusted sanitized prior-complete-day paper diagnostics.",
+		"SOL/USDC: %s\\nJUP/USDC: %s",
+		"research_raw=/run/mithril-hermes-research/hermes-research.raw",
+		"finalizer_raw=/run/mithril-hermes-research/hermes-finalizer.raw",
+		"/usr/bin/docker compose run --rm --no-TTY hermes-research-parallel >\"$research_raw\"",
+		"/usr/bin/sed -n '/^[[:space:]]*{/,$p' \"$research_raw\" >\"$packet\"",
+		"/usr/bin/rm -f \"$research_raw\" \"$finalizer_raw\" \"$packet\"",
+		"/usr/bin/chmod 0644 \"$research_query\"",
+		"export MITHRIL_HERMES_QUERY_FILE=\"$research_query\"",
+		"--latest \"$validated_research\" >/dev/null",
+		"sessions export --format jsonl --redact --yes",
+		"/opt/mithril-hermes-research/build-research-evidence.py",
+		"--sessions \"$session_export\" --packet \"$validated_research\"",
+		"/var/lib/mithril-agent-research/evidence",
+		"/var/lib/mithril-agent-dashboard/research-evidence.json",
+		"if [ -n \"$finalizer_toolsets\" ]",
+		"export MITHRIL_HERMES_TOOLSETS=\"$finalizer_toolsets\"",
+		"/usr/bin/docker compose run --rm --no-TTY hermes-research >\"$finalizer_raw\"",
 		"ulimit -f 128",
 		"mithril-agent research packet-record", "--archive-dir /var/lib/mithril-agent-research/reports",
 		"--latest \"$latest\"", "/var/lib/mithril-agent-dashboard/research.json",
 		"/usr/bin/install -o mithril-agent-dashboard -g mithril-agent-dashboard -m 0600",
 		"runuser -u mithril-agent-dashboard", "--in \"$dashboard_packet\" --latest \"$projection\"",
+		"--sessions \"$dashboard_sessions\" --packet \"$projection\"",
 	} {
 		if !strings.Contains(researchRunner, want) {
 			t.Errorf("Hermes market scout wrapper is missing %q", want)
 		}
 	}
+	dashboardRecord := strings.Index(researchRunner, `--in "$dashboard_packet" --latest "$projection"`)
+	dashboardEvidence := strings.Index(researchRunner, `--sessions "$dashboard_sessions" --packet "$projection"`)
+	if dashboardRecord < 0 || dashboardEvidence < 0 || dashboardRecord > dashboardEvidence {
+		t.Fatal("dashboard research packet is not validated before its retrieval evidence")
+	}
 	researchTimer := readDocumentation(t, "../../deploy/systemd/mithril-hermes-research.timer")
 	for _, want := range []string{
-		"OnCalendar=*-*-* 00,06,12,18:15:00 UTC", "Persistent=true",
-		"RandomizedDelaySec=15min", "AccuracySec=1min",
+		"OnCalendar=*-*-* *:15:00 UTC", "Persistent=true",
+		"RandomizedDelaySec=5min", "AccuracySec=1min",
 		"Unit=mithril-hermes-research.service", "WantedBy=timers.target",
 	} {
 		if !strings.Contains(researchTimer, want) {
@@ -715,38 +953,159 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		}
 	}
 	championUnit = readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-champion.service")
+	preChampionUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-pre-champion.service")
+	statusHandoffUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-status-handoff.service")
 	bridgeUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-status-bridge.service")
 	legacyTelegramUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-telegram.service")
 	if strings.Contains(legacyTelegramUnit, "paper-status") {
 		t.Fatal("legacy Telegram unit makes opt-in paper status mandatory")
 	}
-	const alertPath = "/var/lib/mithril-agent-research/status/champion/alerts.json"
-	if !strings.Contains(championUnit, "--alert-status "+alertPath) ||
+	const alertPath = "/etc/mithril-agent/paper-active/status/sol/alerts.json"
+	if !strings.Contains(championUnit, "run-paper-generation.sh observe sol champion") ||
+		!strings.Contains(preChampionUnit, "run-paper-generation.sh observe sol pre-champion") ||
 		!strings.Contains(bridgeUnit, "LoadCredential=paper-status:"+alertPath) {
 		t.Fatal("paper observer and Telegram bridge disagree on the alert snapshot path")
+	}
+	for _, want := range []string{
+		"ConditionPathExists=/etc/mithril-agent/paper-active/selection/sol/champion/active.json",
+		"ConditionPathExists=!/etc/mithril-agent/paper-active/status/sol/champion-owned",
+		"ExecStart=/opt/mithril-hermes-research/run-paper-generation.sh status-handoff sol",
+		"ReadWritePaths=/etc/mithril-agent/paper-active/status/sol",
+	} {
+		if !strings.Contains(statusHandoffUnit, want) {
+			t.Errorf("SOL status handoff is missing %q", want)
+		}
 	}
 	if !strings.Contains(bridgeUnit, "InaccessiblePaths=/var/lib/mithril-agent-research") {
 		t.Fatal("paper status bridge can see the research tree outside its credential")
 	}
-	jupUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup.service")
+	jupBase := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup.service")
+	jupPreChampion := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup-pre-champion.service")
+	jupChampion := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup-champion.service")
+	jupChallenger := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup-challenger.service")
+	jupChampionPath := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup-champion.path")
+	jupChallengerPath := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup-challenger.path")
+	jupBootstrap := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup-bootstrap.service")
+	jupBootstrapTimer := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup-bootstrap.timer")
+	jupAutoSelect := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup-auto-select.service")
+	jupAutoSelectTimer := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup-auto-select.timer")
+	jupStatusHandoff := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup-status-handoff.service")
 	jupBridge := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup-status-bridge.service")
 	jupSocket := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-jup-status.socket")
 	telegramPaper := readDocumentation(t, "../../deploy/systemd/mithril-agent-telegram-paper.conf")
-	const jupAlertPath = "/var/lib/mithril-agent-research/status/jup/alerts.json"
-	for _, want := range []string{
-		"ConditionPathExists=/var/lib/mithril-agent-research/policy/jup-policy.json",
-		"--dir /var/lib/mithril-agent-research/journals-jup",
-		"--alert-status " + jupAlertPath,
-		"ReadWritePaths=/var/lib/mithril-agent-research/journals-jup /var/lib/mithril-agent-research/status/jup",
+	const jupAlertPath = "/etc/mithril-agent/paper-active/status/jup/alerts.json"
+	for name, unit := range map[string]string{
+		"base": jupBase, "pre-champion": jupPreChampion,
+		"champion": jupChampion, "challenger": jupChallenger,
 	} {
-		if !strings.Contains(jupUnit, want) {
-			t.Errorf("JUP observer is missing %q", want)
+		for _, want := range []string{
+			"PartOf=mithril-agent-paper-generation.target",
+			"ConditionPathExists=/etc/mithril-agent/paper-active/portfolio.json",
+			"ExecStart=/opt/mithril-hermes-research/run-paper-generation.sh observe jup " + name,
+			"ReadOnlyPaths=/var/lib/mithril-agent-research/allocations",
+		} {
+			if !strings.Contains(unit, want) {
+				t.Errorf("JUP %s observer is missing %q", name, want)
+			}
+		}
+	}
+	for _, want := range []string{
+		"ConditionPathExists=/etc/mithril-agent/paper-active/jup-policy.json",
+		"run-paper-generation.sh observe jup base",
+		"ReadWritePaths=/etc/mithril-agent/paper-active/runs/jup/base",
+	} {
+		if !strings.Contains(jupBase, want) {
+			t.Errorf("JUP base observer is missing %q", want)
+		}
+	}
+	if strings.Contains(jupBase, "--alert-status") || strings.Contains(jupBase, "/status/jup") {
+		t.Fatal("JUP base observer still publishes operator status")
+	}
+	for _, want := range []string{
+		"ConditionPathExists=!/etc/mithril-agent/paper-active/selection/jup/champion/active.json",
+		"Conflicts=mithril-agent-paper-jup-champion.service",
+		"run-paper-generation.sh observe jup pre-champion",
+		"ReadWritePaths=/etc/mithril-agent/paper-active/runs/jup/pre-champion /etc/mithril-agent/paper-active/status/jup",
+	} {
+		if !strings.Contains(jupPreChampion, want) {
+			t.Errorf("JUP pre-champion status observer is missing %q", want)
+		}
+	}
+	if strings.Contains(jupPreChampion, "--candidate-pointer") ||
+		strings.Contains(jupPreChampion, "ReadWritePaths=/var/lib/mithril-agent-research/jup") {
+		t.Fatal("JUP pre-champion status observer can select or rewrite lifecycle state")
+	}
+	for _, want := range []string{
+		"ConditionPathExists=/etc/mithril-agent/paper-active/selection/jup/champion/active.json",
+		"Requires=mithril-agent-paper-jup-status-handoff.service",
+		"Conflicts=mithril-agent-paper-jup-pre-champion.service",
+		"run-paper-generation.sh observe jup champion",
+		"ReadWritePaths=/etc/mithril-agent/paper-active/runs/jup/champion /etc/mithril-agent/paper-active/status/jup",
+	} {
+		if !strings.Contains(jupChampion, want) {
+			t.Errorf("JUP champion observer is missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"ConditionPathExists=/etc/mithril-agent/paper-active/selection/jup/challenger/active.json",
+		"run-paper-generation.sh observe jup challenger",
+		"ReadWritePaths=/etc/mithril-agent/paper-active/runs/jup/challenger",
+	} {
+		if !strings.Contains(jupChallenger, want) {
+			t.Errorf("JUP challenger observer is missing %q", want)
+		}
+	}
+	if strings.Contains(jupChallenger, "--alert-status") ||
+		strings.Contains(jupChampion, "ReadWritePaths=/var/lib/mithril-agent-research/jup/champion") ||
+		strings.Contains(jupChallenger, "ReadWritePaths=/var/lib/mithril-agent-research/jup/challenger") {
+		t.Fatal("JUP paper observers can write status or lifecycle pointers they do not own")
+	}
+	if !strings.Contains(jupChampionPath, "PathChanged=/etc/mithril-agent/paper-active/selection/jup/champion/active.json") ||
+		strings.Contains(jupChampionPath, "PathExists=") ||
+		!strings.Contains(jupChallengerPath, "PathChanged=/etc/mithril-agent/paper-active/selection/jup/challenger/active.json") ||
+		strings.Contains(jupChallengerPath, "PathExists=") {
+		t.Fatal("JUP lifecycle paths do not watch pointer changes safely")
+	}
+	for _, want := range []string{
+		"run-paper-generation.sh bootstrap jup",
+		"ReadOnlyPaths=/var/lib/mithril-agent-research/allocations",
+		"ReadWritePaths=/etc/mithril-agent/paper-active/selection/jup/champion /etc/mithril-agent/paper-active/selection/jup/challenger",
+		"PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
+	} {
+		if !strings.Contains(jupBootstrap, want) {
+			t.Errorf("JUP bootstrap unit is missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"run-paper-generation.sh auto-select jup",
+		"ReadOnlyPaths=/var/lib/mithril-agent-research/allocations",
+		"ReadWritePaths=/etc/mithril-agent/paper-active/selection/jup/champion /etc/mithril-agent/paper-active/selection/jup/challenger",
+		"PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
+	} {
+		if !strings.Contains(jupAutoSelect, want) {
+			t.Errorf("JUP auto-selector is missing %q", want)
+		}
+	}
+	if !strings.Contains(jupBootstrapTimer, "Unit=mithril-agent-paper-jup-bootstrap.service") ||
+		!strings.Contains(jupAutoSelectTimer, "Unit=mithril-agent-paper-jup-auto-select.service") {
+		t.Fatal("JUP lifecycle timers do not target their services")
+	}
+	for _, want := range []string{
+		"ConditionPathExists=/etc/mithril-agent/paper-active/selection/jup/champion/active.json",
+		"ConditionPathExists=!/etc/mithril-agent/paper-active/status/jup/champion-owned",
+		"run-paper-generation.sh status-handoff jup",
+		"ReadWritePaths=/etc/mithril-agent/paper-active/status/jup",
+		"PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
+	} {
+		if !strings.Contains(jupStatusHandoff, want) {
+			t.Errorf("JUP status handoff is missing %q", want)
 		}
 	}
 	if !strings.Contains(jupBridge, "LoadCredential=paper-status:"+jupAlertPath) ||
+		!strings.Contains(jupBridge, "After=mithril-agent-paper-jup-status.socket mithril-agent-paper-jup-pre-champion.service mithril-agent-paper-jup-champion.service") ||
 		!strings.Contains(jupBridge, "InaccessiblePaths=/var/lib/mithril-agent-research") ||
 		!strings.Contains(jupSocket, "ListenStream=/run/mithril-agent-paper-jup-status.sock") {
-		t.Fatal("JUP status bridge/socket does not preserve the bounded credential path")
+		t.Fatal("JUP champion status bridge/socket does not preserve the bounded credential path")
 	}
 	for _, want := range []string{
 		"SOL/USDC=/run/mithril-agent-paper-status.sock",
@@ -778,6 +1137,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"SOL/USDC=/run/mithril-agent-paper-status.sock",
 		"JUP/USDC=/run/mithril-agent-paper-jup-status.sock",
 		"--research-packet-path /var/lib/mithril-agent-dashboard/research.json",
+		"--mithril-evidence-status-path /var/lib/mithril-agent-dashboard/mithril-evidence.json",
 	} {
 		if !strings.Contains(dashboardUnit, want) {
 			t.Errorf("paper dashboard unit is missing %q", want)

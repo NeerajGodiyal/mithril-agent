@@ -6,7 +6,7 @@ After=docker.service mithril-hermes-research-egress.service network-online.targe
 Wants=network-online.target
 PartOf=docker.service
 ConditionPathExists=/opt/mithril-hermes-research/state/auth.json
-ConditionPathExists=/var/lib/mithril-agent-research/policy/policy.json
+ConditionPathExists=/etc/mithril-agent/paper-active/sol-policy.json
 ConditionPathIsDirectory=/var/lib/mithril-agent-research/reports
 ConditionPathIsDirectory=/var/lib/mithril-agent-dashboard
 
@@ -20,5 +20,5 @@ ExecStartPre=/opt/mithril-hermes-research/check-network.sh
 ExecStartPre=/usr/sbin/iptables -C DOCKER-USER -s 172.30.77.0/28 -j MITHRIL_HERMES
 ExecStartPre=/usr/sbin/iptables -C INPUT -s 172.30.77.0/28 -j REJECT
 ExecStart=/opt/mithril-hermes-research/run-market-scout.sh
-TimeoutStartSec=6min
+TimeoutStartSec=12min
 TimeoutStopSec=1min

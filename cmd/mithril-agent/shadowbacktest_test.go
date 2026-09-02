@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
 
@@ -264,5 +265,261 @@ func TestBacktestRejectsAJournalRenamedToAnotherDay(t *testing.T) {
 		"--day", "2026-08-30", "--buy-at-usd", "100", "--json",
 	}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "different UTC day") {
 		t.Fatalf("renamed backtest journal was accepted: %v", err)
+	}
+}
+
+func TestPaperRiskPoliciesStayValidFundedAndDoNotMutateTheBase(t *testing.T) {
+	base, err := buildAdaptiveShadowPolicy(
+		shadow.Mainnet, 50_000_000, 100, 100_000,
+		"So11111111111111111111111111111111111111112", 60, "", "", "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.StartingInputUnits = 246_000_000
+	original, err := base.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lanes, err := paperRiskPolicies(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lanes) != 3 || lanes[0].name != "Conservative" ||
+		lanes[1].name != "Current" || lanes[2].name != "Aggressive" {
+		t.Fatalf("unexpected paper lanes: %+v", lanes)
+	}
+	if lanes[0].policy.InputAmount != base.InputAmount/4 {
+		t.Fatalf("conservative amount=%d, want %d", lanes[0].policy.InputAmount, base.InputAmount/4)
+	}
+	if lanes[2].policy.InputAmount != base.InputAmount*4 {
+		t.Fatalf("aggressive amount=%d, want %d", lanes[2].policy.InputAmount, base.InputAmount*4)
+	}
+	for _, lane := range lanes {
+		if err := lane.policy.Validate(); err != nil {
+			t.Fatalf("%s lane is invalid: %v", lane.name, err)
+		}
+	}
+	unchanged, err := base.Fingerprint()
+	if err != nil || unchanged != original {
+		t.Fatalf("paper lanes mutated the base policy: before=%s after=%s err=%v", original, unchanged, err)
+	}
+}
+
+func TestAggressivePaperRiskPolicyLeavesLegacySOLFeesFunded(t *testing.T) {
+	base, err := buildAdaptiveShadowPolicy(
+		shadow.Devnet, 250_000_000, 100, 100_000,
+		"So11111111111111111111111111111111111111112", 60,
+		"11111111111111111111111111111111", "So11111111111111111111111111111111111111112",
+		"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lanes, err := paperRiskPolicies(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aggressive := lanes[2].policy
+	want := base.StartingInputUnits - 2*base.FeeLamports
+	if aggressive.InputAmount != want {
+		t.Fatalf("aggressive amount=%d, want fee-funded maximum %d", aggressive.InputAmount, want)
+	}
+	if err := aggressive.Validate(); err != nil {
+		t.Fatalf("fee-funded aggressive policy is invalid: %v", err)
+	}
+}
+
+func TestPaperRiskComparisonUsesOneLiquidationBenchmark(t *testing.T) {
+	policy, err := buildAdaptiveShadowPolicy(
+		shadow.Mainnet, 250_000_000, 100, 100_000,
+		"So11111111111111111111111111111111111111112", 60, "", "", "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	prices := []uint64{
+		100_000_000, 100_200_000, 100_400_000, 100_600_000, 100_800_000,
+		101_000_000, 101_200_000, 101_400_000, 101_600_000, 101_800_000,
+		102_000_000, 102_200_000, 102_400_000, 102_600_000, 102_800_000,
+		103_000_000, 103_200_000, 103_400_000, 103_600_000, 103_800_000,
+		104_000_000, 103_000_000, 102_000_000, 101_000_000, 100_000_000,
+		99_000_000, 98_000_000, 97_000_000, 96_000_000, 95_000_000,
+	}
+	ticks := make([]shadow.Tick, 0, len(prices))
+	for index, price := range prices {
+		at := start.Add(time.Duration(index) * time.Minute)
+		primary, secondary := shadowSearchSamples(policy, price, at)
+		primary.ConfidenceMicros = 1_500_000
+		secondary.ConfidenceMicros = 1_500_000
+		ticks = append(ticks, shadow.Tick{
+			At: at, Event: shadow.EventWaiting, PriceMicros: price,
+			PrimaryPrice: &primary, SecondaryPrice: &secondary,
+		})
+	}
+	control, err := scoreHoldControl(policy, ticks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lanes, err := paperRiskPolicies(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	liquidationPathExercised := false
+	for _, candidate := range lanes {
+		lane, err := scoreRiskLane(candidate, ticks, 100, control)
+		if err != nil {
+			t.Fatalf("%s: %v", candidate.name, err)
+		}
+		want, err := checkedDifference(lane.ProfitLossMicros, control.ProfitLossMicros)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lane.VersusHoldingMicros != want {
+			t.Fatalf("%s versus hold=%d, want common-benchmark delta %d", candidate.name, lane.VersusHoldingMicros, want)
+		}
+		pool := modelledPool(candidate.policy, 100, candidate.policy.SlippageBPS)
+		liquidation, err := shadow.ReplayRoundTripTicksWithLiquidationMarks(candidate.policy, ticks, pool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		directional, err := shadow.ReplayRoundTripTicks(candidate.policy, ticks, pool)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if liquidation.LiquidationMaxDrawdownMicros != directional.Ledger.MaxDrawdownMicros {
+			liquidationPathExercised = true
+			if lane.MaximumDrawdownMicros != liquidation.LiquidationMaxDrawdownMicros {
+				t.Fatalf("%s lane drawdown=%d, want common liquidation drawdown %d",
+					candidate.name, lane.MaximumDrawdownMicros, liquidation.LiquidationMaxDrawdownMicros)
+			}
+		}
+	}
+	if !liquidationPathExercised {
+		t.Fatal("risk comparison fixture did not exercise a partial-inventory bid/ask mark difference")
+	}
+	var payload bytes.Buffer
+	if err := writeRiskComparison(&payload, true, "2026-09-01", 100, policy, ticks); err != nil {
+		t.Fatal(err)
+	}
+	var decoded riskComparisonResult
+	if err := json.Unmarshal(payload.Bytes(), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.PoolModelled || decoded.SizeImpactModelled || len(decoded.Lanes) != 4 || decoded.Lanes[0].TradingEnabled {
+		t.Fatalf("risk comparison safety labels are wrong: %+v", decoded)
+	}
+}
+
+func TestPaperRiskComparisonBuyStartUsesOneLiquidationOpeningBenchmark(t *testing.T) {
+	_, policy, _, _ := shadowPortfolioTestPolicies(t)
+	// A buy-start book may already hold some base inventory. That inventory must
+	// be valued at the same sell mark as the hold lane from the opening tick.
+	policy.StartingOutputUnits = 1_000_000
+	if err := policy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	prices := []uint64{
+		100_000_000, 100_200_000, 100_400_000, 100_600_000, 100_800_000,
+		101_000_000, 101_200_000, 101_400_000, 101_600_000, 101_800_000,
+		102_000_000, 102_200_000, 102_400_000, 102_600_000, 102_800_000,
+		103_000_000, 103_200_000, 103_400_000, 103_600_000, 103_800_000,
+	}
+	ticks := make([]shadow.Tick, 0, len(prices))
+	for index, price := range prices {
+		at := start.Add(time.Duration(index) * time.Minute)
+		primary, secondary := shadowSearchSamples(policy, price, at)
+		primary.ConfidenceMicros = 1_500_000
+		secondary.ConfidenceMicros = 1_500_000
+		nativePrimary := pricetrigger.Sample{
+			SourceSHA256: policy.NativeFeePrice.PrimarySourceSHA256,
+			Feed:         policy.NativeFeePrice.Feed,
+			PriceMicros:  200_000_000,
+			PublishedAt:  at,
+		}
+		nativeSecondary := nativePrimary
+		nativeSecondary.SourceSHA256 = policy.NativeFeePrice.SecondarySourceSHA256
+		ticks = append(ticks, shadow.Tick{
+			At: at, Event: shadow.EventWaiting, PriceMicros: price,
+			PrimaryPrice: &primary, SecondaryPrice: &secondary,
+			NativeFeePriceMicros: 200_000_000,
+			NativeFeePrimary:     &nativePrimary, NativeFeeSecondary: &nativeSecondary,
+		})
+	}
+	control, err := scoreHoldControl(policy, ticks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lanes, err := paperRiskPolicies(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range lanes {
+		lane, err := scoreRiskLane(candidate, ticks, 100, control)
+		if err != nil {
+			t.Fatalf("%s: %v", candidate.name, err)
+		}
+		if lane.OpeningEquityMicros != control.OpeningEquityMicros {
+			t.Fatalf("%s opening equity=%d, want liquidation benchmark %d",
+				candidate.name, lane.OpeningEquityMicros, control.OpeningEquityMicros)
+		}
+	}
+}
+
+func TestPaperRiskPolicyArithmeticCapsInsteadOfWrapping(t *testing.T) {
+	base, err := buildAdaptiveShadowPolicy(
+		shadow.Mainnet, 250_000_000, 100, 100_000,
+		"So11111111111111111111111111111111111111112", 5, "", "", "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adaptive := *base.Adaptive
+	adaptive.FastWindow = 1_439
+	adaptive.SlowWindow = 1_440
+	adaptive.MinimumSignalBPS = 1_500
+	adaptive.MaxVolatilityBPS = 5_000
+	adaptive.CooldownSeconds = 86_400
+	base.Adaptive = &adaptive
+	if err := base.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	lanes, err := paperRiskPolicies(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conservative := lanes[0].policy.Adaptive
+	if conservative.FastWindow != 1_439 || conservative.SlowWindow != 1_440 ||
+		conservative.MinimumSignalBPS != 2_000 || conservative.CooldownSeconds != 86_400 {
+		t.Fatalf("conservative caps wrapped or drifted: %+v", conservative)
+	}
+}
+
+func TestConservativePaperRiskWindowsFitTheUTCPeriod(t *testing.T) {
+	base, err := buildAdaptiveShadowPolicy(
+		shadow.Mainnet, 250_000_000, 100, 100_000,
+		"So11111111111111111111111111111111111111112", 60, "", "", "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adaptive := *base.Adaptive
+	adaptive.FastWindow = 500
+	adaptive.SlowWindow = 1_000
+	base.Adaptive = &adaptive
+	if err := base.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	lanes, err := paperRiskPolicies(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := lanes[0].policy.Adaptive.SlowWindow; got != 1_439 {
+		t.Fatalf("conservative slow window=%d, want final full-day-valid window 1439", got)
+	}
+	if err := lanes[0].policy.Validate(); err != nil {
+		t.Fatalf("conservative policy exceeds its UTC period: %v", err)
 	}
 }

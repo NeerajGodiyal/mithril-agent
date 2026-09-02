@@ -3,14 +3,19 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/marketadmission"
+	"github.com/Overclock-Validator/mithril-agent/paperstatus"
+	"github.com/Overclock-Validator/mithril-agent/pricesource"
+	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
 
@@ -79,6 +84,385 @@ func TestShadowMarketEvaluateWritesOneImmutableArtifact(t *testing.T) {
 	if err := runShadowMarketEvaluate(args, &bytes.Buffer{}); err == nil ||
 		!strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("expected immutable output refusal, got %v", err)
+	}
+}
+
+func TestShadowMarketProvisionalWritesAnImmutablePaperOnlyCheckpoint(t *testing.T) {
+	directory := t.TempDir()
+	journalPath := filepath.Join(directory, "wif-provisional.jsonl")
+	outPath := filepath.Join(directory, "wif-provisional.json")
+	candidate, _ := marketadmission.Lookup(marketadmission.MarketWIFUSDC)
+	opening, err := marketadmission.NewOpening(
+		candidate, "11111111111111111111111111111111", marketadmission.DefaultThresholds(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bucket := time.Now().UTC().Truncate(time.Minute).Add(-time.Minute)
+	store, err := journal.OpenRotating(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(bucket, marketadmission.EventOpened, opening.ContentSHA256, opening); err != nil {
+		t.Fatal(err)
+	}
+	observation := marketadmission.Observation{
+		Version: marketadmission.Version, OpeningSHA256: opening.ContentSHA256,
+		Bucket: bucket, ObservedAt: bucket.Add(time.Second),
+		Failure: marketadmission.FailureMarketPrice,
+	}
+	if _, err := store.Append(
+		observation.ObservedAt, marketadmission.EventObserved,
+		bucket.Format(time.RFC3339), observation,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--journal", journalPath, "--out", outPath}
+	var output bytes.Buffer
+	if err := runShadowMarketProvisional(args, &output); err != nil {
+		t.Fatal(err)
+	}
+	var artifact marketadmission.ProvisionalArtifact
+	if err := readStrictJSON(outPath, &artifact); err != nil || artifact.Validate() != nil ||
+		artifact.VerifyJournal(journalPath) != nil {
+		t.Fatalf("invalid provisional artifact: %+v, %v", artifact, err)
+	}
+	if artifact.ProvisionalPaperReady || !artifact.PaperOnly || artifact.Authorized ||
+		artifact.ExpectedBuckets != 360 || artifact.ObservedBuckets != 1 {
+		t.Fatalf("unexpected provisional artifact: %+v", artifact)
+	}
+	if !strings.Contains(output.String(), `"status":"development_provisional"`) {
+		t.Fatalf("unexpected provisional output: %s", output.String())
+	}
+	if err := runShadowMarketProvisional(args, &bytes.Buffer{}); err == nil ||
+		!strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("expected immutable provisional output refusal, got %v", err)
+	}
+}
+
+func TestReadyProvisionalEvidenceBuildsOnlyAProvisionalPolicy(t *testing.T) {
+	artifactPath, journalPath, now := writeReadyProvisionalEvidence(t)
+	artifact, err := loadProvisionalMarketAdmission(artifactPath, journalPath, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := buildAdaptiveProvisionalPolicy(
+		artifact,
+		artifact.Candidate.QuoteNotionalUSDC,
+		80_000_000,
+		3_000_000,
+		artifact.Candidate.QuoteSlippageBPS,
+		100_000,
+		artifact.Observe,
+		60,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.MarketEvidenceClass != shadow.MarketEvidenceDevelopmentProvisional ||
+		!provisionalPolicyMatchesArtifact(policy, artifact) ||
+		admittedPolicyMatchesArtifact(policy, marketadmission.Artifact{
+			Candidate: artifact.Candidate, Observe: artifact.Observe,
+			Thresholds: artifact.Thresholds, ContentSHA256: artifact.ContentSHA256,
+		}) {
+		t.Fatalf("provisional policy crossed its evidence class: %+v", policy)
+	}
+}
+
+// This opt-in integration check covers the operator's real provisional path:
+// one immutable checkpoint writes a policy, the policy enters the shared paper
+// portfolio, and two CLI invocations use the same evidence and journal. The
+// second invocation must replay the first; neither path can sign or submit.
+func TestLiveReadyProvisionalPolicyRunsAndResumes(t *testing.T) {
+	endpoint := os.Getenv("MITHRIL_AGENT_LIVE_SOLANA_RPC")
+	if os.Getenv("MITHRIL_AGENT_LIVE_PRICE_TEST") != "1" || endpoint == "" {
+		t.Skip("set MITHRIL_AGENT_LIVE_PRICE_TEST=1 and MITHRIL_AGENT_LIVE_SOLANA_RPC")
+	}
+	t.Setenv(shadowEndpointEnvironment, endpoint)
+	artifactPath, evidenceJournal, _ := writeReadyProvisionalEvidence(t)
+	candidate, _ := marketadmission.Lookup(marketadmission.MarketWIFUSDC)
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	policyPath := filepath.Join(root, "wif-policy.json")
+	if err := runShadowPolicy([]string{
+		"--out", policyPath,
+		"--adaptive", "--market", candidate.Market,
+		"--budget-usdc", formatShadowAmount(candidate.QuoteNotionalUSDC, 6),
+		"--drawdown-stop-bps", "500",
+		"--observe", "11111111111111111111111111111111",
+		"--slippage-bps", strconv.FormatUint(uint64(candidate.QuoteSlippageBPS), 10),
+		"--provisional-artifact", artifactPath,
+		"--provisional-journal", evidenceJournal,
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := loadActiveShadowPolicy(policyPath)
+	if err != nil || policy.MarketEvidenceClass != shadow.MarketEvidenceDevelopmentProvisional {
+		t.Fatalf("generated provisional policy = %+v, %v", policy, err)
+	}
+	portfolioPath := filepath.Join(root, "portfolio.json")
+	if err := runShadowPortfolio([]string{
+		"--out", portfolioPath, "--limit-usd", "1000", "--max-sol-usd", "1000",
+		"--book", "wif=" + policyPath,
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	runDir, statusPath := filepath.Join(root, "journal"), filepath.Join(root, "status.json")
+	args := []string{
+		"--policy", policyPath, "--dir", runDir,
+		"--portfolio", portfolioPath, "--portfolio-book", "wif",
+		"--provisional-artifact", artifactPath,
+		"--provisional-journal", evidenceJournal,
+		"--alert-status", statusPath, "--once",
+	}
+	for invocation := range 2 {
+		var output bytes.Buffer
+		if err := runShadowRun(t.Context(), args, &output); err != nil {
+			t.Fatalf("invocation %d: %v", invocation+1, err)
+		}
+		if !strings.Contains(output.String(), `"event":"shadow.`) {
+			t.Fatalf("invocation %d emitted no paper tick: %s", invocation+1, output.String())
+		}
+	}
+	var snapshot paperstatus.Snapshot
+	if err := readStrictJSON(statusPath, &snapshot); err != nil ||
+		paperstatus.ValidateSnapshot(snapshot) != nil {
+		t.Fatalf("paper status = %+v, %v", snapshot, err)
+	}
+	if snapshot.Summary != nil && snapshot.Summary.Market != candidate.Market ||
+		snapshot.Summary == nil && !strings.Contains(snapshot.Current, "WAITING FOR PRICES") {
+		t.Fatalf("paper status does not describe the provisional market or its honest unavailable state: %+v", snapshot)
+	}
+	roll, err := newDailyJournal(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer roll.Close()
+	if err := roll.openFor(time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if len(roll.Records()) < 2 {
+		t.Fatalf("second CLI invocation did not resume the first journal: %d records", len(roll.Records()))
+	}
+}
+
+func TestShadowPolicyRequiresOneCompleteEvidencePair(t *testing.T) {
+	base := []string{
+		"--out", filepath.Join(t.TempDir(), "policy.json"),
+		"--adaptive", "--market", marketadmission.MarketWIFUSDC,
+		"--budget-usdc", "25", "--drawdown-stop-bps", "500",
+		"--observe", "11111111111111111111111111111111",
+	}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "missing provisional journal",
+			args: []string{"--provisional-artifact", "/tmp/provisional.json"},
+			want: "requires its matching journal",
+		},
+		{
+			name: "missing qualified journal",
+			args: []string{"--admission-artifact", "/tmp/admission.json"},
+			want: "requires its matching journal",
+		},
+		{
+			name: "mixed evidence classes",
+			args: []string{
+				"--admission-artifact", "/tmp/admission.json",
+				"--admission-journal", "/tmp/admission.jsonl",
+				"--provisional-artifact", "/tmp/provisional.json",
+				"--provisional-journal", "/tmp/provisional.jsonl",
+			},
+			want: "choose qualified or provisional",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := runShadowPolicy(append(append([]string{}, base...), test.args...), &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("evidence flags error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestMarketEvidenceClassIsValidatedAndFingerprinted(t *testing.T) {
+	candidate, _ := marketadmission.Lookup(marketadmission.MarketWIFUSDC)
+	primary, err := candidate.Pyth.IdentitySHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondary, err := candidate.Kraken.IdentitySHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := buildAdaptiveQuoteMarketPolicy(
+		shadow.AdmittedVersion, candidate.Market, candidate.Pyth.Feed,
+		primary, secondary, strings.Repeat("a", 64),
+		candidate.QuoteNotionalUSDC, 80_000_000, 3_000_000,
+		candidate.QuoteSlippageBPS, 100_000,
+		"11111111111111111111111111111111", 60,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyFingerprint, err := policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	longRun := policy
+	longRun.MarketEvidenceClass = shadow.MarketEvidenceLongRun
+	longRunFingerprint, err := longRun.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	provisional := policy
+	provisional.MarketEvidenceClass = shadow.MarketEvidenceDevelopmentProvisional
+	provisionalFingerprint, err := provisional.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyFingerprint == longRunFingerprint || legacyFingerprint == provisionalFingerprint ||
+		longRunFingerprint == provisionalFingerprint {
+		t.Fatal("market evidence class was not bound into the policy fingerprint")
+	}
+	unknown := policy
+	unknown.MarketEvidenceClass = "unknown"
+	if unknown.Validate() == nil {
+		t.Fatal("unknown market evidence class was accepted")
+	}
+	nonAdmitted := validShadowPolicy()
+	nonAdmitted.MarketEvidenceClass = shadow.MarketEvidenceLongRun
+	if nonAdmitted.Validate() == nil {
+		t.Fatal("non-admitted policy accepted market evidence class")
+	}
+}
+
+func writeReadyProvisionalEvidence(t *testing.T) (string, string, time.Time) {
+	t.Helper()
+	directory := t.TempDir()
+	journalPath := filepath.Join(directory, "provisional.jsonl")
+	artifactPath := filepath.Join(directory, "provisional.json")
+	candidate, _ := marketadmission.Lookup(marketadmission.MarketWIFUSDC)
+	opening, err := marketadmission.NewOpening(
+		candidate, "11111111111111111111111111111111", marketadmission.DefaultThresholds(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	through := time.Now().UTC().Truncate(time.Minute)
+	store, err := journal.OpenRotating(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(through.Add(-6*time.Hour), marketadmission.EventOpened, opening.ContentSHA256, opening); err != nil {
+		t.Fatal(err)
+	}
+	marketPrimary, _ := candidate.Pyth.IdentitySHA256()
+	marketSecondary, _ := candidate.Kraken.IdentitySHA256()
+	for bucket := through.Add(-6*time.Hour + 18*time.Minute); bucket.Before(through); bucket = bucket.Add(time.Minute) {
+		observed := bucket.Add(time.Second)
+		observation := marketadmission.Observation{
+			Version: marketadmission.Version, OpeningSHA256: opening.ContentSHA256,
+			Bucket: bucket, ObservedAt: observed,
+			Mint: marketadmission.MintEvidence{
+				Address: candidate.BaseMint, Owner: candidate.TokenProgram,
+				Decimals: candidate.BaseDecimals, ContextSlot: 100,
+				DataSHA256: strings.Repeat("d", 64),
+			},
+			MarketPrimary: provisionalPythSample(candidate.Pyth, marketPrimary, 200_000, observed),
+			MarketSecondary: provisionalSample(
+				marketSecondary, candidate.Pyth.Feed, 200_000, observed,
+			),
+			USDCPrimary: provisionalPythSample(
+				pricesource.PythPushUSDCSpec(), pricesource.PythPushUSDCIdentitySHA256(),
+				1_000_000, observed,
+			),
+			USDCSecondary: provisionalSample(
+				pricesource.KrakenIdentitySHA256(), pricetrigger.FeedUSDCUSD, 1_000_000, observed,
+			),
+			SOLPrimary: provisionalPythSample(
+				pricesource.PythPushSOLSpec(), pricesource.PythPushIdentitySHA256(),
+				200_000_000, observed,
+			),
+			SOLSecondary: provisionalSample(
+				pricesource.KrakenSOLIdentitySHA256(), pricetrigger.FeedSOLUSD, 200_000_000, observed,
+			),
+			Buy: marketadmission.Quote{
+				InputMint: candidate.QuoteMint, OutputMint: candidate.BaseMint,
+				InputAmount: candidate.QuoteNotionalUSDC, EstimatedOutput: 125_000_000,
+				MinimumOutput: 123_750_000, ReceivedAt: observed.Add(-time.Millisecond),
+				LatencyMillis: 20, ResponseSHA256: strings.Repeat("a", 64),
+			},
+			Sell: marketadmission.Quote{
+				InputMint: candidate.BaseMint, OutputMint: candidate.QuoteMint,
+				InputAmount: 125_000_000, EstimatedOutput: 24_975_000,
+				MinimumOutput: 24_725_250, ReceivedAt: observed.Add(-time.Millisecond),
+				LatencyMillis: 20, ResponseSHA256: strings.Repeat("b", 64),
+			},
+		}
+		if _, err := store.Append(
+			observed, marketadmission.EventObserved, bucket.Format(time.RFC3339), observation,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prefix, err := store.DurablePrefix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	now := through.Add(30 * time.Second)
+	artifact, err := marketadmission.EvaluateProvisionalJournal(journalPath, prefix, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !artifact.ProvisionalPaperReady || artifact.AvailableBuckets != 342 {
+		t.Fatalf("provisional artifact is not ready: %+v", artifact)
+	}
+	encoded, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artifactPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return artifactPath, journalPath, now
+}
+
+func provisionalPythSample(
+	spec pricesource.PythPushSpec,
+	identity string,
+	price uint64,
+	observed time.Time,
+) pricesource.PythObservation {
+	return pricesource.PythObservation{
+		Sample:      provisionalSample(identity, spec.Feed, price, observed),
+		ContextSlot: 100, Account: spec.LegacyAccount, FeedID: spec.FeedID,
+	}
+}
+
+func provisionalSample(
+	identity, feed string,
+	price uint64,
+	observed time.Time,
+) pricetrigger.Sample {
+	return pricetrigger.Sample{
+		SourceSHA256: identity, Feed: feed, PriceMicros: price,
+		ConfidenceMicros: 1, PublishedAt: observed.Add(-time.Second),
 	}
 }
 
@@ -184,6 +568,7 @@ func TestShadowMarketHelpAndBucketAlignment(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(output.String(), "market collect") ||
+		!strings.Contains(output.String(), "market diagnose") ||
 		!strings.Contains(output.String(), "keyless") {
 		t.Fatalf("unexpected help: %s", output.String())
 	}

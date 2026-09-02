@@ -20,7 +20,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 )
 
-const usage = "Usage: mithril-agent-paper-dashboard --paper-status-socket MARKET=/absolute/path [--instruction-path /absolute/path] [--research-packet-path /absolute/path]"
+const usage = "Usage: mithril-agent-paper-dashboard --paper-status-socket MARKET=/absolute/path [--instruction-path /absolute/path] [--research-packet-path /absolute/path] [--mithril-evidence-status-path /absolute/path]"
 
 var activatedListener = systemdUnixListener
 
@@ -44,11 +44,15 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("mithril-agent-paper-dashboard", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var sockets socketPaths
-	var instructionPath, researchPath, renderInstructionPath string
+	var instructionPath, researchPath, mithrilEvidencePath, recordMithrilPath, mithrilStatus, renderInstructionPath, exportInstructionPath string
 	flags.Var(&sockets, "paper-status-socket", "MARKET=/absolute/path to a bounded paper status socket")
 	flags.StringVar(&instructionPath, "instruction-path", "", "private path for a bounded paper research preference")
 	flags.StringVar(&researchPath, "research-packet-path", "", "private path for the latest validated Hermes packet")
+	flags.StringVar(&mithrilEvidencePath, "mithril-evidence-status-path", "", "private status from the latest Hermes Mithril evidence check")
+	flags.StringVar(&recordMithrilPath, "record-mithril-evidence", "", "atomically record the latest Mithril evidence check")
+	flags.StringVar(&mithrilStatus, "mithril-evidence", "", "current or unavailable")
 	flags.StringVar(&renderInstructionPath, "render-instruction", "", "render a validated preference for the Hermes research prompt")
+	flags.StringVar(&exportInstructionPath, "export-instruction", "", "export one validated canonical operator instruction")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, usage)
@@ -56,8 +60,20 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		}
 		return err
 	}
-	if renderInstructionPath != "" {
+	if recordMithrilPath != "" {
 		if flags.NArg() != 0 || len(sockets) != 0 || instructionPath != "" || researchPath != "" ||
+			mithrilEvidencePath != "" || renderInstructionPath != "" || exportInstructionPath != "" ||
+			!cleanAbsolutePath(recordMithrilPath) ||
+			(mithrilStatus != "current" && mithrilStatus != "unavailable") {
+			return errors.New("--record-mithril-evidence requires one path and current or unavailable")
+		}
+		return paperdashboard.RecordMithrilEvidence(
+			recordMithrilPath, mithrilStatus == "current", time.Now(),
+		)
+	}
+	if renderInstructionPath != "" {
+		if flags.NArg() != 0 || len(sockets) != 0 || instructionPath != "" || researchPath != "" || mithrilEvidencePath != "" || mithrilStatus != "" ||
+			exportInstructionPath != "" ||
 			!cleanAbsolutePath(renderInstructionPath) {
 			return errors.New("--render-instruction requires one clean absolute path and no server flags")
 		}
@@ -68,9 +84,22 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		_, err = fmt.Fprint(output, rendered)
 		return err
 	}
+	if exportInstructionPath != "" {
+		if flags.NArg() != 0 || len(sockets) != 0 || instructionPath != "" || researchPath != "" || mithrilEvidencePath != "" || mithrilStatus != "" ||
+			!cleanAbsolutePath(exportInstructionPath) {
+			return errors.New("--export-instruction requires one clean absolute path and no server flags")
+		}
+		encoded, err := paperdashboard.ExportInstruction(exportInstructionPath)
+		if err != nil {
+			return err
+		}
+		_, err = output.Write(encoded)
+		return err
+	}
 	if flags.NArg() != 0 || len(sockets) == 0 ||
 		(instructionPath != "" && !cleanAbsolutePath(instructionPath)) ||
-		(researchPath != "" && !cleanAbsolutePath(researchPath)) {
+		(researchPath != "" && !cleanAbsolutePath(researchPath)) ||
+		(mithrilEvidencePath != "" && !cleanAbsolutePath(mithrilEvidencePath)) || mithrilStatus != "" {
 		return errors.New("at least one --paper-status-socket is required")
 	}
 	sources := make([]paperdashboard.Source, 0, len(sockets))
@@ -92,6 +121,11 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	}
 	if researchPath != "" {
 		if err := handler.EnableResearch(researchPath); err != nil {
+			return err
+		}
+	}
+	if mithrilEvidencePath != "" {
+		if err := handler.EnableMithrilEvidence(mithrilEvidencePath); err != nil {
 			return err
 		}
 	}

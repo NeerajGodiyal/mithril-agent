@@ -458,6 +458,7 @@ func (s *Service) announcePaperSource(
 			if event.Kind == paperstatus.KindOrderFilled {
 				if portfolio != "" {
 					message = omitPaperLine(message, "Market value:")
+					message = omitPaperLine(message, "Paper cash + current value of paper holdings")
 				}
 				message += portfolio
 			}
@@ -497,10 +498,31 @@ func paperAnnounceWorthy(event paperstatus.Event) bool {
 
 func paperAnnouncement(event paperstatus.Event, label string) string {
 	message := readablePaperMessage(event.Message)
+	asset, _, ok := strings.Cut(label, "/")
+	if !ok || asset == "" {
+		asset = paperTradeAsset(message)
+	}
+	if asset != "" {
+		message = strings.Replace(message, "Expected price:", "Estimated price for 1 "+asset+":", 1)
+		message = strings.Replace(message, "Filled price:", "Actual paper price for 1 "+asset+":", 1)
+	}
 	if label != "" {
 		message = paperMarketMessage(message)
 	}
 	return stackPaperMessage(message, paperMarketName(label))
+}
+
+func paperTradeAsset(message string) string {
+	for _, line := range strings.Split(message, "\n") {
+		if !strings.HasPrefix(line, "Bought: ") && !strings.HasPrefix(line, "Sold: ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 3 {
+			return fields[len(fields)-1]
+		}
+	}
+	return ""
 }
 
 func paperCurrentAge(message string, fresh bool) string {
@@ -517,8 +539,11 @@ func paperCurrentAge(message string, fresh bool) string {
 		"\nGain/loss today:",
 		"\nToday's estimated paper value:",
 		"\nToday's result:",
+		"\nResult since this plan started:",
+		"\nToday's paper result:",
+		"\nPaper result this run:",
 	} {
-		message = strings.Replace(message, current, "\nLast recorded gain/loss:", 1)
+		message = strings.Replace(message, current, "\nLast recorded run result:", 1)
 	}
 	_, details, found := strings.Cut(
 		strings.Replace(message, "\nToday ", "\nLast result ", 1), "\n",
@@ -539,19 +564,29 @@ func readablePaperMessage(message string) string {
 	lines[0] = strings.ReplaceAll(lines[0], "SELL filled", "SOLD")
 	lines[0] = strings.ReplaceAll(lines[0], "BUY filled", "BOUGHT")
 	for index := 1; index < len(lines); index++ {
-		lines[index] = strings.ReplaceAll(lines[index], "Practice account:", "Paper account:")
-		lines[index] = strings.ReplaceAll(lines[index], "Total paper account:", "Paper account:")
-		lines[index] = strings.ReplaceAll(lines[index], "Equity $", "Paper account: $")
+		lines[index] = strings.ReplaceAll(lines[index], "Practice account:", "Total paper value now:")
+		lines[index] = strings.ReplaceAll(lines[index], "Total paper account:", "Total paper value now:")
+		lines[index] = strings.ReplaceAll(lines[index], "Paper account:", "Total paper value now:")
+		lines[index] = strings.ReplaceAll(lines[index], "Equity $", "Total paper value now: $")
 		lines[index] = strings.Replace(lines[index], "Result:", "Paper gain/loss:", 1)
-		lines[index] = strings.ReplaceAll(lines[index], "Today's estimated paper value:", "Gain/loss today:")
-		lines[index] = strings.ReplaceAll(lines[index], "Today's result:", "Gain/loss today:")
+		lines[index] = strings.ReplaceAll(lines[index], "Paper gain/loss today:", "Paper result this run:")
+		lines[index] = strings.ReplaceAll(lines[index], "Gain/loss today:", "Paper result this run:")
+		lines[index] = strings.ReplaceAll(lines[index], "Today's estimated paper value:", "Paper result this run:")
+		lines[index] = strings.ReplaceAll(lines[index], "Today's result:", "Paper result this run:")
+		lines[index] = strings.ReplaceAll(lines[index], "Today's paper result:", "Paper result this run:")
+		lines[index] = strings.ReplaceAll(lines[index], "Result since this plan started:", "Paper result this run:")
+		lines[index] = strings.ReplaceAll(lines[index], "Combined result since each plan started:", "Combined result this run:")
+		lines[index] = strings.ReplaceAll(lines[index], "Combined paper result today:", "Combined result this run:")
 		lines[index] = strings.ReplaceAll(lines[index], "Compared with no trading:", "Compared with holding:")
 		lines[index] = strings.ReplaceAll(lines[index], "Versus no trading:", "Compared with holding:")
 		lines[index] = strings.ReplaceAll(lines[index], "better than no trading", "better than holding")
 		lines[index] = strings.ReplaceAll(lines[index], "worse than no trading", "worse than holding")
 		lines[index] = strings.ReplaceAll(lines[index], "same as no trading", "same as holding")
 		lines[index] = readablePaperTradeCount(lines[index])
-		lines[index] = shortenPaperUSD(lines[index])
+		if !strings.HasPrefix(lines[index], "Expected price:") &&
+			!strings.HasPrefix(lines[index], "Filled price:") {
+			lines[index] = shortenPaperUSD(lines[index])
+		}
 		for _, action := range []string{"Sold", "Received", "Paid", "Bought"} {
 			lines[index] = strings.Replace(lines[index], action+" ", action+": ", 1)
 		}
@@ -580,8 +615,10 @@ func paperDisplayResultLines(message string) string {
 	lines := strings.Split(message, "\n")
 	for index, line := range lines {
 		for _, label := range []string{
-			"Paper gain/loss:", "Gain/loss today:", "This market today:",
-			"All markets today:", "Last recorded gain/loss:",
+			"Paper gain/loss:", "Paper result this run:", "Result since this plan started:",
+			"Combined result this run:", "This completed trade:",
+			"This completed buy + sell:",
+			"Last recorded run result:",
 		} {
 			if result, found := strings.CutPrefix(line, label+" "); found {
 				lines[index] = label + " " + paperResultDisplay(result)
@@ -1033,14 +1070,19 @@ func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, _ time.Time) 
 	var opening, equity, hold, trades, signals uint64
 	paused := 0
 	valueUnit := ""
+	instructionSHA256 := ""
+	haveInstruction := false
 	strategiesReady := true
 	strategies := make(map[string]struct{}, 2)
 	minimumCoverageBPS, coverageReady := uint64(10_000), true
 	for _, summary := range summaries {
-		if summary.ValueUnit == "" || valueUnit != "" && valueUnit != summary.ValueUnit {
+		if summary.ValueUnit == "" || valueUnit != "" && valueUnit != summary.ValueUnit ||
+			haveInstruction && instructionSHA256 != summary.InstructionSHA256 {
 			return ""
 		}
 		valueUnit = summary.ValueUnit
+		instructionSHA256 = summary.InstructionSHA256
+		haveInstruction = true
 		if summary.OpeningEquityMicros > math.MaxUint64-opening ||
 			summary.EquityMicros > math.MaxUint64-equity ||
 			summary.HoldBenchmarkMicros > math.MaxUint64-hold ||
@@ -1069,7 +1111,7 @@ func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, _ time.Time) 
 		}
 	}
 	var report strings.Builder
-	fmt.Fprintf(&report, "PAPER\n\n📊 ACCOUNT TODAY\nTotal paper value: %s\nToday's total result: %s\nCompared with just holding: %s",
+	fmt.Fprintf(&report, "PAPER\n\n📊 ACCOUNT NOW\nTotal paper value: %s\nCombined result this run: %s\nCompared with just holding: %s",
 		paperAbsoluteValue(equity, valueUnit),
 		paperResultDisplay(paperResultChange(opening, equity, valueUnit)),
 		paperResultComparison(hold, equity, valueUnit))
@@ -1078,7 +1120,7 @@ func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, _ time.Time) 
 		if summary.PriceMicros != 0 {
 			fmt.Fprintf(&report, "\nMarket price: %s", formatUSDMicros(summary.PriceMicros))
 		}
-		fmt.Fprintf(&report, "\nPlan: %s\nThis market's result today: %s", paperMarketState(summary),
+		fmt.Fprintf(&report, "\nPlan: %s\nPaper result this run: %s", paperMarketState(summary),
 			paperResultDisplay(paperResultChange(
 				summary.OpeningEquityMicros, summary.EquityMicros, valueUnit,
 			)))
@@ -1110,18 +1152,24 @@ func paperPortfolioAlertSummary(summaries []paperstatus.CurrentSummary) string {
 	}
 	var opening, equity uint64
 	valueUnit := ""
+	instructionSHA256 := ""
+	haveInstruction := false
 	for _, summary := range summaries {
 		if summary.ValueUnit == "" || valueUnit != "" && valueUnit != summary.ValueUnit ||
+			haveInstruction && instructionSHA256 != summary.InstructionSHA256 ||
 			summary.OpeningEquityMicros > math.MaxUint64-opening ||
 			summary.EquityMicros > math.MaxUint64-equity {
 			return ""
 		}
 		valueUnit = summary.ValueUnit
+		instructionSHA256 = summary.InstructionSHA256
+		haveInstruction = true
 		opening += summary.OpeningEquityMicros
 		equity += summary.EquityMicros
 	}
-	return "\n\nTOTAL PAPER ACCOUNT\n" + paperAbsoluteValue(equity, valueUnit) +
-		"\n\nTODAY'S TOTAL RESULT\n" +
+	return "\n\nTOTAL PAPER VALUE NOW\n" + paperAbsoluteValue(equity, valueUnit) +
+		"\nCash + current value of all paper holdings" +
+		"\n\nCOMBINED RESULT THIS RUN\n" +
 		paperResultDisplay(paperResultChange(opening, equity, valueUnit))
 }
 
@@ -1256,8 +1304,10 @@ func labelPaperMessage(message, label string) string {
 }
 
 func paperMarketMessage(message string) string {
-	message = strings.Replace(message, "\nPaper account:", "\nMarket value:", 1)
-	return omitPaperLine(message, "Gain/loss today:")
+	message = strings.Replace(message, "\nTotal paper value now:", "\nMarket value:", 1)
+	message = omitPaperLine(message, "Result since this plan started:")
+	message = omitPaperLine(message, "Today's paper result:")
+	return omitPaperLine(message, "Paper result this run:")
 }
 
 func stackPaperMessage(message, market string) string {

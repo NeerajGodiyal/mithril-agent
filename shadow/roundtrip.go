@@ -55,9 +55,15 @@ type RoundTripCounts struct {
 
 // RoundTripResult is the recomputed run, ready for BuildReport.
 type RoundTripResult struct {
-	Ledger       Ledger
-	Counts       RoundTripCounts
-	ClosingPrice uint64
+	Ledger Ledger
+	// LiquidationLedger values every observation and fill at the same
+	// conservative sell mark. It is populated only by
+	// ReplayRoundTripTicksWithLiquidationMarks.
+	LiquidationLedger            Ledger
+	Counts                       RoundTripCounts
+	ClosingPrice                 uint64
+	LiquidationMaxDrawdownMicros uint64
+	LiquidationMaxDrawdownBPS    uint16
 }
 
 // ReplayRoundTrip scores a price series against both legs on one book.
@@ -86,7 +92,7 @@ func ReplayRoundTrip(
 		}
 		observations[index] = roundTripObservation{at: at, priceMicros: price, observable: true}
 	}
-	return replayRoundTrip(policy, observations, quoteFor)
+	return replayRoundTrip(policy, observations, quoteFor, false)
 }
 
 // ReplayRoundTripTicks uses the journal's actual observation times. This is
@@ -96,6 +102,26 @@ func ReplayRoundTripTicks(
 	policy Policy,
 	ticks []Tick,
 	quoteFor func(priceMicros uint64, sell bool, inputAmount uint64) (Quote, error),
+) (RoundTripResult, error) {
+	return replayRoundTripTicks(policy, ticks, quoteFor, false)
+}
+
+// ReplayRoundTripTicksWithLiquidationMarks keeps strategy and quote prices
+// direction-aware while valuing every book at the same conservative sell mark.
+// It is intended for comparisons whose lanes can hold different inventory.
+func ReplayRoundTripTicksWithLiquidationMarks(
+	policy Policy,
+	ticks []Tick,
+	quoteFor func(priceMicros uint64, sell bool, inputAmount uint64) (Quote, error),
+) (RoundTripResult, error) {
+	return replayRoundTripTicks(policy, ticks, quoteFor, true)
+}
+
+func replayRoundTripTicks(
+	policy Policy,
+	ticks []Tick,
+	quoteFor func(priceMicros uint64, sell bool, inputAmount uint64) (Quote, error),
+	liquidationMarks bool,
 ) (RoundTripResult, error) {
 	if err := policy.Validate(); err != nil {
 		return RoundTripResult{}, err
@@ -122,7 +148,7 @@ func ReplayRoundTripTicks(
 			nativePrimary:     tick.NativeFeePrimary, nativeSecondary: tick.NativeFeeSecondary,
 		})
 	}
-	return replayRoundTrip(policy, observations, quoteFor)
+	return replayRoundTrip(policy, observations, quoteFor, liquidationMarks)
 }
 
 type roundTripObservation struct {
@@ -149,6 +175,7 @@ func replayRoundTrip(
 	policy Policy,
 	observations []roundTripObservation,
 	quoteFor func(priceMicros uint64, sell bool, inputAmount uint64) (Quote, error),
+	liquidationMarks bool,
 ) (RoundTripResult, error) {
 	if !policy.RoundTrip() {
 		return RoundTripResult{}, errors.New("policy has no return trigger; use Replay for one direction")
@@ -166,6 +193,7 @@ func replayRoundTrip(
 	}
 
 	openingPrice := uint64(0)
+	openingLiquidationPrice := uint64(0)
 	var openingNativePrice []uint64
 	for _, observation := range observations {
 		if observation.observable {
@@ -173,6 +201,13 @@ func replayRoundTrip(
 			openingPrice, priceErr = roundTripObservationPrice(policy, policy.IsSell(), observation)
 			if priceErr != nil {
 				return RoundTripResult{}, priceErr
+			}
+			openingLiquidationPrice = openingPrice
+			if liquidationMarks {
+				openingLiquidationPrice, priceErr = roundTripObservationPrice(policy, true, observation)
+				if priceErr != nil {
+					return RoundTripResult{}, priceErr
+				}
 			}
 			openingNativePrice, priceErr = roundTripNativePrice(policy, observation)
 			if priceErr != nil {
@@ -189,6 +224,13 @@ func replayRoundTrip(
 		return RoundTripResult{}, err
 	}
 	result := RoundTripResult{Ledger: ledger}
+	liquidationLedger := ledger
+	if liquidationMarks && openingLiquidationPrice != openingPrice {
+		liquidationLedger, err = NewLedger(policy, openingLiquidationPrice, openingNativePrice...)
+		if err != nil {
+			return RoundTripResult{}, err
+		}
+	}
 	strategy, err := newAdaptiveStrategy(policy.Adaptive)
 	if err != nil {
 		return RoundTripResult{}, err
@@ -238,6 +280,17 @@ func replayRoundTrip(
 			return RoundTripResult{}, err
 		}
 		result.Ledger = marked
+
+		if liquidationMarks {
+			liquidationPrice, priceErr := roundTripObservationPrice(policy, true, observation)
+			if priceErr != nil {
+				return RoundTripResult{}, priceErr
+			}
+			liquidationLedger, err = liquidationLedger.Mark(liquidationPrice, nativePrice...)
+			if err != nil {
+				return RoundTripResult{}, err
+			}
+		}
 
 		rule := buyRule
 		if sell {
@@ -317,6 +370,16 @@ func replayRoundTrip(
 				return RoundTripResult{}, err
 			}
 			result.Ledger = applied
+			if liquidationMarks {
+				liquidationPrice, priceErr := roundTripObservationPrice(policy, true, observation)
+				if priceErr != nil {
+					return RoundTripResult{}, priceErr
+				}
+				liquidationLedger, err = liquidationLedger.Apply(fill, liquidationPrice, nativePrice...)
+				if err != nil {
+					return RoundTripResult{}, err
+				}
+			}
 			if !fill.Filled {
 				result.Counts.Refused++
 				continue
@@ -338,6 +401,11 @@ func replayRoundTrip(
 				); err != nil {
 					return RoundTripResult{}, err
 				}
+				if liquidationMarks {
+					if liquidationLedger, err = liquidationLedger.replenishFeeReserve(reserve); err != nil {
+						return RoundTripResult{}, err
+					}
+				}
 				nextAmount = capSellAmount(nextAmount, result.Ledger, reserve)
 			}
 			// A live observation that settles a decision cannot also open the
@@ -348,7 +416,7 @@ func replayRoundTrip(
 			continue
 		}
 		attemptAmount, feeReserve := paperAttempt(
-			policy, result.Ledger, sell, nextAmount, decision,
+			policy, result.Ledger, sell, nextAmount, price, decision,
 		)
 		// Spend what the previous leg produced, bounded by what is actually held,
 		// so the book can never go short and the return leg cannot invent size.
@@ -398,14 +466,17 @@ func replayRoundTrip(
 
 	for index := len(observations) - 1; index >= 0; index-- {
 		if observations[index].observable {
-			result.ClosingPrice, err = roundTripObservationPrice(
-				policy, sell, observations[index],
-			)
+			result.ClosingPrice, err = roundTripObservationPrice(policy, sell, observations[index])
 			if err != nil {
 				return RoundTripResult{}, err
 			}
 			break
 		}
+	}
+	if liquidationMarks {
+		result.LiquidationLedger = liquidationLedger
+		result.LiquidationMaxDrawdownMicros = liquidationLedger.MaxDrawdownMicros
+		result.LiquidationMaxDrawdownBPS = liquidationLedger.MaxDrawdownBPS
 	}
 	return result, nil
 }

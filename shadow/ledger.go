@@ -56,6 +56,7 @@ type Ledger struct {
 
 	PeakEquityMicros    uint64 `json:"peak_equity_micros"`
 	MaxDrawdownMicros   uint64 `json:"max_drawdown_micros"`
+	MaxDrawdownBPS      uint16 `json:"max_drawdown_bps,omitempty"`
 	OpeningEquityMicros uint64 `json:"opening_equity_micros"`
 	openingBaseUnits    uint64
 	openingQuoteUnits   uint64
@@ -436,7 +437,8 @@ func attemptFeeReserve(policy Policy, sell bool) uint64 {
 }
 
 func paperAttempt(
-	policy Policy, ledger Ledger, sell bool, normalAmount uint64, decision *AdaptiveDecision,
+	policy Policy, ledger Ledger, sell bool, normalAmount, priceMicros uint64,
+	decision *AdaptiveDecision,
 ) (uint64, uint64) {
 	if decision != nil && decision.Strategy == StrategyRiskExit && sell {
 		if ledger.separateFeeReserve() {
@@ -473,7 +475,42 @@ func paperAttempt(
 	if policy.Version == AdmittedVersion && !sell {
 		normalAmount = min(normalAmount, policy.InputAmount)
 	}
+	if policy.MaximumOrderValueMicros != 0 {
+		decimals, price := quoteDecimalsFor(policy), uint64(1_000_000)
+		if sell {
+			decimals, price = baseDecimalsFor(policy), priceMicros
+		}
+		maximum, ok := unitsAtValue(policy.MaximumOrderValueMicros, price, decimals)
+		if !ok {
+			return 0, reserve
+		}
+		normalAmount = min(normalAmount, maximum)
+		value, err := valueAt(normalAmount, price, decimals)
+		if err != nil || value < policy.MinimumOrderValueMicros {
+			return 0, reserve
+		}
+	}
 	return normalAmount, reserve
+}
+
+func quoteDecimalsFor(policy Policy) uint8 {
+	if policy.IsSell() {
+		return policy.OutputDecimals
+	}
+	return policy.InputDecimals
+}
+
+func unitsAtValue(valueMicros, priceMicros uint64, decimals uint8) (uint64, bool) {
+	if priceMicros == 0 {
+		return 0, false
+	}
+	units := new(big.Int).SetUint64(valueMicros)
+	units.Mul(units, pow10(uint(decimals)))
+	units.Div(units, new(big.Int).SetUint64(priceMicros))
+	if !units.IsUint64() {
+		return 0, false
+	}
+	return units.Uint64(), true
 }
 
 // mark revalues the book at the current price and updates the high-water mark
@@ -500,7 +537,23 @@ func (l Ledger) mark(priceMicros uint64, nativePrice ...uint64) (Ledger, error) 
 	if fall := next.PeakEquityMicros - min(equity, next.PeakEquityMicros); fall > next.MaxDrawdownMicros {
 		next.MaxDrawdownMicros = fall
 	}
+	next.MaxDrawdownBPS = max(next.MaxDrawdownBPS, drawdownBPS(next.PeakEquityMicros, equity))
 	return next, nil
+}
+
+// drawdownBPS reports a peak-relative fall with half-up rounding. Keeping the
+// denominator beside every mark matters after the book has risen: the largest
+// dollar fall and the largest percentage fall do not have to occur together.
+func drawdownBPS(peak, equity uint64) uint16 {
+	if peak == 0 || equity >= peak {
+		return 0
+	}
+	high, low := bits.Mul64(peak-equity, 10_000)
+	result, remainder := bits.Div64(high, low, peak)
+	if remainder >= peak-remainder {
+		result++
+	}
+	return uint16(min(result, uint64(math.MaxUint16)))
 }
 
 // Mark revalues without trading, so a flat day still records its drawdown.
@@ -648,6 +701,33 @@ func addSigned(left, right int64) (int64, error) {
 		return 0, errUnrepresentable
 	}
 	return left + right, nil
+}
+
+func paperCycleResult(opening, closing Ledger, marketPrice, nativePrice uint64) (int64, error) {
+	var err error
+	if opening.Policy.NativeFeePrice == nil {
+		opening, err = opening.Mark(marketPrice)
+		if err == nil {
+			closing, err = closing.Mark(marketPrice)
+		}
+	} else {
+		opening, err = opening.Mark(marketPrice, nativePrice)
+		if err == nil {
+			closing, err = closing.Mark(marketPrice, nativePrice)
+		}
+	}
+	if err != nil {
+		return 0, err
+	}
+	before, err := opening.EquityMicros(marketPrice)
+	if err != nil {
+		return 0, err
+	}
+	after, err := closing.EquityMicros(marketPrice)
+	if err != nil || before > math.MaxInt64 || after > math.MaxInt64 {
+		return 0, errUnrepresentable
+	}
+	return int64(after) - int64(before), nil
 }
 
 func (l Ledger) baseDecimals() uint8 { return baseDecimalsFor(l.Policy) }

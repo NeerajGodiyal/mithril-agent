@@ -77,9 +77,8 @@ The repository has distinct local stdio MCP surfaces:
   simulates, reads current accounts, and decodes local data;
 - `index mcp` performs bounded metadata queries over one verified rooted index;
 - agent status MCP reports bounded runtime state; and
-- `shadow research-mcp` exposes two paper-only tools. One reads challenge
-  status; the other may create a content-addressed challenger and update only
-  its dedicated challenger pointer.
+- `shadow research-mcp` exposes two paper-only tools: one reads challenge status;
+  the other may create an experiment-bound challenger and update only its pointer.
 
 The paper write tool cannot change the champion, live policy, signer, submitter,
 or operator control state. It is not exposed to the Telegram toolset.
@@ -106,9 +105,9 @@ settlement-time re-quote?”
 For example, a policy can hypothetically sell 1 SOL at or above a threshold,
 wait, re-quote the same venue, and later buy back using only the simulated USDC
 actually received. The ledger charges both fees and reports the result against
-holding. Telegram interrupts the operator only for a settled fill, risk pause,
-strategy lifecycle change, or daily result; signals, refused attempts, and
-ordinary waiting remain available in the journal and compact `/paper` status.
+holding. Telegram interrupts only for a newly opened paper order, settled fill,
+risk pause, strategy lifecycle change, or daily result; refused attempts and
+ordinary waiting remain in the journal and compact `/paper` status.
 No SOL or USDC is needed because nothing is signed, submitted, or placed on an
 exchange.
 
@@ -131,7 +130,9 @@ boundaries. A risk exit may sell the full simulated base-asset inventory because
 
 Candidate changes are deliberate and bounded. `shadow search` can write an
 immutable candidate, `shadow select` can stage it, and a running observer adopts
-it only at a UTC boundary. `shadow challenge` compares preselected champion and
+it only at a UTC boundary. The first automated champion replays both bound days
+at normal and doubled cost, then requires coverage, round trips, profit, an edge
+over holding, and compliant drawdown. `shadow challenge` compares preselected champion and
 challenger runs. For adaptive policies the chronological train/validation search
 may change the fast/slow windows, raise the minimum signal hurdle, or test a
 post-fill cooldown between one-half and twice the base value. It never lowers
@@ -141,14 +142,14 @@ rollback and still cannot authorize real trading. This is controlled parameter
 learning, not unrestricted model-weight self-training.
 
 The pinned Nous Hermes profile in [`deploy/hermes-research`](deploy/hermes-research)
-can search official sources every six hours, submit a cited typed hypothesis,
-and prepare only the next paper challenger after its evidence gates open. Its
-three explicit MCP servers expose 7 allowlisted tools; terminal, files, code execution, delegation, browser
-control, wallets, signing, and submission are absent. Research prose is
-untrusted provenance attached after the deterministic parameter search; it
-cannot change the selected parameters or act as a trading command. Hermes' own memory/skill
-self-improvement is procedural assistance; it is not treated as market-return
-learning and never receives champion-selection authority.
+uses an isolated research container with up to three parallel leaf agents every
+hour. It has no policy, journal, challenger, wallet, or writable trading
+mount. Deterministic code validates and hashes its source-cited packet. A second
+non-delegating session may submit only that exact digest and date window to a
+paper MCP server, which tests the packet's exact bounded parameter change across
+all walk-forward folds. Terminal, browser control, wallets, signing, and
+submission remain absent. Controlled replay and forward paper comparison—not
+model memory or research prose—is the strategy-learning boundary.
 
 ## Optional Devnet execution
 
@@ -292,7 +293,6 @@ live service, or mutate index history without the operator's explicit approval.
 Use [GitHub Releases](https://github.com/NeerajGodiyal/mithril-agent/releases)
 for published summaries and Git history for exact changes. A merged feature
 branch has no remaining diff against `main`; compare release tags instead.
-
 Keep this README as the entry point. Put walletless setup in
 `WALLETLESS_QUICKSTART.md`, index operation in `INDEXING.md`, installation in
 `QUICKSTART.md`, installed-pilot review in `DEMO.md`, and detailed security,

@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +41,9 @@ func (s *sourceStub) readCount() int {
 }
 
 func TestStatusCombinesMarketsWithoutExposingIDsOrHTML(t *testing.T) {
+	if strings.Contains(appJS, "safe(packet.risk_reason)") || strings.Contains(appJS, "safe(packet.market)") {
+		t.Fatal("research text is escaped before the final HTML sink")
+	}
 	if !strings.Contains(appJS, "card.style.display=card.hidden?'none':''") {
 		t.Fatal("instruction controls can override the disabled hidden state")
 	}
@@ -62,6 +67,7 @@ func TestStatusCombinesMarketsWithoutExposingIDsOrHTML(t *testing.T) {
 				State: "range", Strategy: "adaptive", NextAction: "buy",
 				DecisionReason:  "signal_below_cost_hurdle",
 				InitialLotUnits: 250_000_000, InitialLotDecimals: 6, InitialLotAsset: "USDC",
+				MinimumOrderValueMicros: 10_000_000, MaximumOrderValueMicros: 75_000_000,
 				FeeReserveLamports: 32_000_000, FeeLamports: 100_000, FeeBudgetTracked: true,
 				RemainingFeeReserveLamports: 29_000_000, EstimatedFillsRemaining: 290,
 				SlippageBPS: 100, SettleSeconds: 60,
@@ -111,6 +117,8 @@ func TestStatusCombinesMarketsWithoutExposingIDsOrHTML(t *testing.T) {
 	if view.Markets[0].InitialLotUnits != 250_000_000 ||
 		view.Markets[0].FeesMicros != 15_000 || view.Markets[0].TurnoverMicros != 300_000_000 ||
 		view.Markets[0].InitialLotAsset != "USDC" || view.Markets[0].MaxDrawdownBPS != 300 ||
+		view.Markets[0].MinimumOrderValueMicros != 10_000_000 ||
+		view.Markets[0].MaximumOrderValueMicros != 75_000_000 ||
 		!view.Markets[0].FeeBudgetTracked ||
 		view.Markets[0].RemainingFeeReserveLamports != 29_000_000 ||
 		view.Markets[0].EstimatedFillsRemaining != 290 ||
@@ -235,6 +243,81 @@ func TestStatusRejectsIncompleteStaleOrMismatchedSummaries(t *testing.T) {
 				t.Fatalf("health status = %d", response.Code)
 			}
 		})
+	}
+}
+
+func TestStatusDoesNotFailForAnExplicitlyUnconfiguredMarket(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	sol := &sourceStub{label: "SOL/USDC", snapshot: paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now, Current: "PAPER · Watching",
+		Summary: &paperstatus.CurrentSummary{
+			Market: "SOL/USDC", ValueUnit: "USD", Day: "2026-09-02", TickSeconds: 60,
+			OpeningEquityMicros: 100_000_000, EquityMicros: 101_000_000,
+			HoldBenchmarkMicros: 100_500_000,
+		},
+	}}
+	jup := &sourceStub{label: "JUP/USDC", snapshot: paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now,
+		Current: paperstatus.UnconfiguredCurrent,
+	}}
+	server, err := New([]Source{sol, jup})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return now }
+	view := server.snapshotWithRefresh(true)
+	if !view.Complete || view.Overview.EquityMicros != 101_000_000 ||
+		len(view.Markets) != 2 || view.Markets[1].Available {
+		t.Fatalf("optional market view = %+v", view)
+	}
+}
+
+func TestStatusBindsTheSavedInstructionToOneActiveGeneration(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	instruction := Instruction{
+		Version: InstructionVersion, UpdatedAt: now, Market: "all", Preference: "balanced",
+		PaperCapitalMicros: 150_000_000, MinimumOrderMicros: 5_000_000,
+		MaximumOrderMicros: 75_000_000, CadenceSeconds: 15, MaxDrawdownBPS: 300,
+	}
+	instructionPath := filepath.Join(directory, "instruction.json")
+	if err := writeInstruction(instructionPath, instruction); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := InstructionSHA256(instruction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sol := instructionSource("SOL/USDC", now, 15, 300)
+	jup := instructionSource("JUP/USDC", now, 15, 300)
+	sol.snapshot.Summary.InstructionSHA256 = digest
+	jup.snapshot.Summary.InstructionSHA256 = digest
+	server, err := New([]Source{sol, jup})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return now }
+	if err := server.EnableInstructions(instructionPath); err != nil {
+		t.Fatal(err)
+	}
+	view := server.snapshotWithRefresh(true)
+	if !view.Complete || !view.InstructionActive || view.InstructionSHA256 != digest ||
+		view.ActiveInstructionSHA256 != digest {
+		t.Fatalf("active instruction view = %+v", view)
+	}
+	jup.mu.Lock()
+	jup.snapshot.Summary.InstructionSHA256 = strings.Repeat("b", 64)
+	jup.mu.Unlock()
+	view = server.snapshotWithRefresh(true)
+	if view.Complete || view.InstructionActive || view.ActiveInstructionSHA256 != "" ||
+		view.Overview.EquityMicros != 0 {
+		t.Fatalf("mixed generation was aggregated: %+v", view)
 	}
 }
 
@@ -381,7 +464,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for path, wants := range map[string][]string{
-		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "class=\"overview-workspace\"", "id=\"market-switcher\"", "class=\"activity-table\"", "id=\"help-dialog\"", "Quick explanation", "strategy-brief", "/vendor/overclock.svg", "Automation setup", "Reviewed scope", "WIF, JTO, and PYTH", "are review candidates", "7-day checkpoint", "30 complete collector days", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Largest order", "Paper loss stop", "Activation:", "About this paper account", "bot's UTC day", "/vendor/lightweight-charts-5.2.1.js", "TradingView Lightweight Charts™"},
+		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "class=\"overview-workspace\"", "id=\"market-switcher\"", "class=\"activity-table\"", "id=\"help-dialog\"", "Quick explanation", "strategy-brief", "/vendor/overclock.svg", "Automation setup", "Reviewed scope", "WIF, JTO, and PYTH", "Recorded-journal replay and doubled-cost scenario checks run in minutes", "six-hour paper checkpoint", "without blocking paper development", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Total paper budget", "Smallest order", "Largest order", "Paper loss stop", "saving never restarts Mithril", "About this paper account", "bot's UTC day", "/vendor/lightweight-charts-5.2.1.js", "TradingView Lightweight Charts™"},
 		"/app.css": {
 			"@font-face", "/vendor/space-grotesk-latin.woff2", "--canvas: #000", "--green: #86efac", "--line-strong: #353535", "--text: #e7e7e7", "--subtle: #7f7f7f",
 			".tabs {", "position: fixed", ".tab.active", ".brand-logo", ".panel:focus-visible",
@@ -392,7 +475,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"@media (max-width: 1023px)", "@media (max-width: 767px)", "@media (max-width: 430px)", "prefers-reduced-motion",
 		},
 		"/app.js": {
-			"Paper account now", "Started today", "Account P&L today", "Versus holding", "Filled paper orders", "Compared with holding",
+			"Paper account now", "Start of this run", "Result this run", "Versus holding", "Filled paper orders", "Compared with holding",
 			"<button class=\"help\"", "data-help-copy=", "helpDialog.showModal()", "Waiting for fresh prices",
 			"?fresh=1", "Refreshing…", "Updated ✓",
 			"Checked ✓", "Data delayed", "requestSequence",
@@ -406,13 +489,14 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"amount>=1000000n?2:amount>=10000n?4:6",
 			"marketPriceChart", "LightweightCharts.createChart", "chartSegments", "View exact chart values", "data-chart-action=\"zoom-in\"", "activeChart.remove()", "Bot strategy", "If simply held", "Ahead by ", "Behind by ", "older events omitted", "Proposal ready", "Nous Hermes",
 			"chartPointAvailable", "key!=='price_micros'||integer(point[key])>0n", "m.state==='waiting for data'", "price-values", "performance-values", "pnl===0n?'→'", "Paper values')+' unavailable", "readout.innerHTML=original",
-			"Rejected output", "No valid run yet", "No active plan was changed.", "open-order-history", "Starting trade lot", "Loss pause",
+			"Rejected output", "No valid run yet", "Deterministic replay gates decide whether any paper plan may change.", "open-order-history", "Starting trade lot", "Loss pause",
 			"Minimum opportunity", "saveInstruction", "X-Mithril-Paper-Request",
-			"Fee budget left", "Orders left today", "No more orders today",
+			"Fee budget left", "Orders left this session", "No more orders this run",
 			"Orders paused until tomorrow",
-			"Total traded today", "Modeled fees today", "renderActiveLimits",
-			"High concentration", "Largest market", "of the starting account", "Current first leg",
-			"Saving this does not change the active bots", "above this request",
+			"Total traded this session", "Modeled fees this session", "renderActiveLimits",
+			"Largest market", "of the starting account", "Active order range",
+			"This exact paper setup is active in every current market", "Saved. The paper services are validating and applying this setup",
+			"current.instruction_active", "instruction-cadence", "instruction-drawdown",
 			"Save experiment request", "validInstructionRequest",
 			"decisionReason", "marketStatus", "Fixed paper plan", "const watching=", "const deciding=",
 			"Limited price data", "coverage_bps", "marketDataHealthy", "rememberChartRange",

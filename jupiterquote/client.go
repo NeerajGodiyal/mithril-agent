@@ -13,6 +13,7 @@ import (
 	"math/bits"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +30,9 @@ const (
 	maxAddressTables   = 32
 )
 
+// JupiterRateStateEnvironment names the private cross-process request-gate path.
+const JupiterRateStateEnvironment = "MITHRIL_AGENT_JUPITER_RATE_STATE"
+
 var ErrTemporarilyUnavailable = errors.New("Jupiter quote provider is temporarily unavailable")
 
 type Request struct {
@@ -44,6 +48,7 @@ type Result struct {
 	InputAmount     uint64    `json:"input_amount"`
 	EstimatedOutput uint64    `json:"estimated_output"`
 	MinimumOutput   uint64    `json:"minimum_output"`
+	PriceImpactPct  string    `json:"-"`
 	ReceivedAt      time.Time `json:"-"`
 	ResponseSHA256  string    `json:"-"`
 }
@@ -117,6 +122,7 @@ type Client struct {
 	httpClient *http.Client
 	endpoint   string
 	apiKey     string
+	gate       requestGate
 }
 
 // New returns a read-only client pinned to Jupiter's Swap V2 build endpoint.
@@ -132,10 +138,15 @@ func New(apiKey string) (*Client, error) {
 	// A protected service should not send its credential through an
 	// ambient HTTPS_PROXY inherited from the host.
 	transport.Proxy = nil
-	return newClient(buildEndpoint, apiKey, &http.Client{
+	client, err := newClient(buildEndpoint, apiKey, &http.Client{
 		Transport: transport,
 		Timeout:   15 * time.Second,
 	})
+	if err != nil {
+		return nil, err
+	}
+	client.gate = newRequestGate(os.Getenv(JupiterRateStateEnvironment), apiKey != "")
+	return client, nil
 }
 
 func newClient(endpoint, apiKey string, httpClient *http.Client) (*Client, error) {
@@ -206,6 +217,11 @@ func (c *Client) fetch(ctx context.Context, request Request) ([]byte, error) {
 			return nil, errors.New("destination token account is invalid")
 		}
 	}
+	if c.gate != nil {
+		if err := c.gate.Wait(ctx); err != nil {
+			return nil, ErrTemporarilyUnavailable
+		}
+	}
 
 	endpoint, err := url.Parse(c.endpoint)
 	if err != nil {
@@ -263,6 +279,7 @@ type wireResult struct {
 	InAmount             string              `json:"inAmount"`
 	OutAmount            string              `json:"outAmount"`
 	OtherAmountThreshold string              `json:"otherAmountThreshold"`
+	PriceImpactPct       string              `json:"priceImpactPct"`
 	SwapMode             string              `json:"swapMode"`
 	SlippageBPS          uint16              `json:"slippageBps"`
 	RoutePlan            []wireRoute         `json:"routePlan"`
@@ -325,7 +342,10 @@ func decodeResult(data []byte, request Request) (Result, error) {
 	if err != nil {
 		return Result{}, errors.New("Jupiter quote minimum output is invalid")
 	}
-	result := Result{InputAmount: input, EstimatedOutput: estimated, MinimumOutput: minimum}
+	result := Result{
+		InputAmount: input, EstimatedOutput: estimated, MinimumOutput: minimum,
+		PriceImpactPct: response.PriceImpactPct,
+	}
 	if err := result.Validate(request); err != nil {
 		return Result{}, err
 	}

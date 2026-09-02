@@ -40,6 +40,10 @@ you; everything else has a working default.
 	                    qualified evidence for an admitted candidate market
 	--admission-journal PATH
 	                    exact journal bound by that artifact
+	--provisional-artifact PATH
+	                    six-hour paper-only evidence for a candidate market
+	--provisional-journal PATH
+	                    exact journal bound by that checkpoint
   --budget-sol N    total simulated SOL budget, including fees and setup rent
   --budget-usdc N   simulated USDC budget for non-SOL token markets
   --fee-reserve-sol N
@@ -84,6 +88,8 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	market := flags.String("market", "", "paper mandate market")
 	admissionArtifact := flags.String("admission-artifact", "", "qualified market evidence")
 	admissionJournal := flags.String("admission-journal", "", "market evidence journal")
+	provisionalArtifact := flags.String("provisional-artifact", "", "six-hour paper-only market evidence")
+	provisionalJournal := flags.String("provisional-journal", "", "provisional market evidence journal")
 	budgetSOL := flags.String("budget-sol", "", "total simulated SOL budget")
 	budgetUSDC := flags.String("budget-usdc", "", "simulated USDC budget")
 	feeReserveSOL := flags.String(
@@ -137,10 +143,20 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	}
 	mandate := explicit["market"] || explicit["budget-sol"] || explicit["budget-usdc"] ||
 		explicit["fee-reserve-sol"] || explicit["setup-rent-sol"] || explicit["drawdown-stop-bps"]
-	if !mandate && (*admissionArtifact != "" || *admissionJournal != "") {
+	qualifiedEvidence := *admissionArtifact != "" || *admissionJournal != ""
+	provisionalEvidence := *provisionalArtifact != "" || *provisionalJournal != ""
+	if (*admissionArtifact == "") != (*admissionJournal == "") ||
+		(*provisionalArtifact == "") != (*provisionalJournal == "") {
+		return errors.New("each market evidence artifact requires its matching journal")
+	}
+	if qualifiedEvidence && provisionalEvidence {
+		return errors.New("choose qualified or provisional market evidence, not both")
+	}
+	if !mandate && (qualifiedEvidence || provisionalEvidence) {
 		return errors.New("market admission flags require an admitted paper mandate")
 	}
 	var admission marketadmission.Artifact
+	var provisional marketadmission.ProvisionalArtifact
 	if mandate && !explicit["fee-lamports"] {
 		*feeLamports = defaultPaperFeeLamports
 	}
@@ -158,23 +174,38 @@ func runShadowPolicy(args []string, output io.Writer) error {
 		}
 		admitted := shadow.AdmittedMarket(*market)
 		if admitted {
-			var err error
-			admission, err = loadQualifiedMarketAdmission(
-				*admissionArtifact, *admissionJournal, time.Now(),
-			)
-			if err != nil {
-				return err
+			if provisionalEvidence {
+				var err error
+				provisional, err = loadProvisionalMarketAdmission(
+					*provisionalArtifact, *provisionalJournal, time.Now(),
+				)
+				if err != nil {
+					return err
+				}
+			} else {
+				var err error
+				admission, err = loadQualifiedMarketAdmission(
+					*admissionArtifact, *admissionJournal, time.Now(),
+				)
+				if err != nil {
+					return err
+				}
 			}
-			if admission.Candidate.Market != *market {
+			candidate := admission.Candidate
+			admissionObserve := admission.Observe
+			if provisionalEvidence {
+				candidate, admissionObserve = provisional.Candidate, provisional.Observe
+			}
+			if candidate.Market != *market {
 				return errors.New("market admission artifact does not match --market")
 			}
-			if *observe != admission.Observe {
-				return errors.New("--observe must match the qualified market evidence")
+			if *observe != admissionObserve {
+				return errors.New("--observe must match the market evidence")
 			}
-			if *slippageBPS != uint(admission.Candidate.QuoteSlippageBPS) {
-				return errors.New("--slippage-bps must match the qualified market evidence")
+			if *slippageBPS != uint(candidate.QuoteSlippageBPS) {
+				return errors.New("--slippage-bps must match the market evidence")
 			}
-		} else if *admissionArtifact != "" || *admissionJournal != "" {
+		} else if qualifiedEvidence || provisionalEvidence {
 			return errors.New("market admission flags are only for admitted candidate markets")
 		}
 		if !explicit["drawdown-stop-bps"] {
@@ -221,7 +252,11 @@ func runShadowPolicy(args []string, output io.Writer) error {
 			if err != nil {
 				return err
 			}
-			if admitted && tradeAmount != admission.Candidate.QuoteNotionalUSDC {
+			quoteNotional := admission.Candidate.QuoteNotionalUSDC
+			if provisionalEvidence {
+				quoteNotional = provisional.Candidate.QuoteNotionalUSDC
+			}
+			if admitted && tradeAmount != quoteNotional {
 				return errors.New("admitted paper budget must match the qualified quote notional")
 			}
 			feeReserveLamports, err = parseDecimalUnits9(*feeReserveSOL, "paper SOL fee reserve")
@@ -248,10 +283,17 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	if *adaptive {
 		if mandate && (*market == shadow.MarketJUPUSDC || shadow.AdmittedMarket(*market)) {
 			if shadow.AdmittedMarket(*market) {
-				policy, err = buildAdaptiveAdmittedPolicy(
-					admission, tradeAmount, feeReserveLamports, setupRentLamports,
-					uint16(*slippageBPS), *feeLamports, *observe, *tickSeconds,
-				)
+				if provisionalEvidence {
+					policy, err = buildAdaptiveProvisionalPolicy(
+						provisional, tradeAmount, feeReserveLamports, setupRentLamports,
+						uint16(*slippageBPS), *feeLamports, *observe, *tickSeconds,
+					)
+				} else {
+					policy, err = buildAdaptiveAdmittedPolicy(
+						admission, tradeAmount, feeReserveLamports, setupRentLamports,
+						uint16(*slippageBPS), *feeLamports, *observe, *tickSeconds,
+					)
+				}
 			} else {
 				policy, err = buildAdaptiveJUPPolicy(
 					tradeAmount, feeReserveLamports, setupRentLamports,
@@ -313,6 +355,7 @@ func runShadowPolicy(args []string, output io.Writer) error {
 		"It holds no wallet signing key and cannot sign, submit, or spend anything.\n",
 		*outPath, mandateSummary, shadowRunHint(
 			policy, *outPath, *admissionArtifact, *admissionJournal,
+			*provisionalArtifact, *provisionalJournal,
 		))
 	return err
 }
@@ -396,12 +439,52 @@ func buildAdaptiveAdmittedPolicy(
 	if err != nil {
 		return shadow.Policy{}, err
 	}
-	return buildAdaptiveQuoteMarketPolicy(
+	policy, err := buildAdaptiveQuoteMarketPolicy(
 		shadow.AdmittedVersion, artifact.Candidate.Market, artifact.Candidate.Pyth.Feed,
 		primary, secondary, artifact.ContentSHA256,
 		quoteBudget, feeReserveLamports, setupRentLamports,
 		slippageBPS, feeLamports, observe, tickSeconds,
 	)
+	if err != nil {
+		return shadow.Policy{}, err
+	}
+	policy.MarketEvidenceClass = shadow.MarketEvidenceLongRun
+	return policy, policy.Validate()
+}
+
+func buildAdaptiveProvisionalPolicy(
+	artifact marketadmission.ProvisionalArtifact,
+	quoteBudget, feeReserveLamports, setupRentLamports uint64,
+	slippageBPS uint16, feeLamports uint64,
+	observe string,
+	tickSeconds uint64,
+) (shadow.Policy, error) {
+	if !artifact.ProvisionalPaperReady || artifact.Validate() != nil {
+		return shadow.Policy{}, errors.New("provisional market evidence is not ready for paper testing")
+	}
+	if observe != artifact.Observe || quoteBudget != artifact.Candidate.QuoteNotionalUSDC ||
+		slippageBPS != artifact.Candidate.QuoteSlippageBPS {
+		return shadow.Policy{}, errors.New("provisional policy inputs do not match market evidence")
+	}
+	primary, err := artifact.Candidate.Pyth.IdentitySHA256()
+	if err != nil {
+		return shadow.Policy{}, err
+	}
+	secondary, err := artifact.Candidate.Kraken.IdentitySHA256()
+	if err != nil {
+		return shadow.Policy{}, err
+	}
+	policy, err := buildAdaptiveQuoteMarketPolicy(
+		shadow.AdmittedVersion, artifact.Candidate.Market, artifact.Candidate.Pyth.Feed,
+		primary, secondary, artifact.ContentSHA256,
+		quoteBudget, feeReserveLamports, setupRentLamports,
+		slippageBPS, feeLamports, observe, tickSeconds,
+	)
+	if err != nil {
+		return shadow.Policy{}, err
+	}
+	policy.MarketEvidenceClass = shadow.MarketEvidenceDevelopmentProvisional
+	return policy, policy.Validate()
 }
 
 func buildAdaptiveQuoteMarketPolicy(
@@ -486,18 +569,27 @@ func buildAdaptiveQuoteMarketPolicy(
 
 func shadowRunHint(
 	policy shadow.Policy,
-	path, admissionArtifact, admissionJournal string,
+	path, admissionArtifact, admissionJournal, provisionalArtifact, provisionalJournal string,
 ) string {
 	if policy.Cluster == shadow.Mainnet {
 		admission := ""
 		if policy.Version == shadow.AdmittedVersion {
-			admission = fmt.Sprintf(" --admission-artifact %s --admission-journal %s",
-				admissionArtifact, admissionJournal)
+			if policy.MarketEvidenceClass == shadow.MarketEvidenceDevelopmentProvisional {
+				admission = fmt.Sprintf(" --provisional-artifact %s --provisional-journal %s",
+					provisionalArtifact, provisionalJournal)
+			} else {
+				admission = fmt.Sprintf(" --admission-artifact %s --admission-journal %s",
+					admissionArtifact, admissionJournal)
+			}
 		}
-		return fmt.Sprintf("Run it with:\n  mithril-agent shadow run --policy %s --dir DIR%s\n\n"+
+		portfolio := ""
+		if policy.Version == shadow.AdmittedVersion {
+			portfolio = " --portfolio PORTFOLIO --portfolio-book BOOK"
+		}
+		return fmt.Sprintf("Run it with:\n  mithril-agent shadow run --policy %s --dir DIR%s%s\n\n"+
 			"After N complete UTC days, verify them with:\n  mithril-agent shadow review --policy %s --dir DIR --days N\n\n"+
 			"Keyless Jupiter access needs no account and is suitable for testing. For continuous production operation, Jupiter recommends a free or paid API key; keep MITHRIL_AGENT_JUPITER_API_KEY scoped to this read-only service.",
-			path, admission,
+			path, portfolio, admission,
 			path)
 	}
 	return fmt.Sprintf("Run the Devnet Orca route stored in this policy:\n"+

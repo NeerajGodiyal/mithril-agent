@@ -25,6 +25,7 @@ const shadowSearchUsage = `Usage: mithril-agent shadow search --policy PATH --di
                                    --train-day YYYY-MM-DD
                                    --validation-day YYYY-MM-DD
                                    [--base-policy PATH]
+                                   [--instruction PATH]
                                    [--spread-bps N] [--candidate-out PATH]
 
 Chooses bounded strategy parameters from one completed UTC day's recorded
@@ -105,6 +106,7 @@ func runShadowSearch(args []string, output io.Writer) error {
 	flags.SetOutput(io.Discard)
 	policyPath := flags.String("policy", "", "shadow policy JSON")
 	basePolicyPath := flags.String("base-policy", "", "immutable base policy for an iterative candidate")
+	instructionPath := flags.String("instruction", "", "operator paper experiment instruction")
 	directory := flags.String("dir", "", "directory holding recorded shadow journals")
 	trainDay := flags.String("train-day", "", "training UTC day, YYYY-MM-DD")
 	validationDay := flags.String("validation-day", "", "later validation UTC day, YYYY-MM-DD")
@@ -127,6 +129,9 @@ func runShadowSearch(args []string, output io.Writer) error {
 	if *candidateOut != "" &&
 		(!filepath.IsAbs(*candidateOut) || filepath.Clean(*candidateOut) != *candidateOut) {
 		return errors.New("--candidate-out must be an absolute, clean path")
+	}
+	if *instructionPath != "" && (*candidateOut == "" || !absoluteClean(*instructionPath)) {
+		return errors.New("--instruction requires an absolute clean path and --candidate-out")
 	}
 	trainAt, err := time.Parse("2006-01-02", *trainDay)
 	if err != nil {
@@ -186,6 +191,15 @@ func runShadowSearch(args []string, output io.Writer) error {
 		)
 		if err != nil {
 			return err
+		}
+		if *instructionPath != "" {
+			candidate.Experiment, err = loadShadowPaperExperiment(*instructionPath, candidate.Policy)
+			if err != nil {
+				return err
+			}
+			if err := candidate.validateAgainst(basePolicy); err != nil {
+				return err
+			}
 		}
 		if err := writeShadowPaperCandidate(*candidateOut, candidate); err != nil {
 			return err
@@ -297,7 +311,7 @@ func searchShadowCandidate(
 	policy shadow.Policy, trainPrices, validationPrices []uint64, spreadBPS uint64,
 ) (shadowSearchResult, error) {
 	return searchShadowCandidateScored(
-		policy, trainPrices, validationPrices, spreadBPS,
+		policy, trainPrices, validationPrices, spreadBPS, nil,
 		func(candidate shadow.Policy) (shadowSearchScore, error) {
 			return scoreShadowCandidate(candidate, trainPrices, spreadBPS)
 		},
@@ -312,7 +326,7 @@ func searchShadowCandidateTicks(
 ) (shadowSearchResult, error) {
 	trainPrices, validationPrices := observedPrices(trainTicks), observedPrices(validationTicks)
 	return searchShadowCandidateScored(
-		policy, trainPrices, validationPrices, spreadBPS,
+		policy, trainPrices, validationPrices, spreadBPS, nil,
 		func(candidate shadow.Policy) (shadowSearchScore, error) {
 			return scoreShadowCandidateTicks(candidate, trainTicks, spreadBPS)
 		},
@@ -324,6 +338,28 @@ func searchShadowCandidateTicks(
 
 func searchShadowWalkForward(
 	policy shadow.Policy, days []shadowWalkForwardDay, spreadBPS uint64,
+) (shadowSearchResult, error) {
+	return searchShadowWalkForwardForPreference(policy, policy, days, spreadBPS, "balanced")
+}
+
+func searchShadowWalkForwardForPreference(
+	policy, immutableBase shadow.Policy, days []shadowWalkForwardDay, spreadBPS uint64, preference string,
+) (shadowSearchResult, error) {
+	var adaptiveCandidates []shadow.Policy
+	if policy.Adaptive != nil {
+		var err error
+		adaptiveCandidates, err = adaptiveSearchPoliciesForPreference(policy, immutableBase, preference)
+		if err != nil {
+			return shadowSearchResult{}, err
+		}
+	} else if preference != "balanced" {
+		return shadowSearchResult{}, errors.New("paper research preference requires an adaptive policy")
+	}
+	return searchShadowWalkForwardCandidates(policy, days, spreadBPS, adaptiveCandidates)
+}
+
+func searchShadowWalkForwardCandidates(
+	policy shadow.Policy, days []shadowWalkForwardDay, spreadBPS uint64, adaptiveCandidates []shadow.Policy,
 ) (shadowSearchResult, error) {
 	if len(days) != shadowWalkForwardWindows+1 {
 		return shadowSearchResult{}, errors.New("walk-forward admission needs eight consecutive completed days")
@@ -337,8 +373,14 @@ func searchShadowWalkForward(
 	var final shadowSearchResult
 	for index := 0; index < shadowWalkForwardWindows; index++ {
 		training, validation := days[index], days[index+1]
-		result, err := searchShadowCandidateTicks(
-			policy, training.Ticks, validation.Ticks, spreadBPS,
+		result, err := searchShadowCandidateScored(
+			policy, observedPrices(training.Ticks), observedPrices(validation.Ticks), spreadBPS, adaptiveCandidates,
+			func(candidate shadow.Policy) (shadowSearchScore, error) {
+				return scoreShadowCandidateTicks(candidate, training.Ticks, spreadBPS)
+			},
+			func(candidate shadow.Policy) (shadowSearchScore, error) {
+				return scoreShadowCandidateTicks(candidate, validation.Ticks, spreadBPS)
+			},
 		)
 		if err != nil {
 			return shadowSearchResult{}, fmt.Errorf("walk-forward fold %d: %w", index+1, err)
@@ -468,6 +510,7 @@ func searchShadowCandidateScored(
 	policy shadow.Policy,
 	trainPrices, validationPrices []uint64,
 	spreadBPS uint64,
+	adaptiveCandidates []shadow.Policy,
 	trainingScore, validationScore func(shadow.Policy) (shadowSearchScore, error),
 ) (shadowSearchResult, error) {
 	if policy.Adaptive == nil && !policy.IsSell() {
@@ -480,7 +523,10 @@ func searchShadowCandidateScored(
 		return shadowSearchResult{}, errors.New("shadow search spread must be between 1 and 9999 basis points")
 	}
 	if policy.Adaptive != nil {
-		return searchAdaptiveCandidateScored(policy, spreadBPS, trainingScore, validationScore)
+		if adaptiveCandidates == nil {
+			adaptiveCandidates = adaptiveSearchPolicies(policy)
+		}
+		return searchAdaptiveCandidateScored(policy, adaptiveCandidates, spreadBPS, trainingScore, validationScore)
 	}
 	levels := shadowResearchLevels(trainPrices)
 	if len(levels) < 2 {
@@ -536,12 +582,13 @@ func searchShadowCandidateScored(
 
 func searchAdaptiveCandidateScored(
 	policy shadow.Policy,
+	candidates []shadow.Policy,
 	spreadBPS uint64,
 	trainingScore, validationScore func(shadow.Policy) (shadowSearchScore, error),
 ) (shadowSearchResult, error) {
 	var best shadowSearchResult
 	bestSet := false
-	for _, candidate := range adaptiveSearchPolicies(policy) {
+	for _, candidate := range candidates {
 		training, err := trainingScore(candidate)
 		if err != nil {
 			return shadowSearchResult{}, err
@@ -630,6 +677,50 @@ func adaptiveSearchPolicies(policy shadow.Policy) []shadow.Policy {
 		}
 	}
 	return candidates
+}
+
+func adaptiveSearchPoliciesForPreference(
+	policy, immutableBase shadow.Policy, preference string,
+) ([]shadow.Policy, error) {
+	if policy.Adaptive == nil || immutableBase.Adaptive == nil {
+		return nil, errors.New("paper research preference requires an adaptive policy")
+	}
+	if preference != "balanced" && preference != "more-opportunities" && preference != "more-selective" {
+		return nil, errors.New("paper research preference is invalid")
+	}
+	candidates := adaptiveSearchPolicies(policy)
+	if preference == "balanced" {
+		return candidates, nil
+	}
+	filtered := candidates[:0]
+	for _, candidate := range candidates {
+		if adaptivePolicyMatchesPreference(*immutableBase.Adaptive, *candidate.Adaptive, preference) {
+			filtered = append(filtered, candidate)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, errors.New("no bounded adaptive candidates match the operator research preference")
+	}
+	return filtered, nil
+}
+
+func adaptivePolicyMatchesPreference(
+	base, candidate shadow.AdaptivePolicy, preference string,
+) bool {
+	switch preference {
+	case "balanced":
+		return true
+	case "more-opportunities":
+		return candidate.MinimumSignalBPS == base.MinimumSignalBPS &&
+			candidate.CooldownSeconds <= base.CooldownSeconds
+	case "more-selective":
+		return candidate.MinimumSignalBPS >= base.MinimumSignalBPS &&
+			candidate.CooldownSeconds >= base.CooldownSeconds &&
+			(candidate.MinimumSignalBPS > base.MinimumSignalBPS ||
+				candidate.CooldownSeconds > base.CooldownSeconds)
+	default:
+		return false
+	}
 }
 
 func validateAdaptiveCandidateDelta(base, candidate shadow.AdaptivePolicy) error {

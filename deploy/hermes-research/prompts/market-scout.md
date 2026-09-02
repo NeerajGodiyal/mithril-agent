@@ -1,9 +1,18 @@
 Research material Solana protocol, infrastructure, liquidity, market, and
 security changes published or occurring in the previous 12 hours. Use only
 current primary sources and the configured Mithril and Solana evidence tools.
+The trusted run-time availability line appended by the host is authoritative:
+never claim Mithril evidence was consulted when that line marks it unavailable.
 Call `web_extract` with one
 URL per invocation and reject any returned URL, domain, title, or content that
 does not match the requested source.
+
+When `delegate_task` is available, use one batch call with exactly three leaf
+tasks: protocol and infrastructure changes; market, liquidity, and executable
+route evidence; and a skeptical independent source cross-check. Give each task
+the source-verification and one-URL extraction rules from this prompt, keep its
+answer compact, and independently verify every returned URL before using it.
+Delegation is research-only. Never delegate a Mithril paper tool call.
 
 Use this operator-owned official roster so search ranking cannot silently omit
 a release or incident category:
@@ -57,6 +66,10 @@ of the bull case and must state pass or reject with a reason. The no-trade case
 is a valid result, not a failure to answer. State unknowns instead of guessing.
 This research may propose experiments; it cannot change the market allowlist,
 policy, risk limits, paper balances, or execution path.
+Use the host-produced prior-day diagnostics to explain whether the current
+paper policy was observable, active, costly, or inconclusive. Internal paper
+results may falsify or prioritize a hypothesis; they never count as an external
+source and never prove future profit.
 
 Do not recommend paper admission until an operator-owned point-in-time
 collector exists and has at least 30 consecutive complete days of evidence,
@@ -84,14 +97,17 @@ configured; never work around it with scraping or an unofficial mirror.
 General news and social posts are discovery hints only. Follow each material
 claim to a direct protocol, repository, provider, regulator, or status source
 before using it. Do not ingest or deliver through Telegram; the separate
-deterministic Mithril service owns operator notifications.
+deterministic mithril-agent service owns operator notifications.
 
-If the paper challenge-status tool is available, read it first. It is withheld
-until the operator has selected the first champion; before that gate, research
-and report hypotheses but do not try to create a challenger. If the tool is
-available, create at most one challenger only when no challenger is active, the
-completed prior challenge is rejected, or its exact artifact was selected by
-the independent paper gate. Supply the two UTC days immediately preceding today
+The SOL server is `mithril_paper`; the JUP server is `mithril_paper_jup`. For
+each available server, read its namespaced challenge-status tool first. A server
+is withheld until that market has its first champion; before that market's gate,
+research and report hypotheses but do not try to create its challenger. Never
+infer one market's state, evidence, or parameter change from the other. Use a
+market-specific hypothesis and create at most one challenger per market per run,
+only when that market has no active challenger, its completed prior challenge is
+rejected, or its exact artifact was selected by the independent paper gate.
+Supply the two UTC days immediately preceding today
 as the final training/validation anchor. The server derives and requires all
 eight consecutive completed journals needed for seven chronological
 train/out-of-sample folds; do not fall back to older or cherry-picked dates
@@ -116,7 +132,7 @@ tool for `retrieved_at`; do not invent it.
   "hypothesis_id": "lowercase-id",
   "created_at": "UTC RFC3339 timestamp",
   "valid_until": "UTC RFC3339 timestamp no more than 12 hours later",
-  "market": "all or BASE/USDC",
+  "market": "BASE/USDC",
   "disposition": "candidate, no_change, or blocked",
   "verified_facts": [{
     "id": "lowercase-id",
@@ -139,12 +155,16 @@ tool for `retrieved_at`; do not invent it.
 }
 
 Allowed parameter names are `fast_window`, `slow_window`,
-`minimum_signal_bps`, `max_volatility_bps`, `max_quote_impact_bps`,
-`max_drawdown_bps`, `cooldown_seconds`, and `settle_seconds`. A `candidate`
-needs at least one verified fact, two organization-independent timestamped
-HTTPS sources for every verified fact, an independent `pass`, and at least one
+`minimum_signal_bps`, and `cooldown_seconds`. A `candidate`
+needs at least one fact marked `verified`, two organization-independent timestamped
+HTTPS sources for every such fact, a Hermes `risk_veto` marked `pass`, and at least one
 parameter change. Otherwise use `no_change` or `blocked`, set the veto to
 `reject`, and return an empty parameter-diff array. Do not output
-`content_sha256`; deterministic Mithril code adds and verifies it. Do not edit
+`content_sha256`; deterministic mithril-agent code adds and verifies it. Do not edit
 policy/candidate JSON directly, select a champion, authorize an action, or
 suggest live execution.
+
+`rejection_conditions` must contain one to twelve non-empty strings. Each string
+must be at most 600 UTF-8 bytes, have no leading or trailing whitespace, and state
+one concrete falsifiable condition; never return an empty, null, or whitespace-only
+condition.

@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for a new Mithril paper configuration
+
+[Path]
+PathChanged=/var/lib/mithril-agent-dashboard/instruction.json
+Unit=mithril-agent-paper-instruction.service
+
+[Install]
+WantedBy=multi-user.target

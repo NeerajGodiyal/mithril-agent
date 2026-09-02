@@ -1,8 +1,9 @@
 [Unit]
 Description=Mithril agent challenger paper pointer watcher
+PartOf=mithril-agent-paper-generation.target
 
 [Path]
-PathChanged=/var/lib/mithril-agent-research/challenger/active.json
+PathChanged=/etc/mithril-agent/paper-active/selection/sol/challenger/active.json
 Unit=mithril-agent-paper-challenger.service
 
 [Install]

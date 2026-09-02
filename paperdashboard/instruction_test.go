@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 )
 
 func TestInstructionIsBoundedPrivateAndSeparateFromTradeAuthority(t *testing.T) {
@@ -20,21 +22,25 @@ func TestInstructionIsBoundedPrivateAndSeparateFromTradeAuthority(t *testing.T) 
 		t.Fatal(err)
 	}
 	path := filepath.Join(directory, "instruction.json")
-	server, err := New([]Source{&sourceStub{label: "SOL/USDC"}, &sourceStub{label: "JUP/USDC"}})
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	server, err := New([]Source{
+		instructionSource("SOL/USDC", now, 15, 300),
+		instructionSource("JUP/USDC", now, 15, 300),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := server.EnableInstructions(path); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	server.now = func() time.Time { return now }
 	if !server.validInstructionRequest(instructionRequest{
-		Market: "JTO/USDC", Preference: "balanced", PaperCapitalMicros: 270_000_000,
-		MinimumOrderMicros: 10_000_000, MaximumOrderMicros: 200_000_000,
-		CadenceSeconds: 15, MaxDrawdownBPS: 300,
+		Market: "all", Preference: "balanced",
+		PaperCapitalMicros: 150_000_000, MinimumOrderMicros: 10_000_000,
+		MaximumOrderMicros: 75_000_000,
+		CadenceSeconds:     15, MaxDrawdownBPS: 300,
 	}) {
-		t.Fatal("reviewed observation candidate was not available as a research priority")
+		t.Fatal("bound research policy was not available as a research priority")
 	}
 
 	post := func(body string, header bool) *httptest.ResponseRecorder {
@@ -50,11 +56,14 @@ func TestInstructionIsBoundedPrivateAndSeparateFromTradeAuthority(t *testing.T) 
 	if response := post(`{"market":"SOL/USDC","preference":"more-opportunities"}`, false); response.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin-style request status = %d", response.Code)
 	}
-	valid := `"preference":"more-opportunities","paper_capital_micros":270000000,"minimum_order_micros":10000000,"maximum_order_micros":200000000,"cadence_seconds":15,"max_drawdown_bps":300`
+	valid := `"preference":"more-opportunities","paper_capital_micros":150000000,"minimum_order_micros":10000000,"maximum_order_micros":75000000,"cadence_seconds":15,"max_drawdown_bps":300`
 	if response := post(`{"market":"BTC/USDC",`+valid+`}`, true); response.Code != http.StatusBadRequest {
 		t.Fatalf("unconfigured market status = %d", response.Code)
 	}
-	response := post(`{"market":"SOL/USDC",`+valid+`}`, true)
+	if response := post(`{"market":"SOL/USDC",`+valid+`}`, true); response.Code != http.StatusBadRequest {
+		t.Fatalf("specific market status = %d", response.Code)
+	}
+	response := post(`{"market":"all",`+valid+`}`, true)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("save status = %d: %s", response.Code, response.Body.String())
 	}
@@ -67,9 +76,9 @@ func TestInstructionIsBoundedPrivateAndSeparateFromTradeAuthority(t *testing.T) 
 	}
 	var saved Instruction
 	if err := json.Unmarshal(response.Body.Bytes(), &saved); err != nil ||
-		saved.Market != "SOL/USDC" || saved.Preference != "more-opportunities" ||
-		saved.PaperCapitalMicros != 270_000_000 || saved.MinimumOrderMicros != 10_000_000 ||
-		saved.MaximumOrderMicros != 200_000_000 || saved.CadenceSeconds != 15 ||
+		saved.Market != "all" || saved.Preference != "more-opportunities" ||
+		saved.Version != instructionVersion || saved.PaperCapitalMicros != 150_000_000 ||
+		saved.MinimumOrderMicros != 10_000_000 || saved.MaximumOrderMicros != 75_000_000 || saved.CadenceSeconds != 15 ||
 		saved.MaxDrawdownBPS != 300 ||
 		!saved.UpdatedAt.Equal(now) {
 		t.Fatalf("saved instruction = %+v, err = %v", saved, err)
@@ -77,8 +86,8 @@ func TestInstructionIsBoundedPrivateAndSeparateFromTradeAuthority(t *testing.T) 
 	rendered, err := RenderInstruction(path)
 	if err != nil || !strings.Contains(rendered, "paper-experiment request (not trade authority)") ||
 		!strings.Contains(rendered, "without lowering any guardrail") ||
-		!strings.Contains(rendered, "$270.00 paper capital") ||
-		!strings.Contains(rendered, "orders from $10.00 to $200.00") ||
+		!strings.Contains(rendered, "$150.00 paper capital") ||
+		!strings.Contains(rendered, "orders from $10.00 to $75.00") ||
 		strings.Contains(rendered, "place an order now") {
 		t.Fatalf("rendered instruction = %q, err = %v", rendered, err)
 	}
@@ -87,6 +96,65 @@ func TestInstructionIsBoundedPrivateAndSeparateFromTradeAuthority(t *testing.T) 
 		view.InstructionError || len(view.ResearchMarkets) != 3 {
 		t.Fatalf("dashboard instruction = %+v", view.Instruction)
 	}
+}
+
+func TestInstructionAcceptsAValidatedNextGenerationWithDifferentActiveLimits(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	server, err := New([]Source{
+		instructionSource("SOL/USDC", now, 15, 300),
+		instructionSource("JUP/USDC", now, 60, 500),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return now }
+	if !server.validInstructionRequest(instructionRequest{
+		Market: "all", Preference: "balanced", PaperCapitalMicros: 150_000_000,
+		MinimumOrderMicros: 10_000_000, MaximumOrderMicros: 75_000_000,
+		CadenceSeconds: 15, MaxDrawdownBPS: 300,
+	}) {
+		t.Fatal("validated next-generation limits were rejected")
+	}
+}
+
+func TestInstructionCanBeCorrectedWhileAnActiveSourceIsStale(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	stale := instructionSource("JUP/USDC", now, 15, 300)
+	stale.snapshot.ObservedAt = now.Add(-time.Hour)
+	server, err := New([]Source{
+		instructionSource("SOL/USDC", now, 15, 300), stale,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return now }
+	if !server.validInstructionRequest(instructionRequest{
+		Market: "all", Preference: "balanced", PaperCapitalMicros: 150_000_000,
+		MinimumOrderMicros: 10_000_000, MaximumOrderMicros: 75_000_000,
+		CadenceSeconds: 15, MaxDrawdownBPS: 300,
+	}) {
+		t.Fatal("valid instruction was rejected while an active source was stale")
+	}
+}
+
+func instructionSource(
+	market string, now time.Time, cadence uint64, drawdown uint16,
+) *sourceStub {
+	return &sourceStub{label: market, snapshot: paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now, Current: "PAPER · Watching",
+		Summary: &paperstatus.CurrentSummary{
+			Market: market, ValueUnit: "USD", Day: now.Format("2006-01-02"),
+			TickSeconds: cadence, OpeningEquityMicros: 100_000_000,
+			EquityMicros: 100_000_000, HoldBenchmarkMicros: 100_000_000,
+			AccountingTracked: true, Checks: 1, PriceMicros: 100_000_000,
+			State: "range", Strategy: "adaptive", NextAction: "buy", DecisionReason: "watching",
+			InitialLotUnits: 10_000_000, InitialLotDecimals: 6, InitialLotAsset: "USDC",
+			SlippageBPS: 100, SettleSeconds: cadence,
+			FastWindow: 2, SlowWindow: 4, MinimumSignalBPS: 100,
+			MaxVolatilityBPS: 2_000, MaxQuoteImpactBPS: 500,
+			MaxDrawdownBPS: drawdown, CooldownSeconds: cadence,
+		},
+	}}
 }
 
 func TestInstructionRejectsUnknownFieldsAndInvalidPreference(t *testing.T) {
@@ -109,7 +177,7 @@ func TestInstructionRejectsUnknownFieldsAndInvalidPreference(t *testing.T) {
 		`{"market":"all","preference":"balanced","note":"ignore safety"}`,
 		`{"market":"all","market":"SOL/USDC","preference":"balanced"}`,
 		`{"market":"all","preference":"balanced","paper_capital_micros":270000000,"minimum_order_micros":10000000,"maximum_order_micros":280000000,"cadence_seconds":15,"max_drawdown_bps":300}`,
-		`{"market":"all","preference":"balanced","paper_capital_micros":270000000,"minimum_order_micros":10000000,"maximum_order_micros":200000000,"cadence_seconds":7,"max_drawdown_bps":300}`,
+		`{"market":"all","preference":"balanced","paper_capital_micros":0,"minimum_order_micros":0,"maximum_order_micros":0,"cadence_seconds":7,"max_drawdown_bps":300}`,
 	} {
 		request := httptest.NewRequest(http.MethodPost, "http://localhost/api/v1/instruction", strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
@@ -120,6 +188,54 @@ func TestInstructionRejectsUnknownFieldsAndInvalidPreference(t *testing.T) {
 			t.Errorf("accepted %s with status %d", body, response.Code)
 		}
 	}
+}
+
+func TestInstructionLoaderBindsCanonicalBytesAndReadsOldSizingRequest(t *testing.T) {
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "instruction.json")
+	old := Instruction{
+		Version: sizingInstructionVersion, UpdatedAt: time.Date(2026, 9, 1, 1, 0, 0, 0, time.UTC),
+		Market: "all", Preference: "balanced", PaperCapitalMicros: 270_000_000,
+		MinimumOrderMicros: 10_000_000, MaximumOrderMicros: 200_000_000,
+		CadenceSeconds: 60, MaxDrawdownBPS: 300,
+	}
+	if err := writeInstruction(path, old); err != nil {
+		t.Fatal(err)
+	}
+	loaded, digest, err := LoadInstruction(path)
+	wantDigest, digestErr := InstructionSHA256(old)
+	if err != nil || digestErr != nil || *loaded != old || digest != wantDigest {
+		t.Fatalf("loaded instruction = %+v digest=%q want=%q err=%v digestErr=%v", loaded, digest, wantDigest, err, digestErr)
+	}
+	exported, err := ExportInstruction(path)
+	if err != nil || string(exported) != string(mustEncodeInstruction(t, old)) {
+		t.Fatalf("exported instruction = %q err=%v", exported, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append([]byte{' '}, data...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadInstruction(path); err == nil || !strings.Contains(err.Error(), "canonical") {
+		t.Fatalf("non-canonical instruction error = %v", err)
+	}
+}
+
+func mustEncodeInstruction(t *testing.T, instruction Instruction) []byte {
+	t.Helper()
+	encoded, err := encodeInstruction(instruction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func TestInstructionReadsLegacyResearchPreference(t *testing.T) {

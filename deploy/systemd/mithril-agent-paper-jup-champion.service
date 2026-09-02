@@ -1,0 +1,57 @@
+[Unit]
+Description=Mithril agent JUP/USDC champion paper observer
+Wants=network-online.target
+Requires=mithril-agent-paper-jup-status-handoff.service
+After=network-online.target time-sync.target mithril-agent-paper-jup-pre-champion.service mithril-agent-paper-jup-status-handoff.service
+Conflicts=mithril-agent-paper-jup-pre-champion.service
+PartOf=mithril-agent-paper-generation.target
+StartLimitIntervalSec=0
+ConditionPathExists=/etc/mithril-agent/paper-active/selection/jup/champion/active.json
+ConditionPathExists=/etc/mithril-agent/paper-active/portfolio.json
+
+[Service]
+Type=simple
+User=mithril-agent-research
+Group=mithril-agent-research
+UMask=0077
+EnvironmentFile=/etc/mithril-agent/paper.env
+Environment=MITHRIL_AGENT_KRAKEN_RATE_STATE=/run/mithril-agent-research/kraken-rate
+Environment=MITHRIL_AGENT_JUPITER_RATE_STATE=/run/mithril-agent-research/jupiter-rate
+RuntimeDirectory=mithril-agent-research
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ExecStart=/opt/mithril-hermes-research/run-paper-generation.sh observe jup champion
+Restart=always
+RestartSec=15s
+TimeoutStopSec=30s
+ReadOnlyPaths=/var/lib/mithril-agent-research/allocations
+ReadWritePaths=/etc/mithril-agent/paper-active/runs/jup/champion /etc/mithril-agent/paper-active/status/jup
+InaccessiblePaths=/proc
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+TasksMax=64
+LimitNOFILE=256
+
+[Install]
+WantedBy=multi-user.target

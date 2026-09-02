@@ -110,10 +110,11 @@ func TestShadowSelectRefusesAPointerThatAliasesTheBasePolicy(t *testing.T) {
 
 func TestShadowSelectInitialCannotReplaceAnExistingChampion(t *testing.T) {
 	root := privateTestDirectory(t)
-	base := candidateTestPolicy()
-	policyPath := writeShadowPolicy(t, base)
-	first := candidateForPrices(t, base, 220_000_000, 110_000_000)
-	second := candidateForPrices(t, base, 200_000_000, 100_000_000)
+	_, policyPath, evidenceDir, first := initialShadowCandidateFixture(
+		t, initialWinningPrices(200_000_000, 100_000_000),
+		initialWinningPrices(200_000_000, 100_000_000),
+	)
+	second := first
 	firstPath := filepath.Join(root, "first.json")
 	secondPath := filepath.Join(root, "second.json")
 	for path, candidate := range map[string]shadowPaperCandidate{
@@ -128,7 +129,8 @@ func TestShadowSelectInitialCannotReplaceAnExistingChampion(t *testing.T) {
 	selectInitial := func(candidatePath string) error {
 		return runShadowSelect([]string{
 			"--policy", policyPath, "--candidate", candidatePath,
-			"--pointer", pointerPath, "--lifecycle-lock", lockPath, "--initial",
+			"--pointer", pointerPath, "--lifecycle-lock", lockPath,
+			"--initial", "--evidence-dir", evidenceDir,
 		}, &bytes.Buffer{})
 	}
 	if err := selectInitial(firstPath); err != nil {
@@ -144,6 +146,112 @@ func TestShadowSelectInitialCannotReplaceAnExistingChampion(t *testing.T) {
 	after, err := os.ReadFile(pointerPath)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatalf("initial selection replaced the champion: %v", err)
+	}
+}
+
+func TestShadowSelectInitialRejectsUnsafeEvidence(t *testing.T) {
+	for name, test := range map[string]struct {
+		training   []uint64
+		validation []uint64
+		want       string
+	}{
+		"low coverage": {
+			training:   initialWinningPrices(200_000_000, 100_000_000)[:8],
+			validation: initialWinningPrices(200_000_000, 100_000_000)[:8],
+			want:       "observable coverage",
+		},
+		"losing validation": {
+			training:   initialWinningPrices(200_000_000, 100_000_000),
+			validation: initialLosingPrices(200_000_000, 100_000_000),
+			want:       "net return is not positive",
+		},
+		"doubled spread": {
+			training:   initialWinningPrices(104_000_000, 100_000_000),
+			validation: initialWinningPrices(104_000_000, 100_000_000),
+			want:       "at 200 bps",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, policyPath, evidenceDir, candidate := initialShadowCandidateFixture(
+				t, test.training, test.validation,
+			)
+			root := privateTestDirectory(t)
+			candidatePath := filepath.Join(root, "candidate.json")
+			if err := writeShadowPaperCandidate(candidatePath, candidate); err != nil {
+				t.Fatal(err)
+			}
+			err := runShadowSelect([]string{
+				"--policy", policyPath, "--candidate", candidatePath,
+				"--pointer", filepath.Join(root, "active.json"),
+				"--lifecycle-lock", filepath.Join(root, "lifecycle.lock"),
+				"--initial", "--evidence-dir", evidenceDir,
+			}, &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("initial selection error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestShadowSelectInitialRequiresItsEvidenceDirectory(t *testing.T) {
+	root := privateTestDirectory(t)
+	base := candidateTestPolicy()
+	policyPath := writeShadowPolicy(t, base)
+	candidate := candidateForPrices(t, base, 200_000_000, 100_000_000)
+	candidatePath := filepath.Join(root, "candidate.json")
+	if err := writeShadowPaperCandidate(candidatePath, candidate); err != nil {
+		t.Fatal(err)
+	}
+	err := runShadowSelect([]string{
+		"--policy", policyPath, "--candidate", candidatePath,
+		"--pointer", filepath.Join(root, "active.json"),
+		"--lifecycle-lock", filepath.Join(root, "lifecycle.lock"), "--initial",
+	}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "--evidence-dir") {
+		t.Fatalf("initial selection error = %v", err)
+	}
+}
+
+func TestInitialShadowDrawdownUsesTheAdaptiveOpeningLossBudget(t *testing.T) {
+	policy := adaptiveShadowSearchPolicy()
+	adaptive := *policy.Adaptive
+	adaptive.MaxDrawdownBPS = 300
+	policy.Adaptive = &adaptive
+	ledger, err := shadow.NewLedger(policy, 100_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err = ledger.Mark(90_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initialShadowDrawdownCompliant(policy, ledger) {
+		t.Fatal("accepted a ten-percent drawdown under a three-percent limit")
+	}
+	adaptive.MaxDrawdownBPS = 5_000
+	policy.Adaptive = &adaptive
+	if !initialShadowDrawdownCompliant(policy, ledger) {
+		t.Fatal("rejected a ten-percent drawdown under a fifty-percent limit")
+	}
+}
+
+func TestInitialShadowDrawdownUsesTheActualHighWaterMark(t *testing.T) {
+	policy := adaptiveShadowSearchPolicy()
+	adaptive := *policy.Adaptive
+	adaptive.MaxDrawdownBPS = 1_500
+	policy.Adaptive = &adaptive
+	ledger, err := shadow.NewLedger(policy, 100_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, price := range []uint64{200_000_000, 180_000_000} {
+		ledger, err = ledger.Mark(price)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ledger.MaxDrawdownBPS != 1_000 || !initialShadowDrawdownCompliant(policy, ledger) {
+		t.Fatalf("peak-relative drawdown = %d bps, want a compliant 1000 bps", ledger.MaxDrawdownBPS)
 	}
 }
 
@@ -232,6 +340,19 @@ func TestShadowRunChangesPaperPolicyOnlyAtBoundary(t *testing.T) {
 	}
 	if records := run.roll.Records(); len(records) < 2 || records[0].Type != shadow.EventOpened {
 		t.Fatalf("new candidate journal has no opening record: %+v", records)
+	}
+
+	selectCandidate(firstPath)
+	run.portfolioBound = true
+	run.portfolioInstructionSHA256 = strings.Repeat("c", 64)
+	run.portfolioPaperCapitalMicros = 270_000_000
+	activeFingerprint := run.policySHA256
+	if err := run.refreshSelectedCandidate(newDay.Add(24 * time.Hour)); err == nil ||
+		!strings.Contains(err.Error(), "instruction does not match") {
+		t.Fatalf("unbound boundary candidate error = %v", err)
+	}
+	if run.policySHA256 != activeFingerprint {
+		t.Fatal("unbound boundary candidate changed the active paper policy")
 	}
 
 	if err := os.WriteFile(pointerPath, []byte("not-an-absolute-path\n"), 0o600); err != nil {
@@ -348,6 +469,59 @@ func candidateForPrices(
 		t.Fatal(err)
 	}
 	return candidate
+}
+
+func initialShadowCandidateFixture(
+	t *testing.T, trainingPrices, validationPrices []uint64,
+) (shadow.Policy, string, string, shadowPaperCandidate) {
+	t.Helper()
+	root := privateTestDirectory(t)
+	base := candidateTestPolicy()
+	base.TickSeconds = 3_600
+	policyPath := writeShadowPolicy(t, base)
+	trainDay, validationDay := "2026-08-17", "2026-08-18"
+	writeShadowSearchDay(t, root, base, trainDay, trainingPrices)
+	writeShadowSearchDay(t, root, base, validationDay, validationPrices)
+	training, trainingProvenance, err := readShadowSearchJournal(
+		filepath.Join(root, "shadow-"+trainDay+".jsonl"), trainDay, base,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validation, validationProvenance, err := readShadowSearchJournal(
+		filepath.Join(root, "shadow-"+validationDay+".jsonl"), validationDay, base,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := searchShadowCandidateTicks(base, training, validation, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.TrainDay, result.ValidationDay = trainDay, validationDay
+	candidate, err := newShadowPaperCandidate(
+		base, result, trainingProvenance, validationProvenance,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base, policyPath, root, candidate
+}
+
+func initialWinningPrices(high, low uint64) []uint64 {
+	prices := make([]uint64, 0, 23)
+	for len(prices) < 20 {
+		prices = append(prices, high, high, low, low)
+	}
+	return append(prices, high, high, high)
+}
+
+func initialLosingPrices(high, low uint64) []uint64 {
+	prices := make([]uint64, 0, 23)
+	for len(prices) < 23 {
+		prices = append(prices, high, low, low, high)
+	}
+	return prices[:23]
 }
 
 func privateTestDirectory(t *testing.T) string {

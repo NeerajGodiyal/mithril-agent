@@ -1,0 +1,10 @@
+[Unit]
+Description=Mithril agent JUP/USDC challenger paper pointer watcher
+PartOf=mithril-agent-paper-generation.target
+
+[Path]
+PathChanged=/etc/mithril-agent/paper-active/selection/jup/challenger/active.json
+Unit=mithril-agent-paper-jup-challenger.service
+
+[Install]
+WantedBy=multi-user.target

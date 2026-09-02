@@ -31,6 +31,7 @@ type Replayed struct {
 	PeriodEnd            time.Time
 	nextSell             bool
 	nextAmount           uint64
+	cycleOpeningLedger   *Ledger
 	strategy             *adaptiveStrategy
 	primaryPublishedAt   time.Time
 	secondaryPublishedAt time.Time
@@ -53,6 +54,9 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 	}
 	if len(ticks) == 0 {
 		return Replayed{}, errors.New("no ticks to replay")
+	}
+	if err := validateTickRecordVersions(ticks); err != nil {
+		return Replayed{}, err
 	}
 	strategy, err := newAdaptiveStrategy(policy.Adaptive)
 	if err != nil {
@@ -78,7 +82,7 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 		result.PeriodEnd = tick.At
 		if tick.PeriodClose {
 			if tick.Triggered || tick.Deferred || tick.Fill != nil || tick.DecisionMissed ||
-				tick.DecisionQuote != nil || tick.Decision != nil || tick.Reason != "" ||
+				tick.DecisionQuote != nil || tick.Decision != nil || tick.RoundTripResultMicros != nil || tick.Reason != "" ||
 				tick.PrimaryPrice != nil || tick.SecondaryPrice != nil ||
 				tick.NativeFeePriceMicros != 0 || tick.NativeFeePrimary != nil || tick.NativeFeeSecondary != nil ||
 				tick.QuoteLowerMicros != 0 || tick.QuoteUpperMicros != 0 {
@@ -219,19 +223,19 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 			}
 		}
 		attemptAmount, feeReserve := paperAttempt(
-			policy, result.Ledger, nextSell, nextAmount, tick.Decision,
+			policy, result.Ledger, nextSell, nextAmount, tick.PriceMicros, tick.Decision,
 		)
 		switch tick.Event {
 		case EventWaiting:
 			if tick.Triggered || tick.Deferred || tick.DecisionQuote != nil ||
-				tick.Fill != nil || tick.PeriodClose {
+				tick.Fill != nil || tick.RoundTripResultMicros != nil || tick.PeriodClose {
 				return Replayed{}, errors.New("a waiting tick is malformed")
 			}
 			if pending != nil && !tick.At.Before(pending.settleAfter) {
 				return Replayed{}, errors.New("an expired decision was recorded as waiting")
 			}
 		case EventSignal:
-			if !tick.Triggered || tick.Fill != nil || tick.PeriodClose {
+			if !tick.Triggered || tick.Fill != nil || tick.RoundTripResultMicros != nil || tick.PeriodClose {
 				return Replayed{}, errors.New("a signal tick is malformed")
 			}
 			if tick.Deferred {
@@ -260,7 +264,7 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 			}
 		case EventFiltered:
 			if policy.Adaptive == nil || pending != nil || !tick.Triggered || tick.Deferred ||
-				tick.Fill != nil || tick.PeriodClose || tick.DecisionQuote == nil ||
+				tick.Fill != nil || tick.RoundTripResultMicros != nil || tick.PeriodClose || tick.DecisionQuote == nil ||
 				validateQuote(*tick.DecisionQuote) != nil ||
 				!validDecisionQuoteTime(policy, *tick.DecisionQuote, tick.At) ||
 				tick.DecisionQuote.InputAmount != attemptAmount ||
@@ -275,7 +279,7 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 			}
 			result.Counts.Filtered++
 		case EventMissed:
-			if tick.DecisionQuote != nil || tick.Fill != nil {
+			if tick.DecisionQuote != nil || tick.Fill != nil || tick.RoundTripResultMicros != nil {
 				return Replayed{}, errors.New("a missed tick contains trade evidence")
 			}
 			result.Counts.Missed++
@@ -322,10 +326,17 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 				tick.Fill.DecisionQuote.InputAmount != pending.amount {
 				return Replayed{}, errors.New("a recorded fill is not supported by its decision quote")
 			}
+			priorLedger := result.Ledger
 			if result.Ledger, replayErr = result.Ledger.Apply(
 				*tick.Fill, tick.PriceMicros, nativePrice,
 			); replayErr != nil {
 				return Replayed{}, replayErr
+			}
+			closingRoundTrip := tick.Fill.Filled && policy.RoundTrip() && result.Counts.Fills%2 == 1
+			if tick.Fill.Filled && policy.RoundTrip() && !closingRoundTrip {
+				result.cycleOpeningLedger = &priorLedger
+			} else if !closingRoundTrip && tick.RoundTripResultMicros != nil {
+				return Replayed{}, errors.New("a recorded round-trip result is not on a closing fill")
 			}
 			result.Stats.Settled++
 			result.Stats.SumImpactBPS += int64(tick.Fill.ImpactBPS)
@@ -354,6 +365,24 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 			} else {
 				result.Counts.Refused++
 			}
+			if closingRoundTrip {
+				if result.cycleOpeningLedger == nil {
+					return Replayed{}, errors.New("paper round trip has no opening ledger")
+				}
+				expected, differenceErr := paperCycleResult(
+					*result.cycleOpeningLedger, result.Ledger, tick.PriceMicros, nativePrice,
+				)
+				if differenceErr != nil {
+					return Replayed{}, differenceErr
+				}
+				if tick.RecordVersion != 0 && tick.RoundTripResultMicros == nil {
+					return Replayed{}, errors.New("a new-format closing fill omitted its round-trip result")
+				}
+				if tick.RoundTripResultMicros != nil && *tick.RoundTripResultMicros != expected {
+					return Replayed{}, errors.New("a recorded round-trip result does not match its ledger")
+				}
+				result.cycleOpeningLedger = nil
+			}
 			pending = nil
 		default:
 			return Replayed{}, errors.New("the record contains an unrecognised event")
@@ -373,6 +402,17 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 	result.primaryPublishedAt, result.secondaryPublishedAt = primaryPublishedAt, secondaryPublishedAt
 	result.pending = pending
 	return result, nil
+}
+
+func validateTickRecordVersions(ticks []Tick) error {
+	var previous uint8
+	for _, tick := range ticks {
+		if tick.RecordVersion > currentTickRecordVersion || tick.RecordVersion < previous {
+			return errors.New("the record version is invalid")
+		}
+		previous = tick.RecordVersion
+	}
+	return nil
 }
 
 func quoteReceivedAt(quote Quote, fallback time.Time) time.Time {
@@ -406,7 +446,7 @@ func validateUnobservableTick(tick Tick) error {
 		tick.NativeFeePriceMicros != 0 || tick.NativeFeePrimary != nil || tick.NativeFeeSecondary != nil ||
 		tick.Triggered || tick.Deferred || tick.DecisionQuote != nil || tick.Decision != nil ||
 		tick.PrimaryPrice != nil || tick.SecondaryPrice != nil ||
-		tick.Fill != nil || tick.EquityMicros != 0 ||
+		tick.Fill != nil || tick.RoundTripResultMicros != nil || tick.EquityMicros != 0 ||
 		tick.PeriodClose {
 		return errors.New("an unobservable tick contains market evidence")
 	}

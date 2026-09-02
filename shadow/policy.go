@@ -43,6 +43,9 @@ const (
 	QuoteJupiter = "jupiter"
 	QuoteOrca    = "orca"
 
+	MarketEvidenceLongRun                = "long_run"
+	MarketEvidenceDevelopmentProvisional = "development_provisional"
+
 	MarketSOLUSDC  = "SOL/USDC"
 	MarketJUPUSDC  = "JUP/USDC"
 	MarketWIFUSDC  = "WIF/USDC"
@@ -161,6 +164,10 @@ type Policy struct {
 	// source-and-route qualification artifact. Incumbent SOL/JUP policies leave
 	// it empty because their contracts are code-owned.
 	MarketEvidenceSHA256 string `json:"market_evidence_sha256,omitempty"`
+	// MarketEvidenceClass keeps a six-hour paper-only checkpoint distinct from
+	// long-run market admission. Empty remains accepted only for previously
+	// written admitted policies.
+	MarketEvidenceClass string `json:"market_evidence_class,omitempty"`
 
 	// Adaptive replaces absolute entry prices with a rolling, price-relative
 	// decision model. Trigger and ReturnTrigger still bind the independently
@@ -193,6 +200,12 @@ type Policy struct {
 	// amounts for display and price maths.
 	InputAmount   uint64 `json:"input_amount"`
 	InputDecimals uint8  `json:"input_decimals"`
+	// MinimumOrderValueMicros and MaximumOrderValueMicros bound each ordinary
+	// paper order by its marked USD value. A risk-reducing exit may exceed them
+	// so an order-size setting cannot trap the simulated book in a position.
+	// Both zero preserves previously written policies.
+	MinimumOrderValueMicros uint64 `json:"minimum_order_value_micros,omitempty"`
+	MaximumOrderValueMicros uint64 `json:"maximum_order_value_micros,omitempty"`
 	// OutputDecimals scales the quoted output the same way.
 	OutputDecimals uint8 `json:"output_decimals"`
 
@@ -287,7 +300,8 @@ func (p Policy) Validate() error {
 	if p.Version == NativeFeeVersion && p.OneTimeSetupRentLamports != 0 {
 		return errors.New("v5 shadow policy cannot use v6 setup-rent accounting")
 	}
-	if p.Version != AdmittedVersion && p.MarketEvidenceSHA256 != "" {
+	if p.Version != AdmittedVersion &&
+		(p.MarketEvidenceSHA256 != "" || p.MarketEvidenceClass != "") {
 		return errors.New("only an admitted shadow policy can bind market evidence")
 	}
 	if p.Cluster != Mainnet && p.Cluster != Devnet {
@@ -303,7 +317,9 @@ func (p Policy) Validate() error {
 	admitted := p.Version == AdmittedVersion
 	if admitted {
 		if p.Cluster != Mainnet || !AdmittedMarket(market) ||
-			!validPolicyDigest(p.MarketEvidenceSHA256) {
+			!validPolicyDigest(p.MarketEvidenceSHA256) ||
+			p.MarketEvidenceClass != "" && p.MarketEvidenceClass != MarketEvidenceLongRun &&
+				p.MarketEvidenceClass != MarketEvidenceDevelopmentProvisional {
 			return errors.New("admitted shadow policy market evidence is invalid")
 		}
 		wantFeed := strings.TrimSuffix(market, "/USDC") + "/USD"
@@ -424,6 +440,21 @@ func (p Policy) Validate() error {
 	}
 	if p.InputAmount == 0 {
 		return errors.New("shadow policy input amount must be positive")
+	}
+	if p.MinimumOrderValueMicros != 0 || p.MaximumOrderValueMicros != 0 {
+		if p.Cluster != Mainnet ||
+			p.MinimumOrderValueMicros < 1_000_000 ||
+			p.MinimumOrderValueMicros > p.MaximumOrderValueMicros ||
+			p.MaximumOrderValueMicros > 1_000_000_000_000 {
+			return errors.New("shadow policy order-value limits are invalid")
+		}
+		if !p.IsSell() {
+			initialValue, err := scaleToMicros(p.InputAmount, p.InputDecimals)
+			if err != nil || initialValue < p.MinimumOrderValueMicros ||
+				initialValue > p.MaximumOrderValueMicros {
+				return errors.New("shadow policy initial buy is outside its order-value limits")
+			}
+		}
 	}
 	if p.InputDecimals > maxDecimals || p.OutputDecimals > maxDecimals {
 		return errors.New("shadow policy decimals are out of range")

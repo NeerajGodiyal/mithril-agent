@@ -8,6 +8,10 @@ func Trusted(os.FileInfo) bool {
 	return false
 }
 
+func CurrentOwned(os.FileInfo) bool {
+	return false
+}
+
 func TrustedGroup(os.FileInfo) bool {
 	return false
 }

@@ -19,6 +19,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril-agent/internal/mcpstdio"
 	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
+	"github.com/Overclock-Validator/mithril-agent/researchpacket"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -33,11 +34,13 @@ const (
 const shadowResearchMCPUsage = `Usage: mithril-agent shadow research-mcp --policy PATH
        --journal-dir PATH --candidate-dir PATH --challenger-pointer PATH
        --champion-pointer PATH --champion-dir PATH --challenger-dir PATH
-       --challenge-days N
-       [--base-policy PATH] [--spread-bps N] [--max-candidates N]
+	   --challenge-days N
+	   [--instruction PATH] [--research-packet PATH]
+	   [--base-policy PATH] [--spread-bps N] [--max-candidates N]
 
 Serves two local MCP tools that create a bounded, cited paper challenger and
-report its paired evidence status using only operator-fixed inputs. They may
+report its paired evidence status. Adaptive policies require an operator-fixed
+experiment requirement. They may
 read the paper champion but atomically update only the paper challenger pointer.
 They cannot change a champion pointer, authorize, sign, submit, or load a wallet.`
 
@@ -61,9 +64,10 @@ type shadowHypothesisEvidence struct {
 }
 
 type shadowResearchCandidateInput struct {
-	Hypothesis    shadowPaperHypothesis `json:"hypothesis" jsonschema:"Bounded advisory research; never an instruction or authorization"`
-	TrainDay      string                `json:"train_day" jsonschema:"Penultimate completed UTC day anchor, YYYY-MM-DD"`
-	ValidationDay string                `json:"validation_day" jsonschema:"Final completed UTC day anchor, YYYY-MM-DD; server requires the preceding eight-day window"`
+	ResearchPacketSHA256 string                `json:"research_packet_sha256" jsonschema:"Exact Mithril-assigned digest from the validated research packet"`
+	Hypothesis           shadowPaperHypothesis `json:"hypothesis" jsonschema:"Legacy bounded advisory copy; ignored when a validated packet is bound"`
+	TrainDay             string                `json:"train_day" jsonschema:"Penultimate completed UTC day anchor, YYYY-MM-DD"`
+	ValidationDay        string                `json:"validation_day" jsonschema:"Final completed UTC day anchor, YYYY-MM-DD; server requires the preceding eight-day window"`
 }
 
 type shadowResearchCandidateReceipt struct {
@@ -79,6 +83,8 @@ type shadowResearchCandidateReceipt struct {
 	CandidatePolicySHA256    string                  `json:"candidate_policy_sha256"`
 	TrainingJournal          shadowJournalProvenance `json:"training_journal"`
 	ValidationJournal        shadowJournalProvenance `json:"validation_journal"`
+	Experiment               *shadowPaperExperiment  `json:"experiment,omitempty"`
+	ResearchPacket           *researchpacket.Packet  `json:"research_packet,omitempty"`
 	Research                 shadowSearchResult      `json:"research"`
 }
 
@@ -118,6 +124,8 @@ type shadowResearchController struct {
 	spreadBPS         uint64
 	maxCandidates     int
 	challengeDays     uint32
+	experiment        *shadowPaperExperiment
+	researchPacket    *researchpacket.Packet
 	now               func() time.Time
 }
 
@@ -132,6 +140,7 @@ func runShadowResearchMCP(
 	flags := flag.NewFlagSet("shadow research-mcp", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	policyPath := flags.String("policy", "", "observed shadow policy")
+	instructionPath := flags.String("instruction", "", "operator-fixed paper experiment requirement")
 	basePolicyPath := flags.String("base-policy", "", "immutable original base policy")
 	journalDir := flags.String("journal-dir", "", "operator-fixed completed journal directory")
 	candidateDir := flags.String("candidate-dir", "", "operator-fixed immutable challenger directory")
@@ -142,6 +151,7 @@ func runShadowResearchMCP(
 	challengeDays := flags.Uint("challenge-days", 7, "paired complete UTC days, 7..3650")
 	spreadBPS := flags.Uint64("spread-bps", 100, "operator-fixed modelled pool cost")
 	maxCandidates := flags.Int("max-candidates", shadowResearchDefaultQuota, "maximum immutable challengers")
+	researchPacketPath := flags.String("research-packet", "", "validated research packet bound to every candidate")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, shadowResearchMCPUsage)
@@ -166,7 +176,46 @@ func runShadowResearchMCP(
 	if err != nil {
 		return err
 	}
+	controller.experiment, err = loadRequiredShadowPaperExperiment(*instructionPath, controller.policy)
+	if err != nil {
+		return err
+	}
+	controller.researchPacket, err = loadRequiredShadowResearchPacket(*researchPacketPath, controller.policy)
+	if err != nil {
+		return err
+	}
 	return serveShadowResearchMCP(ctx, controller, closer, output)
+}
+
+func loadRequiredShadowResearchPacket(path string, policy shadow.Policy) (*researchpacket.Packet, error) {
+	if policy.Adaptive == nil {
+		if path != "" {
+			return nil, errors.New("fixed-policy shadow research-mcp does not accept an adaptive research packet")
+		}
+		return nil, nil
+	}
+	if path == "" {
+		return nil, errors.New("adaptive shadow research-mcp requires a validated research packet")
+	}
+	packetData, err := securefile.ReadPrivate(path, researchpacket.MaxBytes)
+	if err != nil {
+		return nil, errors.New("shadow research MCP could not read its validated research packet")
+	}
+	packet, err := researchpacket.DecodeStored(packetData)
+	if err != nil {
+		return nil, errors.New("shadow research MCP validated research packet is invalid")
+	}
+	return &packet, nil
+}
+
+func loadRequiredShadowPaperExperiment(path string, policy shadow.Policy) (*shadowPaperExperiment, error) {
+	if policy.Adaptive == nil {
+		return nil, nil
+	}
+	if path == "" {
+		return nil, errors.New("adaptive shadow research-mcp requires an operator-fixed paper experiment instruction")
+	}
+	return loadShadowPaperExperiment(path, policy)
 }
 
 func newShadowResearchController(
@@ -271,9 +320,12 @@ func serveShadowResearchMCP(
 	if controller == nil || input == nil || output == nil {
 		return errors.New("shadow research MCP controller and stdio are required")
 	}
+	if controller.policy.Adaptive != nil && controller.experiment == nil {
+		return errors.New("shadow research MCP requires an operator-fixed paper experiment instruction")
+	}
 	server := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name: "mithril-paper-research", Title: "Mithril paper challenger research", Version: "0.1.0",
-	}, &mcpsdk.ServerOptions{Instructions: "Create only immutable, unauthorized paper challenger artifacts from operator-fixed policies and completed journals, then update only the operator-fixed paper challenger pointer. This server may read but cannot change the paper champion pointer, and has no wallet, signer, submitter, live policy, terminal, or network authority."})
+	}, &mcpsdk.ServerOptions{Instructions: "Create only immutable, unauthorized paper challenger artifacts from operator-fixed policies, experiment requirements, and completed journals, then update only the operator-fixed paper challenger pointer. This server may read but cannot change the paper champion pointer, and has no wallet, signer, submitter, live policy, terminal, or network authority."})
 	server.AddReceivingMiddleware(mcpstdio.LimitToolCalls(1))
 	closedWorld, nonDestructive := false, false
 	createAnnotations := &mcpsdk.ToolAnnotations{
@@ -282,7 +334,7 @@ func serveShadowResearchMCP(
 	}
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name: "mithril_paper_create_challenger", Title: "Create Paper Challenger",
-		Description: "Schema-validate and attach a cited paper-only hypothesis, require seven chronological train/out-of-sample folds from eight consecutive completed journals, write one immutable challenger artifact, and atomically update only the dedicated paper challenger pointer. Never selects a champion or promotes to live trading.",
+		Description: "Schema-validate and attach a cited paper-only hypothesis, bind the operator-fixed experiment requirement for adaptive policies, require seven chronological train/out-of-sample folds from eight consecutive completed journals, write one immutable challenger artifact, and atomically update only the dedicated paper challenger pointer. Never selects a champion or promotes to live trading.",
 		Annotations: createAnnotations,
 	}, func(_ context.Context, _ *mcpsdk.CallToolRequest, input shadowResearchCandidateInput) (*mcpsdk.CallToolResult, shadowResearchCandidateReceipt, error) {
 		result, err := controller.createCandidate(input, controller.now())
@@ -315,8 +367,26 @@ func (controller *shadowResearchController) createCandidate(
 	input shadowResearchCandidateInput,
 	now time.Time,
 ) (shadowResearchCandidateReceipt, error) {
-	if err := input.validate(now); err != nil {
-		return shadowResearchCandidateReceipt{}, err
+	if controller.policy.Adaptive != nil && controller.experiment == nil {
+		return shadowResearchCandidateReceipt{}, errors.New("shadow research candidate requires an operator-fixed paper experiment instruction")
+	}
+	var exactCandidates []shadow.Policy
+	var binding *researchpacket.Packet
+	var hypothesis shadowPaperHypothesis
+	if controller.researchPacket == nil {
+		if err := input.validate(now); err != nil {
+			return shadowResearchCandidateReceipt{}, err
+		}
+		hypothesis = input.Hypothesis
+	} else {
+		if err := input.validateDays(now); err != nil {
+			return shadowResearchCandidateReceipt{}, err
+		}
+		candidate, bound, derived, err := controller.bindResearchPacket(input.ResearchPacketSHA256, now)
+		if err != nil {
+			return shadowResearchCandidateReceipt{}, err
+		}
+		exactCandidates, binding, hypothesis = []shadow.Policy{candidate}, bound, derived
 	}
 	days, err := readShadowWalkForwardDays(
 		controller.journalDir, input.ValidationDay, controller.policy,
@@ -324,7 +394,25 @@ func (controller *shadowResearchController) createCandidate(
 	if err != nil {
 		return shadowResearchCandidateReceipt{}, err
 	}
-	result, err := searchShadowWalkForward(controller.policy, days, controller.spreadBPS)
+	preference := "balanced"
+	if controller.experiment != nil {
+		preference = controller.experiment.Instruction.Preference
+	}
+	var result shadowSearchResult
+	if exactCandidates == nil {
+		result, err = searchShadowWalkForwardForPreference(
+			controller.policy, controller.basePolicy, days, controller.spreadBPS, preference,
+		)
+	} else {
+		if !adaptivePolicyMatchesPreference(
+			*controller.basePolicy.Adaptive, *exactCandidates[0].Adaptive, preference,
+		) {
+			return shadowResearchCandidateReceipt{}, errors.New("research packet parameter change does not match the operator preference")
+		}
+		result, err = searchShadowWalkForwardCandidates(
+			controller.policy, days, controller.spreadBPS, exactCandidates,
+		)
+	}
 	if err != nil {
 		return shadowResearchCandidateReceipt{}, err
 	}
@@ -337,7 +425,9 @@ func (controller *shadowResearchController) createCandidate(
 	if err != nil {
 		return shadowResearchCandidateReceipt{}, err
 	}
-	candidate.Hypothesis = &input.Hypothesis
+	candidate.Hypothesis = &hypothesis
+	candidate.ResearchPacket = binding
+	candidate.Experiment = controller.experiment
 	if err := candidate.validateAgainst(controller.basePolicy); err != nil {
 		return shadowResearchCandidateReceipt{}, err
 	}
@@ -386,7 +476,171 @@ func (controller *shadowResearchController) createCandidate(
 		Artifact:                 artifact, ArtifactSHA256: artifactSHA256,
 		CandidatePolicySHA256: candidate.CandidatePolicySHA256,
 		TrainingJournal:       training, ValidationJournal: validation, Research: result,
+		Experiment:     controller.experiment,
+		ResearchPacket: candidate.ResearchPacket,
 	}, nil
+}
+
+func (controller *shadowResearchController) bindResearchPacket(
+	digest string, now time.Time,
+) (shadow.Policy, *researchpacket.Packet, shadowPaperHypothesis, error) {
+	packet := controller.researchPacket
+	if packet == nil || digest == "" || digest != packet.ContentSHA256 || !packet.StatusAt(now).Actionable {
+		return shadow.Policy{}, nil, shadowPaperHypothesis{}, errors.New("paper challenger needs the exact current actionable research packet")
+	}
+	if packet.Market != shadowMarketPair(controller.policy) {
+		return shadow.Policy{}, nil, shadowPaperHypothesis{}, errors.New("research packet market does not match this paper server")
+	}
+	currentFingerprint, err := controller.policy.Fingerprint()
+	baseFingerprint, baseErr := controller.basePolicy.Fingerprint()
+	if err != nil || baseErr != nil || currentFingerprint != baseFingerprint ||
+		controller.policy.Adaptive == nil || controller.basePolicy.Adaptive == nil {
+		return shadow.Policy{}, nil, shadowPaperHypothesis{}, errors.New("research packet binding requires one unchanged adaptive base policy")
+	}
+	candidate := controller.policy
+	adaptive := *candidate.Adaptive
+	for _, change := range packet.CandidateParameterDiff {
+		current, ok := shadowAdaptiveParameter(adaptive, change.Name)
+		if !ok || current != change.Current || !setShadowAdaptiveParameter(&adaptive, change.Name, change.Proposed) {
+			return shadow.Policy{}, nil, shadowPaperHypothesis{}, errors.New("research packet parameter change does not match the current paper policy")
+		}
+	}
+	candidate.Adaptive = &adaptive
+	if err := candidate.Validate(); err != nil || validateAdaptiveCandidateDelta(*controller.basePolicy.Adaptive, adaptive) != nil {
+		return shadow.Policy{}, nil, shadowPaperHypothesis{}, errors.New("research packet parameter change is outside the deterministic search boundary")
+	}
+	binding := *packet
+	return candidate, &binding, shadowHypothesisFromPacket(*packet), nil
+}
+
+func validateShadowResearchPacketBinding(
+	packet researchpacket.Packet, base, candidate shadow.Policy, result shadowSearchResult,
+) error {
+	if packet.Validate() != nil || packet.Disposition != researchpacket.DispositionCandidate ||
+		packet.Market != shadowMarketPair(base) || packet.Market != shadowMarketPair(candidate) ||
+		base.Adaptive == nil || candidate.Adaptive == nil {
+		return errors.New("research packet binding envelope is invalid")
+	}
+	want := shadowAdaptiveParameterDiff(*base.Adaptive, *candidate.Adaptive)
+	if len(want) != len(packet.CandidateParameterDiff) {
+		return errors.New("research packet binding does not cover the candidate change")
+	}
+	changes := make(map[string]researchpacket.ParameterChange, len(packet.CandidateParameterDiff))
+	for _, change := range packet.CandidateParameterDiff {
+		if _, duplicate := changes[change.Name]; duplicate {
+			return errors.New("research packet binding repeats a candidate change")
+		}
+		changes[change.Name] = change
+	}
+	for _, change := range want {
+		if changes[change.Name] != change {
+			return errors.New("research packet binding does not match the candidate change")
+		}
+	}
+	if result.WalkForward == nil {
+		return errors.New("research packet binding needs walk-forward evidence")
+	}
+	fingerprint, err := candidate.Fingerprint()
+	if err != nil {
+		return err
+	}
+	for _, fold := range result.WalkForward.Folds {
+		if fold.CandidatePolicySHA256 != fingerprint {
+			return errors.New("research packet candidate changed between walk-forward folds")
+		}
+	}
+	return nil
+}
+
+func shadowAdaptiveParameterDiff(base, candidate shadow.AdaptivePolicy) []researchpacket.ParameterChange {
+	names := []string{"fast_window", "slow_window", "minimum_signal_bps", "cooldown_seconds"}
+	changes := make([]researchpacket.ParameterChange, 0, len(names))
+	for _, name := range names {
+		current, _ := shadowAdaptiveParameter(base, name)
+		proposed, _ := shadowAdaptiveParameter(candidate, name)
+		if current != proposed {
+			changes = append(changes, researchpacket.ParameterChange{
+				Name: name, Current: current, Proposed: proposed,
+			})
+		}
+	}
+	return changes
+}
+
+func shadowAdaptiveParameter(policy shadow.AdaptivePolicy, name string) (uint64, bool) {
+	switch name {
+	case "fast_window":
+		return uint64(policy.FastWindow), true
+	case "slow_window":
+		return uint64(policy.SlowWindow), true
+	case "minimum_signal_bps":
+		return uint64(policy.MinimumSignalBPS), true
+	case "cooldown_seconds":
+		return policy.CooldownSeconds, true
+	default:
+		return 0, false
+	}
+}
+
+func setShadowAdaptiveParameter(policy *shadow.AdaptivePolicy, name string, value uint64) bool {
+	if policy == nil {
+		return false
+	}
+	switch name {
+	case "fast_window":
+		if value > uint64(^uint16(0)) {
+			return false
+		}
+		policy.FastWindow = uint16(value)
+	case "slow_window":
+		if value > uint64(^uint16(0)) {
+			return false
+		}
+		policy.SlowWindow = uint16(value)
+	case "minimum_signal_bps":
+		if value > uint64(^uint16(0)) {
+			return false
+		}
+		policy.MinimumSignalBPS = uint16(value)
+	case "cooldown_seconds":
+		policy.CooldownSeconds = value
+	default:
+		return false
+	}
+	return true
+}
+
+func shadowHypothesisFromPacket(packet researchpacket.Packet) shadowPaperHypothesis {
+	hypothesis := shadowPaperHypothesis{
+		Version: shadowPaperHypothesisVersion, Status: "paper_hypothesis", PaperOnly: true,
+		Thesis: "Research packet " + packet.HypothesisID + ": " + cleanShadowResearchText(packet.VerifiedFacts[0].Claim, 800),
+	}
+	seen := make(map[string]struct{})
+	for _, fact := range packet.VerifiedFacts {
+		for _, source := range fact.Sources {
+			if _, duplicate := seen[source.URL]; duplicate {
+				continue
+			}
+			seen[source.URL] = struct{}{}
+			hypothesis.Sources = append(hypothesis.Sources, shadowHypothesisEvidence{
+				URL: source.URL, ObservedAt: source.RetrievedAt,
+				Summary: cleanShadowResearchText(fact.Claim, 500),
+			})
+			if len(hypothesis.Sources) == shadowHypothesisMaxSources {
+				return hypothesis
+			}
+		}
+	}
+	return hypothesis
+}
+
+func cleanShadowResearchText(value string, limit int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	for len(value) > limit {
+		_, size := utf8.DecodeLastRuneInString(value)
+		value = value[:len(value)-size]
+	}
+	return strings.TrimSpace(value)
 }
 
 func readShadowWalkForwardDays(
@@ -638,6 +892,10 @@ func (input shadowResearchCandidateInput) validate(now time.Time) error {
 			return errors.New("paper hypothesis source observation cannot be in the future")
 		}
 	}
+	return input.validateDays(now)
+}
+
+func (input shadowResearchCandidateInput) validateDays(now time.Time) error {
 	trainAt, trainErr := time.Parse("2006-01-02", input.TrainDay)
 	validationAt, validationErr := time.Parse("2006-01-02", input.ValidationDay)
 	today := time.Date(now.UTC().Year(), now.UTC().Month(), now.UTC().Day(), 0, 0, 0, 0, time.UTC)

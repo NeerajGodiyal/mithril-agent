@@ -103,6 +103,43 @@ func TestRejectedPacketCannotCarryParameterChanges(t *testing.T) {
 	}
 }
 
+func TestPacketRejectsAParameterTheDeterministicSearchCannotApply(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	packet := candidatePacket(now)
+	packet.CandidateParameterDiff[0] = ParameterChange{
+		Name: "max_drawdown_bps", Current: 300, Proposed: 400,
+	}
+	encoded, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(encoded, now); err == nil {
+		t.Fatal("packet accepted a parameter the candidate search cannot apply")
+	}
+}
+
+func TestPacketAcceptsSourcesRetrievedDuringABoundedResearchRun(t *testing.T) {
+	started := time.Date(2026, 9, 2, 10, 0, 0, 0, time.UTC)
+	packet := candidatePacket(started)
+	packet.CreatedAt = started
+	packet.ValidUntil = started.Add(6 * time.Hour)
+	for factIndex := range packet.VerifiedFacts {
+		for sourceIndex := range packet.VerifiedFacts[factIndex].Sources {
+			packet.VerifiedFacts[factIndex].Sources[sourceIndex].RetrievedAt = started.Add(10 * time.Minute)
+		}
+	}
+	encoded, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(encoded, started.Add(11*time.Minute)); err != nil {
+		t.Fatalf("current source retrieved during the research run was rejected: %v", err)
+	}
+	if _, err := Parse(encoded, started.Add(7*time.Minute)); err == nil {
+		t.Fatal("packet accepted a source timestamp in the future")
+	}
+}
+
 func candidatePacket(now time.Time) Packet {
 	created := now.Add(-time.Minute)
 	return Packet{
