@@ -23,7 +23,8 @@ const (
 	settingsVersion      = 2
 	accountingVersion    = 3
 	qualificationVersion = 4
-	Version              = 5
+	multiTapeVersion     = 5
+	Version              = 6
 	MaxEvents            = 64
 	MaxHistoryPoints     = 144
 	MaxMessageBytes      = 3000
@@ -125,34 +126,50 @@ type CurrentSummary struct {
 	FeeLamports             uint64 `json:"fee_lamports,omitempty"`
 	// RemainingFeeReserveLamports excludes setup rent that has not yet been
 	// locked, so it is the native amount still available for paper attempts.
-	FeeBudgetTracked              bool   `json:"fee_budget_tracked,omitempty"`
-	RemainingFeeReserveLamports   uint64 `json:"remaining_fee_reserve_lamports,omitempty"`
-	EstimatedFillsRemaining       uint64 `json:"estimated_fills_remaining,omitempty"`
-	SlippageBPS                   uint16 `json:"slippage_bps,omitempty"`
-	SettleSeconds                 uint64 `json:"settle_seconds,omitempty"`
-	FastWindow                    uint16 `json:"fast_window,omitempty"`
-	SlowWindow                    uint16 `json:"slow_window,omitempty"`
-	MinimumSignalBPS              uint16 `json:"minimum_signal_bps,omitempty"`
-	MaxVolatilityBPS              uint16 `json:"max_volatility_bps,omitempty"`
-	MaxQuoteImpactBPS             uint16 `json:"max_quote_impact_bps,omitempty"`
-	MaxDrawdownBPS                uint16 `json:"max_drawdown_bps,omitempty"`
-	CooldownSeconds               uint64 `json:"cooldown_seconds,omitempty"`
-	QualificationTracked          bool   `json:"qualification_tracked,omitempty"`
-	QualificationOutcome          string `json:"qualification_outcome,omitempty"`
-	QualificationSHA256           string `json:"qualification_sha256,omitempty"`
-	QualificationTapes            uint64 `json:"qualification_tapes,omitempty"`
-	QualificationFrames           uint64 `json:"qualification_frames,omitempty"`
-	QualificationMinimumFrames    uint64 `json:"qualification_minimum_frames,omitempty"`
-	QualificationTrainingFrames   uint64 `json:"qualification_training_frames,omitempty"`
-	QualificationHoldoutFrames    uint64 `json:"qualification_holdout_frames,omitempty"`
-	QualificationStrategy         string `json:"qualification_strategy,omitempty"`
-	QualificationRiskProfile      string `json:"qualification_risk_profile,omitempty"`
-	QualificationHoldoutEvaluated bool   `json:"qualification_holdout_evaluated,omitempty"`
-	QualificationStressEvaluated  bool   `json:"qualification_stress_evaluated,omitempty"`
-	QualificationHoldoutScored    bool   `json:"qualification_holdout_scored,omitempty"`
-	QualificationStressScored     bool   `json:"qualification_stress_scored,omitempty"`
-	QualificationHoldoutMicros    int64  `json:"qualification_holdout_micros,omitempty"`
-	QualificationStressMicros     int64  `json:"qualification_stress_micros,omitempty"`
+	FeeBudgetTracked              bool                   `json:"fee_budget_tracked,omitempty"`
+	RemainingFeeReserveLamports   uint64                 `json:"remaining_fee_reserve_lamports,omitempty"`
+	EstimatedFillsRemaining       uint64                 `json:"estimated_fills_remaining,omitempty"`
+	SlippageBPS                   uint16                 `json:"slippage_bps,omitempty"`
+	SettleSeconds                 uint64                 `json:"settle_seconds,omitempty"`
+	FastWindow                    uint16                 `json:"fast_window,omitempty"`
+	SlowWindow                    uint16                 `json:"slow_window,omitempty"`
+	MinimumSignalBPS              uint16                 `json:"minimum_signal_bps,omitempty"`
+	MaxVolatilityBPS              uint16                 `json:"max_volatility_bps,omitempty"`
+	MaxQuoteImpactBPS             uint16                 `json:"max_quote_impact_bps,omitempty"`
+	MaxDrawdownBPS                uint16                 `json:"max_drawdown_bps,omitempty"`
+	CooldownSeconds               uint64                 `json:"cooldown_seconds,omitempty"`
+	QualificationTracked          bool                   `json:"qualification_tracked,omitempty"`
+	QualificationOutcome          string                 `json:"qualification_outcome,omitempty"`
+	QualificationSHA256           string                 `json:"qualification_sha256,omitempty"`
+	QualificationTapes            uint64                 `json:"qualification_tapes,omitempty"`
+	QualificationFrames           uint64                 `json:"qualification_frames,omitempty"`
+	QualificationMinimumFrames    uint64                 `json:"qualification_minimum_frames,omitempty"`
+	QualificationTrainingFrames   uint64                 `json:"qualification_training_frames,omitempty"`
+	QualificationHoldoutFrames    uint64                 `json:"qualification_holdout_frames,omitempty"`
+	QualificationStrategy         string                 `json:"qualification_strategy,omitempty"`
+	QualificationRiskProfile      string                 `json:"qualification_risk_profile,omitempty"`
+	QualificationHoldoutEvaluated bool                   `json:"qualification_holdout_evaluated,omitempty"`
+	QualificationStressEvaluated  bool                   `json:"qualification_stress_evaluated,omitempty"`
+	QualificationHoldoutScored    bool                   `json:"qualification_holdout_scored,omitempty"`
+	QualificationStressScored     bool                   `json:"qualification_stress_scored,omitempty"`
+	QualificationHoldoutMicros    int64                  `json:"qualification_holdout_micros,omitempty"`
+	QualificationStressMicros     int64                  `json:"qualification_stress_micros,omitempty"`
+	QualificationAttempts         []QualificationAttempt `json:"qualification_attempts,omitempty"`
+}
+
+// QualificationAttempt is a bounded, read-only projection of one completed
+// training result. It is evidence for an operator, never a selected strategy
+// or execution authority.
+type QualificationAttempt struct {
+	RiskProfile       string `json:"risk_profile"`
+	Strategy          string `json:"strategy"`
+	NetPnLMicros      int64  `json:"net_pnl_micros"`
+	FeesMicros        uint64 `json:"fees_micros"`
+	FundingMicros     int64  `json:"funding_micros"`
+	MaxDrawdownMicros uint64 `json:"max_drawdown_micros"`
+	Liquidations      uint64 `json:"liquidations"`
+	FilledOrders      uint64 `json:"filled_orders"`
+	ClosedPositions   uint64 `json:"closed_positions"`
 }
 
 type PerformancePoint struct {
@@ -314,6 +331,7 @@ func ValidateSnapshot(snapshot Snapshot) error {
 	if snapshot.Version != legacyVersion && snapshot.Version != settingsVersion &&
 		snapshot.Version != accountingVersion &&
 		snapshot.Version != qualificationVersion &&
+		snapshot.Version != multiTapeVersion &&
 		snapshot.Version != Version ||
 		snapshot.ObservedAt.IsZero() ||
 		!snapshot.ObservedAt.Equal(snapshot.ObservedAt.UTC()) ||
@@ -322,6 +340,8 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		(snapshot.Current != "" && (len(snapshot.Current) > maxCurrentBytes ||
 			!validMessage(snapshot.Current))) ||
 		(snapshot.Current == "" && snapshot.Summary != nil) ||
+		(snapshot.Version != Version && snapshot.Summary != nil &&
+			len(snapshot.Summary.QualificationAttempts) != 0) ||
 		len(snapshot.History) > MaxHistoryPoints ||
 		validateCurrentSummary(snapshot.Summary) != nil {
 		return errors.New("paper alert snapshot is invalid")
@@ -370,6 +390,9 @@ func normalizeLegacySnapshot(snapshot *Snapshot) {
 	summary := snapshot.Summary
 	if summary.QualificationTracked && summary.QualificationTapes == 0 {
 		summary.QualificationTapes = 1
+	}
+	if snapshot.Version >= multiTapeVersion {
+		return
 	}
 	if summary.QualificationOutcome != "candidate_rejected" && summary.QualificationOutcome != "candidate_ready_for_more_paper_testing" {
 		return
@@ -430,7 +453,7 @@ func validQualification(summary CurrentSummary) bool {
 		summary.QualificationRiskProfile != "" || summary.QualificationHoldoutEvaluated ||
 		summary.QualificationStressEvaluated || summary.QualificationHoldoutScored ||
 		summary.QualificationStressScored || summary.QualificationHoldoutMicros != 0 ||
-		summary.QualificationStressMicros != 0
+		summary.QualificationStressMicros != 0 || len(summary.QualificationAttempts) != 0
 	if !summary.QualificationTracked {
 		return !present
 	}
@@ -438,13 +461,15 @@ func validQualification(summary CurrentSummary) bool {
 		summary.QualificationTapes > summary.QualificationFrames || !validOptionalSHA256(summary.QualificationSHA256) ||
 		summary.QualificationSHA256 == "" || summary.QualificationFrames == 0 || summary.QualificationMinimumFrames == 0 ||
 		summary.QualificationTrainingFrames > summary.QualificationFrames ||
-		summary.QualificationHoldoutFrames > summary.QualificationFrames-summary.QualificationTrainingFrames {
+		summary.QualificationHoldoutFrames > summary.QualificationFrames-summary.QualificationTrainingFrames ||
+		!validQualificationAttempts(summary.QualificationAttempts) {
 		return false
 	}
 	switch summary.QualificationOutcome {
 	case "insufficient_evidence":
 		return summary.QualificationFrames < summary.QualificationMinimumFrames &&
 			summary.QualificationTrainingFrames == 0 && summary.QualificationHoldoutFrames == 0 &&
+			len(summary.QualificationAttempts) == 0 &&
 			summary.QualificationStrategy == "" && summary.QualificationRiskProfile == "" &&
 			!summary.QualificationHoldoutEvaluated && !summary.QualificationStressEvaluated &&
 			!summary.QualificationHoldoutScored && !summary.QualificationStressScored &&
@@ -476,6 +501,24 @@ func validQualification(summary CurrentSummary) bool {
 	default:
 		return false
 	}
+}
+
+func validQualificationAttempts(attempts []QualificationAttempt) bool {
+	if len(attempts) > 3 {
+		return false
+	}
+	order := map[string]int{"conservative": 0, "balanced": 1, "experimental": 2}
+	previous := -1
+	for _, attempt := range attempts {
+		current, ok := order[attempt.RiskProfile]
+		if !ok || current <= previous || !validQualificationStrategy(attempt.Strategy) ||
+			attempt.FilledOrders == 0 || attempt.ClosedPositions != attempt.FilledOrders ||
+			attempt.Liquidations > attempt.ClosedPositions {
+			return false
+		}
+		previous = current
+	}
+	return true
 }
 
 func validQualificationStrategy(strategy string) bool {

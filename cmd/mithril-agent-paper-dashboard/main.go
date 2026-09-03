@@ -20,7 +20,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 )
 
-const usage = "Usage: mithril-agent-paper-dashboard --paper-status-socket MARKET=/absolute/path [--optional-paper-status-socket MARKET=/absolute/path] [--instruction-path /absolute/path] [--research-packet-path /absolute/path] [--mithril-evidence-status-path /absolute/path]"
+const usage = "Usage: mithril-agent-paper-dashboard --paper-status-socket MARKET=/absolute/path [--optional-paper-status-socket MARKET=/absolute/path] [--instruction-path /absolute/path] [--research-packet-path /absolute/path] [--mithril-evidence-status-path /absolute/path]\n       mithril-agent-paper-dashboard --render-perps-research MARKET=/absolute/path --render-perps-research MARKET=/absolute/path --render-perps-research MARKET=/absolute/path"
 
 var activatedListener = systemdUnixListener
 
@@ -43,10 +43,11 @@ func main() {
 func run(ctx context.Context, args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("mithril-agent-paper-dashboard", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	var sockets, optionalSockets socketPaths
+	var sockets, optionalSockets, perpsResearchPaths socketPaths
 	var instructionPath, researchPath, mithrilEvidencePath, recordMithrilPath, mithrilStatus, renderInstructionPath, exportInstructionPath string
 	flags.Var(&sockets, "paper-status-socket", "MARKET=/absolute/path to a bounded paper status socket")
 	flags.Var(&optionalSockets, "optional-paper-status-socket", "MARKET=/absolute/path for a bounded experiment that may expire")
+	flags.Var(&perpsResearchPaths, "render-perps-research", "MARKET=/absolute/path to a completed perps paper status")
 	flags.StringVar(&instructionPath, "instruction-path", "", "private path for a bounded paper research preference")
 	flags.StringVar(&researchPath, "research-packet-path", "", "private path for the latest validated Hermes packet")
 	flags.StringVar(&mithrilEvidencePath, "mithril-evidence-status-path", "", "private status from the latest Hermes Mithril evidence check")
@@ -59,6 +60,24 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 			_, writeErr := fmt.Fprintln(output, usage)
 			return writeErr
 		}
+		return err
+	}
+	if len(perpsResearchPaths) != 0 {
+		if flags.NArg() != 0 || len(sockets) != 0 || len(optionalSockets) != 0 ||
+			instructionPath != "" || researchPath != "" || mithrilEvidencePath != "" ||
+			recordMithrilPath != "" || mithrilStatus != "" || renderInstructionPath != "" ||
+			exportInstructionPath != "" {
+			return errors.New("--render-perps-research requires exactly three paper status paths and no other mode")
+		}
+		paths := make(map[string]string, len(perpsResearchPaths))
+		for _, item := range perpsResearchPaths {
+			paths[item.label] = item.path
+		}
+		encoded, err := paperdashboard.RenderPerpsResearch(paths)
+		if err != nil {
+			return err
+		}
+		_, err = output.Write(encoded)
 		return err
 	}
 	if recordMithrilPath != "" {

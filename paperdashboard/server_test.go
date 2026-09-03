@@ -41,8 +41,9 @@ func (s *sourceStub) readCount() int {
 }
 
 func TestAutomationListsOnlyOptionalExperiments(t *testing.T) {
-	if !strings.Contains(appJS, "const experimentNames=experiments.map") {
-		t.Fatal("paper engine status must derive its perps list from optional experiments")
+	if !strings.Contains(appJS, "completedExperiments=experiments.filter") ||
+		!strings.Contains(appJS, "perps recordings are completed") {
+		t.Fatal("paper engine status must derive completed perps from optional experiments")
 	}
 	if !strings.Contains(appJS, "retained in the final packet") || strings.Contains(appJS, "unique source'+(packet.sources_checked===1?'':'s')+' checked") {
 		t.Fatal("Hermes status must distinguish retrieved pages from sources retained in its final packet")
@@ -389,9 +390,9 @@ func TestOptionalExperimentCannotEraseAHealthyRequiredOverview(t *testing.T) {
 	}
 	server.now = func() time.Time { return now }
 	view = server.snapshotWithRefresh(true)
-	if !view.Complete || view.Overview.EquityMicros != 200_000_000 ||
+	if !view.Complete || view.Overview.EquityMicros != 100_000_000 ||
 		len(view.Markets) != 2 || !view.Markets[1].Optional {
-		t.Fatalf("fresh independent experiment was not aggregated: %+v", view)
+		t.Fatalf("fresh independent experiment changed the live spot overview: %+v", view)
 	}
 
 	freshDifferentUnit := instructionSource("BTC-PERP", now, 15, 300)
@@ -454,6 +455,11 @@ func TestDashboardProjectsQualificationWithoutPrivateTapeIdentity(t *testing.T) 
 			QualificationHoldoutEvaluated: true, QualificationStressEvaluated: true,
 			QualificationHoldoutScored: true, QualificationStressScored: true,
 			QualificationHoldoutMicros: 100_000, QualificationStressMicros: 50_000,
+			QualificationAttempts: []paperstatus.QualificationAttempt{
+				{RiskProfile: "conservative", Strategy: "momentum", NetPnLMicros: 75_000, FeesMicros: 5_000, MaxDrawdownMicros: 10_000, FilledOrders: 2, ClosedPositions: 2},
+				{RiskProfile: "balanced", Strategy: "breakout", NetPnLMicros: 50_000, FeesMicros: 8_000, FundingMicros: -1_000, MaxDrawdownMicros: 15_000, FilledOrders: 3, ClosedPositions: 3},
+				{RiskProfile: "experimental", Strategy: "regime", NetPnLMicros: -25_000, FeesMicros: 10_000, MaxDrawdownMicros: 20_000, Liquidations: 1, FilledOrders: 4, ClosedPositions: 4},
+			},
 		},
 	}}
 	server, err := New([]Source{Optional(source)})
@@ -477,7 +483,10 @@ func TestDashboardProjectsQualificationWithoutPrivateTapeIdentity(t *testing.T) 
 		!view.Markets[0].QualificationHoldoutEvaluated || !view.Markets[0].QualificationStressEvaluated ||
 		!view.Markets[0].QualificationHoldoutScored || !view.Markets[0].QualificationStressScored ||
 		view.Markets[0].QualificationHoldoutMicros != 100_000 ||
-		view.Markets[0].QualificationStressMicros != 50_000 {
+		view.Markets[0].QualificationStressMicros != 50_000 ||
+		len(view.Markets[0].QualificationAttempts) != 3 ||
+		view.Markets[0].QualificationAttempts[0].Strategy != "momentum" ||
+		view.Markets[0].QualificationAttempts[2].Liquidations != 1 {
 		t.Fatalf("qualification projection = %+v", view.Markets)
 	}
 }
@@ -605,7 +614,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for path, wants := range map[string][]string{
-		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "class=\"overview-workspace\"", "id=\"market-switcher\"", "class=\"activity-table\"", "id=\"help-dialog\"", "Quick explanation", "strategy-brief", "/vendor/overclock.svg", "Automation setup", "Reviewed scope", "WIF, JTO, and PYTH", "Recorded replay and doubled-fee checks run in minutes", "short live checkpoints", "None proves profitability", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Total paper budget", "Smallest order", "Largest order", "Paper loss stop", "saving never restarts Mithril", "About this paper account", "bot's UTC day", "/vendor/lightweight-charts-5.2.1.js", "TradingView Lightweight Charts™"},
+		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "class=\"overview-workspace\"", "id=\"market-switcher\"", "aria-label=\"Live spot markets\"", "id=\"perps-research-title\"", "id=\"perps-research-list\"", "class=\"activity-table\"", "id=\"help-dialog\"", "Quick explanation", "strategy-brief", "/vendor/overclock.svg", "Automation setup", "Reviewed scope", "WIF, JTO, and PYTH", "Recorded replay and doubled-fee checks run in minutes", "short live checkpoints", "None proves profitability", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Total paper budget", "Smallest order", "Largest order", "Paper loss stop", "saving never restarts Mithril", "About this paper account", "bot's UTC day", "/vendor/lightweight-charts-5.2.1.js", "TradingView Lightweight Charts™"},
 		"/app.css": {
 			"@font-face", "/vendor/space-grotesk-latin.woff2", "--canvas: #000", "--green: #86efac", "--line-strong: #353535", "--text: #e7e7e7", "--subtle: #7f7f7f",
 			".tabs {", "position: fixed", ".tab.active", ".brand-logo", ".panel:focus-visible",
@@ -616,7 +625,8 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"@media (max-width: 1023px)", "@media (max-width: 767px)", "@media (max-width: 430px)", "prefers-reduced-motion",
 		},
 		"/app.js": {
-			"Paper account now", "Start of this run", "Result this run", "Versus holding", "Paper executions", "Compared with holding",
+			"Live spot account", "Spot account start", "Spot result", "Spot versus holding", "Spot executions", "Compared with holding",
+			"Completed experiment", "Not selected", "Best completed training attempts", "Training candidate",
 			"Final untouched recording", "separate recordings",
 			"<button class=\"help\"", "data-help-copy=", "helpDialog.showModal()", "Waiting for fresh prices",
 			"?fresh=1", "Refreshing…", "Updated ✓",
@@ -643,7 +653,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"decisionReason", "marketStatus", "Fixed paper plan", "const watching=", "const deciding=",
 			"Limited price data", "coverage_bps", "marketDataHealthy", "rememberChartRange",
 			"Math.hypot", "openChartDetail", "openDetails", "helpReturn", "captureRenderFocus", "updateTabOrientation", "ArrowDown", "ArrowUp",
-			"selectedMarketName", "market-choice", "aria-controls=\"markets\"", "current.markets.find(market=>market.name===selectedMarketName)",
+			"selectedMarketName", "market-choice", "aria-controls=\"markets\"", "spotMarkets.find(market=>market.name===selectedMarketName)",
 			"if(changed)window.scrollTo(0,0)",
 			"activity-more", "strategy-list-head", "automation-list-head",
 		},

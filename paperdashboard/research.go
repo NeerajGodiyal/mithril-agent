@@ -1,7 +1,9 @@
 package paperdashboard
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -12,12 +14,14 @@ import (
 
 	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
 	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
+	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 	"github.com/Overclock-Validator/mithril-agent/researchpacket"
 )
 
 const (
 	researchEvidenceVersion  = uint32(1)
 	maxResearchEvidenceBytes = 128 << 10
+	maxPerpsResearchBytes    = 256 << 10
 )
 
 var errResearchEvidenceUnavailable = errors.New("research session evidence is unavailable")
@@ -62,6 +66,116 @@ type Research struct {
 	RiskReason            string                           `json:"risk_reason"`
 	ProposedChanges       []researchpacket.ParameterChange `json:"proposed_changes,omitempty"`
 	ContentSHA256         string                           `json:"content_sha256"`
+}
+
+type perpsResearchMarket struct {
+	Market                        string                             `json:"market"`
+	PaperStatusSHA256             string                             `json:"paper_status_sha256"`
+	QualificationInputSHA256      string                             `json:"qualification_input_sha256"`
+	QualificationOutcome          string                             `json:"qualification_outcome"`
+	QualificationTapes            uint64                             `json:"qualification_tapes"`
+	QualificationFrames           uint64                             `json:"qualification_frames"`
+	QualificationMinimumFrames    uint64                             `json:"qualification_minimum_frames"`
+	QualificationTrainingFrames   uint64                             `json:"qualification_training_frames"`
+	QualificationHoldoutFrames    uint64                             `json:"qualification_holdout_frames"`
+	QualificationStrategy         string                             `json:"qualification_strategy,omitempty"`
+	QualificationRiskProfile      string                             `json:"qualification_risk_profile,omitempty"`
+	QualificationHoldoutEvaluated bool                               `json:"qualification_holdout_evaluated"`
+	QualificationStressEvaluated  bool                               `json:"qualification_stress_evaluated"`
+	QualificationHoldoutScored    bool                               `json:"qualification_holdout_scored"`
+	QualificationStressScored     bool                               `json:"qualification_stress_scored"`
+	QualificationHoldoutMicros    int64                              `json:"qualification_holdout_micros"`
+	QualificationStressMicros     int64                              `json:"qualification_stress_micros"`
+	QualificationAttempts         []paperstatus.QualificationAttempt `json:"qualification_attempts,omitempty"`
+}
+
+type perpsResearchSummary struct {
+	Version       uint32                `json:"version"`
+	PaperOnly     bool                  `json:"paper_only"`
+	AdvisoryOnly  bool                  `json:"advisory_only"`
+	Authorized    bool                  `json:"authorized"`
+	Promotable    bool                  `json:"promotable"`
+	ObservedAt    time.Time             `json:"observed_at"`
+	Markets       []perpsResearchMarket `json:"markets"`
+	ContentSHA256 string                `json:"content_sha256,omitempty"`
+}
+
+// RenderPerpsResearch returns a content-bound, read-only projection of one
+// completed three-market paper qualification. It deliberately excludes account
+// state, events, human text, paths, policies, and every execution capability.
+func RenderPerpsResearch(paths map[string]string) ([]byte, error) {
+	expected := [...]string{"SOL-PERP", "BTC-PERP", "ETH-PERP"}
+	if len(paths) != len(expected) {
+		return nil, errors.New("perps research requires exactly three paper status paths")
+	}
+	result := perpsResearchSummary{
+		Version: 1, PaperOnly: true, AdvisoryOnly: true,
+		Markets: make([]perpsResearchMarket, 0, len(expected)),
+	}
+	for _, market := range expected {
+		path, ok := paths[market]
+		if !ok || !cleanAbsolutePath(path) {
+			return nil, errors.New("perps research paper status paths are invalid")
+		}
+		raw, err := securefile.ReadPrivate(path, maxPerpsResearchBytes)
+		if err != nil {
+			return nil, errors.New("read perps research paper status")
+		}
+		var snapshot paperstatus.Snapshot
+		if strictjson.Decode(raw, &snapshot) != nil || paperstatus.ValidateSnapshot(snapshot) != nil ||
+			snapshot.Summary == nil || snapshot.Summary.Market != market ||
+			snapshot.Summary.Instrument != "perpetual" || !snapshot.Summary.QualificationTracked {
+			return nil, errors.New("perps research paper status is invalid")
+		}
+		if result.ObservedAt.IsZero() {
+			result.ObservedAt = snapshot.ObservedAt
+		} else if !result.ObservedAt.Equal(snapshot.ObservedAt) {
+			return nil, errors.New("perps research paper statuses are from different runs")
+		}
+		summary := snapshot.Summary
+		sourceDigest := sha256.Sum256(raw)
+		result.Markets = append(result.Markets, perpsResearchMarket{
+			Market:                        market,
+			PaperStatusSHA256:             hex.EncodeToString(sourceDigest[:]),
+			QualificationInputSHA256:      summary.QualificationSHA256,
+			QualificationOutcome:          summary.QualificationOutcome,
+			QualificationTapes:            summary.QualificationTapes,
+			QualificationFrames:           summary.QualificationFrames,
+			QualificationMinimumFrames:    summary.QualificationMinimumFrames,
+			QualificationTrainingFrames:   summary.QualificationTrainingFrames,
+			QualificationHoldoutFrames:    summary.QualificationHoldoutFrames,
+			QualificationStrategy:         summary.QualificationStrategy,
+			QualificationRiskProfile:      summary.QualificationRiskProfile,
+			QualificationHoldoutEvaluated: summary.QualificationHoldoutEvaluated,
+			QualificationStressEvaluated:  summary.QualificationStressEvaluated,
+			QualificationHoldoutScored:    summary.QualificationHoldoutScored,
+			QualificationStressScored:     summary.QualificationStressScored,
+			QualificationHoldoutMicros:    summary.QualificationHoldoutMicros,
+			QualificationStressMicros:     summary.QualificationStressMicros,
+			QualificationAttempts: append([]paperstatus.QualificationAttempt(nil),
+				summary.QualificationAttempts...),
+		})
+	}
+	digest, err := perpsResearchFingerprint(result)
+	if err != nil {
+		return nil, errors.New("encode perps research summary")
+	}
+	result.ContentSHA256 = digest
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return nil, errors.New("encode perps research summary")
+	}
+	return append(encoded, '\n'), nil
+}
+
+func perpsResearchFingerprint(summary perpsResearchSummary) (string, error) {
+	summary.ContentSHA256 = ""
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func (s *Server) EnableResearch(path string) error {

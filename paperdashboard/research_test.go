@@ -1,7 +1,10 @@
 package paperdashboard
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -205,6 +208,206 @@ func TestResearchProjectionFailsClosedWithoutMatchingSessionEvidence(t *testing.
 	view := server.snapshot()
 	if !view.ResearchError || view.Research != nil {
 		t.Fatalf("packet without session evidence was exposed: %+v", view.Research)
+	}
+}
+
+func TestRenderPerpsResearchIsDeterministicContentBoundAndMinimal(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	paths := writePerpsResearchStatuses(t, now)
+	first, err := RenderPerpsResearch(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := RenderPerpsResearch(paths)
+	if err != nil || !bytes.Equal(first, second) {
+		t.Fatalf("deterministic render = %q, %v", second, err)
+	}
+	for _, forbidden := range []string{
+		"wallet-secret-marker", "policy-secret-marker", "human-event-marker",
+		`"events"`, `"current"`, `"equity_micros"`, `"history"`, `"path"`,
+	} {
+		if bytes.Contains(first, []byte(forbidden)) {
+			t.Errorf("perps research output contains %q", forbidden)
+		}
+	}
+	var summary perpsResearchSummary
+	if err := json.Unmarshal(first, &summary); err != nil {
+		t.Fatal(err)
+	}
+	wantDigest, err := perpsResearchFingerprint(summary)
+	if err != nil || summary.ContentSHA256 != wantDigest || summary.Version != 1 ||
+		!summary.PaperOnly || !summary.AdvisoryOnly || summary.Authorized || summary.Promotable ||
+		!summary.ObservedAt.Equal(now) || len(summary.Markets) != 3 {
+		t.Fatalf("summary = %+v, digest error = %v", summary, err)
+	}
+	for index, market := range []string{"SOL-PERP", "BTC-PERP", "ETH-PERP"} {
+		item := summary.Markets[index]
+		raw, err := os.ReadFile(paths[market])
+		if err != nil {
+			t.Fatal(err)
+		}
+		sourceDigest := sha256.Sum256(raw)
+		if item.Market != market || item.PaperStatusSHA256 != fmt.Sprintf("%x", sourceDigest) ||
+			item.QualificationOutcome != "candidate_ready_for_more_paper_testing" ||
+			item.QualificationInputSHA256 == "" || item.QualificationTapes != 4 ||
+			item.QualificationFrames != 421 || item.QualificationTrainingFrames != 390 ||
+			item.QualificationHoldoutFrames != 31 || !item.QualificationHoldoutScored ||
+			!item.QualificationStressScored || len(item.QualificationAttempts) != 1 ||
+			item.QualificationAttempts[0].ClosedPositions != 2 {
+			t.Fatalf("market %d = %+v", index, item)
+		}
+	}
+	tampered := summary
+	tampered.Markets = append([]perpsResearchMarket(nil), summary.Markets...)
+	tampered.Markets[0].QualificationFrames++
+	if digest, err := perpsResearchFingerprint(tampered); err != nil || digest == tampered.ContentSHA256 {
+		t.Fatalf("tampered summary retained digest %q, %v", digest, err)
+	}
+}
+
+func TestRenderPerpsResearchRejectsUnsafeOrMixedSnapshots(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	t.Run("mixed completion", func(t *testing.T) {
+		paths := writePerpsResearchStatuses(t, now)
+		rewritePerpsResearchStatus(t, paths["ETH-PERP"], func(snapshot *paperstatus.Snapshot) {
+			snapshot.ObservedAt = snapshot.ObservedAt.Add(time.Second)
+			snapshot.Summary.Day = snapshot.ObservedAt.Format("2006-01-02")
+		})
+		if _, err := RenderPerpsResearch(paths); err == nil {
+			t.Fatal("mixed completion times were accepted")
+		}
+	})
+	t.Run("tampered status", func(t *testing.T) {
+		paths := writePerpsResearchStatuses(t, now)
+		rewritePerpsResearchStatus(t, paths["SOL-PERP"], func(snapshot *paperstatus.Snapshot) {
+			snapshot.Summary.QualificationSHA256 = "not-a-digest"
+		})
+		if _, err := RenderPerpsResearch(paths); err == nil {
+			t.Fatal("tampered qualification was accepted")
+		}
+	})
+	t.Run("unsafe mode", func(t *testing.T) {
+		paths := writePerpsResearchStatuses(t, now)
+		if err := os.Chmod(paths["BTC-PERP"], 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := RenderPerpsResearch(paths); err == nil {
+			t.Fatal("public status file was accepted")
+		}
+	})
+	t.Run("symlink", func(t *testing.T) {
+		paths := writePerpsResearchStatuses(t, now)
+		source := paths["SOL-PERP"]
+		target := source + ".target"
+		if err := os.Rename(source, target); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, source); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := RenderPerpsResearch(paths); err == nil {
+			t.Fatal("symlinked status file was accepted")
+		}
+	})
+	t.Run("wrong market", func(t *testing.T) {
+		paths := writePerpsResearchStatuses(t, now)
+		rewritePerpsResearchStatus(t, paths["SOL-PERP"], func(snapshot *paperstatus.Snapshot) {
+			snapshot.Summary.Market = "JUP/USDC"
+			snapshot.Summary.Instrument = "spot"
+			snapshot.Summary.RiskProfile = ""
+			snapshot.Summary.PositionDirection = ""
+			snapshot.Summary.LeverageBPS = 0
+			snapshot.Summary.FundingTracked = false
+		})
+		if _, err := RenderPerpsResearch(paths); err == nil {
+			t.Fatal("mislabeled spot status was accepted")
+		}
+	})
+	t.Run("extra market", func(t *testing.T) {
+		paths := writePerpsResearchStatuses(t, now)
+		paths["JUP-PERP"] = paths["SOL-PERP"]
+		if _, err := RenderPerpsResearch(paths); err == nil {
+			t.Fatal("extra market was accepted")
+		}
+	})
+}
+
+func writePerpsResearchStatuses(t *testing.T, observedAt time.Time) map[string]string {
+	t.Helper()
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	paths := make(map[string]string, 3)
+	for index, market := range []string{"SOL-PERP", "BTC-PERP", "ETH-PERP"} {
+		path := filepath.Join(directory, strings.ToLower(strings.TrimSuffix(market, "-PERP"))+".json")
+		snapshot := paperstatus.Snapshot{
+			Version: paperstatus.Version, ObservedAt: observedAt,
+			Current: "PAPER · wallet-secret-marker policy-secret-marker",
+			Events: []paperstatus.Event{{
+				ID: strings.Repeat("d", 64), At: observedAt, Kind: paperstatus.KindExperimentDone,
+				Message: "PAPER · human-event-marker",
+			}},
+			Summary: &paperstatus.CurrentSummary{
+				Market: market, Instrument: "perpetual", RiskProfile: "balanced",
+				PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+				ValueUnit: "USD", Day: observedAt.Format("2006-01-02"), TickSeconds: 15,
+				OpeningEquityMicros: 100_000_000, EquityMicros: 100_100_000,
+				HoldBenchmarkMicros: 100_000_000, AccountingTracked: true,
+				UnrealizedMicros: 100_000, Checks: 421, Signals: 2, Trades: 2,
+				State: "watching", Strategy: "fixed",
+				QualificationTracked: true,
+				QualificationOutcome: "candidate_ready_for_more_paper_testing",
+				QualificationSHA256:  strings.Repeat(string(rune('a'+index)), 64),
+				QualificationTapes:   4, QualificationFrames: 421,
+				QualificationMinimumFrames: 96, QualificationTrainingFrames: 390,
+				QualificationHoldoutFrames: 31, QualificationStrategy: "momentum",
+				QualificationRiskProfile: "balanced", QualificationHoldoutEvaluated: true,
+				QualificationStressEvaluated: true, QualificationHoldoutScored: true,
+				QualificationStressScored: true, QualificationHoldoutMicros: 100_000,
+				QualificationStressMicros: 50_000,
+				QualificationAttempts: []paperstatus.QualificationAttempt{{
+					RiskProfile: "conservative", Strategy: "momentum", NetPnLMicros: -50_000,
+					FeesMicros: 20_000, FundingMicros: -1_000, MaxDrawdownMicros: 70_000,
+					FilledOrders: 2, ClosedPositions: 2,
+				}},
+			},
+		}
+		if err := paperstatus.ValidateSnapshot(snapshot); err != nil {
+			t.Fatalf("fixture %s is invalid: %v", market, err)
+		}
+		encoded, err := json.Marshal(snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		paths[market] = path
+	}
+	return paths
+}
+
+func rewritePerpsResearchStatus(t *testing.T, path string, mutate func(*paperstatus.Snapshot)) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot paperstatus.Snapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	mutate(&snapshot)
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

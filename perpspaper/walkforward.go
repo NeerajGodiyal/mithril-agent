@@ -195,6 +195,32 @@ func QualifyWalkForward(config QualificationConfig, tapes []WalkForwardTape) (Wa
 	return result, nil
 }
 
+// BestCompletedTrainingAttempts returns the strongest completed aggregate
+// training attempt for each risk arm. Unlike candidate qualification, it keeps
+// losing attempts so operators can see why no candidate passed.
+func BestCompletedTrainingAttempts(training []WalkForwardTrial) []QualificationTrial {
+	arms := [...]RiskArm{Conservative, Balanced, Experimental}
+	result := make([]QualificationTrial, 0, len(arms))
+	for _, arm := range arms {
+		var best QualificationTrial
+		for _, trial := range training {
+			if trial.RiskArm != arm || !trial.Eligible || trial.Aggregate == nil ||
+				trial.Aggregate.FilledOrders == 0 || trial.Aggregate.ClosedPositions != trial.Aggregate.FilledOrders {
+				continue
+			}
+			score := *trial.Aggregate
+			candidate := QualificationTrial{QualificationKey: trial.QualificationKey, Eligible: true, Score: &score}
+			if best.Score == nil || betterQualificationTrial(candidate, best) {
+				best = candidate
+			}
+		}
+		if best.Score != nil {
+			result = append(result, best)
+		}
+	}
+	return result
+}
+
 func aggregateWalkForwardScores(starting uint64, scores []TournamentScore) (TournamentScore, error) {
 	if len(scores) == 0 || starting > math.MaxInt64 {
 		return TournamentScore{}, errors.New("walk-forward scores are empty or out of range")

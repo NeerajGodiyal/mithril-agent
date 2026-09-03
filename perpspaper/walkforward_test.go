@@ -64,6 +64,47 @@ func TestWalkForwardReportsShortTapeWithoutSelecting(t *testing.T) {
 	}
 }
 
+func TestBestCompletedTrainingAttemptsKeepsLosingActiveAttempts(t *testing.T) {
+	score := func(pnl int64, drawdown, fills, closes uint64) *TournamentScore {
+		return &TournamentScore{
+			EndingEquityMicros: 100_000_000 + pnl, NetPnLMicros: pnl,
+			MaxDrawdownMicros: drawdown, FilledOrders: fills, ClosedPositions: closes,
+		}
+	}
+	training := []WalkForwardTrial{
+		{QualificationKey: QualificationKey{RiskArm: Conservative, Strategy: StrategyMomentum}, Eligible: true, Aggregate: score(0, 0, 0, 0)},
+		{QualificationKey: QualificationKey{RiskArm: Conservative, Strategy: StrategyMeanReversion}, Eligible: true, Aggregate: score(-10, 5, 1, 1)},
+		{QualificationKey: QualificationKey{RiskArm: Conservative, Strategy: StrategyBreakout}, Eligible: true, Aggregate: score(-20, 1, 1, 1)},
+		{QualificationKey: QualificationKey{RiskArm: Conservative, Strategy: StrategyRegime}, Eligible: true, Aggregate: score(100, 1, 2, 1)},
+		{QualificationKey: QualificationKey{RiskArm: Balanced, Strategy: StrategyMomentum}, Eligible: false, Aggregate: score(50, 1, 1, 1)},
+		{QualificationKey: QualificationKey{RiskArm: Balanced, Strategy: StrategyBreakout}, Eligible: true, Aggregate: score(-5, 9, 2, 2)},
+		{QualificationKey: QualificationKey{RiskArm: Balanced, Strategy: StrategyMeanReversion}, Eligible: true, Aggregate: score(-5, 4, 2, 2)},
+		{QualificationKey: QualificationKey{RiskArm: Experimental, Strategy: StrategyRegime}, Eligible: true, Aggregate: score(-1, 2, 3, 3)},
+	}
+
+	got := BestCompletedTrainingAttempts(training)
+	want := []QualificationKey{
+		{RiskArm: Conservative, Strategy: StrategyMeanReversion},
+		{RiskArm: Balanced, Strategy: StrategyMeanReversion},
+		{RiskArm: Experimental, Strategy: StrategyRegime},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("best completed attempts = %+v", got)
+	}
+	for index := range want {
+		if got[index].QualificationKey != want[index] || got[index].Score == nil || got[index].Score.NetPnLMicros >= 0 {
+			t.Fatalf("best completed attempt %d = %+v", index, got[index])
+		}
+	}
+	got[0].Score.NetPnLMicros = 1
+	if training[1].Aggregate.NetPnLMicros != -10 {
+		t.Fatal("returned score aliases the training evidence")
+	}
+	if got := BestCompletedTrainingAttempts(training[:1]); len(got) != 0 {
+		t.Fatalf("no-trade attempt was exposed as active: %+v", got)
+	}
+}
+
 func shiftedWalkForwardFrames(frames []TapeFrame, offset int64) []TapeFrame {
 	shifted := cloneTournamentFrames(frames)
 	for index := range shifted {

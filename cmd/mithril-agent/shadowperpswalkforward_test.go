@@ -160,10 +160,37 @@ func TestShadowPerpsWalkForwardMessageUsesPlainPaperLanguage(t *testing.T) {
 		Tapes:   []perpspaper.WalkForwardTapeEvidence{{}, {}},
 	}
 	message := shadowPerpsWalkForwardMessage(result)
-	for _, want := range []string{"PAPER · 🧪 STRATEGY CHECK", "Recordings checked: 2 separate", "No real order was sent."} {
+	for _, want := range []string{"PAPER · 🧪 STRATEGY CHECK", "Recordings checked: 2 separate", "Final untouched recording: kept closed", "No real order was sent."} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("plain paper message = %q", message)
 		}
+	}
+}
+
+func TestWalkForwardSummaryShowsCompletedAttemptsWithoutSelectingThem(t *testing.T) {
+	result := perpspaper.WalkForwardQualification{
+		Outcome: "no_training_candidate", InputSHA256: strings.Repeat("a", 64),
+		Tapes: []perpspaper.WalkForwardTapeEvidence{{Frames: 24}, {Frames: 24}},
+		Training: []perpspaper.WalkForwardTrial{{
+			QualificationKey: perpspaper.QualificationKey{RiskArm: perpspaper.Balanced, Strategy: perpspaper.StrategyMomentum},
+			Eligible:         true, Aggregate: &perpspaper.TournamentScore{
+				NetPnLMicros: -125_000, FeesPaidMicros: 25_000, FundingPnLMicros: 1_000,
+				MaxDrawdownMicros: 400_000, FilledOrders: 2, ClosedPositions: 2,
+			},
+		}},
+	}
+	var summary paperstatus.CurrentSummary
+	applyShadowPerpsWalkForward(&summary, result)
+	if summary.QualificationStrategy != "" || summary.QualificationRiskProfile != "" ||
+		len(summary.QualificationAttempts) != 1 {
+		t.Fatalf("losing attempt was selected or omitted: %+v", summary)
+	}
+	attempt := summary.QualificationAttempts[0]
+	if attempt.RiskProfile != "balanced" || attempt.Strategy != "momentum" ||
+		attempt.NetPnLMicros != -125_000 || attempt.FeesMicros != 25_000 ||
+		attempt.FundingMicros != 1_000 || attempt.MaxDrawdownMicros != 400_000 ||
+		attempt.FilledOrders != 2 || attempt.ClosedPositions != 2 {
+		t.Fatalf("attempt projection = %+v", attempt)
 	}
 }
 

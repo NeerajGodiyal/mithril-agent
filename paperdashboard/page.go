@@ -45,9 +45,13 @@ const indexHTML = `<!doctype html>
     <section id="overview" class="panel active" role="tabpanel" aria-labelledby="tab-overview" tabindex="0">
       <div id="metrics" class="metrics" aria-label="Paper account summary"></div>
       <div class="overview-workspace">
-        <div id="markets" class="market-grid" role="tabpanel" aria-label="Selected paper market performance"></div>
-        <div id="market-switcher" class="market-switcher" role="tablist" aria-label="Paper markets" aria-orientation="vertical"></div>
+        <div id="markets" class="market-grid" role="tabpanel" aria-label="Selected live spot market performance"></div>
+        <div id="market-switcher" class="market-switcher" role="tablist" aria-label="Live spot markets" aria-orientation="vertical"></div>
       </div>
+      <section class="perps-research" aria-labelledby="perps-research-title">
+        <div class="section-title compact"><div><p class="eyebrow">Recorded research</p><h2 id="perps-research-title">Perps experiments</h2><p>Completed simulations stay separate from the live SOL and JUP spot account.</p></div></div>
+        <div id="perps-research-list" class="perps-research-grid"></div>
+      </section>
       <details class="daily-note"><summary>About this paper account</summary><p>“Started” compares each active simulation with its own opening balance. Spot runs reset on the bot's UTC day; short perps experiments can begin later. The combined result is simulated and is not a continuously compounded wallet.</p></details>
     </section>
     <section id="activity" class="panel" role="tabpanel" aria-labelledby="tab-activity" tabindex="0" hidden>
@@ -211,6 +215,7 @@ const deltaValue=(micros,unit)=>unit==='USD'&&integer(micros)<10000n?'<$0.01':un
 const resultDelta=(from,to,unit)=>{const value=integer(to)-integer(from);if(value===0n)return 'Unchanged';return (value>0n?'Up ':'Down ')+deltaValue(value>0n?value:-value,unit);};
 const signedResult=(value,unit)=>{value=integer(value);if(value===0n)return 'Unchanged';return (value>0n?'Up ':'Down ')+deltaValue(value>0n?value:-value,unit);};
 const signedAmount=(value,unit)=>{value=integer(value);if(value===0n)return 'No change';return (value>0n?'+':'−')+deltaValue(value>0n?value:-value,unit);};
+const fundingAdjustment=(value,unit)=>{value=integer(value);if(value===0n)return 'No funding change';return deltaValue(value>0n?value:-value,unit)+' '+(value>0n?'credit':'cost');};
 const versusHolding=(strategy,hold,unit)=>{const value=integer(strategy)-integer(hold);if(value===0n)return 'Same as holding';return (value>0n?'Ahead by ':'Behind by ')+deltaValue(value>0n?value:-value,unit);};
 const changePercent=(from,to)=>{from=integer(from);to=integer(to);if(from===0n)return '';const change=to-from;if(change===0n)return '0.00%';const hundredths=change*10000n/from,absolute=hundredths<0n?-hundredths:hundredths;return (change>0n?'+':'-')+(Number(absolute)/100).toFixed(2)+'%';};
 const resultWithPercent=(from,to,unit)=>{const percentage=changePercent(from,to);return signedAmount(integer(to)-integer(from),unit)+(percentage?' · '+percentage:'');};
@@ -224,7 +229,7 @@ const state=value=>({warming:'Learning recent prices',uptrend:'Market rising',do
 const humanToken=value=>String(value||'').replaceAll('_',' ').replace(/^./,character=>character.toUpperCase());
 const decisionReason=value=>({'watching':'Watching the next price update','collecting_history':'Still learning recent prices','drawdown_limit':'Reducing risk after the loss limit','risk_halt':'New buys are paused by the loss limit','drawdown_halt':'New buys are paused by the loss limit','volatility_limit':'The market is moving too quickly','cooldown':'Taking a short break after a fill','trend_aligned_buy':'The trend supported a buy','sell_leg_waiting':'Waiting for a better sell move','trend_aligned_sell':'The trend supported a sell','buy_leg_waiting':'Waiting for a better buy move','range_high_sell':'Price reached the plan’s sell range','range_low_buy':'Price reached the plan’s buy range','signal_below_cost_hurdle':'The move is too small after costs','data_unavailable':'Fresh prices are unavailable','fee_budget_used':'This run’s simulated fee budget is used up','route_cost_limit':'The route was too expensive','order_pending':'A paper order is waiting to fill','order_filled':'The latest paper order filled','fill_limit':'Price moved beyond the fill limit','trade_unavailable':'The paper trade could not be priced or funded'}[value]||'Watching the market');
 const eventGroup=kind=>kind.startsWith('order_')?'orders':kind.startsWith('strategy_')?'strategy':kind==='risk_halted'?'safety':kind.startsWith('data_')?'data':'other';
-const marketStatus=(m,feeBudgetUsed)=>!m.fresh?{label:m.optional?'Not active':'Waiting for data',tone:'amber'}:feeBudgetUsed?{label:'Orders paused',tone:'amber'}:m.risk_halted?{label:isPerps(m)?'Simulation paused':'New buys paused',tone:'red'}:!m.coverage_ready?{label:'Checking data quality',tone:'amber'}:Number(m.coverage_bps||0)<9900?{label:'Limited price data',tone:'amber'}:{label:'Running',tone:'green'};
+const marketStatus=(m,feeBudgetUsed)=>m.optional&&m.qualification_tracked?{label:'Completed experiment',tone:'amber'}:!m.fresh?{label:'Waiting for data',tone:'amber'}:feeBudgetUsed?{label:'Orders paused',tone:'amber'}:m.risk_halted?{label:isPerps(m)?'Simulation paused':'New buys paused',tone:'red'}:!m.coverage_ready?{label:'Checking data quality',tone:'amber'}:Number(m.coverage_bps||0)<9900?{label:'Limited price data',tone:'amber'}:{label:'Running',tone:'green'};
 const priceCoverage=m=>m.coverage_ready?(Number(m.coverage_bps||0)/100).toFixed(1).replace(/\.0$/,'')+'%':'updating';
 const marketDataHealthy=m=>m.available&&m.ready&&m.fresh&&m.coverage_ready&&Number(m.coverage_bps||0)>=9900;
 const ratio=(value,total)=>integer(total)>0n?Math.max(0,Math.min(100,Number(integer(value)*10000n/integer(total))/100)):0;
@@ -384,8 +389,8 @@ $('market-switcher').addEventListener('click',event=>{const button=event.target.
 $('market-switcher').addEventListener('keydown',event=>{const buttons=[...event.currentTarget.querySelectorAll('.market-choice')],index=buttons.indexOf(event.target);if(index<0)return;let next;if(event.key==='ArrowRight'||event.key==='ArrowDown')next=(index+1)%buttons.length;else if(event.key==='ArrowLeft'||event.key==='ArrowUp')next=(index+buttons.length-1)%buttons.length;else if(event.key==='Home')next=0;else if(event.key==='End')next=buttons.length-1;else return;event.preventDefault();selectedMarketName=buttons[next].dataset.market;renderMarkets();$('market-switcher').querySelector('[data-market="'+CSS.escape(selectedMarketName)+'"]').focus();});
 const helpDialog=$('help-dialog');
 document.addEventListener('click',event=>{
-  const planButton=event.target.closest('[data-plan-market]');
-  if(planButton){const market=current?.markets?.find(item=>item.name===planButton.dataset.planMarket);if(market){helpReturn={attribute:'data-plan-market',value:market.name};openPlanDialog(market);}return;}
+  const planButton=event.target.closest('[data-plan-market],[data-research-market]');
+  if(planButton){const attribute=planButton.hasAttribute('data-research-market')?'data-research-market':'data-plan-market',name=planButton.getAttribute(attribute),market=current?.markets?.find(item=>item.name===name);if(market){helpReturn={attribute,value:market.name};openPlanDialog(market);}return;}
   const button=event.target.closest('[data-help-copy]');
   if(!button)return;
   helpReturn={attribute:'data-help-label',value:button.dataset.helpLabel};
@@ -410,22 +415,23 @@ function metric(label,value,foot,klass='',explanation='',trend='',detail=''){
   return '<article class="metric"><div class="metric-label"><span>'+safe(label)+'</span>'+help(label,explanation)+'</div><div class="metric-main">'+movement+'<strong class="metric-value '+klass+'">'+safe(value)+'</strong>'+(detail?'<span class="metric-percent '+klass+'">'+safe(detail)+'</span>':'')+'</div><span class="metric-foot">'+safe(foot)+'</span></article>';
 }
 function renderMetrics(){
-	if(!current.complete){$('metrics').innerHTML=metric('Paper account now','—','Waiting for all markets','','Current value of all simulated cash and coins. It is not a real wallet balance.')+metric('Start of this run','—','Waiting for current data','','Combined simulated value when the active paper runs began.')+metric('Result this run','—','Waiting for current data','','Change across the active paper markets since these runs began.')+metric('Versus holding','—','Waiting for current data','','Compares the strategy with leaving the same starting assets untouched for this run.')+metric('Paper executions','—','Waiting for current data','','Completed simulated fills in this run.');return;}
+	if(!current.complete){$('metrics').innerHTML=metric('Live spot account','—','Waiting for SOL and JUP','','Current value of the live SOL and JUP paper simulations. It is not a real wallet balance.')+metric('Spot account start','—','Waiting for current data','','Combined simulated value when the live spot runs began.')+metric('Spot result','—','Waiting for current data','','Change across the live SOL and JUP spot simulations since these runs began.')+metric('Spot versus holding','—','Waiting for current data','','Compares the spot strategies with leaving the same starting assets untouched.')+metric('Spot executions','—','Waiting for current data','','Completed simulated spot fills in this run.');return;}
   const o=current.overview||{};
 	  const effective=effectiveEquity(o),pnl=effective-integer(o.opening_equity_micros);
 	  const hold=effective-integer(o.hold_benchmark_micros);
 	  const deficit=integer(o.deficit_micros),breakdown=o.accounting_tracked?'Booked '+signedAmount(o.realized_micros,o.value_unit)+' · Open '+signedAmount(o.unrealized_micros,o.value_unit)+(deficit?' · Liquidation deficit '+paperValue(deficit,o.value_unit):''):'Booked/open breakdown updating';
   const holdingText=signedAmount(hold,o.value_unit);
-  const ready=(current.markets||[]).filter(m=>m.available&&m.ready),largest=ready.reduce((found,m)=>integer(m.opening_equity_micros)>integer(found?.opening_equity_micros||0)?m:found,null);
-	  const accountFoot='All active simulated markets'+(largest?' · Largest market '+exposure(largest.opening_equity_micros,o.opening_equity_micros):'')+(deficit?' · '+paperValue(deficit,o.value_unit)+' liquidation deficit shown in the result':'');
-  $('metrics').innerHTML=metric('Paper account now',paperValue(o.equity_micros,o.value_unit),accountFoot,'neutral','Current value of all simulated cash and coins. It is not a real wallet balance. Largest market shows how much of the starting paper account was assigned to one market.')+
-	  metric('Start of this run',paperValue(o.opening_equity_micros,o.value_unit),'Opening paper value','neutral','Combined simulated value when the active paper runs began.')+
-	  metric('Result this run',signedAmount(pnl,o.value_unit),breakdown,tone(pnl),'Change across every active paper market since these runs began, including any liquidation deficit. Booked includes closed trades, modeled fees, and applied funding; open is still marked to market.',tone(pnl),changePercent(o.opening_equity_micros,effective))+
-    metric('Versus holding',holdingText,hold===0n?'Same result as holding':'Same starting assets',tone(hold),'Compares the strategy with leaving the same starting assets untouched.',tone(hold))+
-	    metric('Paper executions',String(o.trades||0),paperValue(o.turnover_micros,o.value_unit)+' filled · '+paperValue(o.fees_micros,o.value_unit)+' costs','neutral','Completed simulated spot orders and perps fills. Total filled is activity, not profit.');
+  const ready=(current.markets||[]).filter(m=>!m.optional&&m.available&&m.ready),largest=ready.reduce((found,m)=>integer(m.opening_equity_micros)>integer(found?.opening_equity_micros||0)?m:found,null);
+	  const spotNames=ready.map(m=>m.name.split('/')[0]).join(' + ')||'SOL + JUP';
+	  const accountFoot=spotNames+' spot only'+(largest?' · Largest market '+exposure(largest.opening_equity_micros,o.opening_equity_micros):'')+(deficit?' · '+paperValue(deficit,o.value_unit)+' liquidation deficit shown in the result':'');
+  $('metrics').innerHTML=metric('Live spot account',paperValue(o.equity_micros,o.value_unit),accountFoot,'neutral','Current value of the live SOL and JUP paper simulations. Completed perps research is not included.')+
+	  metric('Spot account start',paperValue(o.opening_equity_micros,o.value_unit),'Opening SOL + JUP paper value','neutral','Combined simulated value when the live spot runs began.')+
+	  metric('Spot result',signedAmount(pnl,o.value_unit),breakdown,tone(pnl),'Change across the live SOL and JUP spot simulations since these runs began.',tone(pnl),changePercent(o.opening_equity_micros,effective))+
+    metric('Spot versus holding',holdingText,hold===0n?'Same result as holding':'Same starting assets',tone(hold),'Compares the spot strategies with leaving the same starting assets untouched.',tone(hold))+
+	    metric('Spot executions',String(o.trades||0),paperValue(o.turnover_micros,o.value_unit)+' filled · '+paperValue(o.fees_micros,o.value_unit)+' costs','neutral','Completed simulated spot fills. Perps research fills are shown separately.');
 }
 function marketCard(m){
-	  if(!m.available){const ended=m.optional;return '<article class="market"><div class="market-head"><h3>'+safe(m.name)+'</h3><span class="badge '+(ended?'amber':'red')+'">'+(ended?'Not active':'Unavailable')+'</span></div><p class="strategy-next">'+(ended?'This bounded experiment is not running':'Status is unavailable')+'</p><p class="market-context">'+(ended?'Core markets and their totals are unaffected.':'Combined totals are withheld until this required status returns.')+'</p></article>';}
+	  if(!m.available)return '<article class="market"><div class="market-head"><h3>'+safe(m.name)+'</h3><span class="badge red">Unavailable</span></div><p class="strategy-next">Status is unavailable</p><p class="market-context">Combined totals are withheld until this required status returns.</p></article>';
   if(!m.ready)return '<article class="market"><div class="market-head"><h3>'+safe(m.name)+'</h3><span class="badge amber">Updating</span></div><p class="strategy-next">Waiting for market data</p></article>';
   const feeBudgetUsed=m.fresh&&Boolean(m.fee_budget_tracked)&&!Number(m.estimated_fills_remaining||0);
   const status=marketStatus(m,feeBudgetUsed);
@@ -438,9 +444,9 @@ function qualificationView(m){
   if(!m.qualification_tracked)return null;
   const frames=Number(m.qualification_frames||0),minimum=Number(m.qualification_minimum_frames||0),tapes=Math.max(1,Number(m.qualification_tapes||1)),multi=tapes>1;
   switch(m.qualification_outcome){
-  case 'insufficient_evidence': return {label:'Collecting market checks',tone:'amber',status:frames+' of '+minimum+' saved price checks',next:'No paper plan selected yet. The recording is still too short.'};
+  case 'insufficient_evidence': return {label:'Recording ended too early',tone:'amber',status:frames+' of '+minimum+' required price checks',next:'No paper plan was selected because the completed recording was too short.'};
   case 'no_training_candidate': return {label:'No plan passed',tone:'amber',status:multi?'12 plans across '+(tapes-1)+' earlier recording'+(tapes===2?'':'s'):'12 paper plans checked',next:multi?'None made money after costs across all earlier recordings.':'None completed a profitable trade after costs.'};
-  case 'candidate_rejected': return {label:'Plan did not pass',tone:'amber',status:humanToken(m.qualification_strategy)+' · '+humanToken(m.qualification_risk_profile),next:multi?'The selected paper plan did not pass the final untouched recording or higher-cost check.':'The selected paper plan did not pass the final or higher-cost check.'};
+  case 'candidate_rejected': return {label:'Plan did not pass',tone:'amber',status:humanToken(m.qualification_strategy)+' · '+humanToken(m.qualification_risk_profile),next:multi?'The best training attempt did not pass the final untouched recording or higher-cost check.':'The best training attempt did not pass the final or higher-cost check.'};
   case 'candidate_ready_for_more_paper_testing': return {label:'Ready for another paper test',tone:'green',status:humanToken(m.qualification_strategy)+' · '+humanToken(m.qualification_risk_profile),next:multi?'The plan passed the final untouched recording and higher-cost check. This does not authorize real trading.':'The plan passed the final and higher-cost checks. This does not authorize real trading.'};
   default: return {label:'Checkpoint unavailable',tone:'amber',status:'Recorded evidence rejected',next:'The saved qualification outcome was not recognized.'};
   }
@@ -451,23 +457,47 @@ function qualificationStrip(m){
   const tapes=Math.max(1,Number(m.qualification_tapes||1)),checked=m.qualification_holdout_evaluated?'<span><small>'+(tapes>1?'Final untouched recording':'Final paper check')+'</small><strong class="'+(m.qualification_holdout_scored?tone(integer(m.qualification_holdout_micros)):'')+'">'+safe(m.qualification_holdout_scored?signedAmount(m.qualification_holdout_micros,m.value_unit):'No complete result')+'</strong></span>':'<span><small>Paper plans</small><strong>12 checked</strong></span>';
   return '<div class="qualification-strip" aria-label="Latest paper strategy check"><span class="qualification-symbol">'+uiIcon('score')+'</span><span><small>Latest check</small><strong>'+safe(view.label)+'</strong></span><span><small>Market checks saved</small><strong>'+safe(String(m.qualification_frames||0))+' / '+safe(String(m.qualification_minimum_frames||0))+(tapes>1?' · '+tapes+' separate recordings':'')+'</strong></span>'+checked+'<span class="badge '+view.tone+'">Paper only</span></div>';
 }
+function perpsAttemptCard(attempt,m,maxMagnitude){
+  const result=integer(attempt.net_pnl_micros),magnitude=result<0n?-result:result;
+  const value=maxMagnitude>0n?magnitude:0n;
+  const liquidations=Number(attempt.liquidations||0),risk=liquidations?' · '+liquidations+' forced close'+(liquidations===1?'':'s'):'';
+  return '<article class="attempt-card"><div class="attempt-head"><div><strong>'+safe(humanToken(attempt.strategy))+'</strong><small>'+safe(humanToken(attempt.risk_profile))+'</small></div><span class="badge neutral">Not selected</span></div><div class="attempt-result '+tone(result)+'"><span>Training result</span><strong>'+safe(signedAmount(result,m.value_unit))+'</strong></div><progress class="attempt-meter '+tone(result)+'" max="'+safe(String(maxMagnitude||1n))+'" value="'+safe(String(value))+'" aria-label="'+safe(humanToken(attempt.strategy))+' training result magnitude '+safe(signedAmount(result,m.value_unit))+'">'+safe(String(value))+'</progress><p>'+safe(String(attempt.filled_orders||0))+' fills · '+safe(String(attempt.closed_positions||0))+' closed · '+safe(paperValue(attempt.fees_micros,m.value_unit))+' trade fees · Funding: '+safe(fundingAdjustment(attempt.funding_micros,m.value_unit))+' · '+safe(paperValue(attempt.max_drawdown_micros,m.value_unit))+' largest drop'+safe(risk)+'</p></article>';
+}
+function perpsResearchCard(m){
+  const view=qualificationView(m),attempts=(m.qualification_attempts||[]).slice(0,3);
+  const maxMagnitude=attempts.reduce((largest,attempt)=>{const value=integer(attempt.net_pnl_micros),magnitude=value<0n?-value:value;return magnitude>largest?magnitude:largest;},1n);
+  const completed=m.available&&m.ready&&Boolean(m.qualification_tracked);
+  const stateLabel=!m.available?'Unavailable':!m.ready?'Updating':completed?'Completed experiment':'Needs attention';
+	const stateTone=!m.available?'red':'amber';
+  const outcome=view?.label||(completed?'Recorded result':m.available&&m.ready?'Experiment incomplete':'No saved result');
+  const detail=view?.status||(completed&&m.observed_at?'Finished '+eventTime(m.observed_at):'No completed recording');
+  const leader=attempts.reduce((best,attempt)=>!best||integer(attempt.net_pnl_micros)>integer(best.net_pnl_micros)?attempt:best,null),others=attempts.filter(attempt=>attempt!==leader);
+  const terms=help('Perps test terms','Trade fees are simulated execution charges. A funding adjustment is the simulated carry charge or credit. Largest drop is the worst fall from a prior high. A forced close means the safety model closed a leveraged position.');
+  const body=leader?'<div class="attempt-grid" aria-label="Best completed training attempts"><div class="attempt-kicker"><span>Strongest completed attempt</span>'+terms+'</div>'+perpsAttemptCard(leader,m,maxMagnitude)+(others.length?'<details class="attempt-more"><summary>Compare '+others.length+' other risk level'+(others.length===1?'':'s')+'</summary><div class="attempt-grid">'+others.map(attempt=>perpsAttemptCard(attempt,m,maxMagnitude)).join('')+'</div></details>':'')+'</div>':'<p class="perps-empty">No completed training attempts are available to compare.</p>';
+  const button=m.available&&m.ready?'<button class="plan-trigger" type="button" data-research-market="'+safe(m.name)+'" aria-haspopup="dialog">View experiment details'+uiIcon('arrow')+'</button>':'';
+  return '<article class="perps-research-card"><header><div class="strategy-market-name"><span class="asset-orb" aria-hidden="true">'+safe(m.name.slice(0,1))+'</span><div><h3>'+safe(m.name)+'</h3><span>'+safe(detail)+'</span></div></div><span class="badge '+stateTone+'">'+safe(stateLabel)+'</span></header><div class="perps-outcome"><span>'+uiIcon('score')+'</span><div><small>Latest gate</small><strong>'+safe(outcome)+'</strong></div>'+button+'</div>'+body+'</article>';
+}
+function strategyGroup(title,description,markets){
+  if(!markets.length)return '';
+  return '<section class="strategy-market-group" aria-label="'+safe(title)+'"><div class="subsection-head"><div><h3>'+safe(title)+'</h3><p>'+safe(description)+'</p></div></div><div class="strategy-list-head" aria-hidden="true"><span>Market</span><span>Current decision</span><span>Plan</span></div>'+markets.map(strategyCard).join('')+'</section>';
+}
 function strategyView(m){
   const unavailable=!m.available;
-	  const ended=m.optional&&(unavailable||(m.ready&&!m.fresh));
+	  const completed=m.optional&&m.available&&m.ready&&Boolean(m.qualification_tracked);
   const feeBudgetUsed=m.fresh&&Boolean(m.fee_budget_tracked)&&!Number(m.estimated_fills_remaining||0);
   const perps=isPerps(m),position=m.position_direction==='long'?'Price-up position open':m.position_direction==='short'?'Price-down position open':'No position open',qualification=qualificationView(m);
   return {
     unavailable,
     feeBudgetUsed,
-	    label:qualification?qualification.label:ended?'Perps experiment ended':unavailable?'Unavailable':m.ready?(perps?'Perps paper experiment':m.strategy==='adaptive'?'Market-responsive paper plan':m.strategy||'Saved plan'):'Updating',
-	    next:qualification?qualification.next:ended?'This bounded experiment is not active':unavailable?'Status source unavailable':!m.ready?'Waiting for status':!m.fresh?(m.optional?'This bounded experiment is not active':'Waiting for fresh prices'):m.risk_halted?(perps?'Simulation paused after liquidation':'New buys paused; sells can still reduce risk'):perps?position:feeBudgetUsed?'Orders paused until tomorrow; the simulated fee budget is used up':m.next_action?'Ready to '+m.next_action+' when the opportunity clears every limit':'Watching for the next opportunity',
-	    status:qualification?qualification.status:ended?'Not active':unavailable?'Unavailable':m.ready&&!m.fresh&&m.optional?'Experiment ended':m.ready?state(m.state):'Status updating',
+	    label:qualification?qualification.label:completed?'Perps experiment completed':unavailable?'Unavailable':m.ready?(perps?'Perps paper experiment':m.strategy==='adaptive'?'Market-responsive paper plan':m.strategy||'Saved plan'):'Updating',
+	    next:qualification?qualification.next:completed?'This completed recording is kept for comparison only':unavailable?'Status source unavailable':!m.ready?'Waiting for status':!m.fresh?'Waiting for fresh prices':m.risk_halted?(perps?'Simulation paused after liquidation':'New buys paused; sells can still reduce risk'):perps?position:feeBudgetUsed?'Orders paused until tomorrow; the simulated fee budget is used up':m.next_action?'Ready to '+m.next_action+' when the opportunity clears every limit':'Watching for the next opportunity',
+	    status:qualification?qualification.status:completed?'Completed experiment':unavailable?'Unavailable':m.ready?state(m.state):'Status updating',
 	trades:unavailable||!m.ready?'—':(m.trades||0)+' filled · '+attempts(m.signals).toLowerCase()+' '+(m.fresh?'this run':'in the last recorded run')
   };
 }
 function strategyCard(m){
   const view=strategyView(m);
-	  const plan='<div class="strategy-plan"><span class="badge '+(m.optional&&(view.unavailable||!m.fresh)?'amber':view.unavailable?'red':!m.ready?'amber':'blue')+'">'+safe(view.label)+'</span>'+(view.unavailable||!m.ready?'':'<button class="plan-trigger" type="button" data-plan-market="'+safe(m.name)+'" aria-haspopup="dialog">View visual plan'+uiIcon('arrow')+'</button>')+'</div>';
+	  const plan='<div class="strategy-plan"><span class="badge '+(m.optional&&m.available&&m.ready&&m.qualification_tracked?'amber':view.unavailable?'red':!m.ready?'amber':'blue')+'">'+safe(view.label)+'</span>'+(view.unavailable||!m.ready?'':'<button class="plan-trigger" type="button" data-plan-market="'+safe(m.name)+'" aria-haspopup="dialog">View visual plan'+uiIcon('arrow')+'</button>')+'</div>';
   return '<article class="strategy-market-row"><div class="strategy-market-name"><span class="asset-orb" aria-hidden="true">'+safe(m.name.slice(0,1))+'</span><div><h3>'+safe(m.name)+'</h3><span>'+safe(view.status)+'</span></div></div><p class="strategy-next">'+safe(view.next)+(view.unavailable||!m.ready?'':'<small>'+safe(view.trades)+'</small>')+'</p>'+plan+'</article>';
 }
 function openPlanDialog(m){
@@ -542,7 +572,7 @@ function openPerpsPlanDialog(m){
 	    '<article>'+uiIcon('clock')+'<span>New decision</span><strong>Every minute</strong><small>Uses completed candles</small></article>';
   $('help-dialog-extra').innerHTML=snapshot+
     '</div><details class="plan-more"><summary>Current accounting and boundaries</summary><dl class="limit-grid">'+
-	(qualification&&m.qualification_strategy?'<div><dt>Selected paper strategy</dt><dd>'+safe(humanToken(m.qualification_strategy))+'</dd></div><div><dt>Selected paper risk</dt><dd>'+safe(humanToken(m.qualification_risk_profile))+'</dd></div>':'')+
+	(qualification&&m.qualification_strategy?'<div><dt>Training candidate</dt><dd>'+safe(humanToken(m.qualification_strategy))+'</dd></div><div><dt>Candidate risk</dt><dd>'+safe(humanToken(m.qualification_risk_profile))+'</dd></div>':'')+
     '<div><dt>Position</dt><dd>'+safe(position)+' · '+safe(positionTone)+'</dd></div>'+
     '<div><dt>Paper value now</dt><dd>'+safe(paperValue(m.equity_micros,m.value_unit))+'</dd></div>'+
 	    '<div><dt>Result this run</dt><dd>'+safe(signedAmount(effectiveEquity(m)-integer(m.opening_equity_micros),m.value_unit))+'</dd></div>'+
@@ -636,19 +666,20 @@ function renderMarkets(){
   const focusedChoice=document.activeElement?.closest('.market-choice')?.dataset.market;
   const focused=document.activeElement?.closest('.chart-toggle');
   const focusMarket=focused?.closest('.market')?.dataset.market,focusView=focused?.dataset.chartView;
-  if(!current.markets.some(market=>market.name===selectedMarketName))selectedMarketName=current.markets.find(market=>market.available&&market.ready)?.name||current.markets[0]?.name||'';
+	const spotMarkets=current.markets.filter(market=>!market.optional),perpsMarkets=current.markets.filter(market=>market.optional);
+  if(!spotMarkets.some(market=>market.name===selectedMarketName))selectedMarketName=spotMarkets.find(market=>market.available&&market.ready)?.name||spotMarkets[0]?.name||'';
 	  const marketHeading='<div class="market-list-head" role="presentation"><span>Market</span><span aria-label="Paper value trend"></span><span>Fills</span><span>Market price</span><span>Started</span><span>Current</span><span>Paper P&L</span></div>';
-  $('market-switcher').innerHTML=marketHeading+current.markets.map(market=>{
+  $('market-switcher').innerHTML=marketHeading+spotMarkets.map(market=>{
     const active=market.name===selectedMarketName,ready=market.available&&market.ready;
     const feeBudgetUsed=ready&&market.fresh&&Boolean(market.fee_budget_tracked)&&!Number(market.estimated_fills_remaining||0);
-	    const status=!market.available?{label:market.optional?'Not active':'Unavailable',tone:market.optional?'amber':'red'}:!market.ready?{label:'Updating',tone:'amber'}:marketStatus(market,feeBudgetUsed);
+	    const status=!market.available?{label:'Unavailable',tone:'red'}:!market.ready?{label:'Updating',tone:'amber'}:marketStatus(market,feeBudgetUsed);
 	    const pnl=ready?effectiveEquity(market)-integer(market.opening_equity_micros):0n;
     const plan=ready?(isPerps(market)?'Perps paper experiment':market.strategy==='adaptive'?'Adaptive paper plan':market.strategy==='fixed'?'Fixed paper plan':'Paper plan'):'Waiting for data';
     const arrow=!ready?'':pnl===0n?'→':pnl<0n?'↓':'↑';
 	    return '<button class="market-choice'+(active?' active':'')+'" type="button" role="tab" data-market="'+safe(market.name)+'" aria-label="Show '+safe(market.name)+' paper market" aria-selected="'+String(active)+'" aria-controls="markets" tabindex="'+(active?'0':'-1')+'"><span class="market-choice-name"><strong>'+safe(market.name)+'</strong><small class="'+status.tone+'">'+safe(status.label)+' · '+safe(plan)+'</small></span><span class="market-sparkline" data-market-sparkline="'+safe(market.name)+'" role="img" aria-label="Recent '+safe(market.name)+' paper-value trend">'+(ready?'':'—')+'</span><span class="market-choice-value">'+safe(ready?String(market.trades||0):'—')+'</span><span class="market-choice-value">'+safe(ready&&market.price_micros?price(market.price_micros):'—')+'</span><span class="market-choice-value">'+safe(ready?paperValue(market.opening_equity_micros,market.value_unit):'—')+'</span><span class="market-choice-value">'+safe(ready?paperValue(market.equity_micros,market.value_unit):'—')+'</span><span class="market-choice-value '+tone(pnl)+'"><span class="return-arrow" aria-hidden="true">'+arrow+'</span>'+safe(ready?resultWithDeficit(market):'—')+'</span></button>';
   }).join('');
-  mountMarketSparklines(current.markets);
-  const selected=current.markets.find(market=>market.name===selectedMarketName);
+  mountMarketSparklines(spotMarkets);
+  const selected=spotMarkets.find(market=>market.name===selectedMarketName);
   disposeChart();
   $('markets').innerHTML=selected?marketCard(selected):'<div class="empty">No paper markets configured.</div>';
   if(openChartDetail)$('markets').querySelector('.chart-data[data-detail="'+CSS.escape(openChartDetail)+'"]')?.setAttribute('open','');
@@ -656,7 +687,8 @@ function renderMarkets(){
   if(focusedChoice)$('market-switcher').querySelector('[data-market="'+CSS.escape(focusedChoice)+'"]')?.focus({preventScroll:true});
   if(focusMarket&&focusView){[...document.querySelectorAll('.market')].find(card=>card.dataset.market===focusMarket)?.querySelector('[data-chart-view="'+focusView+'"]')?.focus({preventScroll:true});}
   if(focusedChartCanvas)$('markets').querySelector('[data-chart-canvas]')?.focus({preventScroll:true});
-  $('strategy-markets').innerHTML='<div class="strategy-list-head" aria-hidden="true"><span>Market</span><span>Current decision</span><span>Plan</span></div>'+current.markets.map(strategyCard).join('');
+	$('perps-research-list').innerHTML=perpsMarkets.length?perpsMarkets.map(perpsResearchCard).join(''):'<p class="perps-empty">No perps research experiments are configured.</p>';
+	$('strategy-markets').innerHTML=strategyGroup('Live spot plans','SOL and JUP make up the live paper account above.',spotMarkets)+strategyGroup('Perps research','Independent experiments; completed results are not live account positions.',perpsMarkets);
   renderInstruction();
 }
 function activityUSD(amount){
@@ -751,22 +783,22 @@ function mithrilEvidenceView(){
 }
 function renderSystem(){
   const required=current.markets.filter(market=>!market.optional),healthy=required.filter(marketDataHealthy).length,total=required.length;
-  const experiments=current.markets.filter(market=>market.optional),activeExperiments=experiments.filter(marketDataHealthy).length;
-	const experimentNames=experiments.map(m=>m.name).join(', ')||'none active';
+  const experiments=current.markets.filter(market=>market.optional),completedExperiments=experiments.filter(market=>market.available&&market.ready&&market.qualification_tracked).length;
 	const research=researchView();
   const mithril=mithrilEvidenceView();
   $('automation').innerHTML='<div class="automation-list-head" aria-hidden="true"><span>Service</span><span>Role and boundary</span><span>Status</span></div>'+
-    automationCard('engines','BOT','Paper engines',healthy===total&&total?'Running':'Needs attention',healthy===total&&total?'green':'amber',healthy+' of '+total+' core market observers are current. '+activeExperiments+' of '+experiments.length+' optional perps experiments are active: '+experimentNames+'.')+
+    automationCard('engines','BOT','Paper engines',healthy===total&&total?'Running':'Needs attention',healthy===total&&total?'green':'amber',healthy+' of '+total+' live spot observers are current. '+completedExperiments+' of '+experiments.length+' perps recordings are completed.')+
     automationCard('hermes','H','Nous Hermes',research.label,research.tone,research.description)+
     automationCard('mithril','M','Mithril evidence',mithril.label,mithril.tone,mithril.description)+
     automationCard('strategy','AD','Versioned learning','Gate required','blue','Spot rules adapt on current prices. Perps strategies are compared on causal, after-cost replay. Passing only makes a candidate eligible for another bounded paper experiment; it changes no plan automatically.')+
     automationCard('alerts','TG','Telegram alerts','Open + filled','amber','Sends concise open-order, filled-order, safety, data, and daily-result messages. Unfilled attempts appear in Recent activity instead of creating Telegram noise.');
-	  $('system-list').innerHTML=current.markets.map(m=>{const healthy=marketDataHealthy(m),ended=m.optional&&(!m.available||!m.ready||!m.fresh),updating=m.available&&!m.ready,checking=m.available&&m.ready&&m.fresh&&!m.coverage_ready,limited=m.available&&m.ready&&m.fresh&&m.coverage_ready&&Number(m.coverage_bps||0)<9900;const description=healthy?'Paper observer and price data are current.':ended?'This bounded experiment is not active. Core spot markets and their totals are unaffected.':updating?'Waiting for the first complete paper status.':checking?'Checking whether enough recent price data is usable.':limited?'Only '+priceCoverage(m)+' of recent price checks were usable. New evidence is still being collected.':m.available?'Observer status is older than expected.':'Status source could not be read. Other markets continue independently.';const label=healthy?'Healthy':ended?'Not active':updating?'Updating':checking?'Checking data':limited?'Limited data':m.available?'Stale':'Unavailable';return '<article class="system-row"><p><strong>'+safe(m.name)+'</strong></p><p class="description">'+description+'</p><span class="badge '+(healthy?'green':ended||m.available?'amber':'red')+'">'+label+'</span></article>';}).join('');
+	  $('system-list').innerHTML=current.markets.map(m=>{const completed=m.optional&&m.available&&m.ready&&Boolean(m.qualification_tracked),healthy=!completed&&marketDataHealthy(m),updating=m.available&&!m.ready,checking=m.available&&m.ready&&m.fresh&&!m.coverage_ready,limited=m.available&&m.ready&&m.fresh&&m.coverage_ready&&Number(m.coverage_bps||0)<9900;const description=healthy?'Paper observer and price data are current.':completed?'This completed experiment is saved for comparison. Live spot totals are unaffected.':updating?'Waiting for the first complete paper status.':checking?'Checking whether enough recent price data is usable.':limited?'Only '+priceCoverage(m)+' of recent price checks were usable. New evidence is still being collected.':m.available?'Observer status is older than expected.':'Status source could not be read. Other markets continue independently.';const label=healthy?'Healthy':completed?'Completed experiment':updating?'Updating':checking?'Checking data':limited?'Limited data':m.available?'Stale':'Unavailable';return '<article class="system-row"><p><strong>'+safe(m.name)+'</strong></p><p class="description">'+description+'</p><span class="badge '+(healthy?'green':completed||m.available?'amber':'red')+'">'+label+'</span></article>';}).join('');
 	$('research-evidence').innerHTML='<span class="badge '+research.tone+'">'+safe(research.label)+'</span><h3>Latest Hermes research</h3><p>'+safe(research.description)+'<br>'+safe(research.detail)+'</p>';
 }
 function captureRenderFocus(){
   const active=document.activeElement;
   if(active?.matches('[data-help-label]'))return {selector:'[data-help-label="'+CSS.escape(active.dataset.helpLabel)+'"]'};
+  if(active?.matches('[data-research-market]'))return {selector:'[data-research-market="'+CSS.escape(active.dataset.researchMarket)+'"]'};
   if(active?.matches('[data-plan-market]'))return {selector:'[data-plan-market="'+CSS.escape(active.dataset.planMarket)+'"]'};
   if(active?.matches('[data-chart-action]')){const view=active.closest('[data-chart-panel]')?.dataset.chartPanel;return {selector:'#markets [data-chart-panel="'+CSS.escape(view||'')+'"] [data-chart-action="'+CSS.escape(active.dataset.chartAction)+'"]'};}
   if(active?.matches('.chart-data summary'))return {selector:'.chart-data[data-detail="'+CSS.escape(active.closest('.chart-data').dataset.detail)+'"] summary'};

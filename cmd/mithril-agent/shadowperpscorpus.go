@@ -310,6 +310,7 @@ func applyShadowPerpsWalkForward(summary *paperstatus.CurrentSummary, result per
 	summary.QualificationStressScored = false
 	summary.QualificationHoldoutMicros = 0
 	summary.QualificationStressMicros = 0
+	summary.QualificationAttempts = nil
 	for index, tape := range result.Tapes {
 		summary.QualificationFrames += tape.Frames
 		if index < len(result.Tapes)-1 {
@@ -319,6 +320,16 @@ func applyShadowPerpsWalkForward(summary *paperstatus.CurrentSummary, result per
 		}
 	}
 	summary.QualificationMinimumFrames = uint64(len(result.Tapes)) * perpspaper.QualificationMinimumFrames
+	for _, attempt := range perpspaper.BestCompletedTrainingAttempts(result.Training) {
+		score := attempt.Score
+		summary.QualificationAttempts = append(summary.QualificationAttempts, paperstatus.QualificationAttempt{
+			RiskProfile: string(attempt.RiskArm), Strategy: string(attempt.Strategy),
+			NetPnLMicros: score.NetPnLMicros, FeesMicros: score.FeesPaidMicros,
+			FundingMicros: score.FundingPnLMicros, MaxDrawdownMicros: score.MaxDrawdownMicros,
+			Liquidations: score.Liquidations, FilledOrders: score.FilledOrders,
+			ClosedPositions: score.ClosedPositions,
+		})
+	}
 	if result.TrainingLeader != nil {
 		summary.QualificationStrategy = string(result.TrainingLeader.Strategy)
 		summary.QualificationRiskProfile = string(result.TrainingLeader.RiskArm)
@@ -360,6 +371,8 @@ func shadowPerpsWalkForwardMessage(result perpspaper.WalkForwardQualification) s
 		} else {
 			message += "\nFinal untouched recording: no complete result"
 		}
+	} else if result.Outcome == "no_training_candidate" {
+		message += "\nFinal untouched recording: kept closed"
 	}
 	return message + "\nNo real order was sent."
 }

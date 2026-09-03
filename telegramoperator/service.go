@@ -395,7 +395,6 @@ func (s *Service) announce(ctx context.Context) {
 	snapshots := make([]paperstatus.Snapshot, len(s.paperSources))
 	errorsBySource := make([]error, len(s.paperSources))
 	requiredSummaries := make([]paperstatus.CurrentSummary, 0, len(s.paperSources))
-	optionalSummaries := make([]paperstatus.CurrentSummary, 0, len(s.paperSources))
 	required, readyRequired := 0, 0
 	now := s.now()
 	for index, source := range s.paperSources {
@@ -407,9 +406,7 @@ func (s *Service) announce(ctx context.Context) {
 			paperSnapshotMatchesReader(source, snapshots[index]) &&
 			paperSnapshotFresh(snapshots[index], now) && snapshots[index].Summary != nil &&
 			snapshots[index].Summary.Day == now.UTC().Format("2006-01-02") {
-			if paperSourceOptional(source) {
-				optionalSummaries = append(optionalSummaries, *snapshots[index].Summary)
-			} else {
+			if !paperSourceOptional(source) {
 				requiredSummaries = append(requiredSummaries, *snapshots[index].Summary)
 				readyRequired++
 			}
@@ -417,13 +414,15 @@ func (s *Service) announce(ctx context.Context) {
 	}
 	portfolio := ""
 	if readyRequired == required {
-		portfolio = paperPortfolioAlertSummary(
-			compatiblePaperSummaries(requiredSummaries, optionalSummaries),
-		)
+		portfolio = paperPortfolioAlertSummary(requiredSummaries)
 	}
 	for index, source := range s.paperSources {
+		sourcePortfolio := portfolio
+		if paperSourceOptional(source) {
+			sourcePortfolio = ""
+		}
 		s.announcePaperSource(
-			ctx, index, source, snapshots[index], errorsBySource[index], portfolio,
+			ctx, index, source, snapshots[index], errorsBySource[index], sourcePortfolio,
 		)
 	}
 }
@@ -486,6 +485,9 @@ func (s *Service) announcePaperSource(
 				label = paperReaderLabel(source)
 			}
 			message := paperAnnouncement(event, label)
+			if paperSourceOptional(source) {
+				message = paperExperimentMessage(message)
+			}
 			if event.Kind == paperstatus.KindOrderFilled {
 				if portfolio != "" {
 					message = omitPaperLine(message, "Market value:")
@@ -1032,8 +1034,8 @@ func (s *Service) paperReports() string {
 		return "Paper: not configured"
 	}
 	reports := make([]string, 0, len(s.paperSources))
+	optionalReports := make([]string, 0, len(s.paperSources))
 	requiredSummaries := make([]paperstatus.CurrentSummary, 0, len(s.paperSources))
-	optionalSummaries := make([]paperstatus.CurrentSummary, 0, len(s.paperSources))
 	now := s.now()
 	var oldestSummary time.Time
 	required, readyRequired := 0, 0
@@ -1060,47 +1062,56 @@ func (s *Service) paperReports() string {
 			continue
 		}
 		fresh := paperSnapshotFresh(snapshot, now)
+		completedExperiment := optional && snapshot.Summary != nil && snapshot.Summary.QualificationTracked
 		if fresh && snapshot.Summary != nil && snapshot.Summary.Day == now.UTC().Format("2006-01-02") {
-			if optional {
-				optionalSummaries = append(optionalSummaries, *snapshot.Summary)
-			} else {
+			if !optional {
 				requiredSummaries = append(requiredSummaries, *snapshot.Summary)
 				readyRequired++
-			}
-			if oldestSummary.IsZero() || snapshot.ObservedAt.Before(oldestSummary) {
-				oldestSummary = snapshot.ObservedAt
+				if oldestSummary.IsZero() || snapshot.ObservedAt.Before(oldestSummary) {
+					oldestSummary = snapshot.ObservedAt
+				}
 			}
 		}
-		if optional && !fresh {
+		if optional && !fresh && !completedExperiment {
 			continue
 		}
 		if len(snapshot.Events) == 0 {
-			report := paperCurrentAge(snapshot.Current, fresh)
+			report := paperCurrentAge(snapshot.Current, fresh || completedExperiment)
 			if report == "" {
 				report = "PAPER · No events yet"
 			}
 			if label != "" {
 				report = labelPaperMessage(report, label)
 			}
-			reports = append(reports, report)
+			if optional {
+				optionalReports = append(optionalReports, paperExperimentMessage(report))
+			} else {
+				reports = append(reports, report)
+			}
 			continue
 		}
 		if snapshot.Current != "" {
-			report := labelPaperMessage(paperCurrentAge(snapshot.Current, fresh), label)
-			reports = append(reports, paperReportExcerpt(report))
+			report := labelPaperMessage(paperCurrentAge(snapshot.Current, fresh || completedExperiment), label)
+			if optional {
+				optionalReports = append(optionalReports, paperExperimentMessage(paperReportExcerpt(report)))
+			} else {
+				reports = append(reports, paperReportExcerpt(report))
+			}
 			continue
 		}
-		reports = append(reports, paperReportExcerpt(
-			paperAnnouncement(snapshot.Events[len(snapshot.Events)-1], label),
-		))
-	}
-	if readyRequired == required {
-		summaries := compatiblePaperSummaries(requiredSummaries, optionalSummaries)
-		if aggregate := paperPortfolioSummary(summaries, oldestSummary); aggregate != "" {
-			return aggregate
+		report := paperReportExcerpt(paperAnnouncement(snapshot.Events[len(snapshot.Events)-1], label))
+		if optional {
+			optionalReports = append(optionalReports, paperExperimentMessage(report))
+		} else {
+			reports = append(reports, report)
 		}
 	}
-	return strings.Join(reports, "\n\n")
+	if readyRequired == required {
+		if aggregate := paperPortfolioSummary(requiredSummaries, oldestSummary); aggregate != "" {
+			return strings.Join(append([]string{aggregate}, optionalReports...), "\n\n")
+		}
+	}
+	return strings.Join(append(reports, optionalReports...), "\n\n")
 }
 
 func paperSummaryMatchesReader(source PaperStatusReader, summary paperstatus.CurrentSummary) bool {
@@ -1110,50 +1121,6 @@ func paperSummaryMatchesReader(source PaperStatusReader, summary paperstatus.Cur
 
 func paperSnapshotMatchesReader(source PaperStatusReader, snapshot paperstatus.Snapshot) bool {
 	return snapshot.Summary == nil || paperSummaryMatchesReader(source, *snapshot.Summary)
-}
-
-func compatiblePaperSummaries(
-	required, optional []paperstatus.CurrentSummary,
-) []paperstatus.CurrentSummary {
-	if !paperSummariesCompatible(required) {
-		return nil
-	}
-	result := append([]paperstatus.CurrentSummary(nil), required...)
-	for _, candidate := range optional {
-		trial := append(append([]paperstatus.CurrentSummary(nil), result...), candidate)
-		if paperSummariesCompatible(trial) {
-			result = trial
-		}
-	}
-	return result
-}
-
-func paperSummariesCompatible(summaries []paperstatus.CurrentSummary) bool {
-	var opening, equity, deficit, hold, trades, signals uint64
-	valueUnit, instructionSHA256 := "", ""
-	for _, summary := range summaries {
-		if summary.ValueUnit == "" || valueUnit != "" && valueUnit != summary.ValueUnit ||
-			summary.InstructionSHA256 != "" && instructionSHA256 != "" &&
-				instructionSHA256 != summary.InstructionSHA256 ||
-			summary.OpeningEquityMicros > math.MaxUint64-opening ||
-			summary.EquityMicros > math.MaxUint64-equity ||
-			summary.DeficitMicros > math.MaxUint64-deficit ||
-			summary.HoldBenchmarkMicros > math.MaxUint64-hold ||
-			summary.Trades > math.MaxUint64-trades || summary.Signals > math.MaxUint64-signals {
-			return false
-		}
-		valueUnit = summary.ValueUnit
-		if summary.InstructionSHA256 != "" {
-			instructionSHA256 = summary.InstructionSHA256
-		}
-		opening += summary.OpeningEquityMicros
-		equity += summary.EquityMicros
-		deficit += summary.DeficitMicros
-		hold += summary.HoldBenchmarkMicros
-		trades += summary.Trades
-		signals += summary.Signals
-	}
-	return true
 }
 
 func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, _ time.Time) string {
@@ -1478,6 +1445,10 @@ func stackPaperMessage(message, market string) string {
 		stacked += "\n" + details
 	}
 	return stacked
+}
+
+func paperExperimentMessage(message string) string {
+	return strings.Replace(message, "PAPER\n\n", "PERPS PAPER EXPERIMENT\n\n", 1)
 }
 
 func omitPaperLine(message, prefix string) string {

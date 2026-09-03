@@ -3,13 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 )
 
 type unixAddr struct{}
@@ -206,5 +210,69 @@ func TestExportInstructionModeDoesNotOpenAListener(t *testing.T) {
 		"--export-instruction", source, "--research-packet-path", filepath.Join(root, "research.json"),
 	}, io.Discard); err == nil {
 		t.Fatal("export mode accepted a server flag")
+	}
+}
+
+func TestRenderPerpsResearchModeIsExclusiveAndDoesNotOpenAListener(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	var args []string
+	for index, market := range []string{"SOL-PERP", "BTC-PERP", "ETH-PERP"} {
+		path := filepath.Join(root, strings.ToLower(strings.TrimSuffix(market, "-PERP"))+".json")
+		snapshot := paperstatus.Snapshot{
+			Version: paperstatus.Version, ObservedAt: now, Events: []paperstatus.Event{},
+			Current: "PAPER · checkpoint complete",
+			Summary: &paperstatus.CurrentSummary{
+				Market: market, Instrument: "perpetual", RiskProfile: "balanced",
+				PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+				ValueUnit: "USD", Day: "2026-09-03", TickSeconds: 15,
+				OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+				HoldBenchmarkMicros: 100_000_000, AccountingTracked: true,
+				Checks: 421, State: "watching", Strategy: "fixed",
+				QualificationTracked: true, QualificationOutcome: "no_training_candidate",
+				QualificationSHA256: strings.Repeat(string(rune('a'+index)), 64),
+				QualificationTapes:  4, QualificationFrames: 421,
+				QualificationMinimumFrames: 96, QualificationTrainingFrames: 390,
+				QualificationHoldoutFrames: 31,
+			},
+		}
+		encoded, err := json.Marshal(snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, append(encoded, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		args = append(args, "--render-perps-research", market+"="+path)
+	}
+	previous := activatedListener
+	activatedListener = func() (net.Listener, error) {
+		t.Fatal("perps research render opened a listener")
+		return nil, errors.New("unexpected listener")
+	}
+	t.Cleanup(func() { activatedListener = previous })
+	var output bytes.Buffer
+	if err := run(t.Context(), args, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"paper_only":true`) ||
+		!strings.Contains(output.String(), `"advisory_only":true`) ||
+		!strings.Contains(output.String(), `"authorized":false`) ||
+		!strings.Contains(output.String(), `"promotable":false`) ||
+		!strings.Contains(output.String(), `"content_sha256":"`) {
+		t.Fatalf("perps research output = %q", output.String())
+	}
+	if err := run(t.Context(), append(append([]string(nil), args...),
+		"--research-packet-path", filepath.Join(root, "research.json")), io.Discard); err == nil {
+		t.Fatal("perps research render accepted a server flag")
+	}
+	if err := run(t.Context(), args[:2], io.Discard); err == nil {
+		t.Fatal("perps research render accepted fewer than three markets")
 	}
 }

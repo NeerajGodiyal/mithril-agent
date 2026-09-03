@@ -79,6 +79,10 @@ func TestQualificationProjectionIsBoundedAndPerpsOnly(t *testing.T) {
 		QualificationHoldoutEvaluated: true, QualificationStressEvaluated: true,
 		QualificationHoldoutScored: true, QualificationStressScored: true,
 		QualificationHoldoutMicros: 100_000, QualificationStressMicros: 50_000,
+		QualificationAttempts: []QualificationAttempt{{
+			RiskProfile: "balanced", Strategy: "momentum", NetPnLMicros: 90_000,
+			FeesMicros: 10_000, MaxDrawdownMicros: 25_000, FilledOrders: 2, ClosedPositions: 2,
+		}},
 	}
 	if err := validateCurrentSummary(&summary); err != nil {
 		t.Fatalf("valid qualification projection: %v", err)
@@ -93,6 +97,15 @@ func TestQualificationProjectionIsBoundedAndPerpsOnly(t *testing.T) {
 		"missing evaluation": func(value *CurrentSummary) { value.QualificationHoldoutEvaluated = false },
 		"missing score":      func(value *CurrentSummary) { value.QualificationStressScored = false },
 		"false pass":         func(value *CurrentSummary) { value.QualificationStressMicros = 0 },
+		"bad attempt strategy": func(value *CurrentSummary) {
+			value.QualificationAttempts[0].Strategy = "llm"
+		},
+		"unfinished attempt": func(value *CurrentSummary) {
+			value.QualificationAttempts[0].ClosedPositions = 1
+		},
+		"duplicate attempt risk": func(value *CurrentSummary) {
+			value.QualificationAttempts = append(value.QualificationAttempts, value.QualificationAttempts[0])
+		},
 		"overflow": func(value *CurrentSummary) {
 			value.QualificationTrainingFrames = math.MaxUint64
 			value.QualificationHoldoutFrames = 61
@@ -100,6 +113,7 @@ func TestQualificationProjectionIsBoundedAndPerpsOnly(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			candidate := summary
+			candidate.QualificationAttempts = append([]QualificationAttempt(nil), summary.QualificationAttempts...)
 			mutate(&candidate)
 			if err := validateCurrentSummary(&candidate); err == nil {
 				t.Fatal("invalid qualification projection was accepted")
@@ -118,6 +132,56 @@ func TestQualificationProjectionIsBoundedAndPerpsOnly(t *testing.T) {
 	summary.QualificationTracked = false
 	if err := validateCurrentSummary(&summary); err == nil {
 		t.Fatal("untracked qualification fields were accepted")
+	}
+}
+
+func TestVersionFiveMultiTapeSummaryRemainsReadable(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	snapshot := Snapshot{Version: multiTapeVersion, ObservedAt: now, Current: "PAPER · checkpoint", Summary: &CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced", PositionDirection: "flat",
+		LeverageBPS: 20_000, FundingTracked: true, ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000, HoldBenchmarkMicros: 100_000_000,
+		Checks: 60, State: "watching", Strategy: "fixed", QualificationTracked: true,
+		QualificationOutcome: "no_training_candidate", QualificationSHA256: strings.Repeat("a", 64),
+		QualificationTapes: 2, QualificationFrames: 48, QualificationMinimumFrames: 48,
+		QualificationTrainingFrames: 24, QualificationHoldoutFrames: 24,
+	}}
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("version five snapshot: %v", err)
+	}
+	snapshot.Summary.QualificationAttempts = []QualificationAttempt{{
+		RiskProfile: "balanced", Strategy: "momentum", FilledOrders: 1, ClosedPositions: 1,
+	}}
+	if err := ValidateSnapshot(snapshot); err == nil {
+		t.Fatal("version five snapshot accepted version six attempt evidence")
+	}
+}
+
+func TestVersionFiveZeroResultCandidateKeepsExplicitScores(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	snapshot := Snapshot{Version: multiTapeVersion, ObservedAt: now, Current: "PAPER · checkpoint", Summary: &CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced", PositionDirection: "flat",
+		LeverageBPS: 20_000, FundingTracked: true, ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000, HoldBenchmarkMicros: 100_000_000,
+		AccountingTracked: true, Checks: 60, Signals: 2, Trades: 2, State: "watching", Strategy: "fixed",
+		QualificationTracked: true, QualificationOutcome: "candidate_rejected",
+		QualificationSHA256: strings.Repeat("a", 64), QualificationTapes: 2,
+		QualificationFrames: 60, QualificationMinimumFrames: 24,
+		QualificationTrainingFrames: 40, QualificationHoldoutFrames: 20,
+		QualificationStrategy: "momentum", QualificationRiskProfile: "balanced",
+		QualificationHoldoutEvaluated: true, QualificationStressEvaluated: true,
+		QualificationHoldoutScored: true, QualificationStressScored: true,
+	}}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.Summary.QualificationHoldoutScored || !decoded.Summary.QualificationStressScored {
+		t.Fatalf("version five explicit zero scores were discarded: %+v", decoded.Summary)
 	}
 }
 

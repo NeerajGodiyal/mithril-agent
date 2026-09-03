@@ -46,6 +46,7 @@ help:
 	@echo "  make test-free-evidence      check two public origins retain identical history"
 	@echo "  make test-prometheus         validate monitoring rules and alert scenarios"
 	@echo "  make test-route-guard        test the isolated keyless Jupiter deployment guard"
+	@echo "  make test-paper-strategy-lab run the fast deterministic paper/perps QA loop"
 	@echo "  make build-route-guard ROUTE_GUARD_OUT=/private/path"
 	@echo "                         build SBF outside the checkout (needs Agave CLI 4.2+)"
 	@echo "  make build           build all nine binaries into ./$(BIN_DIR)"
@@ -371,6 +372,13 @@ build-route-guard:
 .PHONY: test-short
 test-short:
 	@umask 077; go test ./... -count=1 -short
+
+.PHONY: test-paper-strategy-lab
+test-paper-strategy-lab:
+	@umask 077; go test ./perpspaper ./paperstatus ./paperdashboard ./telegramoperator \
+		./cmd/mithril-agent ./cmd/mithril-agent-paper-dashboard \
+		-run '(WalkForward|BestCompletedTrainingAttempts|Qualification|VersionFive|FinalizePreservesTapes|PerpsResearch|PerpsTrainingAttempts|AutomationListsOnlyOptionalExperiments|OptionalPaperExperiment|OptionalExperimentCannotChangeRequired|OptionalExperimentCannotErase)' -count=1
+	@echo "Fast paper strategy-lab checks passed. No network, wallet, signature, or real order was used."
 
 .PHONY: test-prometheus
 test-prometheus:

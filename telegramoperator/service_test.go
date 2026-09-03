@@ -777,8 +777,9 @@ func TestOptionalPaperExperimentDoesNotHideRequiredPortfolio(t *testing.T) {
 	stopped := &paperStatusStub{
 		sourceID: "/run/sol-perp.sock", label: "SOL-PERP", err: io.EOF,
 	}
+	bot := &botStub{}
 	service, err := New(Config{
-		Bot: &botStub{}, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
+		Bot: bot, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
 		PaperSources:   append(required, OptionalPaperSource(stopped)),
 		AllowedChatIDs: []int64{123}, Now: func() time.Time { return now },
 	})
@@ -796,14 +797,42 @@ func TestOptionalPaperExperimentDoesNotHideRequiredPortfolio(t *testing.T) {
 	active.snapshot.Summary.PositionDirection = "flat"
 	active.snapshot.Summary.LeverageBPS = 20_000
 	active.snapshot.Summary.FundingTracked = true
+	active.snapshot.Events = []paperstatus.Event{{
+		ID: strings.Repeat("d", 64), At: now, Kind: paperstatus.KindOrderFilled,
+		Message: "PAPER · 🔵 SOLD\nSold: 1 SOL\nReceived: 100 USDC\nMarket value: $102.00",
+	}}
 	service.paperSources[2] = OptionalPaperSource(active)
-	if report := service.paperReports(); !strings.Contains(report, "Total paper value: $302.00") ||
-		!strings.Contains(report, "SOL-PERP") {
+	if report := service.paperReports(); !strings.Contains(report, "Total paper value: $200.00") ||
+		!strings.Contains(report, "PERPS PAPER EXPERIMENT") || !strings.Contains(report, "SOL-PERP") ||
+		strings.Contains(report, "Total paper value: $302.00") {
 		t.Fatalf("active optional experiment was omitted:\n%s", report)
+	}
+	service.announce(t.Context())
+	if len(bot.sent) != 1 || !strings.Contains(bot.sent[0].Text, "PERPS PAPER EXPERIMENT") ||
+		!strings.Contains(bot.sent[0].Text, "SOL-PERP") ||
+		strings.Contains(bot.sent[0].Text, "TOTAL PAPER VALUE NOW") {
+		t.Fatalf("perps experiment was confused with the spot account: %+v", bot.sent)
+	}
+
+	active.snapshot.ObservedAt = now.Add(-4 * time.Minute)
+	active.snapshot.Events = nil
+	active.snapshot.Current = "PAPER · 🧪 STRATEGY CHECK\nResult: no paper plan made money after costs\nFinal untouched recording: kept closed"
+	active.snapshot.Summary.QualificationTracked = true
+	active.snapshot.Summary.QualificationOutcome = "no_training_candidate"
+	active.snapshot.Summary.QualificationSHA256 = strings.Repeat("a", 64)
+	active.snapshot.Summary.QualificationTapes = 1
+	active.snapshot.Summary.QualificationFrames = 24
+	active.snapshot.Summary.QualificationMinimumFrames = 24
+	active.snapshot.Summary.QualificationTrainingFrames = 12
+	active.snapshot.Summary.QualificationHoldoutFrames = 12
+	if report := service.paperReports(); !strings.Contains(report, "PERPS PAPER EXPERIMENT") ||
+		!strings.Contains(report, "Final untouched recording: kept closed") ||
+		strings.Contains(report, "LATEST UPDATE DELAYED") {
+		t.Fatalf("completed optional experiment was not retained clearly:\n%s", report)
 	}
 }
 
-func TestFreshIncompatibleOptionalExperimentCannotEraseRequiredReports(t *testing.T) {
+func TestOptionalExperimentCannotChangeRequiredAccountTotals(t *testing.T) {
 	now := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
 	build := func(id, market string) *paperStatusStub {
 		return &paperStatusStub{sourceID: id, label: market, snapshot: paperstatus.Snapshot{
@@ -859,7 +888,7 @@ func TestFreshIncompatibleOptionalExperimentCannotEraseRequiredReports(t *testin
 				t.Fatal(err)
 			}
 			if report := service.paperReports(); !strings.Contains(report, "Total paper value: $200.00") ||
-				strings.Contains(report, "SOL-PERP") {
+				!strings.Contains(report, "PERPS PAPER EXPERIMENT") || !strings.Contains(report, "SOL-PERP") {
 				t.Fatalf("optional source erased /paper aggregate:\n%s", report)
 			}
 			service.announce(t.Context())
@@ -982,21 +1011,6 @@ func TestPaperPortfolioDoesNotMixInstructionGenerations(t *testing.T) {
 	}
 	if got := paperPortfolioAlertSummary(summaries); got != "" {
 		t.Fatalf("mixed-generation alert portfolio = %q", got)
-	}
-}
-
-func TestPaperPortfolioCombinesBoundAndIndependentSources(t *testing.T) {
-	summaries := []paperstatus.CurrentSummary{
-		{Market: "SOL/USDC", ValueUnit: "USD", InstructionSHA256: strings.Repeat("a", 64), OpeningEquityMicros: 1_000_000, EquityMicros: 1_000_000, HoldBenchmarkMicros: 1_000_000},
-		{Market: "SOL-PERP", Instrument: "perpetual", ValueUnit: "USD", OpeningEquityMicros: 1_000_000, EquityMicros: 1_000_000, HoldBenchmarkMicros: 1_000_000, Strategy: "fixed"},
-	}
-	if got := paperPortfolioSummary(summaries, time.Time{}); !strings.Contains(got, "Total paper value: $2.00") ||
-		!strings.Contains(got, "SOL/USDC") || !strings.Contains(got, "SOL-PERP") ||
-		strings.Contains(got, "saved buy and sell prices") {
-		t.Fatalf("bound and independent portfolio = %q", got)
-	}
-	if got := paperPortfolioAlertSummary(summaries); !strings.Contains(got, "TOTAL PAPER VALUE NOW\n$2.00") {
-		t.Fatalf("bound and independent alert portfolio = %q", got)
 	}
 }
 

@@ -180,7 +180,22 @@ type Market struct {
 	QualificationStressScored     bool               `json:"qualification_stress_scored,omitempty"`
 	QualificationHoldoutMicros    int64              `json:"qualification_holdout_micros,omitempty,string"`
 	QualificationStressMicros     int64              `json:"qualification_stress_micros,omitempty,string"`
+	QualificationAttempts         []TrainingAttempt  `json:"qualification_attempts,omitempty"`
 	History                       []PerformancePoint `json:"history,omitempty"`
+}
+
+// TrainingAttempt is read-only evidence from a completed paper replay.
+// It must never be presented as an approved or selected trading plan.
+type TrainingAttempt struct {
+	RiskProfile       string `json:"risk_profile"`
+	Strategy          string `json:"strategy"`
+	NetPnLMicros      int64  `json:"net_pnl_micros,string"`
+	FeesMicros        uint64 `json:"fees_micros,string"`
+	FundingMicros     int64  `json:"funding_micros,string"`
+	MaxDrawdownMicros uint64 `json:"max_drawdown_micros,string"`
+	Liquidations      uint64 `json:"liquidations"`
+	FilledOrders      uint64 `json:"filled_orders"`
+	ClosedPositions   uint64 `json:"closed_positions"`
 }
 
 type PerformancePoint struct {
@@ -388,7 +403,7 @@ func (s *Server) readSnapshot(now time.Time) View {
 		if !market.Fresh && !optional {
 			view.Complete = false
 		}
-		if market.Fresh && (view.ObservedAt == nil || snapshot.ObservedAt.Before(*view.ObservedAt)) {
+		if market.Fresh && !optional && (view.ObservedAt == nil || snapshot.ObservedAt.Before(*view.ObservedAt)) {
 			observedAt := snapshot.ObservedAt
 			view.ObservedAt = &observedAt
 		}
@@ -397,15 +412,15 @@ func (s *Server) readSnapshot(now time.Time) View {
 				view.Complete = false
 				coverageReady = false
 			}
-		} else if !addOverview(&view.Overview, *snapshot.Summary) {
-			if !optional {
+		} else if !optional {
+			if !addOverview(&view.Overview, *snapshot.Summary) {
 				view.Complete = false
 				coverageReady = false
+			} else if market.CoverageReady && market.CoverageBPS < minimumCoverage {
+				minimumCoverage = market.CoverageBPS
+			} else if !market.CoverageReady {
+				coverageReady = false
 			}
-		} else if market.CoverageReady && market.CoverageBPS < minimumCoverage {
-			minimumCoverage = market.CoverageBPS
-		} else if !market.CoverageReady {
-			coverageReady = false
 		}
 		for _, event := range snapshot.Events {
 			view.Activity = append(view.Activity, Activity{
@@ -532,6 +547,15 @@ func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Mark
 		market.QualificationStressScored = summary.QualificationStressScored
 		market.QualificationHoldoutMicros = summary.QualificationHoldoutMicros
 		market.QualificationStressMicros = summary.QualificationStressMicros
+		for _, attempt := range summary.QualificationAttempts[:min(3, len(summary.QualificationAttempts))] {
+			market.QualificationAttempts = append(market.QualificationAttempts, TrainingAttempt{
+				RiskProfile: attempt.RiskProfile, Strategy: attempt.Strategy,
+				NetPnLMicros: attempt.NetPnLMicros, FeesMicros: attempt.FeesMicros,
+				FundingMicros: attempt.FundingMicros, MaxDrawdownMicros: attempt.MaxDrawdownMicros,
+				Liquidations: attempt.Liquidations, FilledOrders: attempt.FilledOrders,
+				ClosedPositions: attempt.ClosedPositions,
+			})
+		}
 	}
 	return market
 }
