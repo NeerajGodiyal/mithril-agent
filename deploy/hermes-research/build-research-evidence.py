@@ -273,6 +273,54 @@ def session_trace(sessions_data: bytes, run_started: float, run_finished: float)
     }
 
 
+def extract_packet(sessions_data: bytes, run_started: float, run_finished: float) -> bytes:
+    session_trace(sessions_data, run_started, run_finished)
+    sessions = [strict_json_object(line) for line in sessions_data.splitlines() if line.strip()]
+    roots = [
+        session for session in sessions
+        if session.get("source") == "cli" and session.get("parent_session_id") is None
+    ]
+    if len(roots) != 1:
+        raise ValueError("session export does not contain one root CLI session")
+    terminal = roots[0]
+    seen = set()
+    while terminal.get("end_reason") == "compression":
+        session_id = terminal.get("id")
+        if session_id in seen:
+            raise ValueError("root CLI compression lineage contains a cycle")
+        seen.add(session_id)
+        children = []
+        for session in sessions:
+            if session.get("parent_session_id") != session_id or session.get("source") == "tool":
+                continue
+            config = session.get("model_config")
+            if isinstance(config, str):
+                config = strict_json_object(config)
+            elif config is None:
+                config = {}
+            elif not isinstance(config, dict):
+                raise ValueError("session model configuration is invalid")
+            if config.get("_branched_from") == session_id or config.get("_delegate_from") == session_id:
+                continue
+            children.append(session)
+        if len(children) != 1:
+            raise ValueError("root CLI compression lineage is incomplete or ambiguous")
+        terminal = children[0]
+    if terminal.get("end_reason") != "agent_close":
+        raise ValueError("root CLI session did not complete")
+    messages = terminal.get("messages")
+    final = messages[-1] if isinstance(messages, list) and messages else None
+    if (not isinstance(final, dict) or final.get("role") != "assistant" or
+            final.get("finish_reason") != "stop" or final.get("tool_calls") not in (None, []) or
+            not isinstance(final.get("content"), str)):
+        raise ValueError("root CLI session does not end with one final assistant response")
+    content = final["content"].encode("utf-8")
+    strict_json_object(content)
+    if len(content) + 1 > 64 << 10:
+        raise ValueError("raw research packet exceeds the size limit")
+    return content + b"\n"
+
+
 def packet_created_at(packet: dict, run_started: float, run_finished: float) -> str:
     created_at = packet.get("created_at")
     if not isinstance(created_at, str) or not created_at.endswith("Z"):
@@ -388,14 +436,24 @@ def replace_private(path: Path, content: bytes) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sessions", type=Path, required=True)
-    parser.add_argument("--packet", type=Path, required=True)
+    parser.add_argument("--packet", type=Path)
     destination = parser.add_mutually_exclusive_group(required=True)
     destination.add_argument("--output", type=Path)
     destination.add_argument("--bind-output", type=Path)
+    destination.add_argument("--extract-output", type=Path)
     parser.add_argument("--run-started", type=float, required=True)
     parser.add_argument("--run-finished", type=float, required=True)
     args = parser.parse_args()
     sessions = read_private(args.sessions, MAX_EXPORT_BYTES)
+    if args.extract_output:
+        if args.packet:
+            parser.error("--packet cannot be used with --extract-output")
+        replace_private(args.extract_output, extract_packet(
+            sessions, args.run_started, args.run_finished,
+        ))
+        return
+    if not args.packet:
+        parser.error("--packet is required unless --extract-output is used")
     packet = read_private(args.packet, 64 << 10)
     if args.bind_output:
         replace_private(args.bind_output, bind_source_times(

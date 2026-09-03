@@ -46,6 +46,49 @@ class ResearchEvidenceTest(unittest.TestCase):
             ],
         }) + "\n").encode()
 
+    def sessions_with_final(self, content=None):
+        session = json.loads(self.sessions())
+        session.update({
+            "source": "cli", "parent_session_id": None, "end_reason": "agent_close",
+        })
+        session["messages"].append({
+            "role": "assistant", "finish_reason": "stop", "tool_calls": [],
+            "content": content or '{"created_at":"2026-09-02T12:00:00Z","verified_facts":[]}',
+            "timestamp": self.created + 4,
+        })
+        return (json.dumps(session) + "\n").encode()
+
+    def compressed_sessions_with_final(self):
+        root = json.loads(self.sessions())
+        root.update({
+            "source": "cli", "parent_session_id": None, "end_reason": "compression",
+            "ended_at": self.created + 3.5,
+        })
+        continuation = {
+            "id": "continuation", "source": "cli", "parent_session_id": "parent",
+            "model_config": "{}", "end_reason": "agent_close",
+            "started_at": self.created + 3.4,
+            "ended_at": self.created + 4.5, "messages": [{
+                "role": "assistant", "finish_reason": "stop", "tool_calls": [],
+                "content": '{"created_at":"2026-09-02T12:00:00Z","verified_facts":[]}',
+                "timestamp": self.created + 4,
+            }],
+        }
+        siblings = [
+            {"id": "branch", "source": "cli", "parent_session_id": "parent",
+             "model_config": {"_branched_from": "parent"}, "end_reason": "agent_close",
+             "started_at": self.created + 3.6, "ended_at": self.created + 3.7,
+             "messages": []},
+            {"id": "delegate", "source": "subagent", "parent_session_id": "parent",
+             "model_config": {"_delegate_from": "parent"}, "end_reason": "agent_close",
+             "started_at": self.created + 3.6, "ended_at": self.created + 3.7,
+             "messages": []},
+            {"id": "tool", "source": "tool", "parent_session_id": "parent",
+             "end_reason": "agent_close", "started_at": self.created + 3.6,
+             "ended_at": self.created + 3.7, "messages": []},
+        ]
+        return "".join(json.dumps(session) + "\n" for session in [root, continuation, *siblings]).encode()
+
     def build(self, sessions=None, packet=None):
         return evidence.build_evidence(
             sessions or self.sessions(), packet or self.packet(),
@@ -137,6 +180,51 @@ class ResearchEvidenceTest(unittest.TestCase):
             evidence.strict_json_object(' \n {"value":1,"nested":{"ok":true}}\t'),
             {"value": 1, "nested": {"ok": True}},
         )
+
+    def test_extracts_complete_final_response_from_root_cli_session(self):
+        packet = evidence.extract_packet(
+            self.sessions_with_final(), self.created, self.created + 5,
+        )
+        self.assertEqual(json.loads(packet)["verified_facts"], [])
+
+    def test_extracts_final_response_from_compression_continuation(self):
+        packet = evidence.extract_packet(
+            self.compressed_sessions_with_final(), self.created, self.created + 5,
+        )
+        self.assertEqual(json.loads(packet)["created_at"], "2026-09-02T12:00:00Z")
+
+    def test_extraction_rejects_ambiguous_compression_continuation(self):
+        sessions = self.compressed_sessions_with_final() + json.dumps({
+            "id": "unmarked-sibling", "source": "cli", "parent_session_id": "parent",
+            "end_reason": "agent_close", "started_at": self.created + 3.6,
+            "ended_at": self.created + 3.7, "messages": [],
+        }).encode() + b"\n"
+        with self.assertRaisesRegex(ValueError, "incomplete or ambiguous"):
+            evidence.extract_packet(sessions, self.created, self.created + 5)
+
+    def test_extraction_rejects_ambiguous_or_incomplete_root_response(self):
+        for mutate in (
+            lambda session: session.update(source="subagent"),
+            lambda session: session.update(end_reason="error"),
+            lambda session: session["messages"][-1].update(role="tool"),
+            lambda session: session["messages"][-1].update(finish_reason="length"),
+            lambda session: session["messages"][-1].update(tool_calls=[{"id": "pending"}]),
+            lambda session: session["messages"][-1].update(content="prefix {\"value\":1}"),
+        ):
+            session = json.loads(self.sessions_with_final())
+            mutate(session)
+            with self.subTest(session=session):
+                with self.assertRaises(ValueError):
+                    evidence.extract_packet(
+                        (json.dumps(session) + "\n").encode(), self.created, self.created + 5,
+                    )
+
+    def test_extraction_rejects_oversized_final_response(self):
+        with self.assertRaisesRegex(ValueError, "size limit"):
+            evidence.extract_packet(
+                self.sessions_with_final(json.dumps({"value": "x" * (64 << 10)})),
+                self.created, self.created + 5,
+            )
 
     def test_rejects_a_source_time_not_bound_to_the_session_trace(self):
         packet = json.loads(self.packet())

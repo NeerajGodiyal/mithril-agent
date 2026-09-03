@@ -23,7 +23,7 @@ base_query=/opt/mithril-hermes-research/prompts/market-scout.md
 research_query=/run/mithril-hermes-research/market-research.md
 finalizer_query=/run/mithril-hermes-research/challenger-finalizer.md
 finalizer_raw=/run/mithril-hermes-research/hermes-finalizer.raw
-packet=/run/mithril-hermes-research/packet.raw
+packet=/run/mithril-hermes-research/research-state/packet.raw
 bound_packet=/run/mithril-hermes-research/research-state/packet-bound.raw
 dashboard_packet=/run/mithril-hermes-research/packet-dashboard.raw
 research_state=/run/mithril-hermes-research/research-state
@@ -137,7 +137,8 @@ fi
 
 # The delegated model output is advisory and bounded before deterministic code
 # accepts it. This container has no paper policy, journal, or challenger mount.
-# POSIX ulimit -f uses 512-byte blocks, matching the packet's 64 KiB ceiling.
+# Container console output is not a response channel. The complete final
+# response is extracted from the structured session export and size-checked.
 # Retry only this pre-publication phase, with a fresh Hermes home and trace.
 collect_research_packet() (
   set -eu
@@ -169,19 +170,18 @@ collect_research_packet() (
   export MITHRIL_HERMES_QUERY_FILE="$research_query"
 
   cd /opt/mithril-hermes-research
-  (
-    ulimit -f 128
-    /usr/bin/docker compose run --rm --no-TTY hermes-research-parallel >"$packet"
-  )
+  /usr/bin/docker compose run --rm --no-TTY hermes-research-parallel >/dev/null
   run_finished=$(/usr/bin/date -u +%s.%N)
-  /usr/bin/chmod 0600 "$packet"
-  /usr/bin/chown mithril-agent-research:mithril-agent-research "$packet"
   # Pinned Hermes v2026.8.27 exports one full session object per JSONL row.
   /usr/bin/docker compose run --rm --no-TTY \
     hermes-research-parallel sessions export --format jsonl --redact --yes --after "$created_at" \
     /opt/research-data/sessions.jsonl >/dev/null
   /usr/bin/chmod 0600 "$session_export"
   /usr/bin/chown mithril-agent-research:mithril-agent-research "$session_export"
+  /usr/sbin/runuser -u mithril-agent-research -- \
+    /usr/bin/python3 /opt/mithril-hermes-research/build-research-evidence.py \
+      --sessions "$session_export" --extract-output "$packet" \
+      --run-started "$run_started" --run-finished "$run_finished"
   /usr/sbin/runuser -u mithril-agent-research -- \
     /usr/bin/python3 /opt/mithril-hermes-research/build-research-evidence.py \
       --sessions "$session_export" --packet "$packet" \

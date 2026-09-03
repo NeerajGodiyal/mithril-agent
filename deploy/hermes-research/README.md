@@ -58,9 +58,12 @@ It must never mount a policy, journal, champion, or challenger path.
 
 The research phase uses Hermes stateless one-shot mode (`hermes -z`). Pinned
 Hermes runs delegation inline on that channel, so the parent waits for all
-three leaf results before emitting one JSON packet. Do not replace it with
-`hermes chat --query-file`: that mode exits while its children are still
-running.
+three leaf results before emitting one JSON packet. The wrapper extracts that
+complete final response from the single completed root CLI session in Hermes'
+redacted JSONL export, following an unambiguous compression-continuation chain
+when present. Mixed container console output is discarded, never parsed. Do
+not replace it with `hermes chat --query-file`: that mode exits while its
+children are still running.
 
 After the one-shot completes, the wrapper uses the pinned image's supported
 `hermes sessions export --format jsonl --redact` command. It archives that full
