@@ -23,6 +23,8 @@ type stubShadowPerpsReader struct {
 	funding     []perpspaper.Funding
 	fundingFrom int64
 	fundingTo   int64
+	candleFrom  int64
+	candleTo    int64
 	candleCalls int
 	bookCalls   int
 	metaCalls   int
@@ -42,7 +44,8 @@ func (reader *stubShadowPerpsReader) MetaAndAssetContexts(context.Context) (perp
 	}, nil
 }
 
-func (reader *stubShadowPerpsReader) Candles(context.Context, perpspaper.Symbol, string, int64, int64) ([]perpspaper.Candle, error) {
+func (reader *stubShadowPerpsReader) Candles(_ context.Context, _ perpspaper.Symbol, _ string, from, to int64) ([]perpspaper.Candle, error) {
+	reader.candleFrom, reader.candleTo = from, to
 	reader.candleCalls++
 	reader.calls = append(reader.calls, "candles")
 	return append([]perpspaper.Candle(nil), reader.candles...), nil
@@ -111,6 +114,52 @@ func TestShadowPerpsPaperRunPersistsSignerFreePaperState(t *testing.T) {
 	}
 }
 
+func TestShadowPerpsPaperRunWaitsForCandleSettlement(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 5, 30, 0, time.UTC)
+	reader := validStubShadowPerpsReader(now)
+	directory := filepath.Join(t.TempDir(), "perps")
+	if err := runShadowPerpsPaperWith(t.Context(), []string{
+		"--state-dir", directory, "--symbols", "SOL", "--once",
+	}, &bytes.Buffer{}, func() time.Time { return now }, func(perpspaper.Environment) (shadowPerpsReader, error) {
+		return reader, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var tape shadowPerpsTape
+	if err := readStrictJSON(filepath.Join(directory, "sol-tape.json"), &tape); err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, 9, 2, 12, 2, 59, 999_000_000, time.UTC).UnixMilli()
+	if got := tape.Frames[0].Candles[len(tape.Frames[0].Candles)-1].CloseTime; got != want || now.UnixMilli()-got < int64(shadowPerpsCandleSettleLag/time.Millisecond) {
+		t.Fatalf("recorded candle close = %d, want %d with settlement lag", got, want)
+	}
+	if reader.candleTo != want {
+		t.Fatalf("candle request ended at %d, want settled boundary %d", reader.candleTo, want)
+	}
+}
+
+func TestShadowPerpsPaperRunRejectsChangedSettledCandleImmediately(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 5, 30, 0, time.UTC)
+	reader := validStubShadowPerpsReader(now)
+	directory := filepath.Join(t.TempDir(), "perps")
+	factory := func(perpspaper.Environment) (shadowPerpsReader, error) { return reader, nil }
+	args := []string{"--state-dir", directory, "--symbols", "SOL", "--once"}
+	if err := runShadowPerpsPaperWith(t.Context(), args, &bytes.Buffer{}, func() time.Time { return now }, factory); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	reader.candles = paperCandles(now, "100", "101")
+	reader.candles[0].Close = "100.01"
+	reader.book.Time = now.UnixMilli()
+	if err := runShadowPerpsPaperWith(t.Context(), args, &bytes.Buffer{}, func() time.Time { return now }, factory); err == nil || !strings.Contains(err.Error(), "changed a previously observed settled candle") {
+		t.Fatalf("changed settled candle error = %v", err)
+	}
+	var tape shadowPerpsTape
+	if err := readStrictJSON(filepath.Join(directory, "sol-tape.json"), &tape); err != nil || len(tape.Frames) != 1 {
+		t.Fatalf("changed candle persisted: %d frames, %v", len(tape.Frames), err)
+	}
+}
+
 func TestShadowPerpsPaperRunResumesOnlyNewCausalFrames(t *testing.T) {
 	now := time.Date(2026, 9, 2, 12, 5, 30, 0, time.UTC)
 	reader := validStubShadowPerpsReader(now)
@@ -137,7 +186,7 @@ func TestShadowPerpsPaperRunResumesOnlyNewCausalFrames(t *testing.T) {
 	now = now.Add(time.Minute)
 	reader.candles = paperCandles(now, "100", "101")
 	reader.book.Time = now.UnixMilli()
-	reader.funding = []perpspaper.Funding{{Symbol: perpspaper.SOL, Rate: "-0.00001", Premium: "0", Time: reader.candles[len(reader.candles)-1].CloseTime + 1}}
+	reader.funding = []perpspaper.Funding{{Symbol: perpspaper.SOL, Rate: "-0.00001", Premium: "0", Time: previousBook + 1}}
 	var advanced bytes.Buffer
 	if err := runShadowPerpsPaperWith(t.Context(), args, &advanced, func() time.Time { return now }, factory); err != nil {
 		t.Fatal(err)
@@ -148,44 +197,6 @@ func TestShadowPerpsPaperRunResumesOnlyNewCausalFrames(t *testing.T) {
 	}
 	if reader.fundingFrom != previousBook+1 || reader.fundingTo != reader.book.Time {
 		t.Fatalf("funding range = %d..%d", reader.fundingFrom, reader.fundingTo)
-	}
-}
-
-func TestShadowPerpsPaperRunWaitsForBookAfterCandleClose(t *testing.T) {
-	now := time.Date(2026, 9, 2, 12, 5, 30, 0, time.UTC)
-	reader := validStubShadowPerpsReader(now)
-	directory := filepath.Join(t.TempDir(), "perps")
-	factory := func(perpspaper.Environment) (shadowPerpsReader, error) { return reader, nil }
-	args := []string{"--state-dir", directory, "--symbols", "SOL", "--once"}
-	if err := runShadowPerpsPaperWith(t.Context(), args, &bytes.Buffer{}, func() time.Time { return now }, factory); err != nil {
-		t.Fatal(err)
-	}
-
-	now = now.Truncate(time.Minute).Add(time.Minute + 500*time.Millisecond)
-	reader.candles = paperCandles(now, "100", "101")
-	latestClose := reader.candles[len(reader.candles)-1].CloseTime
-	reader.book.Time = latestClose - 1
-	var waiting bytes.Buffer
-	if err := runShadowPerpsPaperWith(t.Context(), args, &waiting, func() time.Time { return now }, factory); err != nil {
-		t.Fatal(err)
-	}
-	var waitingStatus shadowPerpsStatus
-	if err := json.Unmarshal(waiting.Bytes(), &waitingStatus); err != nil || waitingStatus.NewFrame || waitingStatus.Frames != 1 {
-		t.Fatalf("waiting status = %+v, %v", waitingStatus, err)
-	}
-	var tape shadowPerpsTape
-	if err := readStrictJSON(filepath.Join(directory, "sol-tape.json"), &tape); err != nil || len(tape.Frames) != 1 {
-		t.Fatalf("pre-close book changed tape: %d frames, %v", len(tape.Frames), err)
-	}
-
-	reader.book.Time = latestClose + 1
-	var advanced bytes.Buffer
-	if err := runShadowPerpsPaperWith(t.Context(), args, &advanced, func() time.Time { return now }, factory); err != nil {
-		t.Fatal(err)
-	}
-	var advancedStatus shadowPerpsStatus
-	if err := json.Unmarshal(advanced.Bytes(), &advancedStatus); err != nil || !advancedStatus.NewFrame || advancedStatus.Frames != 2 {
-		t.Fatalf("advanced status = %+v, %v", advancedStatus, err)
 	}
 }
 
@@ -497,7 +508,7 @@ func validStubShadowPerpsReader(now time.Time) *stubShadowPerpsReader {
 }
 
 func paperCandles(now time.Time, first, second string) []perpspaper.Candle {
-	end := now.Truncate(time.Minute).Add(-time.Millisecond)
+	end := shadowPerpsSettledCandleEnd(now)
 	return []perpspaper.Candle{
 		{OpenTime: end.Add(-2 * time.Minute).Add(time.Millisecond).UnixMilli(), CloseTime: end.Add(-time.Minute).UnixMilli(), Symbol: perpspaper.SOL, Interval: "1m", Open: first, Close: first, High: first, Low: first, Volume: "1"},
 		{OpenTime: end.Add(-time.Minute).Add(time.Millisecond).UnixMilli(), CloseTime: end.UnixMilli(), Symbol: perpspaper.SOL, Interval: "1m", Open: second, Close: second, High: second, Low: second, Volume: "1"},

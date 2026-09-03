@@ -107,6 +107,9 @@ func ensureShadowPerpsPrivateDirectory(path string) error {
 }
 
 func canonicalShadowPerpsTape(tape shadowPerpsTape) ([]byte, string, error) {
+	if _, err := perpspaper.QualifyTournament(tape.Config.qualificationConfig(), tape.Frames); err != nil {
+		return nil, "", fmt.Errorf("verify perps paper tape: %w", err)
+	}
 	raw, err := json.Marshal(tape)
 	if err != nil {
 		return nil, "", fmt.Errorf("encode perps paper tape: %w", err)

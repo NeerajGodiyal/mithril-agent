@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -35,6 +37,34 @@ func TestShadowPerpsWalkForwardReadsOnlySealedCompatibleTapes(t *testing.T) {
 	}
 }
 
+func TestSettledCaptureKeepsVerifiedV3ReplayTapesCompatible(t *testing.T) {
+	base := t.TempDir()
+	config := shadowPerpsTapeConfig{
+		Environment: perpspaper.Mainnet, Symbol: perpspaper.SOL, RiskArm: perpspaper.Balanced,
+		StartingCollateralMicros: 100_000_000, VenueMaxLeverage: 20, VenueSzDecimals: 2,
+	}
+	// Sampling delay is recorded by frame timestamps; it does not change the v3
+	// tape schema, accounting, or replay rules.
+	legacy := shadowPerpsTape{
+		Version: 3, PaperOnly: true, AccountingModel: "hyperliquid_causal_sampled_context_stress_v3",
+		Config: config, Frames: flatShadowPerpsTestFrames(0, perpspaper.QualificationMinimumFrames),
+	}
+	if gap := legacy.Frames[0].Book.Time - legacy.Frames[0].Candles[1].CloseTime; gap != 1_000 {
+		t.Fatalf("legacy fixture gap = %d", gap)
+	}
+	path, err := sealShadowPerpsTape(filepath.Join(base, "current"), legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, _, err := readShadowPerpsCorpusTape(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.Version != shadowPerpsTapeVersion || read.AccountingModel != shadowPerpsModel || !compatibleShadowPerpsTapes(config, read.Config) {
+		t.Fatalf("verified v3 tape became incompatible: %+v", read)
+	}
+}
+
 func TestShadowPerpsSealedTapeIsWriteOnceAndDigestBound(t *testing.T) {
 	base := t.TempDir()
 	path := createAndSealShadowPerpsTestTape(t, base, "first", time.Date(2026, 9, 3, 8, 0, 0, 0, time.UTC))
@@ -56,6 +86,59 @@ func TestShadowPerpsSealedTapeIsWriteOnceAndDigestBound(t *testing.T) {
 	}
 	if _, _, err := readShadowPerpsCorpusTape(path); err == nil || !strings.Contains(err.Error(), "digest") {
 		t.Fatalf("mutated sealed tape error = %v", err)
+	}
+}
+
+func TestShadowPerpsSealRejectsChangedClosedCandle(t *testing.T) {
+	base := t.TempDir()
+	frames := flatShadowPerpsTestFrames(0, perpspaper.QualificationMinimumFrames)
+	frames[1].Candles[0].Close = "101"
+	tape := shadowPerpsTape{
+		Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
+		Config: shadowPerpsTapeConfig{
+			Environment: perpspaper.Mainnet, Symbol: perpspaper.SOL, RiskArm: perpspaper.Balanced,
+			StartingCollateralMicros: 100_000_000, VenueMaxLeverage: 20, VenueSzDecimals: 2,
+		},
+		Frames: frames,
+	}
+	if _, err := sealShadowPerpsTape(filepath.Join(base, "current"), tape); err == nil || !strings.Contains(err.Error(), "changes an existing closed candle") {
+		t.Fatalf("changed closed candle seal error = %v", err)
+	}
+	if _, err := os.Stat(shadowPerpsCorpusDir(filepath.Join(base, "current"), perpspaper.SOL)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid tape created corpus: %v", err)
+	}
+}
+
+func TestShadowPerpsStagingRecoveryRejectsChangedClosedCandle(t *testing.T) {
+	base := t.TempDir()
+	config := shadowPerpsTapeConfig{
+		Environment: perpspaper.Mainnet, Symbol: perpspaper.SOL, RiskArm: perpspaper.Balanced,
+		StartingCollateralMicros: 100_000_000, VenueMaxLeverage: 20, VenueSzDecimals: 2,
+	}
+	frames := flatShadowPerpsTestFrames(0, perpspaper.QualificationMinimumFrames)
+	frames[1].Candles[0].Close = "101"
+	raw, err := json.Marshal(shadowPerpsTape{
+		Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
+		Config: config, Frames: frames,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = append(raw, '\n')
+	digest := sha256.Sum256(raw)
+	name := "." + hex.EncodeToString(digest[:]) + ".staging"
+	directory := shadowPerpsCorpusDir(filepath.Join(base, "current"), perpspaper.SOL)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, name), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverShadowPerpsStaging(directory, name); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := os.ReadDir(directory); err != nil || len(entries) != 0 {
+		t.Fatalf("invalid staging survived recovery: %v, %v", entries, err)
 	}
 }
 
@@ -185,6 +268,53 @@ func TestPreparePreservesCompleteTapeAfterInterruptedRun(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(archiveDir, startedAt.Format("20060102T150405.000000000Z"), "sol-tape.json")); err != nil {
 		t.Fatalf("archived interrupted run: %v", err)
+	}
+}
+
+func TestPrepareDoesNotSealOrArchiveCausallyInvalidCompletedTape(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stateDir, archiveDir := filepath.Join(base, "current"), filepath.Join(base, "runs")
+	if err := os.Mkdir(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := shadowPerpsTapeConfig{
+		Environment: perpspaper.Mainnet, Symbol: perpspaper.SOL, RiskArm: perpspaper.Balanced,
+		StartingCollateralMicros: 100_000_000, VenueMaxLeverage: 20, VenueSzDecimals: 2,
+	}
+	frames := flatShadowPerpsTestFrames(0, perpspaper.QualificationMinimumFrames)
+	frames[1].Candles[0].Close = "101"
+	tapePath := filepath.Join(stateDir, "sol-tape.json")
+	if err := writeShadowPerpsJSON(tapePath, shadowPerpsTape{
+		Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
+		Config: config, Frames: frames,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(tapePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Date(2026, 9, 3, 15, 0, 0, 0, time.UTC)
+	err = prepareShadowPerpsRun(stateDir, archiveDir, startedAt)
+	if err == nil || !strings.Contains(err.Error(), "changes an existing closed candle") {
+		t.Fatalf("invalid recovery error = %v", err)
+	}
+	after, readErr := os.ReadFile(tapePath)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("invalid current tape changed: %v", readErr)
+	}
+	if _, statErr := os.Stat(shadowPerpsCorpusDir(stateDir, perpspaper.SOL)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("invalid tape created corpus: %v", statErr)
+	}
+	archivePath := filepath.Join(archiveDir, startedAt.Format("20060102T150405.000000000Z"))
+	if _, statErr := os.Stat(archivePath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("invalid tape was archived: %v", statErr)
 	}
 }
 

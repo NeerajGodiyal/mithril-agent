@@ -28,6 +28,7 @@ const (
 	shadowPerpsMaxFrames              = 1_500
 	shadowPerpsMaxFileBytes    int64  = 16 << 20
 	shadowPerpsModel                  = "hyperliquid_causal_sampled_context_stress_v3"
+	shadowPerpsCandleSettleLag        = 2 * time.Minute
 	shadowPerpsMaxClockSkew           = 5 * time.Second
 	shadowPerpsMaxBookAge             = 30 * time.Second
 	shadowPerpsMaxArchivedRuns        = 8
@@ -593,7 +594,7 @@ func updateShadowPerpsMarketUnlocked(
 	if err != nil {
 		return shadowPerpsStatus{}, err
 	}
-	closedEnd := now.Truncate(time.Minute).Add(-time.Millisecond)
+	closedEnd := shadowPerpsSettledCandleEnd(now)
 	if closedEnd.UnixMilli() <= 0 {
 		return shadowPerpsStatus{}, errors.New("system time has no completed one-minute candle")
 	}
@@ -624,7 +625,11 @@ func updateShadowPerpsMarketUnlocked(
 	}
 	newFrame := len(tape.Frames) == 0 || latestClose > tape.Frames[len(tape.Frames)-1].Candles[len(tape.Frames[len(tape.Frames)-1].Candles)-1].CloseTime
 	if len(tape.Frames) > 0 && newFrame {
-		lastClose := tape.Frames[len(tape.Frames)-1].Candles[len(tape.Frames[len(tape.Frames)-1].Candles)-1].CloseTime
+		previousCandle := tape.Frames[len(tape.Frames)-1].Candles[len(tape.Frames[len(tape.Frames)-1].Candles)-1]
+		if candles[0] != previousCandle {
+			return shadowPerpsStatus{}, errors.New("Hyperliquid changed a previously observed settled candle")
+		}
+		lastClose := previousCandle.CloseTime
 		if latestClose != lastClose+int64(time.Minute/time.Millisecond) {
 			return shadowPerpsStatus{}, errors.New("paper candle sequence has a gap")
 		}
@@ -696,6 +701,10 @@ func updateShadowPerpsMarketUnlocked(
 		return shadowPerpsStatus{}, err
 	}
 	return status, nil
+}
+
+func shadowPerpsSettledCandleEnd(now time.Time) time.Time {
+	return now.Truncate(time.Minute).Add(-shadowPerpsCandleSettleLag - time.Millisecond)
 }
 
 func writeShadowPerpsCycle(
