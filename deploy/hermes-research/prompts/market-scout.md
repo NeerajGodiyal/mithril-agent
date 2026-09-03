@@ -78,6 +78,13 @@ Use the host-produced prior-day diagnostics to explain whether the current
 paper policy was observable, active, costly, or inconclusive. Internal paper
 results may falsify or prioritize a hypothesis; they never count as an external
 source and never prove future profit.
+Use the host-produced completed perps summary to compare the recorded SOL-PERP,
+BTC-PERP, and ETH-PERP training attempts, costs, fills, and drawdown when those
+fields are present. Treat its content hash and paper-status hashes as integrity bindings,
+not market sources. It may support an advisory hypothesis or rejection
+condition, but it cannot open a holdout, change a policy, authorize execution,
+promote a plan, or prove future profit.
+If the host marks it unavailable, do not infer any perps result.
 
 Do not recommend paper admission until an operator-owned point-in-time
 collector exists and has at least 30 consecutive complete days of evidence,

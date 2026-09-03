@@ -483,6 +483,11 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"omit `retrieved_at`", "host inserts the exact successful",
 		"https://www.coinbase.com/cbbtc", "https://www.circle.com/transparency",
 		"not all-in execution guarantees",
+		"host-produced completed perps summary",
+		"content hash and paper-status hashes as integrity bindings",
+		"not market sources",
+		"cannot open a holdout, change a policy, authorize execution",
+		"If the host marks it unavailable, do not infer any perps result.",
 	} {
 		if !strings.Contains(marketScout, want) {
 			t.Errorf("Hermes market scout omits official source rule %q", want)
@@ -913,6 +918,15 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"mithril-agent shadow review", "--days 1 --json",
 		"Trusted sanitized prior-complete-day paper diagnostics.",
 		"SOL/USDC: %s\\nJUP/USDC: %s",
+		"sol_perps_status=/var/lib/mithril-agent-perps-paper/published/sol-paper-status.json",
+		"btc_perps_status=/var/lib/mithril-agent-perps-paper/published/btc-paper-status.json",
+		"eth_perps_status=/var/lib/mithril-agent-perps-paper/published/eth-paper-status.json",
+		"perps_research='{\"status\":\"completed_perps_research_unavailable\"}'",
+		"--render-perps-research \"SOL-PERP=$sol_perps_status\"",
+		"--render-perps-research \"BTC-PERP=$btc_perps_status\"",
+		"--render-perps-research \"ETH-PERP=$eth_perps_status\"",
+		"Trusted content-hashed completed perps paper research.",
+		"cannot authorize, promote, or execute anything",
 		"research_raw=/run/mithril-hermes-research/hermes-research.raw",
 		"finalizer_raw=/run/mithril-hermes-research/hermes-finalizer.raw",
 		"/usr/bin/docker compose run --rm --no-TTY hermes-research-parallel >\"$research_raw\"",
@@ -939,6 +953,33 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		if !strings.Contains(researchRunner, want) {
 			t.Errorf("Hermes market scout wrapper is missing %q", want)
 		}
+	}
+	if sol := strings.Index(researchRunner, `--render-perps-research "SOL-PERP=$sol_perps_status"`); sol < 0 {
+		t.Fatal("Hermes wrapper is missing SOL perps research")
+	} else if btc := strings.Index(researchRunner, `--render-perps-research "BTC-PERP=$btc_perps_status"`); btc <= sol {
+		t.Fatal("Hermes wrapper does not render BTC after SOL")
+	} else if eth := strings.Index(researchRunner, `--render-perps-research "ETH-PERP=$eth_perps_status"`); eth <= btc {
+		t.Fatal("Hermes wrapper does not render ETH after BTC")
+	}
+	if got := strings.Count(researchRunner, "--render-perps-research "); got != 3 {
+		t.Fatalf("Hermes wrapper has %d perps research inputs; want 3", got)
+	}
+	for _, assignment := range []string{"sol_perps_status=", "btc_perps_status=", "eth_perps_status="} {
+		if got := strings.Count(researchRunner, assignment); got != 1 {
+			t.Errorf("Hermes wrapper has %d %s assignments; want 1", got, assignment)
+		}
+	}
+	fallback := strings.Index(researchRunner, `perps_research='{"status":"completed_perps_research_unavailable"}'`)
+	if fallback < 0 {
+		t.Fatal("Hermes wrapper is missing the completed perps fallback")
+	}
+	perpsBlock := researchRunner[fallback:]
+	render := strings.Index(perpsBlock, "if reviewed=$(/usr/sbin/runuser -u mithril-agent-research --")
+	accept := strings.Index(perpsBlock, "then\n  perps_research=$reviewed\nfi")
+	appendSummary := strings.Index(perpsBlock, `"$perps_research" >>"$research_query"`)
+	if render < 0 || accept <= render || appendSummary <= accept ||
+		strings.Count(perpsBlock, "perps_research=$reviewed") != 1 {
+		t.Fatal("Hermes wrapper does not fail the completed perps summary closed as one unit")
 	}
 	dashboardRecord := strings.Index(researchRunner, `--in "$dashboard_packet" --latest "$projection"`)
 	dashboardEvidence := strings.Index(researchRunner, `--sessions "$dashboard_sessions" --packet "$projection"`)

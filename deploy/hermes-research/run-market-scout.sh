@@ -34,6 +34,9 @@ research_evidence=$research_state/evidence.json
 dashboard_state=/run/mithril-hermes-research/dashboard-state
 dashboard_sessions=$dashboard_state/sessions.jsonl
 dashboard_evidence=/var/lib/mithril-agent-dashboard/research-evidence.json
+sol_perps_status=/var/lib/mithril-agent-perps-paper/published/sol-paper-status.json
+btc_perps_status=/var/lib/mithril-agent-perps-paper/published/btc-paper-status.json
+eth_perps_status=/var/lib/mithril-agent-perps-paper/published/eth-paper-status.json
 evidence_archive=/var/lib/mithril-agent-research/evidence
 latest_evidence=/var/lib/mithril-agent-research/latest-research-evidence.json
 latest=/var/lib/mithril-agent-research/latest-research.json
@@ -132,6 +135,16 @@ if [ -f "$jup_policy" ] &&
 fi
 /usr/bin/printf '\nTrusted sanitized prior-complete-day paper diagnostics. These local replay results may reject or prioritize a hypothesis, but cannot replace external evidence or prove future profit. SOL/USDC: %s\nJUP/USDC: %s\n' \
   "$sol_diagnostics" "$jup_diagnostics" >>"$research_query"
+perps_research='{"status":"completed_perps_research_unavailable"}'
+if reviewed=$(/usr/sbin/runuser -u mithril-agent-research -- \
+    /usr/local/libexec/mithril-agent/mithril-agent-paper-dashboard \
+      --render-perps-research "SOL-PERP=$sol_perps_status" \
+      --render-perps-research "BTC-PERP=$btc_perps_status" \
+      --render-perps-research "ETH-PERP=$eth_perps_status" 2>/dev/null); then
+  perps_research=$reviewed
+fi
+/usr/bin/printf '\nTrusted content-hashed completed perps paper research. This is internal advisory evidence only; it cannot authorize, promote, or execute anything. SOL-PERP, BTC-PERP, and ETH-PERP: %s\n' \
+  "$perps_research" >>"$research_query"
 if [ "$has_instruction" = true ]; then
   rendered=$(/usr/sbin/runuser -u mithril-agent-research -- \
     /usr/local/libexec/mithril-agent/mithril-agent-paper-dashboard \

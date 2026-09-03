@@ -57,7 +57,7 @@ e588c5821442434ea24841a27e2d4557013f5d00f76b45302c14d540c1a82c57  ./cmd/mithril-
 d53ac9839fbe784a1655a799f97c843bf9fcd4c5dd8d71838010f0b41dddf903  ./cmd/mithril-agent/doctor_telegram_test.go
 52084607d80293db7a84216e4d9d13f381ccd3f187c0045ac11cbc6480fbeb95  ./cmd/mithril-agent/doctor_test.go
 519267fdaa4647298c383b54cb24127010e9bb600ae334317012d3db45b12cd6  ./cmd/mithril-agent/doctor_trading_test.go
-f973fe30fc624f5a1c67bb24a0d2b62aaf418253c0c0e9afe0e0d978c107760e  ./cmd/mithril-agent/documentation_test.go
+907a0c51484c47fe133be1629cf6e9bc3f61e9e62dcf82be86ecb2c26ac48b87  ./cmd/mithril-agent/documentation_test.go
 4aad63196ecf6d68dd4047804cac2943ee4ece9a5cb7273878915b2983836d42  ./cmd/mithril-agent/explain.go
 f1a080ac99ba19b1a6cf9602d0bd65cd081145b8bcf620616a24b4ab7299923e  ./cmd/mithril-agent/explain_stage.go
 3358177400d3b66329c3510c8274e37c3fce8990ba48975eadf58fcead630cd6  ./cmd/mithril-agent/explain_stage_test.go
@@ -230,8 +230,8 @@ ef9e6ddbc0a8bad3a111cd9157d7aaf0c3e9f4593c47c10b476c7f3a23c18629  ./deploy/herme
 0b2c0c1b3848f5402c5bd625844abc9a682c6200d01b7e32e99c5230cefedf9c  ./deploy/hermes-research/config-delegated.yaml
 717fbc0d2f754b5f3d8ad744749717d5519a467f2fc506bba9ff3ff9053fb190  ./deploy/hermes-research/config.yaml
 cd719fafedb55c7e82922f92d230368561b3a2340af1d95061a609f36cc6017e  ./deploy/hermes-research/env.example
-4b1bbd37a89db8cd5236e1a95696d94b56feba1375f68728f8b20d0b0f0163fa  ./deploy/hermes-research/prompts/market-scout.md
-8bda1d485c0d3bfac337d38c37dca8563952af19314519453be0f3a8a914f66e  ./deploy/hermes-research/run-market-scout.sh
+a149b0a5f6969165dc6a132985b5a106960f4cb424b341a9f0f9ff3d21fa5321  ./deploy/hermes-research/prompts/market-scout.md
+a91d255d087a08c577dc638ab08d94eeae6eca4efcb1b305807d98d06b40e963  ./deploy/hermes-research/run-market-scout.sh
 647aa2673b931d1e0156ff48a314de287a7e0b24ba3078bb63375793cbd316c9  ./deploy/hermes-research/run-paper-generation.sh
 0483df10bfe669accd58c1d05ecf5667bea4f28731bf775a5e8452bf643fe7e5  ./deploy/hermes-research/test_build_research_evidence.py
 43df10ef5192a5bc6fa52796612132de5235c7ea42b068e05ccceb4457ea1dee  ./deploy/prometheus/mithril-agent.rules.test.yml
