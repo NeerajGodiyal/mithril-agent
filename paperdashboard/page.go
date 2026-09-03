@@ -710,10 +710,11 @@ function readableActivityResult(line){
 function readableActivity(message){
   const lines=String(message||'').split('\n');
   lines[0]=(lines[0]||'').replace(/SELL filled/i,'SOLD').replace(/BUY filled/i,'BOUGHT');
+  const experiment=/STRATEGY CHECK/i.test(lines[0]);
   for(let index=1;index<lines.length;index++){
     lines[index]=readableActivityResult(lines[index]
       .replace('Practice account:','This market value:').replace('Total paper account:','This market value:').replace(/^Equity /,'This market value: ')
-      .replace(/^Paper value /,'This market value: ').replace(/^Result:/,'This market gain/loss:')
+      .replace(/^Paper value /,'This market value: ').replace(/^Result:/,experiment?'Experiment result:':'This market gain/loss:')
 	      .replace('Gain/loss today:',"Plan result at that update:").replace("Today's result:","Plan result at that update:").replace("Today's estimated paper value:","Plan result at that update:").replace('Paper result this run:',"Plan result at that update:")
       .replaceAll('better than no trading','better than holding').replaceAll('worse than no trading','worse than holding').replaceAll('same as no trading','same as holding')
       .replace(/\b1 trade\b/g,'1 filled paper order').replace(/\b(\d+) trades\b/g,'$1 filled paper orders')

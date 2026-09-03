@@ -567,6 +567,11 @@ func TestReadablePaperMessageUpgradesRetainedCopyWithoutChangingHistory(t *testi
 	if got := readablePaperMessage(legacyDay); got != wantDay {
 		t.Fatalf("readable retained daily result = %q, want %q", got, wantDay)
 	}
+	legacyExperiment := "PAPER · 🧪 STRATEGY CHECK\nResult: no paper plan passed every training gate\nFinal untouched recording: kept closed"
+	wantExperiment := "PAPER · 🧪 STRATEGY CHECK\nExperiment result: no paper plan passed every training gate\nFinal untouched recording: kept closed"
+	if got := readablePaperMessage(legacyExperiment); got != wantExperiment {
+		t.Fatalf("readable retained experiment result = %q, want %q", got, wantExperiment)
+	}
 }
 
 func TestPaperAnnouncementFullSnapshotDoesNotEvictItsOwnDeliveries(t *testing.T) {

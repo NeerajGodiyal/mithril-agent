@@ -70,3 +70,14 @@ func TestPerpsTrainingAttemptsStayCompactAndUnapproved(t *testing.T) {
 		}
 	}
 }
+
+func TestActivityDoesNotMislabelExperimentOutcomeAsProfitOrLoss(t *testing.T) {
+	for _, want := range []string{
+		`const experiment=/STRATEGY CHECK/i.test(lines[0])`,
+		`experiment?'Experiment result:':'This market gain/loss:'`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Errorf("activity display omits %q", want)
+		}
+	}
+}

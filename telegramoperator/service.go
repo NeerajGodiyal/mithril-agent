@@ -596,12 +596,17 @@ func readablePaperMessage(message string) string {
 	}
 	lines[0] = strings.ReplaceAll(lines[0], "SELL filled", "SOLD")
 	lines[0] = strings.ReplaceAll(lines[0], "BUY filled", "BOUGHT")
+	experiment := strings.Contains(lines[0], "STRATEGY CHECK")
 	for index := 1; index < len(lines); index++ {
 		lines[index] = strings.ReplaceAll(lines[index], "Practice account:", "Total paper value now:")
 		lines[index] = strings.ReplaceAll(lines[index], "Total paper account:", "Total paper value now:")
 		lines[index] = strings.ReplaceAll(lines[index], "Paper account:", "Total paper value now:")
 		lines[index] = strings.ReplaceAll(lines[index], "Equity $", "Total paper value now: $")
-		lines[index] = strings.Replace(lines[index], "Result:", "Paper gain/loss:", 1)
+		if experiment {
+			lines[index] = strings.Replace(lines[index], "Result:", "Experiment result:", 1)
+		} else {
+			lines[index] = strings.Replace(lines[index], "Result:", "Paper gain/loss:", 1)
+		}
 		lines[index] = strings.ReplaceAll(lines[index], "Paper gain/loss today:", "Paper result this run:")
 		lines[index] = strings.ReplaceAll(lines[index], "Gain/loss today:", "Paper result this run:")
 		lines[index] = strings.ReplaceAll(lines[index], "Today's estimated paper value:", "Paper result this run:")
