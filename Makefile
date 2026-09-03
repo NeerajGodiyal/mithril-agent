@@ -147,6 +147,7 @@ verify-source:
 	    -not -path '*/node_modules/*' -not -path '*/target/*' \
 	    -not -path './deploy/hermes-research/state/*' \
 	    -not -path './deploy/hermes-research/secrets/*' \
+	    -not -path './AGENTS.md' \
 	    -not -name '$(MANIFEST)' \
 	    | LC_ALL=C sort > "$$expected"; \
 	 awk '{print $$2}' "$(MANIFEST)" | LC_ALL=C sort > "$$listed"; \
@@ -184,6 +185,7 @@ manifest:
 	   -not -path '*/node_modules/*' -not -path '*/target/*' \
 	   -not -path './deploy/hermes-research/state/*' \
 	   -not -path './deploy/hermes-research/secrets/*' \
+	   -not -path './AGENTS.md' \
 	   -not -name '$(MANIFEST)' \
 	   | LC_ALL=C sort \
 	   | xargs $$(command -v sha256sum || echo "shasum -a 256") > "$(MANIFEST)"
