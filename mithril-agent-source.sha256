@@ -122,8 +122,8 @@ a7d95c384bb91deb8b5182dffcc1f76d0074302d6a45753788c5bc8c936dee90  ./cmd/mithril-
 93accdf9d9392ed81fc984b6176e56a063a1001d111f35c518f3be5039a071c4  ./cmd/mithril-agent/setup_test.go
 de8bcdd0cdc25385d7fe7b6c3c45fed9e9bca70c56d33daab3d4e5d6a421e66e  ./cmd/mithril-agent/shadowalerts.go
 9f270ade6d404d8aaf2edc08d7c6b660c260123967ee296406dce9d4bc19ecd6  ./cmd/mithril-agent/shadowalerts_test.go
-c657e1b10c28ac2093538fb7b6a6bcb86d1134f1b0ecdd2d07f618090a256c98  ./cmd/mithril-agent/shadowallocation.go
-606fb5c4fcf2909b6fed5dbe42adadf15b259002df4b220ce4d057a8a3263614  ./cmd/mithril-agent/shadowallocation_test.go
+7ebae87ed728973638730bf1da415bab53a64be6e56f5fee8d3d944efe551d34  ./cmd/mithril-agent/shadowallocation.go
+cc3100bbeeed78ee7f0249df676de25f30cc1ea7a317aa6470dfa2282a62b1b1  ./cmd/mithril-agent/shadowallocation_test.go
 9a7f885a42fddda0a8487f77319c70a93ed26afc09f9dc14ab4b7b31a6f66a24  ./cmd/mithril-agent/shadowautoselect.go
 ae8770dbf8dd8a286a0740ed48ae1505849081d9cd9f4135ca15f1e8b63361f5  ./cmd/mithril-agent/shadowautoselect_test.go
 180b3e62e23d492a141b852ffb0d935eb0eec7b1aeecb3e853fb3328e663f95f  ./cmd/mithril-agent/shadowbacktest.go

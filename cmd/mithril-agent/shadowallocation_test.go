@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/paperdashboard"
+	"github.com/Overclock-Validator/mithril-agent/pricesource"
+	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
 
 func TestShadowAllocationBuildsAnInactiveExactPaperGeneration(t *testing.T) {
@@ -79,6 +82,72 @@ func TestShadowAllocationBuildsAnInactiveExactPaperGeneration(t *testing.T) {
 			policy.Adaptive.MaxObservationGapSeconds != 30 {
 			t.Fatalf("%s resized policy = %+v", id, policy)
 		}
+	}
+}
+
+func TestShadowAllocationRefreshesOnlyPinnedLegacyKrakenSources(t *testing.T) {
+	sol, jup, _, _ := shadowPortfolioTestPolicies(t)
+	sol.Trigger.SecondarySourceSHA256 = legacyKrakenSOLIdentity
+	sol.ReturnTrigger.SecondarySourceSHA256 = legacyKrakenSOLIdentity
+	sol.QuotePeg.SecondarySourceSHA256 = legacyKrakenUSDCIdentity
+	jup.Trigger.SecondarySourceSHA256 = legacyKrakenJUPIdentity
+	jup.ReturnTrigger.SecondarySourceSHA256 = legacyKrakenJUPIdentity
+	jup.QuotePeg.SecondarySourceSHA256 = legacyKrakenUSDCIdentity
+	jup.NativeFeePrice.SecondarySourceSHA256 = legacyKrakenSOLIdentity
+	for name, policy := range map[string]shadow.Policy{"sol": sol, "jup": jup} {
+		refreshed, err := refreshPaperPolicySources(policy)
+		if err != nil {
+			t.Fatalf("refresh %s: %v", name, err)
+		}
+		if refreshed.Trigger.SecondarySourceSHA256 == policy.Trigger.SecondarySourceSHA256 ||
+			refreshed.ReturnTrigger == nil ||
+			refreshed.Trigger.SecondarySourceSHA256 != refreshed.ReturnTrigger.SecondarySourceSHA256 ||
+			refreshed.QuotePeg.SecondarySourceSHA256 != pricesource.KrakenIdentitySHA256() ||
+			refreshed.NativeFeePrice != nil &&
+				refreshed.NativeFeePrice.SecondarySourceSHA256 != pricesource.KrakenSOLIdentitySHA256() {
+			t.Fatalf("%s sources were not refreshed: %+v", name, refreshed)
+		}
+	}
+	sol.Trigger.SecondarySourceSHA256 = strings.Repeat("f", 64)
+	sol.ReturnTrigger.SecondarySourceSHA256 = strings.Repeat("f", 64)
+	if _, err := refreshPaperPolicySources(sol); err == nil {
+		t.Fatal("unrecognized market source was refreshed")
+	}
+}
+
+func TestShadowAllocationDoesNotMigrateAdmittedMarketSources(t *testing.T) {
+	artifactPath, journalPath, now := writeReadyProvisionalEvidence(t)
+	artifact, err := loadProvisionalMarketAdmission(artifactPath, journalPath, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := buildAdaptiveProvisionalPolicy(
+		artifact, artifact.Candidate.QuoteNotionalUSDC, 80_000_000, 3_000_000,
+		artifact.Candidate.QuoteSlippageBPS, 100_000, artifact.Observe, 60,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := refreshPaperPolicySources(policy); err != nil {
+		t.Fatalf("current admitted policy was rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(*shadow.Policy){
+		"quote": func(value *shadow.Policy) {
+			value.QuotePeg.SecondarySourceSHA256 = legacyKrakenUSDCIdentity
+		},
+		"native fee": func(value *shadow.Policy) {
+			value.NativeFeePrice.SecondarySourceSHA256 = legacyKrakenSOLIdentity
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tampered := policy
+			quote, native := *policy.QuotePeg, *policy.NativeFeePrice
+			tampered.QuotePeg, tampered.NativeFeePrice = &quote, &native
+			mutate(&tampered)
+			if _, err := refreshPaperPolicySources(tampered); err == nil {
+				t.Fatal("legacy admitted source was migrated")
+			}
+		})
 	}
 }
 
@@ -196,6 +265,10 @@ func TestShadowAllocationKeepsAnAdmittedMarketAtItsEvidenceNotional(t *testing.T
 		artifact, artifact.Candidate.QuoteNotionalUSDC, 80_000_000, 3_000_000,
 		artifact.Candidate.QuoteSlippageBPS, 100_000, artifact.Observe, 60,
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err = refreshPaperPolicySources(policy)
 	if err != nil {
 		t.Fatal(err)
 	}
