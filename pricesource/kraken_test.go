@@ -15,7 +15,7 @@ type testKrakenGate struct{}
 
 func (testKrakenGate) Wait(context.Context) error { return nil }
 
-func TestKrakenUsesFreshSnapshotWithPersistentBidAsk(t *testing.T) {
+func TestKrakenUsesOldestTopLevelPublicationTime(t *testing.T) {
 	snapshotAt := time.Now().UTC().Truncate(time.Second)
 	bidAt := snapshotAt.Add(-10 * time.Minute)
 	askAt := snapshotAt.Add(-5 * time.Minute)
@@ -36,7 +36,7 @@ func TestKrakenUsesFreshSnapshotWithPersistentBidAsk(t *testing.T) {
 	}
 	if sample.SourceSHA256 != KrakenIdentitySHA256() || sample.Feed != pricetrigger.FeedUSDCUSD ||
 		sample.PriceMicros != 1_000_000 || sample.ConfidenceMicros != 90 ||
-		!sample.PublishedAt.Equal(snapshotAt) {
+		!sample.PublishedAt.Equal(bidAt) {
 		t.Fatalf("sample = %+v", sample)
 	}
 }

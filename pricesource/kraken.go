@@ -21,9 +21,9 @@ const (
 	krakenUSDCProduct             = "USDC/USD"
 	krakenSOLProduct              = "SOL/USD"
 	krakenJUPProduct              = "JUP/USD"
-	krakenUSDCIdentityDescription = "mithril-agent/price-source-v1|kraken-spot|api.kraken.com|USDC/USD|pre-trade|best-bid-ask|http-date"
-	krakenSOLIdentityDescription  = "mithril-agent/price-source-v1|kraken-spot|api.kraken.com|SOL/USD|pre-trade|best-bid-ask|http-date"
-	krakenJUPIdentityDescription  = "mithril-agent/price-source-v1|kraken-spot|api.kraken.com|JUP/USD|pre-trade|best-bid-ask|http-date"
+	krakenUSDCIdentityDescription = "mithril-agent/price-source-v1|kraken-spot|api.kraken.com|USDC/USD|pre-trade|best-bid-ask|oldest-level-publication-time"
+	krakenSOLIdentityDescription  = "mithril-agent/price-source-v1|kraken-spot|api.kraken.com|SOL/USD|pre-trade|best-bid-ask|oldest-level-publication-time"
+	krakenJUPIdentityDescription  = "mithril-agent/price-source-v1|kraken-spot|api.kraken.com|JUP/USD|pre-trade|best-bid-ask|oldest-level-publication-time"
 	KrakenRateStateEnvironment    = "MITHRIL_AGENT_KRAKEN_RATE_STATE"
 )
 
@@ -58,7 +58,7 @@ func (spec KrakenSpec) IdentitySHA256() (string, error) {
 		return "", err
 	}
 	description := "mithril-agent/price-source-v2|kraken-spot|api.kraken.com|" +
-		spec.Product + "|pre-trade|best-bid-ask|http-date"
+		spec.Product + "|pre-trade|best-bid-ask|oldest-level-publication-time"
 	return sourceIdentity(description), nil
 }
 
@@ -187,6 +187,11 @@ func (source *Kraken) Latest(ctx context.Context, feed string) (pricetrigger.Sam
 	}
 	if confidence >= price {
 		return pricetrigger.Sample{}, errors.New("Kraken price response is invalid")
+	}
+	if bidAt.Before(askAt) {
+		publishedAt = bidAt
+	} else {
+		publishedAt = askAt
 	}
 	return pricetrigger.Sample{
 		SourceSHA256: source.IdentitySHA256(), Feed: feed,

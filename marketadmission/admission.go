@@ -22,7 +22,9 @@ import (
 )
 
 const (
-	Version = uint32(1)
+	// Version 2 prevents journals collected before Kraken level publication
+	// timestamps became authoritative from being resumed or mixed with new evidence.
+	Version = uint32(2)
 
 	ProvisionalStatus                 = "development_provisional"
 	ProvisionalWindowHours            = uint16(6)
@@ -606,12 +608,8 @@ func diagnose(
 			continue
 		}
 		diagnostic.ObservedBuckets++
-		cost, usable := usableObservation(opening, observation)
+		cost, reason, usable := observationUsability(opening, observation)
 		if !usable {
-			reason := observation.Failure
-			if reason == "" {
-				reason = "evidence_rejected"
-			}
 			diagnostic.FailureCounts[reason]++
 			continue
 		}
@@ -796,17 +794,27 @@ func evaluate(
 }
 
 func usableObservation(opening Opening, observation Observation) (uint16, bool) {
+	cost, _, ok := observationUsability(opening, observation)
+	return cost, ok
+}
+
+func observationUsability(opening Opening, observation Observation) (uint16, string, bool) {
 	thresholds := opening.Thresholds
 	cadence := time.Duration(thresholds.CadenceSeconds) * time.Second
-	if observation.Failure != "" || !observation.ObservedAt.Before(observation.Bucket.Add(cadence)) ||
-		observation.Mint.Validate(opening.Candidate) != nil {
-		return 0, false
+	if observation.Failure != "" {
+		return 0, observation.Failure, false
+	}
+	if !observation.ObservedAt.Before(observation.Bucket.Add(cadence)) {
+		return 0, "observation_deadline_rejected", false
+	}
+	if observation.Mint.Validate(opening.Candidate) != nil {
+		return 0, "mint_evidence_rejected", false
 	}
 	marketPrimary, err := opening.Candidate.Pyth.IdentitySHA256()
 	if err != nil || !validPythObservation(
 		observation.MarketPrimary, opening.Candidate.Pyth, marketPrimary,
 	) {
-		return 0, false
+		return 0, "market_primary_rejected", false
 	}
 	marketPolicy := observationPolicy(
 		opening.Candidate.Pyth.Feed, marketPrimary,
@@ -816,13 +824,13 @@ func usableObservation(opening Opening, observation Observation) (uint16, bool) 
 		marketPolicy, observation.MarketPrimary.Sample, observation.MarketSecondary,
 		observation.ObservedAt,
 	) != nil {
-		return 0, false
+		return 0, "market_sources_rejected", false
 	}
 	usdcSpec := pricesource.PythPushUSDCSpec()
 	if !validPythObservation(
 		observation.USDCPrimary, usdcSpec, pricesource.PythPushUSDCIdentitySHA256(),
 	) {
-		return 0, false
+		return 0, "quote_primary_rejected", false
 	}
 	peg := pricetrigger.BandPolicy{
 		Version: pricetrigger.Version, Feed: pricetrigger.FeedUSDCUSD,
@@ -839,27 +847,36 @@ func usableObservation(opening Opening, observation Observation) (uint16, bool) 
 		peg, observation.USDCPrimary.Sample, observation.USDCSecondary, observation.ObservedAt,
 	)
 	if err != nil || !pegEvidence.InBand {
-		return 0, false
+		return 0, "quote_peg_rejected", false
 	}
 	solSpec := pricesource.PythPushSOLSpec()
 	if !validPythObservation(
 		observation.SOLPrimary, solSpec, pricesource.PythPushIdentitySHA256(),
-	) || pricetrigger.ValidateObservation(
+	) {
+		return 0, "native_primary_rejected", false
+	}
+	if pricetrigger.ValidateObservation(
 		observationPolicy(
 			pricetrigger.FeedSOLUSD, pricesource.PythPushIdentitySHA256(),
 			pricesource.KrakenSOLIdentitySHA256(), thresholds,
 		),
 		observation.SOLPrimary.Sample, observation.SOLSecondary, observation.ObservedAt,
 	) != nil {
-		return 0, false
+		return 0, "native_sources_rejected", false
 	}
-	if !validQuote(opening, observation.Buy, false, observation, thresholds) ||
-		!validQuote(opening, observation.Sell, true, observation, thresholds) ||
-		observation.Sell.InputAmount != observation.Buy.EstimatedOutput ||
-		!quotePricesUsable(opening.Candidate, observation, thresholds.MaximumQuoteImpactBPS) {
-		return 0, false
+	if !validQuote(opening, observation.Buy, false, observation, thresholds) {
+		return 0, "buy_quote_rejected", false
 	}
-	return routeCostBPS(opening.Candidate.QuoteNotionalUSDC, observation.Sell.EstimatedOutput), true
+	if !validQuote(opening, observation.Sell, true, observation, thresholds) {
+		return 0, "sell_quote_rejected", false
+	}
+	if observation.Sell.InputAmount != observation.Buy.EstimatedOutput {
+		return 0, "round_trip_rejected", false
+	}
+	if !quotePricesUsable(opening.Candidate, observation, thresholds.MaximumQuoteImpactBPS) {
+		return 0, "quote_price_rejected", false
+	}
+	return routeCostBPS(opening.Candidate.QuoteNotionalUSDC, observation.Sell.EstimatedOutput), "", true
 }
 
 func quotePricesUsable(candidate Candidate, observation Observation, maximumBPS uint16) bool {

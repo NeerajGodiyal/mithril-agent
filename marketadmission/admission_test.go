@@ -35,6 +35,18 @@ func TestCatalogPinsCanonicalCandidateMetadata(t *testing.T) {
 	}
 }
 
+func TestPreviousEvidenceVersionCannotResume(t *testing.T) {
+	candidate, _ := Lookup(MarketWIFUSDC)
+	opening, err := NewOpening(candidate, testObserve, DefaultThresholds())
+	if err != nil {
+		t.Fatal(err)
+	}
+	opening.Version--
+	if opening.Validate() == nil {
+		t.Fatal("previous market evidence version was accepted")
+	}
+}
+
 func TestEvaluateCountsMissingAndFailedBuckets(t *testing.T) {
 	candidate, _ := Lookup(MarketWIFUSDC)
 	thresholds := DefaultThresholds()
@@ -106,6 +118,27 @@ func TestDiagnoseMeasuresAPartialWindowWithoutQualifyingIt(t *testing.T) {
 	}
 	if _, err := diagnose(opening, observations, through, 90*time.Minute); err == nil {
 		t.Fatal("fractional-hour diagnostic window was accepted")
+	}
+}
+
+func TestDiagnoseNamesRejectedEvidenceLayer(t *testing.T) {
+	candidate, _ := Lookup(MarketWIFUSDC)
+	opening, err := NewOpening(candidate, testObserve, DefaultThresholds())
+	if err != nil {
+		t.Fatal(err)
+	}
+	through := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
+	from := through.Add(-time.Hour)
+	observations := observationsFor(t, opening, from, through, 12)
+	observations[0].MarketSecondary.PublishedAt =
+		observations[0].MarketPrimary.Sample.PublishedAt.Add(-time.Minute)
+	diagnostic, err := diagnose(opening, observations, through, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diagnostic.AvailableBuckets != 59 ||
+		diagnostic.FailureCounts["market_sources_rejected"] != 1 {
+		t.Fatalf("diagnostic = %+v", diagnostic)
 	}
 }
 
@@ -281,8 +314,8 @@ func TestPythAndMintProvenanceAreRequired(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			tampered := observation
 			mutate(&tampered)
-			if _, ok := usableObservation(opening, tampered); ok {
-				t.Fatal("tampered observation was usable")
+			if _, reason, ok := observationUsability(opening, tampered); ok || reason == "" {
+				t.Fatalf("tampered observation usability = %t, reason = %q", ok, reason)
 			}
 		})
 	}

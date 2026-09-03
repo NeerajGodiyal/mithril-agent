@@ -718,9 +718,17 @@ sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
   --out /var/lib/mithril-agent-research/market-admission-wif/paper-policy.json
 
 sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
+  shadow portfolio \
+  --out /var/lib/mithril-agent-research/market-admission-wif/paper-portfolio.json \
+  --limit-usd 270 --max-sol-usd 300 \
+  --book wif=/var/lib/mithril-agent-research/market-admission-wif/paper-policy.json
+
+sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
   shadow run \
   --policy /var/lib/mithril-agent-research/market-admission-wif/paper-policy.json \
   --dir /var/lib/mithril-agent-research/market-admission-wif/paper-run \
+  --portfolio /var/lib/mithril-agent-research/market-admission-wif/paper-portfolio.json \
+  --portfolio-book wif \
   --provisional-artifact /var/lib/mithril-agent-research/market-admission-wif/provisional.json \
   --provisional-journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl
 ```
