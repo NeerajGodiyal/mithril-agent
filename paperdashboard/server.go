@@ -107,75 +107,80 @@ type Overview struct {
 }
 
 type Market struct {
-	Name                        string             `json:"name"`
-	Optional                    bool               `json:"optional,omitempty"`
-	Instrument                  string             `json:"instrument,omitempty"`
-	RiskProfile                 string             `json:"risk_profile,omitempty"`
-	PositionDirection           string             `json:"position_direction,omitempty"`
-	LeverageBPS                 uint32             `json:"leverage_bps,omitempty"`
-	ObservedAt                  *time.Time         `json:"observed_at,omitempty"`
-	Available                   bool               `json:"available"`
-	Ready                       bool               `json:"ready"`
-	Fresh                       bool               `json:"fresh"`
-	Current                     string             `json:"current,omitempty"`
-	Day                         string             `json:"day,omitempty"`
-	ValueUnit                   string             `json:"value_unit,omitempty"`
-	InstructionSHA256           string             `json:"instruction_sha256,omitempty"`
-	TickSeconds                 uint64             `json:"tick_seconds,omitempty"`
-	OpeningEquityMicros         uint64             `json:"opening_equity_micros,omitempty,string"`
-	EquityMicros                uint64             `json:"equity_micros,omitempty,string"`
-	DeficitMicros               uint64             `json:"deficit_micros,omitempty,string"`
-	HoldBenchmarkMicros         uint64             `json:"hold_benchmark_micros,omitempty,string"`
-	AccountingTracked           bool               `json:"accounting_tracked,omitempty"`
-	RealizedMicros              int64              `json:"realized_micros,omitempty,string"`
-	UnrealizedMicros            int64              `json:"unrealized_micros,omitempty,string"`
-	FeesMicros                  int64              `json:"fees_micros,omitempty,string"`
-	FundingTracked              bool               `json:"funding_tracked,omitempty"`
-	FundingMicros               int64              `json:"funding_micros,omitempty,string"`
-	TurnoverMicros              uint64             `json:"turnover_micros,omitempty,string"`
-	DrawdownMicros              uint64             `json:"drawdown_micros,omitempty,string"`
-	MaxDrawdownMicros           uint64             `json:"max_drawdown_micros,omitempty,string"`
-	PriceMicros                 uint64             `json:"price_micros,omitempty,string"`
-	Checks                      uint64             `json:"checks,omitempty"`
-	Signals                     uint64             `json:"signals,omitempty"`
-	Trades                      uint64             `json:"trades,omitempty"`
-	CoverageBPS                 uint64             `json:"coverage_bps,omitempty"`
-	CoverageReady               bool               `json:"coverage_ready"`
-	State                       string             `json:"state,omitempty"`
-	Strategy                    string             `json:"strategy,omitempty"`
-	NextAction                  string             `json:"next_action,omitempty"`
-	DecisionReason              string             `json:"decision_reason,omitempty"`
-	RiskHalted                  bool               `json:"risk_halted,omitempty"`
-	InitialLotUnits             uint64             `json:"initial_lot_units,omitempty,string"`
-	InitialLotDecimals          uint8              `json:"initial_lot_decimals,omitempty"`
-	InitialLotAsset             string             `json:"initial_lot_asset,omitempty"`
-	MinimumOrderValueMicros     uint64             `json:"minimum_order_value_micros,omitempty,string"`
-	MaximumOrderValueMicros     uint64             `json:"maximum_order_value_micros,omitempty,string"`
-	FeeReserveLamports          uint64             `json:"fee_reserve_lamports,omitempty,string"`
-	FeeLamports                 uint64             `json:"fee_lamports,omitempty,string"`
-	FeeBudgetTracked            bool               `json:"fee_budget_tracked,omitempty"`
-	RemainingFeeReserveLamports uint64             `json:"remaining_fee_reserve_lamports,omitempty,string"`
-	EstimatedFillsRemaining     uint64             `json:"estimated_fills_remaining,omitempty"`
-	SlippageBPS                 uint16             `json:"slippage_bps,omitempty"`
-	SettleSeconds               uint64             `json:"settle_seconds,omitempty"`
-	FastWindow                  uint16             `json:"fast_window,omitempty"`
-	SlowWindow                  uint16             `json:"slow_window,omitempty"`
-	MinimumSignalBPS            uint16             `json:"minimum_signal_bps,omitempty"`
-	MaxVolatilityBPS            uint16             `json:"max_volatility_bps,omitempty"`
-	MaxQuoteImpactBPS           uint16             `json:"max_quote_impact_bps,omitempty"`
-	MaxDrawdownBPS              uint16             `json:"max_drawdown_bps,omitempty"`
-	CooldownSeconds             uint64             `json:"cooldown_seconds,omitempty"`
-	QualificationTracked        bool               `json:"qualification_tracked,omitempty"`
-	QualificationOutcome        string             `json:"qualification_outcome,omitempty"`
-	QualificationFrames         uint64             `json:"qualification_frames,omitempty"`
-	QualificationMinimumFrames  uint64             `json:"qualification_minimum_frames,omitempty"`
-	QualificationTrainingFrames uint64             `json:"qualification_training_frames,omitempty"`
-	QualificationHoldoutFrames  uint64             `json:"qualification_holdout_frames,omitempty"`
-	QualificationStrategy       string             `json:"qualification_strategy,omitempty"`
-	QualificationRiskProfile    string             `json:"qualification_risk_profile,omitempty"`
-	QualificationHoldoutMicros  int64              `json:"qualification_holdout_micros,omitempty,string"`
-	QualificationStressMicros   int64              `json:"qualification_stress_micros,omitempty,string"`
-	History                     []PerformancePoint `json:"history,omitempty"`
+	Name                          string             `json:"name"`
+	Optional                      bool               `json:"optional,omitempty"`
+	Instrument                    string             `json:"instrument,omitempty"`
+	RiskProfile                   string             `json:"risk_profile,omitempty"`
+	PositionDirection             string             `json:"position_direction,omitempty"`
+	LeverageBPS                   uint32             `json:"leverage_bps,omitempty"`
+	ObservedAt                    *time.Time         `json:"observed_at,omitempty"`
+	Available                     bool               `json:"available"`
+	Ready                         bool               `json:"ready"`
+	Fresh                         bool               `json:"fresh"`
+	Current                       string             `json:"current,omitempty"`
+	Day                           string             `json:"day,omitempty"`
+	ValueUnit                     string             `json:"value_unit,omitempty"`
+	InstructionSHA256             string             `json:"instruction_sha256,omitempty"`
+	TickSeconds                   uint64             `json:"tick_seconds,omitempty"`
+	OpeningEquityMicros           uint64             `json:"opening_equity_micros,omitempty,string"`
+	EquityMicros                  uint64             `json:"equity_micros,omitempty,string"`
+	DeficitMicros                 uint64             `json:"deficit_micros,omitempty,string"`
+	HoldBenchmarkMicros           uint64             `json:"hold_benchmark_micros,omitempty,string"`
+	AccountingTracked             bool               `json:"accounting_tracked,omitempty"`
+	RealizedMicros                int64              `json:"realized_micros,omitempty,string"`
+	UnrealizedMicros              int64              `json:"unrealized_micros,omitempty,string"`
+	FeesMicros                    int64              `json:"fees_micros,omitempty,string"`
+	FundingTracked                bool               `json:"funding_tracked,omitempty"`
+	FundingMicros                 int64              `json:"funding_micros,omitempty,string"`
+	TurnoverMicros                uint64             `json:"turnover_micros,omitempty,string"`
+	DrawdownMicros                uint64             `json:"drawdown_micros,omitempty,string"`
+	MaxDrawdownMicros             uint64             `json:"max_drawdown_micros,omitempty,string"`
+	PriceMicros                   uint64             `json:"price_micros,omitempty,string"`
+	Checks                        uint64             `json:"checks,omitempty"`
+	Signals                       uint64             `json:"signals,omitempty"`
+	Trades                        uint64             `json:"trades,omitempty"`
+	CoverageBPS                   uint64             `json:"coverage_bps,omitempty"`
+	CoverageReady                 bool               `json:"coverage_ready"`
+	State                         string             `json:"state,omitempty"`
+	Strategy                      string             `json:"strategy,omitempty"`
+	NextAction                    string             `json:"next_action,omitempty"`
+	DecisionReason                string             `json:"decision_reason,omitempty"`
+	RiskHalted                    bool               `json:"risk_halted,omitempty"`
+	InitialLotUnits               uint64             `json:"initial_lot_units,omitempty,string"`
+	InitialLotDecimals            uint8              `json:"initial_lot_decimals,omitempty"`
+	InitialLotAsset               string             `json:"initial_lot_asset,omitempty"`
+	MinimumOrderValueMicros       uint64             `json:"minimum_order_value_micros,omitempty,string"`
+	MaximumOrderValueMicros       uint64             `json:"maximum_order_value_micros,omitempty,string"`
+	FeeReserveLamports            uint64             `json:"fee_reserve_lamports,omitempty,string"`
+	FeeLamports                   uint64             `json:"fee_lamports,omitempty,string"`
+	FeeBudgetTracked              bool               `json:"fee_budget_tracked,omitempty"`
+	RemainingFeeReserveLamports   uint64             `json:"remaining_fee_reserve_lamports,omitempty,string"`
+	EstimatedFillsRemaining       uint64             `json:"estimated_fills_remaining,omitempty"`
+	SlippageBPS                   uint16             `json:"slippage_bps,omitempty"`
+	SettleSeconds                 uint64             `json:"settle_seconds,omitempty"`
+	FastWindow                    uint16             `json:"fast_window,omitempty"`
+	SlowWindow                    uint16             `json:"slow_window,omitempty"`
+	MinimumSignalBPS              uint16             `json:"minimum_signal_bps,omitempty"`
+	MaxVolatilityBPS              uint16             `json:"max_volatility_bps,omitempty"`
+	MaxQuoteImpactBPS             uint16             `json:"max_quote_impact_bps,omitempty"`
+	MaxDrawdownBPS                uint16             `json:"max_drawdown_bps,omitempty"`
+	CooldownSeconds               uint64             `json:"cooldown_seconds,omitempty"`
+	QualificationTracked          bool               `json:"qualification_tracked,omitempty"`
+	QualificationOutcome          string             `json:"qualification_outcome,omitempty"`
+	QualificationTapes            uint64             `json:"qualification_tapes,omitempty"`
+	QualificationFrames           uint64             `json:"qualification_frames,omitempty"`
+	QualificationMinimumFrames    uint64             `json:"qualification_minimum_frames,omitempty"`
+	QualificationTrainingFrames   uint64             `json:"qualification_training_frames,omitempty"`
+	QualificationHoldoutFrames    uint64             `json:"qualification_holdout_frames,omitempty"`
+	QualificationStrategy         string             `json:"qualification_strategy,omitempty"`
+	QualificationRiskProfile      string             `json:"qualification_risk_profile,omitempty"`
+	QualificationHoldoutEvaluated bool               `json:"qualification_holdout_evaluated,omitempty"`
+	QualificationStressEvaluated  bool               `json:"qualification_stress_evaluated,omitempty"`
+	QualificationHoldoutScored    bool               `json:"qualification_holdout_scored,omitempty"`
+	QualificationStressScored     bool               `json:"qualification_stress_scored,omitempty"`
+	QualificationHoldoutMicros    int64              `json:"qualification_holdout_micros,omitempty,string"`
+	QualificationStressMicros     int64              `json:"qualification_stress_micros,omitempty,string"`
+	History                       []PerformancePoint `json:"history,omitempty"`
 }
 
 type PerformancePoint struct {
@@ -514,12 +519,17 @@ func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Mark
 		market.CooldownSeconds = summary.CooldownSeconds
 		market.QualificationTracked = summary.QualificationTracked
 		market.QualificationOutcome = summary.QualificationOutcome
+		market.QualificationTapes = summary.QualificationTapes
 		market.QualificationFrames = summary.QualificationFrames
 		market.QualificationMinimumFrames = summary.QualificationMinimumFrames
 		market.QualificationTrainingFrames = summary.QualificationTrainingFrames
 		market.QualificationHoldoutFrames = summary.QualificationHoldoutFrames
 		market.QualificationStrategy = summary.QualificationStrategy
 		market.QualificationRiskProfile = summary.QualificationRiskProfile
+		market.QualificationHoldoutEvaluated = summary.QualificationHoldoutEvaluated
+		market.QualificationStressEvaluated = summary.QualificationStressEvaluated
+		market.QualificationHoldoutScored = summary.QualificationHoldoutScored
+		market.QualificationStressScored = summary.QualificationStressScored
 		market.QualificationHoldoutMicros = summary.QualificationHoldoutMicros
 		market.QualificationStressMicros = summary.QualificationStressMicros
 	}

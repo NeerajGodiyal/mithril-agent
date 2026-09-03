@@ -436,20 +436,20 @@ function marketCard(m){
 }
 function qualificationView(m){
   if(!m.qualification_tracked)return null;
-  const frames=Number(m.qualification_frames||0),minimum=Number(m.qualification_minimum_frames||0);
+  const frames=Number(m.qualification_frames||0),minimum=Number(m.qualification_minimum_frames||0),tapes=Math.max(1,Number(m.qualification_tapes||1)),multi=tapes>1;
   switch(m.qualification_outcome){
-  case 'insufficient_evidence': return {label:'Collecting evidence',tone:'amber',status:frames+' of '+minimum+' causal checkpoints',next:'No strategy selected yet. The recorded run is still too short.'};
-  case 'no_training_candidate': return {label:'No candidate',tone:'amber',status:'12 paper combinations checked',next:'None completed a profitable after-cost training trade.'};
-  case 'candidate_rejected': return {label:'Not retained',tone:'amber',status:humanToken(m.qualification_strategy)+' · '+humanToken(m.qualification_risk_profile),next:'The training leader failed the held-out or higher-cost check.'};
-  case 'candidate_ready_for_more_paper_testing': return {label:'Ready for another paper test',tone:'green',status:humanToken(m.qualification_strategy)+' · '+humanToken(m.qualification_risk_profile),next:'Passed the held-out and higher-cost paper checks. This does not authorize real trading.'};
+  case 'insufficient_evidence': return {label:'Collecting market checks',tone:'amber',status:frames+' of '+minimum+' saved price checks',next:'No paper plan selected yet. The recording is still too short.'};
+  case 'no_training_candidate': return {label:'No plan passed',tone:'amber',status:multi?'12 plans across '+(tapes-1)+' earlier recording'+(tapes===2?'':'s'):'12 paper plans checked',next:multi?'None made money after costs across all earlier recordings.':'None completed a profitable trade after costs.'};
+  case 'candidate_rejected': return {label:'Plan did not pass',tone:'amber',status:humanToken(m.qualification_strategy)+' · '+humanToken(m.qualification_risk_profile),next:multi?'The selected paper plan did not pass the final untouched recording or higher-cost check.':'The selected paper plan did not pass the final or higher-cost check.'};
+  case 'candidate_ready_for_more_paper_testing': return {label:'Ready for another paper test',tone:'green',status:humanToken(m.qualification_strategy)+' · '+humanToken(m.qualification_risk_profile),next:multi?'The plan passed the final untouched recording and higher-cost check. This does not authorize real trading.':'The plan passed the final and higher-cost checks. This does not authorize real trading.'};
   default: return {label:'Checkpoint unavailable',tone:'amber',status:'Recorded evidence rejected',next:'The saved qualification outcome was not recognized.'};
   }
 }
 function qualificationStrip(m){
   const view=qualificationView(m);
   if(!view)return '';
-  const checked=m.qualification_holdout_frames?'<span><small>Held-out replay</small><strong class="'+tone(integer(m.qualification_holdout_micros))+'">'+safe(signedAmount(m.qualification_holdout_micros,m.value_unit))+'</strong></span>':'<span><small>Paper combinations</small><strong>12 checked</strong></span>';
-  return '<div class="qualification-strip" aria-label="Latest paper qualification"><span class="qualification-symbol">'+uiIcon('score')+'</span><span><small>Latest checkpoint</small><strong>'+safe(view.label)+'</strong></span><span><small>Evidence recorded</small><strong>'+safe(String(m.qualification_frames||0))+' / '+safe(String(m.qualification_minimum_frames||0))+'</strong></span>'+checked+'<span class="badge '+view.tone+'">Paper only</span></div>';
+  const tapes=Math.max(1,Number(m.qualification_tapes||1)),checked=m.qualification_holdout_evaluated?'<span><small>'+(tapes>1?'Final untouched recording':'Final paper check')+'</small><strong class="'+(m.qualification_holdout_scored?tone(integer(m.qualification_holdout_micros)):'')+'">'+safe(m.qualification_holdout_scored?signedAmount(m.qualification_holdout_micros,m.value_unit):'No complete result')+'</strong></span>':'<span><small>Paper plans</small><strong>12 checked</strong></span>';
+  return '<div class="qualification-strip" aria-label="Latest paper strategy check"><span class="qualification-symbol">'+uiIcon('score')+'</span><span><small>Latest check</small><strong>'+safe(view.label)+'</strong></span><span><small>Market checks saved</small><strong>'+safe(String(m.qualification_frames||0))+' / '+safe(String(m.qualification_minimum_frames||0))+(tapes>1?' · '+tapes+' separate recordings':'')+'</strong></span>'+checked+'<span class="badge '+view.tone+'">Paper only</span></div>';
 }
 function strategyView(m){
   const unavailable=!m.available;
@@ -522,7 +522,7 @@ function openPerpsPlanDialog(m){
   const leverage=Number(m.leverage_bps||10000)/10000;
   const profile=String(m.risk_profile||'bounded').replace(/^./,character=>character.toUpperCase());
   const position=m.position_direction==='long'?'Price-up position':m.position_direction==='short'?'Price-down position':'No position';
-	  const qualification=qualificationView(m),qualificationResults=Boolean(m.qualification_holdout_frames);
+	  const qualification=qualificationView(m),qualificationResults=Boolean(m.qualification_holdout_scored),qualificationStress=Boolean(m.qualification_stress_scored),qualificationTapes=Math.max(1,Number(m.qualification_tapes||1));
 	  const positionTone=!m.fresh?'Last recorded state':m.position_direction==='flat'?'Waiting for a signal':'Open in this simulation';
 	  $('help-dialog-kicker').textContent=qualification?'Latest paper checkpoint':m.fresh?'Live perps simulation':'Last perps experiment';
   $('help-dialog-title').textContent=m.name;
@@ -532,9 +532,9 @@ function openPerpsPlanDialog(m){
   $('help-dialog-visual').innerHTML='<ol class="plan-loop" aria-label="Current perps stage">'+steps.map((step,index)=>'<li class="plan-node'+(index===stage?' active':'')+'">'+uiIcon(step[0])+'<span><strong>'+step[1]+'</strong><small>'+step[2]+'</small></span></li>').join('')+'</ol>';
   const snapshot=qualification?'<div class="plan-snapshot">'+
 	    '<article>'+uiIcon('score')+'<span>Checkpoint</span><strong>'+safe(qualification.label)+'</strong><small>'+safe(qualification.status)+'</small></article>'+
-	    '<article>'+uiIcon('watch')+'<span>Evidence</span><strong>'+safe(String(m.qualification_frames||0))+' / '+safe(String(m.qualification_minimum_frames||0))+'</strong><small>Causal market checkpoints</small></article>'+
-	    '<article>'+uiIcon('decide')+'<span>Held-out replay</span><strong class="'+(qualificationResults?tone(integer(m.qualification_holdout_micros)):'')+'">'+safe(qualificationResults?signedAmount(m.qualification_holdout_micros,m.value_unit):'Not reached')+'</strong><small>Not used to choose in this run</small></article>'+
-	    '<article>'+uiIcon('protect')+'<span>Higher-cost result</span><strong class="'+(qualificationResults?tone(integer(m.qualification_stress_micros)):'')+'">'+safe(qualificationResults?signedAmount(m.qualification_stress_micros,m.value_unit):'Not reached')+'</strong><small>Same test with doubled fees</small></article>':
+	    '<article>'+uiIcon('watch')+'<span>Market checks</span><strong>'+safe(String(m.qualification_frames||0))+' / '+safe(String(m.qualification_minimum_frames||0))+'</strong><small>'+(qualificationTapes>1?safe(String(qualificationTapes))+' separate recordings':'Saved price checks')+'</small></article>'+
+	    '<article>'+uiIcon('decide')+'<span>'+(qualificationTapes>1?'Final untouched recording':'Final paper check')+'</span><strong class="'+(qualificationResults?tone(integer(m.qualification_holdout_micros)):'')+'">'+safe(!m.qualification_holdout_evaluated?'Not reached':qualificationResults?signedAmount(m.qualification_holdout_micros,m.value_unit):'No complete result')+'</strong><small>'+(qualificationTapes>1?'Not used to choose the paper plan':'Not used to choose in this run')+'</small></article>'+
+	    '<article>'+uiIcon('protect')+'<span>Higher-cost result</span><strong class="'+(qualificationStress?tone(integer(m.qualification_stress_micros)):'')+'">'+safe(!m.qualification_stress_evaluated?'Not reached':qualificationStress?signedAmount(m.qualification_stress_micros,m.value_unit):'No complete score')+'</strong><small>Same test with doubled fees</small></article>':
 	    '<div class="plan-snapshot">'+
 	    '<article>'+uiIcon('wallet')+'<span>Paper collateral</span><strong>'+safe(paperValue(m.opening_equity_micros,m.value_unit))+'</strong><small>This market only</small></article>'+
 	    '<article>'+uiIcon('gauge')+'<span>Risk setting</span><strong>'+safe(profile)+'</strong><small>Isolated experiment</small></article>'+

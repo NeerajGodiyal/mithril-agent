@@ -19,20 +19,21 @@ import (
 )
 
 const (
-	legacyVersion       = 1
-	settingsVersion     = 2
-	accountingVersion   = 3
-	Version             = 4
-	MaxEvents           = 64
-	MaxHistoryPoints    = 144
-	MaxMessageBytes     = 3000
-	maxCurrentBytes     = 512
-	maxSnapshotBytes    = 256 << 10
-	historyInterval     = 10 * time.Minute
-	messagePrefix       = "PAPER ·"
-	legacyMessagePrefix = "PAPER SIMULATION —"
-	legacyDisclaimer    = "No transaction was signed or submitted."
-	UnconfiguredCurrent = "PAPER · NOT ENABLED"
+	legacyVersion        = 1
+	settingsVersion      = 2
+	accountingVersion    = 3
+	qualificationVersion = 4
+	Version              = 5
+	MaxEvents            = 64
+	MaxHistoryPoints     = 144
+	MaxMessageBytes      = 3000
+	maxCurrentBytes      = 512
+	maxSnapshotBytes     = 256 << 10
+	historyInterval      = 10 * time.Minute
+	messagePrefix        = "PAPER ·"
+	legacyMessagePrefix  = "PAPER SIMULATION —"
+	legacyDisclaimer     = "No transaction was signed or submitted."
+	UnconfiguredCurrent  = "PAPER · NOT ENABLED"
 )
 
 const (
@@ -124,29 +125,34 @@ type CurrentSummary struct {
 	FeeLamports             uint64 `json:"fee_lamports,omitempty"`
 	// RemainingFeeReserveLamports excludes setup rent that has not yet been
 	// locked, so it is the native amount still available for paper attempts.
-	FeeBudgetTracked            bool   `json:"fee_budget_tracked,omitempty"`
-	RemainingFeeReserveLamports uint64 `json:"remaining_fee_reserve_lamports,omitempty"`
-	EstimatedFillsRemaining     uint64 `json:"estimated_fills_remaining,omitempty"`
-	SlippageBPS                 uint16 `json:"slippage_bps,omitempty"`
-	SettleSeconds               uint64 `json:"settle_seconds,omitempty"`
-	FastWindow                  uint16 `json:"fast_window,omitempty"`
-	SlowWindow                  uint16 `json:"slow_window,omitempty"`
-	MinimumSignalBPS            uint16 `json:"minimum_signal_bps,omitempty"`
-	MaxVolatilityBPS            uint16 `json:"max_volatility_bps,omitempty"`
-	MaxQuoteImpactBPS           uint16 `json:"max_quote_impact_bps,omitempty"`
-	MaxDrawdownBPS              uint16 `json:"max_drawdown_bps,omitempty"`
-	CooldownSeconds             uint64 `json:"cooldown_seconds,omitempty"`
-	QualificationTracked        bool   `json:"qualification_tracked,omitempty"`
-	QualificationOutcome        string `json:"qualification_outcome,omitempty"`
-	QualificationSHA256         string `json:"qualification_sha256,omitempty"`
-	QualificationFrames         uint64 `json:"qualification_frames,omitempty"`
-	QualificationMinimumFrames  uint64 `json:"qualification_minimum_frames,omitempty"`
-	QualificationTrainingFrames uint64 `json:"qualification_training_frames,omitempty"`
-	QualificationHoldoutFrames  uint64 `json:"qualification_holdout_frames,omitempty"`
-	QualificationStrategy       string `json:"qualification_strategy,omitempty"`
-	QualificationRiskProfile    string `json:"qualification_risk_profile,omitempty"`
-	QualificationHoldoutMicros  int64  `json:"qualification_holdout_micros,omitempty"`
-	QualificationStressMicros   int64  `json:"qualification_stress_micros,omitempty"`
+	FeeBudgetTracked              bool   `json:"fee_budget_tracked,omitempty"`
+	RemainingFeeReserveLamports   uint64 `json:"remaining_fee_reserve_lamports,omitempty"`
+	EstimatedFillsRemaining       uint64 `json:"estimated_fills_remaining,omitempty"`
+	SlippageBPS                   uint16 `json:"slippage_bps,omitempty"`
+	SettleSeconds                 uint64 `json:"settle_seconds,omitempty"`
+	FastWindow                    uint16 `json:"fast_window,omitempty"`
+	SlowWindow                    uint16 `json:"slow_window,omitempty"`
+	MinimumSignalBPS              uint16 `json:"minimum_signal_bps,omitempty"`
+	MaxVolatilityBPS              uint16 `json:"max_volatility_bps,omitempty"`
+	MaxQuoteImpactBPS             uint16 `json:"max_quote_impact_bps,omitempty"`
+	MaxDrawdownBPS                uint16 `json:"max_drawdown_bps,omitempty"`
+	CooldownSeconds               uint64 `json:"cooldown_seconds,omitempty"`
+	QualificationTracked          bool   `json:"qualification_tracked,omitempty"`
+	QualificationOutcome          string `json:"qualification_outcome,omitempty"`
+	QualificationSHA256           string `json:"qualification_sha256,omitempty"`
+	QualificationTapes            uint64 `json:"qualification_tapes,omitempty"`
+	QualificationFrames           uint64 `json:"qualification_frames,omitempty"`
+	QualificationMinimumFrames    uint64 `json:"qualification_minimum_frames,omitempty"`
+	QualificationTrainingFrames   uint64 `json:"qualification_training_frames,omitempty"`
+	QualificationHoldoutFrames    uint64 `json:"qualification_holdout_frames,omitempty"`
+	QualificationStrategy         string `json:"qualification_strategy,omitempty"`
+	QualificationRiskProfile      string `json:"qualification_risk_profile,omitempty"`
+	QualificationHoldoutEvaluated bool   `json:"qualification_holdout_evaluated,omitempty"`
+	QualificationStressEvaluated  bool   `json:"qualification_stress_evaluated,omitempty"`
+	QualificationHoldoutScored    bool   `json:"qualification_holdout_scored,omitempty"`
+	QualificationStressScored     bool   `json:"qualification_stress_scored,omitempty"`
+	QualificationHoldoutMicros    int64  `json:"qualification_holdout_micros,omitempty"`
+	QualificationStressMicros     int64  `json:"qualification_stress_micros,omitempty"`
 }
 
 type PerformancePoint struct {
@@ -201,7 +207,11 @@ func (w *Writer) UpdateCurrentSummary(
 	snapshot := Snapshot{Version: Version, ObservedAt: at, Events: []Event{}}
 	data, err := securefile.ReadPrivate(w.path, maxSnapshotBytes)
 	if err == nil {
-		if err := strictjson.Decode(data, &snapshot); err != nil || ValidateSnapshot(snapshot) != nil {
+		if err := strictjson.Decode(data, &snapshot); err != nil {
+			return errors.New("existing paper alert status is invalid")
+		}
+		normalizeLegacySnapshot(&snapshot)
+		if ValidateSnapshot(snapshot) != nil {
 			return errors.New("existing paper alert status is invalid")
 		}
 		if at.Before(snapshot.ObservedAt) {
@@ -228,7 +238,11 @@ func (w *Writer) append(at time.Time, kind, key, message string, reconcile bool)
 	snapshot := Snapshot{Version: Version, ObservedAt: at, Events: []Event{}}
 	data, err := securefile.ReadPrivate(w.path, maxSnapshotBytes)
 	if err == nil {
-		if err := strictjson.Decode(data, &snapshot); err != nil || ValidateSnapshot(snapshot) != nil {
+		if err := strictjson.Decode(data, &snapshot); err != nil {
+			return errors.New("existing paper alert status is invalid")
+		}
+		normalizeLegacySnapshot(&snapshot)
+		if ValidateSnapshot(snapshot) != nil {
 			return errors.New("existing paper alert status is invalid")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -296,8 +310,10 @@ func TruncationEvent(snapshot Snapshot) (Event, bool) {
 }
 
 func ValidateSnapshot(snapshot Snapshot) error {
+	normalizeLegacySnapshot(&snapshot)
 	if snapshot.Version != legacyVersion && snapshot.Version != settingsVersion &&
 		snapshot.Version != accountingVersion &&
+		snapshot.Version != qualificationVersion &&
 		snapshot.Version != Version ||
 		snapshot.ObservedAt.IsZero() ||
 		!snapshot.ObservedAt.Equal(snapshot.ObservedAt.UTC()) ||
@@ -347,6 +363,28 @@ func ValidateSnapshot(snapshot Snapshot) error {
 	return nil
 }
 
+func normalizeLegacySnapshot(snapshot *Snapshot) {
+	if snapshot == nil || snapshot.Version >= Version || snapshot.Summary == nil {
+		return
+	}
+	summary := snapshot.Summary
+	if summary.QualificationTracked && summary.QualificationTapes == 0 {
+		summary.QualificationTapes = 1
+	}
+	if summary.QualificationOutcome != "candidate_rejected" && summary.QualificationOutcome != "candidate_ready_for_more_paper_testing" {
+		return
+	}
+	summary.QualificationHoldoutEvaluated = true
+	summary.QualificationStressEvaluated = true
+	if summary.QualificationOutcome == "candidate_ready_for_more_paper_testing" {
+		summary.QualificationHoldoutScored = true
+		summary.QualificationStressScored = true
+		return
+	}
+	summary.QualificationHoldoutScored = summary.QualificationHoldoutMicros != 0
+	summary.QualificationStressScored = summary.QualificationStressMicros != 0
+}
+
 func validateCurrentSummary(summary *CurrentSummary) error {
 	if summary == nil {
 		return nil
@@ -385,15 +423,19 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 
 func validQualification(summary CurrentSummary) bool {
 	present := summary.QualificationOutcome != "" || summary.QualificationSHA256 != "" ||
+		summary.QualificationTapes != 0 ||
 		summary.QualificationFrames != 0 || summary.QualificationMinimumFrames != 0 ||
 		summary.QualificationTrainingFrames != 0 ||
 		summary.QualificationHoldoutFrames != 0 || summary.QualificationStrategy != "" ||
-		summary.QualificationRiskProfile != "" || summary.QualificationHoldoutMicros != 0 ||
+		summary.QualificationRiskProfile != "" || summary.QualificationHoldoutEvaluated ||
+		summary.QualificationStressEvaluated || summary.QualificationHoldoutScored ||
+		summary.QualificationStressScored || summary.QualificationHoldoutMicros != 0 ||
 		summary.QualificationStressMicros != 0
 	if !summary.QualificationTracked {
 		return !present
 	}
-	if summary.Instrument != "perpetual" || !validOptionalSHA256(summary.QualificationSHA256) ||
+	if summary.Instrument != "perpetual" || summary.QualificationTapes == 0 ||
+		summary.QualificationTapes > summary.QualificationFrames || !validOptionalSHA256(summary.QualificationSHA256) ||
 		summary.QualificationSHA256 == "" || summary.QualificationFrames == 0 || summary.QualificationMinimumFrames == 0 ||
 		summary.QualificationTrainingFrames > summary.QualificationFrames ||
 		summary.QualificationHoldoutFrames > summary.QualificationFrames-summary.QualificationTrainingFrames {
@@ -404,21 +446,33 @@ func validQualification(summary CurrentSummary) bool {
 		return summary.QualificationFrames < summary.QualificationMinimumFrames &&
 			summary.QualificationTrainingFrames == 0 && summary.QualificationHoldoutFrames == 0 &&
 			summary.QualificationStrategy == "" && summary.QualificationRiskProfile == "" &&
+			!summary.QualificationHoldoutEvaluated && !summary.QualificationStressEvaluated &&
+			!summary.QualificationHoldoutScored && !summary.QualificationStressScored &&
 			summary.QualificationHoldoutMicros == 0 && summary.QualificationStressMicros == 0
 	case "no_training_candidate":
 		return summary.QualificationFrames >= summary.QualificationMinimumFrames &&
+			summary.QualificationTrainingFrames != 0 && summary.QualificationHoldoutFrames != 0 &&
 			summary.QualificationTrainingFrames == summary.QualificationFrames-summary.QualificationHoldoutFrames &&
 			summary.QualificationStrategy == "" && summary.QualificationRiskProfile == "" &&
+			!summary.QualificationHoldoutEvaluated && !summary.QualificationStressEvaluated &&
+			!summary.QualificationHoldoutScored && !summary.QualificationStressScored &&
 			summary.QualificationHoldoutMicros == 0 && summary.QualificationStressMicros == 0
 	case "candidate_rejected", "candidate_ready_for_more_paper_testing":
 		if summary.QualificationFrames < summary.QualificationMinimumFrames ||
+			summary.QualificationTrainingFrames == 0 || summary.QualificationHoldoutFrames == 0 ||
 			summary.QualificationTrainingFrames != summary.QualificationFrames-summary.QualificationHoldoutFrames ||
 			!validQualificationStrategy(summary.QualificationStrategy) ||
-			!validQualificationRisk(summary.QualificationRiskProfile) {
+			!validQualificationRisk(summary.QualificationRiskProfile) ||
+			!summary.QualificationHoldoutEvaluated || !summary.QualificationStressEvaluated {
+			return false
+		}
+		if (!summary.QualificationHoldoutScored && summary.QualificationHoldoutMicros != 0) ||
+			(!summary.QualificationStressScored && summary.QualificationStressMicros != 0) {
 			return false
 		}
 		return summary.QualificationOutcome != "candidate_ready_for_more_paper_testing" ||
-			summary.QualificationHoldoutMicros > 0 && summary.QualificationStressMicros > 0
+			summary.QualificationHoldoutScored && summary.QualificationStressScored &&
+				summary.QualificationHoldoutMicros > 0 && summary.QualificationStressMicros > 0
 	default:
 		return false
 	}

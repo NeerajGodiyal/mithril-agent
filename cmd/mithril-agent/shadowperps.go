@@ -192,12 +192,8 @@ func runShadowPerpsPaperWith(
 			if !publishQualification {
 				return
 			}
-			if err := finalizeShadowPerpsRun(*stateDir, symbols, now().UTC()); err != nil {
-				returnErr = errors.Join(returnErr, err)
-				return
-			}
-			returnErr = errors.Join(returnErr,
-				publishShadowPerpsStatuses(*stateDir, shadowPerpsPublishedDir(*stateDir), symbols))
+			returnErr = errors.Join(returnErr, finalizeAndPublishShadowPerps(
+				*stateDir, shadowPerpsPublishedDir(*stateDir), symbols, now().UTC()))
 		}()
 	} else if err := os.Mkdir(*stateDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return fmt.Errorf("create perps paper state directory: %w", err)
@@ -305,6 +301,9 @@ func prepareShadowPerpsRun(stateDir, archiveDir string, startedAt time.Time) err
 	if len(entries) == 0 {
 		return pruneShadowPerpsArchives(archiveDir, shadowPerpsMaxArchivedRuns)
 	}
+	if err := preserveCompletedShadowPerpsTapes(stateDir); err != nil {
+		return err
+	}
 	target := filepath.Join(archiveDir, startedAt.Format("20060102T150405.000000000Z"))
 	if err := securefile.RenameNoReplace(stateDir, target); err != nil {
 		return fmt.Errorf("archive previous perps paper run: %w", err)
@@ -313,6 +312,17 @@ func prepareShadowPerpsRun(stateDir, archiveDir string, startedAt time.Time) err
 		return fmt.Errorf("create current perps paper run: %w", err)
 	}
 	return pruneShadowPerpsArchives(archiveDir, shadowPerpsMaxArchivedRuns)
+}
+
+func finalizeAndPublishShadowPerps(stateDir, publishedDir string, symbols []perpspaper.Symbol, endedAt time.Time) error {
+	finalizeErr := finalizeShadowPerpsRun(stateDir, symbols, endedAt)
+	if finalizeErr != nil {
+		var researchErr *shadowPerpsResearchError
+		if !errors.As(finalizeErr, &researchErr) {
+			return finalizeErr
+		}
+	}
+	return errors.Join(finalizeErr, publishShadowPerpsStatuses(stateDir, publishedDir, symbols))
 }
 
 func shadowPerpsPublishedDir(stateDir string) string {
@@ -368,7 +378,7 @@ func pruneShadowPerpsArchives(archiveDir string, keep int) error {
 }
 
 func finalizeShadowPerpsRun(stateDir string, symbols []perpspaper.Symbol, endedAt time.Time) error {
-	var result error
+	var result, researchResult error
 	for _, symbol := range symbols {
 		name := strings.ToLower(string(symbol))
 		tapePath := filepath.Join(stateDir, name+"-tape.json")
@@ -395,6 +405,23 @@ func finalizeShadowPerpsRun(stateDir string, symbols []perpspaper.Symbol, endedA
 			result = errors.Join(result, fmt.Errorf("qualify %s paper run: %w", symbol, err))
 			continue
 		}
+		var walkForward *perpspaper.WalkForwardQualification
+		if qualification.Frames >= qualification.MinimumFrames {
+			if _, err := sealShadowPerpsTape(stateDir, tape); err != nil {
+				researchResult = errors.Join(researchResult, fmt.Errorf("preserve %s paper tape: %w", symbol, err))
+			} else {
+				walkForward, err = qualifyShadowPerpsCorpus(stateDir, tape.Config)
+				if err != nil {
+					researchResult = errors.Join(researchResult, fmt.Errorf("multi-tape qualify %s paper corpus: %w", symbol, err))
+					walkForward = nil
+				} else if walkForward != nil {
+					if err := writeShadowPerpsJSON(filepath.Join(stateDir, name+"-walk-forward.json"), walkForward); err != nil {
+						researchResult = errors.Join(researchResult, err)
+						walkForward = nil
+					}
+				}
+			}
+		}
 		if err := writeShadowPerpsJSON(filepath.Join(stateDir, name+"-qualification.json"), qualification); err != nil {
 			result = errors.Join(result, err)
 			continue
@@ -409,9 +436,13 @@ func finalizeShadowPerpsRun(stateDir string, symbols []perpspaper.Symbol, endedA
 			result = errors.Join(result, err)
 			continue
 		}
-		if err := writer.Append(endedAt, paperstatus.KindExperimentDone,
-			"perps-qualification/"+string(symbol)+"/"+qualification.InputSHA256,
-			shadowPerpsQualificationMessage(qualification)); err != nil {
+		eventID := "perps-qualification/" + string(symbol) + "/" + qualification.InputSHA256
+		message := shadowPerpsQualificationMessage(qualification)
+		if walkForward != nil {
+			eventID = "perps-walk-forward/" + string(symbol) + "/" + walkForward.InputSHA256
+			message = shadowPerpsWalkForwardMessage(*walkForward)
+		}
+		if err := writer.Append(endedAt, paperstatus.KindExperimentDone, eventID, message); err != nil {
 			result = errors.Join(result, err)
 			continue
 		}
@@ -422,17 +453,28 @@ func finalizeShadowPerpsRun(stateDir string, symbols []perpspaper.Symbol, endedA
 		}
 		applyShadowPerpsQualification(&summary, qualification)
 		current += "\nCheckpoint: " + shadowPerpsQualificationLabel(qualification)
+		if walkForward != nil {
+			applyShadowPerpsWalkForward(&summary, *walkForward)
+			current += "\nResearch pack: " + shadowPerpsWalkForwardLabel(*walkForward)
+		}
 		if err := writer.UpdateCurrentSummary(endedAt, current, &summary); err != nil {
 			result = errors.Join(result, err)
 		}
 	}
-	return result
+	if result != nil {
+		return errors.Join(result, researchResult)
+	}
+	if researchResult != nil {
+		return &shadowPerpsResearchError{err: researchResult}
+	}
+	return nil
 }
 
 func applyShadowPerpsQualification(summary *paperstatus.CurrentSummary, qualification perpspaper.Qualification) {
 	summary.QualificationTracked = true
 	summary.QualificationOutcome = qualification.Outcome
 	summary.QualificationSHA256 = qualification.InputSHA256
+	summary.QualificationTapes = 1
 	summary.QualificationFrames = qualification.Frames
 	summary.QualificationMinimumFrames = qualification.MinimumFrames
 	summary.QualificationTrainingFrames = qualification.TrainingFrames
@@ -441,11 +483,19 @@ func applyShadowPerpsQualification(summary *paperstatus.CurrentSummary, qualific
 		summary.QualificationStrategy = string(qualification.TrainingLeader.Strategy)
 		summary.QualificationRiskProfile = string(qualification.TrainingLeader.RiskArm)
 	}
-	if qualification.Holdout != nil && qualification.Holdout.Score != nil {
-		summary.QualificationHoldoutMicros = qualification.Holdout.Score.NetPnLMicros
+	if qualification.Holdout != nil {
+		summary.QualificationHoldoutEvaluated = true
+		if qualification.Holdout.Score != nil {
+			summary.QualificationHoldoutScored = true
+			summary.QualificationHoldoutMicros = qualification.Holdout.Score.NetPnLMicros
+		}
 	}
-	if qualification.Stress != nil && qualification.Stress.Score != nil {
-		summary.QualificationStressMicros = qualification.Stress.Score.NetPnLMicros
+	if qualification.Stress != nil {
+		summary.QualificationStressEvaluated = true
+		if qualification.Stress.Score != nil {
+			summary.QualificationStressScored = true
+			summary.QualificationStressMicros = qualification.Stress.Score.NetPnLMicros
+		}
 	}
 }
 

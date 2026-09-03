@@ -72,22 +72,27 @@ func TestQualificationProjectionIsBoundedAndPerpsOnly(t *testing.T) {
 		HoldBenchmarkMicros: 100_000_000, AccountingTracked: true, RealizedMicros: 1_000_000,
 		Checks: 60, Signals: 2, Trades: 2, State: "watching", Strategy: "fixed",
 		QualificationTracked: true, QualificationOutcome: "candidate_ready_for_more_paper_testing",
-		QualificationSHA256: strings.Repeat("a", 64), QualificationFrames: 60,
+		QualificationSHA256: strings.Repeat("a", 64), QualificationTapes: 1, QualificationFrames: 60,
 		QualificationMinimumFrames:  24,
 		QualificationTrainingFrames: 40, QualificationHoldoutFrames: 20,
 		QualificationStrategy: "momentum", QualificationRiskProfile: "balanced",
+		QualificationHoldoutEvaluated: true, QualificationStressEvaluated: true,
+		QualificationHoldoutScored: true, QualificationStressScored: true,
 		QualificationHoldoutMicros: 100_000, QualificationStressMicros: 50_000,
 	}
 	if err := validateCurrentSummary(&summary); err != nil {
 		t.Fatalf("valid qualification projection: %v", err)
 	}
 	for name, mutate := range map[string]func(*CurrentSummary){
-		"spot":       func(value *CurrentSummary) { value.Instrument = "spot" },
-		"digest":     func(value *CurrentSummary) { value.QualificationSHA256 = "bad" },
-		"frames":     func(value *CurrentSummary) { value.QualificationHoldoutFrames++ },
-		"strategy":   func(value *CurrentSummary) { value.QualificationStrategy = "llm" },
-		"risk":       func(value *CurrentSummary) { value.QualificationRiskProfile = "maximum" },
-		"false pass": func(value *CurrentSummary) { value.QualificationStressMicros = 0 },
+		"spot":               func(value *CurrentSummary) { value.Instrument = "spot" },
+		"digest":             func(value *CurrentSummary) { value.QualificationSHA256 = "bad" },
+		"tapes":              func(value *CurrentSummary) { value.QualificationTapes = 0 },
+		"frames":             func(value *CurrentSummary) { value.QualificationHoldoutFrames++ },
+		"strategy":           func(value *CurrentSummary) { value.QualificationStrategy = "llm" },
+		"risk":               func(value *CurrentSummary) { value.QualificationRiskProfile = "maximum" },
+		"missing evaluation": func(value *CurrentSummary) { value.QualificationHoldoutEvaluated = false },
+		"missing score":      func(value *CurrentSummary) { value.QualificationStressScored = false },
+		"false pass":         func(value *CurrentSummary) { value.QualificationStressMicros = 0 },
 		"overflow": func(value *CurrentSummary) {
 			value.QualificationTrainingFrames = math.MaxUint64
 			value.QualificationHoldoutFrames = 61
@@ -101,9 +106,43 @@ func TestQualificationProjectionIsBoundedAndPerpsOnly(t *testing.T) {
 			}
 		})
 	}
+	rejectedWithoutScore := summary
+	rejectedWithoutScore.QualificationOutcome = "candidate_rejected"
+	rejectedWithoutScore.QualificationHoldoutScored = false
+	rejectedWithoutScore.QualificationStressScored = false
+	rejectedWithoutScore.QualificationHoldoutMicros = 0
+	rejectedWithoutScore.QualificationStressMicros = 0
+	if err := validateCurrentSummary(&rejectedWithoutScore); err != nil {
+		t.Fatalf("evaluated candidate without a complete score: %v", err)
+	}
 	summary.QualificationTracked = false
 	if err := validateCurrentSummary(&summary); err == nil {
 		t.Fatal("untracked qualification fields were accepted")
+	}
+}
+
+func TestVersionFourQualificationIsNormalizedOnDecode(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	snapshot := Snapshot{Version: qualificationVersion, ObservedAt: now, Current: "PAPER · checkpoint", Summary: &CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced", PositionDirection: "flat",
+		LeverageBPS: 20_000, FundingTracked: true, ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_100_000, HoldBenchmarkMicros: 100_000_000,
+		AccountingTracked: true, RealizedMicros: 100_000, Checks: 60, Signals: 2, Trades: 2, State: "watching", Strategy: "fixed",
+		QualificationTracked: true, QualificationOutcome: "candidate_ready_for_more_paper_testing",
+		QualificationSHA256: strings.Repeat("a", 64), QualificationFrames: 60, QualificationMinimumFrames: 24,
+		QualificationTrainingFrames: 40, QualificationHoldoutFrames: 20,
+		QualificationStrategy: "momentum", QualificationRiskProfile: "balanced",
+		QualificationHoldoutMicros: 100_000, QualificationStressMicros: 50_000,
+	}}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := decode(raw)
+	if err != nil || decoded.Summary.QualificationTapes != 1 || !decoded.Summary.QualificationHoldoutEvaluated ||
+		!decoded.Summary.QualificationStressEvaluated || !decoded.Summary.QualificationHoldoutScored ||
+		!decoded.Summary.QualificationStressScored {
+		t.Fatalf("normalized v4 snapshot = %+v, %v", decoded.Summary, err)
 	}
 }
 

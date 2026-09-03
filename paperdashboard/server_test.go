@@ -448,9 +448,11 @@ func TestDashboardProjectsQualificationWithoutPrivateTapeIdentity(t *testing.T) 
 			Checks:           60, Trades: 2, Signals: 2, State: "watching", Strategy: "fixed",
 			QualificationTracked: true,
 			QualificationOutcome: "candidate_ready_for_more_paper_testing",
-			QualificationSHA256:  digest, QualificationFrames: 60, QualificationMinimumFrames: 24,
+			QualificationSHA256:  digest, QualificationTapes: 1, QualificationFrames: 60, QualificationMinimumFrames: 24,
 			QualificationTrainingFrames: 40, QualificationHoldoutFrames: 20,
 			QualificationStrategy: "momentum", QualificationRiskProfile: "balanced",
+			QualificationHoldoutEvaluated: true, QualificationStressEvaluated: true,
+			QualificationHoldoutScored: true, QualificationStressScored: true,
 			QualificationHoldoutMicros: 100_000, QualificationStressMicros: 50_000,
 		},
 	}}
@@ -472,6 +474,8 @@ func TestDashboardProjectsQualificationWithoutPrivateTapeIdentity(t *testing.T) 
 		view.Markets[0].QualificationOutcome != "candidate_ready_for_more_paper_testing" ||
 		view.Markets[0].QualificationMinimumFrames != 24 ||
 		view.Markets[0].QualificationStrategy != "momentum" ||
+		!view.Markets[0].QualificationHoldoutEvaluated || !view.Markets[0].QualificationStressEvaluated ||
+		!view.Markets[0].QualificationHoldoutScored || !view.Markets[0].QualificationStressScored ||
 		view.Markets[0].QualificationHoldoutMicros != 100_000 ||
 		view.Markets[0].QualificationStressMicros != 50_000 {
 		t.Fatalf("qualification projection = %+v", view.Markets)
@@ -613,6 +617,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 		},
 		"/app.js": {
 			"Paper account now", "Start of this run", "Result this run", "Versus holding", "Paper executions", "Compared with holding",
+			"Final untouched recording", "separate recordings",
 			"<button class=\"help\"", "data-help-copy=", "helpDialog.showModal()", "Waiting for fresh prices",
 			"?fresh=1", "Refreshing…", "Updated ✓",
 			"Checked ✓", "Data delayed", "requestSequence",

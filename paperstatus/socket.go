@@ -147,5 +147,6 @@ func decode(data []byte) (Snapshot, error) {
 	if err := strictjson.Decode(data, &snapshot); err != nil || ValidateSnapshot(snapshot) != nil {
 		return Snapshot{}, errors.New("paper status snapshot is invalid")
 	}
+	normalizeLegacySnapshot(&snapshot)
 	return snapshot, nil
 }
