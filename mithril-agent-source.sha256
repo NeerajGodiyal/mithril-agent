@@ -1,5 +1,5 @@
 2d11bd4a192897373f83583e1a41b767afca4c8691f844609e42415c12793cc7  ./.github/workflows/security.yml
-2616418d985d6942c8606b0017e1858928bdc0791f01c378617c50dca9d1dffe  ./.gitignore
+9bb0bd08529284f32055b70a1bbe2b980f20b306a53a6a1a37f2925607cd9994  ./.gitignore
 1eb575a3cff8a8caaf2a3a3cf234270e689b9b6e27f5eb91cd993e942df1378f  ./DEMO.md
 dd7d6042d0844aabd442f89b6bac8137bf42c53263c5ea297e07d4644df65fee  ./INDEXING.md
 5db754148ccb4d5b9ee71ecee0505d09d56ac127adf2699e33d4808091ec560e  ./Makefile
@@ -57,7 +57,7 @@ e588c5821442434ea24841a27e2d4557013f5d00f76b45302c14d540c1a82c57  ./cmd/mithril-
 d53ac9839fbe784a1655a799f97c843bf9fcd4c5dd8d71838010f0b41dddf903  ./cmd/mithril-agent/doctor_telegram_test.go
 52084607d80293db7a84216e4d9d13f381ccd3f187c0045ac11cbc6480fbeb95  ./cmd/mithril-agent/doctor_test.go
 519267fdaa4647298c383b54cb24127010e9bb600ae334317012d3db45b12cd6  ./cmd/mithril-agent/doctor_trading_test.go
-5068ea6eef74d1a9d70518d6abdc1113287c23fed81bdb063034c9620ca23433  ./cmd/mithril-agent/documentation_test.go
+f973fe30fc624f5a1c67bb24a0d2b62aaf418253c0c0e9afe0e0d978c107760e  ./cmd/mithril-agent/documentation_test.go
 4aad63196ecf6d68dd4047804cac2943ee4ece9a5cb7273878915b2983836d42  ./cmd/mithril-agent/explain.go
 f1a080ac99ba19b1a6cf9602d0bd65cd081145b8bcf620616a24b4ab7299923e  ./cmd/mithril-agent/explain_stage.go
 3358177400d3b66329c3510c8274e37c3fce8990ba48975eadf58fcead630cd6  ./cmd/mithril-agent/explain_stage_test.go
@@ -225,7 +225,7 @@ ef9e6ddbc0a8bad3a111cd9157d7aaf0c3e9f4593c47c10b476c7f3a23c18629  ./deploy/herme
 0b2c0c1b3848f5402c5bd625844abc9a682c6200d01b7e32e99c5230cefedf9c  ./deploy/hermes-research/config-delegated.yaml
 717fbc0d2f754b5f3d8ad744749717d5519a467f2fc506bba9ff3ff9053fb190  ./deploy/hermes-research/config.yaml
 cd719fafedb55c7e82922f92d230368561b3a2340af1d95061a609f36cc6017e  ./deploy/hermes-research/env.example
-c3182624ad1731cf456e5e5f76ddf7a17a24c1fed260ac7db5fe7d7785ce76f5  ./deploy/hermes-research/prompts/market-scout.md
+4b1bbd37a89db8cd5236e1a95696d94b56feba1375f68728f8b20d0b0f0163fa  ./deploy/hermes-research/prompts/market-scout.md
 8bda1d485c0d3bfac337d38c37dca8563952af19314519453be0f3a8a914f66e  ./deploy/hermes-research/run-market-scout.sh
 647aa2673b931d1e0156ff48a314de287a7e0b24ba3078bb63375793cbd316c9  ./deploy/hermes-research/run-paper-generation.sh
 0483df10bfe669accd58c1d05ecf5667bea4f28731bf775a5e8452bf643fe7e5  ./deploy/hermes-research/test_build_research_evidence.py
@@ -376,11 +376,11 @@ e61c67f75d734e22ffc681699fe258cbb89d4ef4861cad3fb91caa9d0fc729d6  ./paperdashboa
 b0940dcff44f8157cf9f8963b2a0c69cb936c2aab37d76104f2b3f9422adca60  ./paperdashboard/instruction_test.go
 123c398d99315dfe063bd6f0efc810968589479a7bbf92d497ec2d125ee5e739  ./paperdashboard/mithril.go
 a3ab10c3e1a5b91aa29f2510eda54dd5652ae39bbf31892fd2b6ca5c37a84c96  ./paperdashboard/mithril_test.go
-0c67cb98b9f266671560fbbd2cc855c0728a5bc7487de191f789a2eb779219e5  ./paperdashboard/page.go
+b5736dacedc43d0f9d0ad61d067ebd3a2e44ff6185c36d445ea3f73da531f6b0  ./paperdashboard/page.go
 30d12cf6e6eecb0e1f6068a779eb87bb6e71ac0fb0af79728f19d3d1fd86f888  ./paperdashboard/research.go
 256819342262576b737e7ea4ee481b23da2f7b70bfbaf0fe8ec10461f47afe83  ./paperdashboard/research_test.go
 21fb0a0c7c29a0d7c58802f0b4770d83989bb21cb870b043f00e0d997e1ade0e  ./paperdashboard/server.go
-ae20cdb8cc64b3cfbae1cc31331c5ac50185311096ccb35515e5477cc30bd7da  ./paperdashboard/server_test.go
+ba26517c57b5e4475e553d2947690ef8474aa39c85a7a9df2503fd34cfd733a3  ./paperdashboard/server_test.go
 70c9d5382506dd184465425c08a99ad9bd6d9ac1313c252968ba0b585e5ef823  ./paperdashboard/vendor/LICENSE.lightweight-charts
 18a4de52385f6b988782639d5d0cc1326e5a8c2de9a7f01d7b20d9aedcc60943  ./paperdashboard/vendor/LICENSE.space-grotesk.txt
 f76c6afab94884448f0426e30d6e9d555ca7247894cd3484e477d2f87513036e  ./paperdashboard/vendor/NOTICE.lightweight-charts

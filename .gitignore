@@ -44,6 +44,7 @@ coverage*.out
 /adapters/orca/node_modules/
 /programs/*/target/
 .claude/
+.playwright-cli/
 node_modules/
 *keypair*.json
 *.jsonl*

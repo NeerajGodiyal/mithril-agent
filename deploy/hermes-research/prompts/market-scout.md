@@ -64,6 +64,14 @@ sources; otherwise mark it `single_source`, `contradicted`, or `unverified` and
 do not use it to justify a parameter change. The risk veto must be independent
 of the bull case and must state pass or reject with a reason. The no-trade case
 is a valid result, not a failure to answer. State unknowns instead of guessing.
+Do not discard a supported observation merely because it lacks a second source.
+When exactly one successfully extracted page directly supports a bounded fact,
+include that fact as `single_source` with the exact URL. Use `unverified` only
+when no successfully extracted page directly supports the claim. The parent
+must independently call `web_extract` for every URL it cites instead of trusting
+a delegated summary. An all-`unverified` `no_change` packet remains valid when
+none of the retrieved pages supports a material bounded fact; never invent a
+citation just to avoid that result.
 This research may propose experiments; it cannot change the market allowlist,
 policy, risk limits, paper balances, or execution path.
 Use the host-produced prior-day diagnostics to explain whether the current

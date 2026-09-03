@@ -475,6 +475,8 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"hypothesis_id", "verified_facts", "no_trade_case", "risk_veto",
 		"candidate_parameter_diff", "two independent timestamped",
 		"trusted run-time anchor", "single_source` requires exactly one source",
+		"Do not discard a supported observation", "Use `unverified` only",
+		"independently call `web_extract` for every URL it cites",
 		"The SOL server is `mithril_paper`; the JUP server is `mithril_paper_jup`",
 		"infer one market's state", "at most one challenger per market per run",
 		"`unverified`", "requires an empty sources array",

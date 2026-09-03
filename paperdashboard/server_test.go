@@ -44,6 +44,9 @@ func TestAutomationListsOnlyOptionalExperiments(t *testing.T) {
 	if !strings.Contains(appJS, "const experimentNames=experiments.map") {
 		t.Fatal("paper engine status must derive its perps list from optional experiments")
 	}
+	if !strings.Contains(appJS, "retained in the final packet") || strings.Contains(appJS, "unique source'+(packet.sources_checked===1?'':'s')+' checked") {
+		t.Fatal("Hermes status must distinguish retrieved pages from sources retained in its final packet")
+	}
 }
 
 func TestStatusCombinesMarketsWithoutExposingIDsOrHTML(t *testing.T) {

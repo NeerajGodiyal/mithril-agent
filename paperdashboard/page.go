@@ -704,10 +704,10 @@ function researchView(){
   if(current.research_error)return {label:'Rejected output',tone:'red',description:'The latest output did not pass the agent packet checks.',detail:'No proposal or policy change was accepted.'};
   const packet=current.research;
   if(!packet)return {label:'No valid run yet',tone:'amber',description:'Waiting for the first validated source-cited packet.',detail:'The paper plans continue without Hermes input.'};
-  const checked=packet.sources_checked+' unique source'+(packet.sources_checked===1?'':'s')+' checked';
+	const cited=packet.sources_checked+' unique source'+(packet.sources_checked===1?'':'s')+' retained in the final packet';
 	const retrieved=packet.retrieved_pages+' page'+(packet.retrieved_pages===1?'':'s')+' retrieved from '+packet.successful_web_searches+' successful search'+(packet.successful_web_searches===1?'':'es');
-	  const outcomes=packet.two_source_claims+' two-source Hermes claim'+(packet.two_source_claims===1?'':'s')+' · '+packet.retrieved_citations+' retrieved citation'+(packet.retrieved_citations===1?'':'s')+' · '+packet.single_source_facts+' single-source · '+packet.contradicted_facts+' contradicted · '+packet.unverified_facts+' unverified';
-  const evidence=retrieved+'; '+checked+'; '+outcomes;
+	const outcomes=packet.two_source_claims+' two-source fact'+(packet.two_source_claims===1?'':'s')+' · '+packet.single_source_facts+' one-source fact'+(packet.single_source_facts===1?'':'s')+' · '+packet.contradicted_facts+' contradicted · '+packet.unverified_facts+' unverified';
+	const evidence=retrieved+'; '+cited+'; '+outcomes;
   if(!packet.current)return {label:'Expired',tone:'amber',description:packet.market+' research expired. '+evidence+'.',detail:'It cannot be used for a new paper experiment.'};
   const passed=packet.risk_decision==='pass';
   const label=packet.disposition==='candidate'&&packet.actionable?'Proposal ready':packet.disposition==='blocked'?'Vetoed':'No change';
