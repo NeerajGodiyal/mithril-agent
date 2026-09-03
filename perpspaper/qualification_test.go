@@ -26,6 +26,9 @@ func TestQualificationRejectsNoTradeTieAndComparesAllPairs(t *testing.T) {
 		first.TrainingLeader != nil || first.Candidate != nil || len(first.Training) != 12 {
 		t.Fatalf("flat qualification = %+v", first)
 	}
+	if !slices.Equal(first.Reasons, []string{"no_profitable_completed_training_trade"}) {
+		t.Fatalf("flat qualification reasons = %v", first.Reasons)
+	}
 	want := []QualificationKey{
 		{Conservative, StrategyMomentum}, {Conservative, StrategyMeanReversion},
 		{Conservative, StrategyBreakout}, {Conservative, StrategyRegime},

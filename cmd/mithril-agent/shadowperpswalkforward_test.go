@@ -165,6 +165,21 @@ func TestShadowPerpsWalkForwardMessageUsesPlainPaperLanguage(t *testing.T) {
 			t.Fatalf("plain paper message = %q", message)
 		}
 	}
+	if strings.Contains(message, "made money") || !strings.Contains(message, "passed every training gate") {
+		t.Fatalf("paper message overstates its rejection reason: %q", message)
+	}
+}
+
+func TestShadowPerpsQualificationMessageUsesAggressiveOperatorLabel(t *testing.T) {
+	message := shadowPerpsQualificationMessage(perpspaper.Qualification{
+		Outcome: "candidate_rejected",
+		TrainingLeader: &perpspaper.QualificationKey{
+			RiskArm: perpspaper.Experimental, Strategy: perpspaper.StrategyRegime,
+		},
+	})
+	if !strings.Contains(message, "regime · aggressive") || strings.Contains(message, "experimental") {
+		t.Fatalf("candidate message exposes the internal risk name: %q", message)
+	}
 }
 
 func TestWalkForwardSummaryShowsCompletedAttemptsWithoutSelectingThem(t *testing.T) {

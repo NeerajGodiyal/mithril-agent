@@ -2,9 +2,26 @@ package perpspaper
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestWalkForwardPreservesVersionedNoCandidateReason(t *testing.T) {
+	first := shiftedWalkForwardFrames(tournamentTestFrames(slices.Repeat([]int{10_000}, 33)), 0)
+	second := shiftedWalkForwardFrames(tournamentTestFrames(slices.Repeat([]int{10_000}, 33)), 10_000_000)
+	result, err := QualifyWalkForward(qualificationTestConfig(), []WalkForwardTape{
+		{ContentSHA256: strings.Repeat("1", 64), Frames: first},
+		{ContentSHA256: strings.Repeat("2", 64), Frames: second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != "no_training_candidate" ||
+		!slices.Equal(result.Reasons, []string{"no_profitable_completed_training_trade"}) {
+		t.Fatalf("flat walk-forward result = %+v", result)
+	}
+}
 
 func TestWalkForwardFreezesTrainingLeaderBeforeFinalTape(t *testing.T) {
 	training := shiftedWalkForwardFrames(tournamentTestFrames(qualificationWavePrices(4)), 0)

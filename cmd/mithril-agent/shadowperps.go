@@ -505,7 +505,7 @@ func shadowPerpsQualificationLabel(qualification perpspaper.Qualification) strin
 	case "insufficient_evidence":
 		return fmt.Sprintf("collecting (%d/%d frames)", qualification.Frames, qualification.MinimumFrames)
 	case "no_training_candidate":
-		return "no profitable training candidate"
+		return "no training plan passed every evidence and safety check"
 	case "candidate_rejected":
 		return "training leader did not pass held-out checks"
 	default:
@@ -516,7 +516,11 @@ func shadowPerpsQualificationLabel(qualification perpspaper.Qualification) strin
 func shadowPerpsQualificationMessage(qualification perpspaper.Qualification) string {
 	message := "PAPER · 🧪 PERPS CHECKPOINT COMPLETE\n" + shadowPerpsQualificationLabel(qualification)
 	if qualification.TrainingLeader != nil {
-		message += "\nCandidate checked: " + string(qualification.TrainingLeader.Strategy) + " · " + string(qualification.TrainingLeader.RiskArm)
+		risk := string(qualification.TrainingLeader.RiskArm)
+		if qualification.TrainingLeader.RiskArm == perpspaper.Experimental {
+			risk = "aggressive"
+		}
+		message += "\nCandidate checked: " + string(qualification.TrainingLeader.Strategy) + " · " + risk
 	}
 	if qualification.Holdout != nil && qualification.Holdout.Score != nil {
 		message += "\nHeld-out replay: " + formatPerpsResult(qualification.Holdout.Score.NetPnLMicros)

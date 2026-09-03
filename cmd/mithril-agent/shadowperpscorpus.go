@@ -355,7 +355,7 @@ func shadowPerpsWalkForwardLabel(result perpspaper.WalkForwardQualification) str
 	case "insufficient_evidence":
 		return "more complete market recordings are needed"
 	case "no_training_candidate":
-		return "no paper plan made money after costs across the earlier recordings"
+		return "no paper plan passed every training gate across the earlier recordings"
 	case "candidate_rejected":
 		return "the selected paper plan did not pass the final untouched recording"
 	default:
