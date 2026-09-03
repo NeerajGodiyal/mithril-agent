@@ -9,11 +9,13 @@ func TestPerpsPaperSystemdIsBoundedSignerFreeAndPrivate(t *testing.T) {
 	collector := readDocumentation(t, "../../deploy/systemd/mithril-agent-perps-paper.service")
 	for _, want := range []string{
 		"User=mithril-agent-research", "UMask=0077",
-		"RuntimeDirectory=mithril-agent-perps-paper", "RuntimeDirectoryMode=0700",
-		"RuntimeDirectoryPreserve=no", "--state-dir /run/mithril-agent-perps-paper",
+		"StateDirectory=mithril-agent-perps-paper", "StateDirectoryMode=0700",
+		"--state-dir /var/lib/mithril-agent-perps-paper/current",
+		"--archive-dir /var/lib/mithril-agent-perps-paper/runs",
 		"--environment mainnet --symbols SOL,BTC,ETH --arm balanced",
-		"--paper-usd-per-market 100 --cadence 15s --duration 1h",
-		"Restart=no", "RuntimeMaxSec=65min", "ProtectSystem=strict",
+		"--paper-usd-per-market 100 --cadence 15s --duration 30m",
+		"Restart=no", "RuntimeMaxSec=35min", "ProtectSystem=strict",
+		"ReadWritePaths=/var/lib/mithril-agent-perps-paper",
 		"RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
 	} {
 		if !strings.Contains(collector, want) {
@@ -28,8 +30,8 @@ func TestPerpsPaperSystemdIsBoundedSignerFreeAndPrivate(t *testing.T) {
 
 	bridge := readDocumentation(t, "../../deploy/systemd/mithril-agent-perps-paper-status-bridge@.service")
 	for _, want := range []string{
-		"LoadCredential=paper-status:/run/mithril-agent-perps-paper/%i-paper-status.json",
-		"InaccessiblePaths=-/run/mithril-agent-perps-paper",
+		"LoadCredential=paper-status:/var/lib/mithril-agent-perps-paper/published/%i-paper-status.json",
+		"InaccessiblePaths=-/var/lib/mithril-agent-perps-paper",
 		"mithril-agent-paper-status-bridge --credential paper-status",
 		"PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX", "RuntimeMaxSec=5s",
 	} {
@@ -41,7 +43,6 @@ func TestPerpsPaperSystemdIsBoundedSignerFreeAndPrivate(t *testing.T) {
 	socket := readDocumentation(t, "../../deploy/systemd/mithril-agent-perps-paper-status@.socket")
 	for _, want := range []string{
 		"ListenStream=/run/mithril-agent-perps-%i-paper-status.sock",
-		"BindsTo=mithril-agent-perps-paper.service",
 		"After=mithril-agent-perps-paper.service",
 		"SocketGroup=mithril-agent-status", "SocketMode=0660",
 		"Service=mithril-agent-perps-paper-status-bridge@%i.service", "Accept=no",
@@ -49,6 +50,9 @@ func TestPerpsPaperSystemdIsBoundedSignerFreeAndPrivate(t *testing.T) {
 		if !strings.Contains(socket, want) {
 			t.Errorf("perps status socket is missing %q", want)
 		}
+	}
+	if strings.Contains(socket, "BindsTo=mithril-agent-perps-paper.service") {
+		t.Fatal("perps status socket cannot disappear with the completed experiment evidence")
 	}
 }
 

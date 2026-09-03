@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 	"github.com/Overclock-Validator/mithril-agent/perpspaper"
 )
 
@@ -26,11 +27,16 @@ type stubShadowPerpsReader struct {
 	bookCalls   int
 	metaCalls   int
 	calls       []string
+	metaErr     error
+	bookErr     error
 }
 
 func (reader *stubShadowPerpsReader) MetaAndAssetContexts(context.Context) (perpspaper.MetaAndAssetContexts, error) {
 	reader.metaCalls++
 	reader.calls = append(reader.calls, "context")
+	if reader.metaErr != nil {
+		return perpspaper.MetaAndAssetContexts{}, reader.metaErr
+	}
 	return perpspaper.MetaAndAssetContexts{
 		Universe: []perpspaper.AssetMeta{reader.asset}, Contexts: []perpspaper.AssetContext{reader.context},
 	}, nil
@@ -45,6 +51,9 @@ func (reader *stubShadowPerpsReader) Candles(context.Context, perpspaper.Symbol,
 func (reader *stubShadowPerpsReader) Book(context.Context, perpspaper.Symbol) (perpspaper.L2Book, error) {
 	reader.bookCalls++
 	reader.calls = append(reader.calls, "book")
+	if reader.bookErr != nil {
+		return perpspaper.L2Book{}, reader.bookErr
+	}
 	return reader.book, nil
 }
 
@@ -309,6 +318,169 @@ func TestShadowPerpsPaperRunRejectsStaleBookBeforePersistingIt(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(directory, "sol-tape.json")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("stale book was persisted: %v", statErr)
+	}
+}
+
+func TestShadowPerpsPaperRunPersistsQualificationAndRotatesPreviousRun(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 5, 30, 0, time.UTC)
+	base := t.TempDir()
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stateDir, archiveDir := filepath.Join(base, "current"), filepath.Join(base, "runs")
+	if err := runShadowPerpsPaperWith(
+		t.Context(),
+		[]string{"--state-dir", stateDir, "--archive-dir", archiveDir, "--symbols", "SOL", "--once"},
+		&bytes.Buffer{}, func() time.Time { return now },
+		func(perpspaper.Environment) (shadowPerpsReader, error) { return validStubShadowPerpsReader(now), nil },
+	); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(stateDir, "sol-qualification.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var qualification perpspaper.Qualification
+	if err := json.Unmarshal(raw, &qualification); err != nil || qualification.Outcome != "insufficient_evidence" || qualification.Frames != 1 {
+		t.Fatalf("qualification = %+v, %v", qualification, err)
+	}
+	raw, err = os.ReadFile(filepath.Join(stateDir, "sol-paper-status.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot paperstatus.Snapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil || paperstatus.ValidateSnapshot(snapshot) != nil ||
+		snapshot.Summary == nil || !snapshot.Summary.QualificationTracked ||
+		snapshot.Summary.QualificationOutcome != "insufficient_evidence" ||
+		len(snapshot.Events) == 0 || snapshot.Events[len(snapshot.Events)-1].Kind != paperstatus.KindExperimentDone {
+		t.Fatalf("final snapshot = %+v, %v", snapshot, err)
+	}
+	publishedPath := filepath.Join(shadowPerpsPublishedDir(stateDir), "sol-paper-status.json")
+	published, err := os.ReadFile(publishedPath)
+	if err != nil || !bytes.Equal(published, raw) {
+		t.Fatalf("published checkpoint = %q, %v", published, err)
+	}
+
+	later := now.Add(time.Minute)
+	if err := prepareShadowPerpsRun(stateDir, archiveDir, later); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(stateDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("new current run = %v, %v", entries, err)
+	}
+	archived := filepath.Join(archiveDir, later.Format("20060102T150405.000000000Z"))
+	if _, err := os.Stat(filepath.Join(archived, "sol-tape.json")); err != nil {
+		t.Fatalf("archived tape: %v", err)
+	}
+}
+
+func TestShadowPerpsFailureDoesNotPublishCompletedQualification(t *testing.T) {
+	now := time.Date(2026, 9, 3, 13, 5, 30, 0, time.UTC)
+	base := t.TempDir()
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stateDir, archiveDir := filepath.Join(base, "current"), filepath.Join(base, "runs")
+	if err := runShadowPerpsPaperWith(t.Context(), []string{
+		"--state-dir", stateDir, "--archive-dir", archiveDir, "--symbols", "SOL", "--once",
+	}, &bytes.Buffer{}, func() time.Time { return now }, func(perpspaper.Environment) (shadowPerpsReader, error) {
+		return validStubShadowPerpsReader(now), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	publishedPath := filepath.Join(shadowPerpsPublishedDir(stateDir), "sol-paper-status.json")
+	before, err := os.ReadFile(publishedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	failed := validStubShadowPerpsReader(now.Add(time.Minute))
+	failed.bookErr = errors.New("book unavailable")
+	err = runShadowPerpsPaperWith(t.Context(), []string{
+		"--state-dir", stateDir, "--archive-dir", archiveDir, "--symbols", "SOL", "--once",
+	}, &bytes.Buffer{}, func() time.Time { return now.Add(time.Minute) }, func(perpspaper.Environment) (shadowPerpsReader, error) {
+		return failed, nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "book unavailable") {
+		t.Fatalf("failed run error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "sol-qualification.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed run published a qualification: %v", err)
+	}
+	after, err := os.ReadFile(publishedPath)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("failed run replaced last good checkpoint: %v", err)
+	}
+	var partial paperstatus.Snapshot
+	if err := json.Unmarshal(before, &partial); err != nil {
+		t.Fatal(err)
+	}
+	partial.ObservedAt = now.Add(90 * time.Second)
+	partial.Current = "PAPER · partial failed run"
+	partialRaw, err := json.Marshal(partial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "sol-paper-status.json"), partialRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareShadowPerpsRun(stateDir, archiveDir, now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	afterRestart, err := os.ReadFile(publishedPath)
+	if err != nil || !bytes.Equal(afterRestart, before) {
+		t.Fatalf("restart published a partial failed run: %v", err)
+	}
+}
+
+func TestShadowPerpsMetadataFailureDoesNotRotateCurrentRun(t *testing.T) {
+	now := time.Date(2026, 9, 3, 14, 5, 30, 0, time.UTC)
+	base := t.TempDir()
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stateDir, archiveDir := filepath.Join(base, "current"), filepath.Join(base, "runs")
+	if err := runShadowPerpsPaperWith(t.Context(), []string{
+		"--state-dir", stateDir, "--archive-dir", archiveDir, "--symbols", "SOL", "--once",
+	}, &bytes.Buffer{}, func() time.Time { return now }, func(perpspaper.Environment) (shadowPerpsReader, error) {
+		return validStubShadowPerpsReader(now), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	failed := validStubShadowPerpsReader(now.Add(time.Minute))
+	failed.metaErr = errors.New("metadata unavailable")
+	if err := runShadowPerpsPaperWith(t.Context(), []string{
+		"--state-dir", stateDir, "--archive-dir", archiveDir, "--symbols", "SOL", "--once",
+	}, &bytes.Buffer{}, func() time.Time { return now.Add(time.Minute) }, func(perpspaper.Environment) (shadowPerpsReader, error) {
+		return failed, nil
+	}); err == nil || !strings.Contains(err.Error(), "metadata unavailable") {
+		t.Fatalf("metadata failure = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "sol-qualification.json")); err != nil {
+		t.Fatalf("metadata failure rotated the completed current run: %v", err)
+	}
+}
+
+func TestShadowPerpsArchivesKeepOnlyNewestRuns(t *testing.T) {
+	archiveDir := filepath.Join(t.TempDir(), "runs")
+	if err := os.Mkdir(archiveDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	for index := 0; index < shadowPerpsMaxArchivedRuns+2; index++ {
+		name := start.Add(time.Duration(index) * time.Minute).Format("20060102T150405.000000000Z")
+		if err := os.Mkdir(filepath.Join(archiveDir, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := pruneShadowPerpsArchives(archiveDir, shadowPerpsMaxArchivedRuns); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(archiveDir)
+	if err != nil || len(entries) != shadowPerpsMaxArchivedRuns ||
+		entries[0].Name() != start.Add(2*time.Minute).Format("20060102T150405.000000000Z") {
+		t.Fatalf("retained archives = %v, %v", entries, err)
 	}
 }
 

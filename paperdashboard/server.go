@@ -165,6 +165,16 @@ type Market struct {
 	MaxQuoteImpactBPS           uint16             `json:"max_quote_impact_bps,omitempty"`
 	MaxDrawdownBPS              uint16             `json:"max_drawdown_bps,omitempty"`
 	CooldownSeconds             uint64             `json:"cooldown_seconds,omitempty"`
+	QualificationTracked        bool               `json:"qualification_tracked,omitempty"`
+	QualificationOutcome        string             `json:"qualification_outcome,omitempty"`
+	QualificationFrames         uint64             `json:"qualification_frames,omitempty"`
+	QualificationMinimumFrames  uint64             `json:"qualification_minimum_frames,omitempty"`
+	QualificationTrainingFrames uint64             `json:"qualification_training_frames,omitempty"`
+	QualificationHoldoutFrames  uint64             `json:"qualification_holdout_frames,omitempty"`
+	QualificationStrategy       string             `json:"qualification_strategy,omitempty"`
+	QualificationRiskProfile    string             `json:"qualification_risk_profile,omitempty"`
+	QualificationHoldoutMicros  int64              `json:"qualification_holdout_micros,omitempty,string"`
+	QualificationStressMicros   int64              `json:"qualification_stress_micros,omitempty,string"`
 	History                     []PerformancePoint `json:"history,omitempty"`
 }
 
@@ -502,6 +512,16 @@ func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Mark
 		market.MaxQuoteImpactBPS = summary.MaxQuoteImpactBPS
 		market.MaxDrawdownBPS = summary.MaxDrawdownBPS
 		market.CooldownSeconds = summary.CooldownSeconds
+		market.QualificationTracked = summary.QualificationTracked
+		market.QualificationOutcome = summary.QualificationOutcome
+		market.QualificationFrames = summary.QualificationFrames
+		market.QualificationMinimumFrames = summary.QualificationMinimumFrames
+		market.QualificationTrainingFrames = summary.QualificationTrainingFrames
+		market.QualificationHoldoutFrames = summary.QualificationHoldoutFrames
+		market.QualificationStrategy = summary.QualificationStrategy
+		market.QualificationRiskProfile = summary.QualificationRiskProfile
+		market.QualificationHoldoutMicros = summary.QualificationHoldoutMicros
+		market.QualificationStressMicros = summary.QualificationStressMicros
 	}
 	return market
 }

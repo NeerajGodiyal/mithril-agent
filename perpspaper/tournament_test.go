@@ -75,7 +75,7 @@ func TestTournamentIsDeterministicAndUsesStableTieBreak(t *testing.T) {
 		t.Fatal("identical tournament input produced different results")
 	}
 	if first.Status != "research_only" || !first.PaperOnly || first.Authorized || first.Promotable ||
-		first.Winner != StrategyBreakout || len(first.Results) != 4 || len(first.InputSHA256) != 64 {
+		first.Winner != "" || len(first.Results) != 4 || len(first.InputSHA256) != 64 {
 		t.Fatalf("tournament safety or tie result = %+v", first)
 	}
 	if first.NoTrade.EndingEquityMicros != int64(config.StartingCollateralMicros) || first.NoTrade.NetPnLMicros != 0 {
@@ -90,7 +90,7 @@ func TestTournamentIsDeterministicAndUsesStableTieBreak(t *testing.T) {
 	for left, right := 0, len(reversed)-1; left < right; left, right = left+1, right-1 {
 		reversed[left], reversed[right] = reversed[right], reversed[left]
 	}
-	if winner := tournamentWinner(reversed); winner != first.Winner {
+	if winner := tournamentWinner(reversed); winner != "" {
 		t.Fatalf("reversed candidate order winner = %s, want %s", winner, first.Winner)
 	}
 	encoded, err := json.Marshal(first)

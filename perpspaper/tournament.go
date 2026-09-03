@@ -367,7 +367,8 @@ func betterTournamentResult(left, right TournamentResult) bool {
 func tournamentWinner(results []TournamentResult) Strategy {
 	var best TournamentResult
 	for _, result := range results {
-		if result.Eligible && result.Score != nil && (best.Score == nil || betterTournamentResult(result, best)) {
+		if result.Eligible && result.Score != nil && result.Score.FilledOrders > 0 &&
+			result.Score.ClosedPositions > 0 && (best.Score == nil || betterTournamentResult(result, best)) {
 			best = result
 		}
 	}

@@ -239,6 +239,9 @@ func TestShadowHelpListsResearchAndPerpsPaper(t *testing.T) {
 	if !strings.Contains(output.String(), "shadow perps-tournament --tape PATH") {
 		t.Fatalf("shadow help omits perps tournament: %q", output.String())
 	}
+	if !strings.Contains(output.String(), "shadow perps-qualify --tape PATH") {
+		t.Fatalf("shadow help omits perps qualification: %q", output.String())
+	}
 }
 
 func TestTopLevelCheckAndDemoAliasesKeepCanonicalHelp(t *testing.T) {

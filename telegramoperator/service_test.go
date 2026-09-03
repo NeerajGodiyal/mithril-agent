@@ -258,6 +258,7 @@ func TestPaperAnnouncementKindsKeepOnlyOperatorActions(t *testing.T) {
 		paperstatus.KindOrderFilled,
 		paperstatus.KindRiskHalted,
 		paperstatus.KindDataUnavailable, paperstatus.KindDataRestored,
+		paperstatus.KindExperimentDone,
 		"history_truncated",
 	} {
 		if !paperAnnounceWorthy(paperstatus.Event{Kind: kind}) {

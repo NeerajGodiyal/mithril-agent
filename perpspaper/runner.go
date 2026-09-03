@@ -103,6 +103,7 @@ type ReplayConfig struct {
 	Symbol                   Symbol  `json:"symbol"`
 	RiskArm                  RiskArm `json:"risk_arm"`
 	Quantity                 uint64  `json:"quantity"`           // optional maximum quantity; zero uses the arm's notional allocation
+	AdditionalFeeBPS         uint16  `json:"additional_fee_bps"` // optional deterministic research stress added to entry and exit fees
 	VenueMaxLeverage         uint32  `json:"venue_max_leverage"` // multiplier reported by venue metadata
 	VenueSzDecimals          uint8   `json:"venue_sz_decimals"`
 }
@@ -114,7 +115,7 @@ func ReplayTape(config ReplayConfig, frames []TapeFrame) (TapeReplay, error) {
 }
 
 func replayTape(config ReplayConfig, frames []TapeFrame, decide func(Symbol, RiskArm, []Candle) (Decision, error)) (TapeReplay, error) {
-	if _, err := lotSize(config.Symbol, config.VenueSzDecimals); len(frames) == 0 || err != nil || config.VenueMaxLeverage == 0 || config.VenueMaxLeverage > MaxLeverageBPS/uint32(basisPoints) || config.Quantity != 0 && !validLot(config.Symbol, config.Quantity, config.VenueSzDecimals) {
+	if _, err := lotSize(config.Symbol, config.VenueSzDecimals); len(frames) == 0 || err != nil || config.VenueMaxLeverage == 0 || config.VenueMaxLeverage > MaxLeverageBPS/uint32(basisPoints) || config.Quantity != 0 && !validLot(config.Symbol, config.Quantity, config.VenueSzDecimals) || config.AdditionalFeeBPS > MaxFeeBPS-10 {
 		return TapeReplay{}, errors.New("paper replay configuration is invalid")
 	}
 	_, _, policyLeverage, err := armPolicy(config.RiskArm)
@@ -127,6 +128,8 @@ func replayTape(config ReplayConfig, frames []TapeFrame, decide func(Symbol, Ris
 	}
 	leverage := min(policyLeverage, uint32(venueLeverage))
 	entryFee, exitFee, maintenance := armAccounting(config.RiskArm)
+	entryFee += config.AdditionalFeeBPS
+	exitFee += config.AdditionalFeeBPS
 	book, err := New(config.StartingCollateralMicros)
 	if err != nil {
 		return TapeReplay{}, err
@@ -153,7 +156,8 @@ func replayTape(config ReplayConfig, frames []TapeFrame, decide func(Symbol, Ris
 		if frame.Context.ReceivedAt > frame.Book.Time {
 			contextBookSeparation = frame.Context.ReceivedAt - frame.Book.Time
 		}
-		if frame.Context.ReceivedAt <= 0 || frame.Context.ReceivedAt < lastContextTime ||
+		if frame.Context.ReceivedAt < finalClose || frame.Context.ReceivedAt < lastContextTime ||
+			(i > 0 && frame.Context.ReceivedAt <= lastBookTime) ||
 			contextBookSeparation > maxContextBookSeparationMillis {
 			return TapeReplay{}, fmt.Errorf("frame %d price context time is invalid", i)
 		}

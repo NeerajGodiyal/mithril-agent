@@ -46,6 +46,7 @@ const (
 	KindDataUnavailable = "data_unavailable"
 	KindDataRestored    = "data_restored"
 	KindPeriodClosed    = "period_closed"
+	KindExperimentDone  = "experiment_completed"
 )
 
 // Event is safe to present to an operator. ID is deterministic so a Telegram
@@ -135,6 +136,17 @@ type CurrentSummary struct {
 	MaxQuoteImpactBPS           uint16 `json:"max_quote_impact_bps,omitempty"`
 	MaxDrawdownBPS              uint16 `json:"max_drawdown_bps,omitempty"`
 	CooldownSeconds             uint64 `json:"cooldown_seconds,omitempty"`
+	QualificationTracked        bool   `json:"qualification_tracked,omitempty"`
+	QualificationOutcome        string `json:"qualification_outcome,omitempty"`
+	QualificationSHA256         string `json:"qualification_sha256,omitempty"`
+	QualificationFrames         uint64 `json:"qualification_frames,omitempty"`
+	QualificationMinimumFrames  uint64 `json:"qualification_minimum_frames,omitempty"`
+	QualificationTrainingFrames uint64 `json:"qualification_training_frames,omitempty"`
+	QualificationHoldoutFrames  uint64 `json:"qualification_holdout_frames,omitempty"`
+	QualificationStrategy       string `json:"qualification_strategy,omitempty"`
+	QualificationRiskProfile    string `json:"qualification_risk_profile,omitempty"`
+	QualificationHoldoutMicros  int64  `json:"qualification_holdout_micros,omitempty"`
+	QualificationStressMicros   int64  `json:"qualification_stress_micros,omitempty"`
 }
 
 type PerformancePoint struct {
@@ -352,6 +364,7 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 		!validAccounting(*summary) ||
 		!validCurrentState(summary.State) || !validCurrentStrategy(summary.Strategy) ||
 		!validNextAction(summary.NextAction) || !validDecisionReason(summary.DecisionReason) ||
+		!validQualification(*summary) ||
 		!validPaperSettings(*summary) {
 		return errors.New("paper current summary is invalid")
 	}
@@ -368,6 +381,55 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 		return errors.New("paper current summary is invalid")
 	}
 	return nil
+}
+
+func validQualification(summary CurrentSummary) bool {
+	present := summary.QualificationOutcome != "" || summary.QualificationSHA256 != "" ||
+		summary.QualificationFrames != 0 || summary.QualificationMinimumFrames != 0 ||
+		summary.QualificationTrainingFrames != 0 ||
+		summary.QualificationHoldoutFrames != 0 || summary.QualificationStrategy != "" ||
+		summary.QualificationRiskProfile != "" || summary.QualificationHoldoutMicros != 0 ||
+		summary.QualificationStressMicros != 0
+	if !summary.QualificationTracked {
+		return !present
+	}
+	if summary.Instrument != "perpetual" || !validOptionalSHA256(summary.QualificationSHA256) ||
+		summary.QualificationSHA256 == "" || summary.QualificationFrames == 0 || summary.QualificationMinimumFrames == 0 ||
+		summary.QualificationTrainingFrames > summary.QualificationFrames ||
+		summary.QualificationHoldoutFrames > summary.QualificationFrames-summary.QualificationTrainingFrames {
+		return false
+	}
+	switch summary.QualificationOutcome {
+	case "insufficient_evidence":
+		return summary.QualificationFrames < summary.QualificationMinimumFrames &&
+			summary.QualificationTrainingFrames == 0 && summary.QualificationHoldoutFrames == 0 &&
+			summary.QualificationStrategy == "" && summary.QualificationRiskProfile == "" &&
+			summary.QualificationHoldoutMicros == 0 && summary.QualificationStressMicros == 0
+	case "no_training_candidate":
+		return summary.QualificationFrames >= summary.QualificationMinimumFrames &&
+			summary.QualificationTrainingFrames == summary.QualificationFrames-summary.QualificationHoldoutFrames &&
+			summary.QualificationStrategy == "" && summary.QualificationRiskProfile == "" &&
+			summary.QualificationHoldoutMicros == 0 && summary.QualificationStressMicros == 0
+	case "candidate_rejected", "candidate_ready_for_more_paper_testing":
+		if summary.QualificationFrames < summary.QualificationMinimumFrames ||
+			summary.QualificationTrainingFrames != summary.QualificationFrames-summary.QualificationHoldoutFrames ||
+			!validQualificationStrategy(summary.QualificationStrategy) ||
+			!validQualificationRisk(summary.QualificationRiskProfile) {
+			return false
+		}
+		return summary.QualificationOutcome != "candidate_ready_for_more_paper_testing" ||
+			summary.QualificationHoldoutMicros > 0 && summary.QualificationStressMicros > 0
+	default:
+		return false
+	}
+}
+
+func validQualificationStrategy(strategy string) bool {
+	return strategy == "momentum" || strategy == "mean_reversion" || strategy == "breakout" || strategy == "regime"
+}
+
+func validQualificationRisk(risk string) bool {
+	return risk == "conservative" || risk == "balanced" || risk == "experimental"
 }
 
 func validInstrument(summary CurrentSummary) bool {
@@ -554,7 +616,7 @@ func validKind(kind string) bool {
 	switch kind {
 	case KindStrategyActive, KindStrategyChanged, KindOrderOpened, KindOrderFilled,
 		KindOrderRefused, KindOrderMissed, KindRiskHalted, KindDataUnavailable,
-		KindDataRestored, KindPeriodClosed:
+		KindDataRestored, KindPeriodClosed, KindExperimentDone:
 		return true
 	default:
 		return false

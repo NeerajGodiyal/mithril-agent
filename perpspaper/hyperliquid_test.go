@@ -234,7 +234,7 @@ func TestReplayTapeRejectsLookAheadAndDoesNotStack(t *testing.T) {
 	candles := []Candle{{OpenTime: 1, CloseTime: 1, Symbol: SOL, Close: "100"}, {OpenTime: 2, CloseTime: 2, Symbol: SOL, Close: "101"}}
 	frames := []TapeFrame{{Candles: candles, Context: sampledContext(SOL, "101"), Book: book}, {
 		Candles: []Candle{{OpenTime: 2, CloseTime: 2, Symbol: SOL, Close: "101"}, {OpenTime: 3, CloseTime: 3, Symbol: SOL, Close: "102"}},
-		Context: sampledContext(SOL, "102"),
+		Context: sampledContext(SOL, "102", 4),
 		Book:    L2Book{Symbol: SOL, Time: 4, Levels: book.Levels},
 		Funding: []Funding{{Symbol: SOL, Rate: "0.0001", Premium: "0", Time: 4}},
 	}}
@@ -275,7 +275,7 @@ func TestReplayTapeUsesPolicySizeAndCausalLivePrecisionFunding(t *testing.T) {
 	}
 	second := TapeFrame{
 		Candles: []Candle{{OpenTime: 3, CloseTime: 3, Symbol: SOL, Close: "100"}, {OpenTime: 4, CloseTime: 4, Symbol: SOL, Close: "101"}},
-		Context: sampledContext(SOL, "101"),
+		Context: sampledContext(SOL, "101", 5),
 		Book:    L2Book{Symbol: SOL, Time: 6, Levels: levels},
 		Funding: []Funding{{Symbol: SOL, Rate: "-0.0000187103", Premium: "0", Time: 5}},
 	}
@@ -306,7 +306,7 @@ func TestReplayTapeMarksWithVenueContextInsteadOfCandleClose(t *testing.T) {
 	}
 	adverseMark := TapeFrame{
 		Candles: []Candle{{OpenTime: 3, CloseTime: 3, Symbol: SOL, Close: "100"}, {OpenTime: 4, CloseTime: 4, Symbol: SOL, Close: "99"}},
-		Context: sampledContext(SOL, "1000"),
+		Context: sampledContext(SOL, "1000", 4),
 		Book:    L2Book{Symbol: SOL, Time: 5, Levels: first.Book.Levels},
 	}
 	replay, err := ReplayTape(config, []TapeFrame{first, adverseMark})
@@ -319,7 +319,7 @@ func TestReplayTapeMarksWithVenueContextInsteadOfCandleClose(t *testing.T) {
 
 	extremeClose := adverseMark
 	extremeClose.Candles[1].Close = "1000"
-	extremeClose.Context = sampledContext(SOL, "100")
+	extremeClose.Context = sampledContext(SOL, "100", 4)
 	replay, err = ReplayTape(config, []TapeFrame{first, extremeClose})
 	if err != nil {
 		t.Fatal(err)
@@ -461,7 +461,7 @@ func TestReplayTapeLiquidatesBeforeAnOppositeDecision(t *testing.T) {
 		},
 		{
 			Candles: []Candle{{OpenTime: 3, CloseTime: 3, Symbol: SOL, Close: "100"}, {OpenTime: 4, CloseTime: 4, Symbol: SOL, Close: "500"}},
-			Context: sampledContext(SOL, "500"),
+			Context: sampledContext(SOL, "500", 4),
 			Book:    L2Book{Symbol: SOL, Time: 5, Levels: [2][]Level{{{Price: "499", Size: "2", Count: 1}}, {{Price: "500", Size: "2", Count: 1}}}},
 		},
 	}
@@ -484,7 +484,7 @@ func TestReplayTapeDoesNotReportUnbookedPartialCloseAsFill(t *testing.T) {
 		},
 		{
 			Candles: []Candle{{OpenTime: 3, CloseTime: 3, Symbol: SOL, Close: "100"}, {OpenTime: 4, CloseTime: 4, Symbol: SOL, Close: "100"}},
-			Context: sampledContext(SOL, "100"),
+			Context: sampledContext(SOL, "100", 4),
 			Book:    L2Book{Symbol: SOL, Time: 5, Levels: [2][]Level{{{Price: "99", Size: "0.1", Count: 1}}, {{Price: "100", Size: "2", Count: 1}}}},
 		},
 	}
@@ -536,6 +536,10 @@ func TestFilledNotionalMicrosUsesVenueQuantityScale(t *testing.T) {
 	}
 }
 
-func sampledContext(symbol Symbol, price string) PriceContext {
-	return PriceContext{Symbol: symbol, MarkPx: price, OraclePx: price, ReceivedAt: 1}
+func sampledContext(symbol Symbol, price string, receivedAt ...int64) PriceContext {
+	at := int64(2)
+	if len(receivedAt) == 1 {
+		at = receivedAt[0]
+	}
+	return PriceContext{Symbol: symbol, MarkPx: price, OraclePx: price, ReceivedAt: at}
 }

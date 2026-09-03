@@ -433,6 +433,51 @@ func TestStatusOmitsObservedAtWhenNoMarketIsReady(t *testing.T) {
 	}
 }
 
+func TestDashboardProjectsQualificationWithoutPrivateTapeIdentity(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	digest := strings.Repeat("f", 64)
+	source := &sourceStub{label: "SOL-PERP", snapshot: paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now, Current: "PAPER · checkpoint complete",
+		Summary: &paperstatus.CurrentSummary{
+			Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+			PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+			ValueUnit: "USD", Day: "2026-09-03", TickSeconds: 60,
+			OpeningEquityMicros: 100_000_000, EquityMicros: 100_100_000,
+			HoldBenchmarkMicros: 100_000_000, AccountingTracked: true,
+			UnrealizedMicros: 100_000,
+			Checks:           60, Trades: 2, Signals: 2, State: "watching", Strategy: "fixed",
+			QualificationTracked: true,
+			QualificationOutcome: "candidate_ready_for_more_paper_testing",
+			QualificationSHA256:  digest, QualificationFrames: 60, QualificationMinimumFrames: 24,
+			QualificationTrainingFrames: 40, QualificationHoldoutFrames: 20,
+			QualificationStrategy: "momentum", QualificationRiskProfile: "balanced",
+			QualificationHoldoutMicros: 100_000, QualificationStressMicros: 50_000,
+		},
+	}}
+	server, err := New([]Source{Optional(source)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return now }
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://localhost/api/v1/status", nil))
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), digest) {
+		t.Fatalf("qualification response leaked private identity or failed: %d %s", response.Code, response.Body.String())
+	}
+	var view View
+	if err := json.Unmarshal(response.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Markets) != 1 || !view.Markets[0].QualificationTracked ||
+		view.Markets[0].QualificationOutcome != "candidate_ready_for_more_paper_testing" ||
+		view.Markets[0].QualificationMinimumFrames != 24 ||
+		view.Markets[0].QualificationStrategy != "momentum" ||
+		view.Markets[0].QualificationHoldoutMicros != 100_000 ||
+		view.Markets[0].QualificationStressMicros != 50_000 {
+		t.Fatalf("qualification projection = %+v", view.Markets)
+	}
+}
+
 func TestStatusDoesNotAggregateDifferentValueUnits(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	build := func(label, unit string) *sourceStub {
@@ -556,7 +601,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for path, wants := range map[string][]string{
-		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "class=\"overview-workspace\"", "id=\"market-switcher\"", "class=\"activity-table\"", "id=\"help-dialog\"", "Quick explanation", "strategy-brief", "/vendor/overclock.svg", "Automation setup", "Reviewed scope", "WIF, JTO, and PYTH", "Recorded replay and cost stress checks run in minutes", "short live checkpoints", "None proves profitability", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Total paper budget", "Smallest order", "Largest order", "Paper loss stop", "saving never restarts Mithril", "About this paper account", "bot's UTC day", "/vendor/lightweight-charts-5.2.1.js", "TradingView Lightweight Charts™"},
+		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "class=\"overview-workspace\"", "id=\"market-switcher\"", "class=\"activity-table\"", "id=\"help-dialog\"", "Quick explanation", "strategy-brief", "/vendor/overclock.svg", "Automation setup", "Reviewed scope", "WIF, JTO, and PYTH", "Recorded replay and doubled-fee checks run in minutes", "short live checkpoints", "None proves profitability", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Total paper budget", "Smallest order", "Largest order", "Paper loss stop", "saving never restarts Mithril", "About this paper account", "bot's UTC day", "/vendor/lightweight-charts-5.2.1.js", "TradingView Lightweight Charts™"},
 		"/app.css": {
 			"@font-face", "/vendor/space-grotesk-latin.woff2", "--canvas: #000", "--green: #86efac", "--line-strong: #353535", "--text: #e7e7e7", "--subtle: #7f7f7f",
 			".tabs {", "position: fixed", ".tab.active", ".brand-logo", ".panel:focus-visible",

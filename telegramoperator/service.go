@@ -517,7 +517,7 @@ func paperAnnounceWorthy(event paperstatus.Event) bool {
 	case paperstatus.KindStrategyChanged, paperstatus.KindOrderOpened,
 		paperstatus.KindOrderFilled, paperstatus.KindRiskHalted,
 		paperstatus.KindDataUnavailable, paperstatus.KindDataRestored,
-		"history_truncated":
+		paperstatus.KindExperimentDone, "history_truncated":
 		return true
 	case paperstatus.KindPeriodClosed:
 		at := event.At.UTC()

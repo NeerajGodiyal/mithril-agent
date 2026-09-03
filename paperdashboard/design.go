@@ -475,6 +475,13 @@ footer.shell {
   justify-content: space-between;
   gap: 20px;
 }
+.qualification-strip { display: grid; grid-template-columns: auto repeat(3, minmax(0, 1fr)) auto; gap: 18px; align-items: center; margin-top: 18px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius-small); background: #0b0b0b; }
+.qualification-strip > span { min-width: 0; }
+.qualification-strip small, .qualification-strip strong { display: block; }
+.qualification-strip small { color: var(--subtle); font-size: .59rem; }
+.qualification-strip strong { margin-top: 3px; overflow: hidden; color: var(--secondary); font-size: .7rem; text-overflow: ellipsis; white-space: nowrap; }
+.qualification-symbol { display: grid; width: 34px; height: 34px; border-radius: 50%; place-items: center; color: var(--green); background: var(--green-soft); }
+.qualification-symbol .ui-icon { width: 17px; height: 17px; }
 .performance-title { display: flex; min-width: 0; align-items: center; gap: 12px; }
 .performance-title h3,
 .market-head > h3 { margin: 0; font-size: 1.2rem; font-weight: 550; letter-spacing: -.03em; }
@@ -1052,6 +1059,9 @@ footer.shell {
   .chart-canvas, .chart-empty { height: 320px; }
   .chart-readout { flex-wrap: wrap; }
   .chart-readout time { width: 100%; margin-left: 0; }
+	.qualification-strip { grid-template-columns: auto 1fr 1fr; gap: 12px; }
+	.qualification-strip > span:nth-child(4) { grid-column: 2 / -1; }
+	.qualification-strip > .badge { grid-column: 3; grid-row: 1; justify-self: end; }
   .automation-grid, .system-list, .market-switcher { padding: 16px; }
   .activity-item { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 14px; }
   .activity-copy { grid-column: 1 / -1; padding-left: 46px; }
@@ -1117,6 +1127,9 @@ footer.shell {
   .chart-switch { max-width: 100%; }
   .chart-toggle { padding: 0 9px; font-size: .61rem; }
   .chart-canvas, .chart-empty { height: 280px; }
+	.qualification-strip { grid-template-columns: auto 1fr; }
+	.qualification-strip > span:nth-child(3), .qualification-strip > span:nth-child(4) { grid-column: 2; }
+	.qualification-strip > .badge { grid-column: 1 / -1; grid-row: auto; justify-self: start; }
   .filter { width: 100%; justify-content: space-between; }
   .filter select { min-width: 0; flex: 1; }
   .activity-time { font-size: .62rem; }

@@ -3,6 +3,7 @@ package paperstatus
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,6 +60,50 @@ func TestWriterIsPrivateBoundedAndDeduplicated(t *testing.T) {
 	gap, ok := TruncationEvent(snapshot)
 	if !ok || gap.Kind != "history_truncated" || !strings.Contains(gap.Message, "journal") {
 		t.Fatalf("truncation event = %+v, %v", gap, ok)
+	}
+}
+
+func TestQualificationProjectionIsBoundedAndPerpsOnly(t *testing.T) {
+	summary := CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: "2026-09-03", TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 101_000_000,
+		HoldBenchmarkMicros: 100_000_000, AccountingTracked: true, RealizedMicros: 1_000_000,
+		Checks: 60, Signals: 2, Trades: 2, State: "watching", Strategy: "fixed",
+		QualificationTracked: true, QualificationOutcome: "candidate_ready_for_more_paper_testing",
+		QualificationSHA256: strings.Repeat("a", 64), QualificationFrames: 60,
+		QualificationMinimumFrames:  24,
+		QualificationTrainingFrames: 40, QualificationHoldoutFrames: 20,
+		QualificationStrategy: "momentum", QualificationRiskProfile: "balanced",
+		QualificationHoldoutMicros: 100_000, QualificationStressMicros: 50_000,
+	}
+	if err := validateCurrentSummary(&summary); err != nil {
+		t.Fatalf("valid qualification projection: %v", err)
+	}
+	for name, mutate := range map[string]func(*CurrentSummary){
+		"spot":       func(value *CurrentSummary) { value.Instrument = "spot" },
+		"digest":     func(value *CurrentSummary) { value.QualificationSHA256 = "bad" },
+		"frames":     func(value *CurrentSummary) { value.QualificationHoldoutFrames++ },
+		"strategy":   func(value *CurrentSummary) { value.QualificationStrategy = "llm" },
+		"risk":       func(value *CurrentSummary) { value.QualificationRiskProfile = "maximum" },
+		"false pass": func(value *CurrentSummary) { value.QualificationStressMicros = 0 },
+		"overflow": func(value *CurrentSummary) {
+			value.QualificationTrainingFrames = math.MaxUint64
+			value.QualificationHoldoutFrames = 61
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := summary
+			mutate(&candidate)
+			if err := validateCurrentSummary(&candidate); err == nil {
+				t.Fatal("invalid qualification projection was accepted")
+			}
+		})
+	}
+	summary.QualificationTracked = false
+	if err := validateCurrentSummary(&summary); err == nil {
+		t.Fatal("untracked qualification fields were accepted")
 	}
 }
 

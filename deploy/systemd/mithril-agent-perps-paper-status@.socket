@@ -1,6 +1,5 @@
 [Unit]
 Description=Mithril bounded %I perps paper status socket
-BindsTo=mithril-agent-perps-paper.service
 After=mithril-agent-perps-paper.service
 
 [Socket]
