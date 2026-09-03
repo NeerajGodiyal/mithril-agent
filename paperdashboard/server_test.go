@@ -40,6 +40,12 @@ func (s *sourceStub) readCount() int {
 	return s.reads
 }
 
+func TestAutomationListsOnlyOptionalExperiments(t *testing.T) {
+	if !strings.Contains(appJS, "const experimentNames=experiments.map") {
+		t.Fatal("paper engine status must derive its perps list from optional experiments")
+	}
+}
+
 func TestStatusCombinesMarketsWithoutExposingIDsOrHTML(t *testing.T) {
 	if strings.Contains(appJS, "safe(packet.risk_reason)") || strings.Contains(appJS, "safe(packet.market)") {
 		t.Fatal("research text is escaped before the final HTML sink")

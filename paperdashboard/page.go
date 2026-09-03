@@ -726,11 +726,11 @@ function mithrilEvidenceView(){
 function renderSystem(){
   const required=current.markets.filter(market=>!market.optional),healthy=required.filter(marketDataHealthy).length,total=required.length;
   const experiments=current.markets.filter(market=>market.optional),activeExperiments=experiments.filter(marketDataHealthy).length;
-  const marketNames=current.markets.map(m=>m.name).join(', ')||'none configured';
+	const experimentNames=experiments.map(m=>m.name).join(', ')||'none active';
 	const research=researchView();
   const mithril=mithrilEvidenceView();
   $('automation').innerHTML='<div class="automation-list-head" aria-hidden="true"><span>Service</span><span>Role and boundary</span><span>Status</span></div>'+
-    automationCard('engines','BOT','Paper engines',healthy===total&&total?'Running':'Needs attention',healthy===total&&total?'green':'amber',healthy+' of '+total+' core market observers are current. '+activeExperiments+' of '+experiments.length+' optional perps experiments are active: '+marketNames+'.')+
+    automationCard('engines','BOT','Paper engines',healthy===total&&total?'Running':'Needs attention',healthy===total&&total?'green':'amber',healthy+' of '+total+' core market observers are current. '+activeExperiments+' of '+experiments.length+' optional perps experiments are active: '+experimentNames+'.')+
     automationCard('hermes','H','Nous Hermes',research.label,research.tone,research.description)+
     automationCard('mithril','M','Mithril evidence',mithril.label,mithril.tone,mithril.description)+
     automationCard('strategy','AD','Versioned learning','Gate required','blue','Spot rules adapt on current prices. Perps strategies are compared on causal, after-cost replay. A candidate changes no live plan until later untouched evidence passes.')+
