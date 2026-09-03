@@ -94,18 +94,28 @@ func TestShadowAllocationRefreshesOnlyPinnedLegacyKrakenSources(t *testing.T) {
 	jup.ReturnTrigger.SecondarySourceSHA256 = legacyKrakenJUPIdentity
 	jup.QuotePeg.SecondarySourceSHA256 = legacyKrakenUSDCIdentity
 	jup.NativeFeePrice.SecondarySourceSHA256 = legacyKrakenSOLIdentity
-	for name, policy := range map[string]shadow.Policy{"sol": sol, "jup": jup} {
-		refreshed, err := refreshPaperPolicySources(policy)
+	tests := []struct {
+		name         string
+		policy       shadow.Policy
+		marketSource string
+		nativeSource string
+	}{
+		{"sol", sol, pricesource.KrakenSOLIdentitySHA256(), ""},
+		{"jup", jup, pricesource.KrakenJUPIdentitySHA256(), pricesource.KrakenSOLIdentitySHA256()},
+	}
+	for _, test := range tests {
+		refreshed, err := refreshPaperPolicySources(test.policy)
 		if err != nil {
-			t.Fatalf("refresh %s: %v", name, err)
+			t.Fatalf("refresh %s: %v", test.name, err)
 		}
-		if refreshed.Trigger.SecondarySourceSHA256 == policy.Trigger.SecondarySourceSHA256 ||
+		if refreshed.Trigger.SecondarySourceSHA256 != test.marketSource ||
 			refreshed.ReturnTrigger == nil ||
-			refreshed.Trigger.SecondarySourceSHA256 != refreshed.ReturnTrigger.SecondarySourceSHA256 ||
+			refreshed.ReturnTrigger.SecondarySourceSHA256 != test.marketSource ||
 			refreshed.QuotePeg.SecondarySourceSHA256 != pricesource.KrakenIdentitySHA256() ||
+			(test.nativeSource == "") != (refreshed.NativeFeePrice == nil) ||
 			refreshed.NativeFeePrice != nil &&
-				refreshed.NativeFeePrice.SecondarySourceSHA256 != pricesource.KrakenSOLIdentitySHA256() {
-			t.Fatalf("%s sources were not refreshed: %+v", name, refreshed)
+				refreshed.NativeFeePrice.SecondarySourceSHA256 != test.nativeSource {
+			t.Fatalf("%s sources were not refreshed: %+v", test.name, refreshed)
 		}
 	}
 	sol.Trigger.SecondarySourceSHA256 = strings.Repeat("f", 64)
