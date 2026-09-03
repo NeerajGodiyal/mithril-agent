@@ -298,7 +298,8 @@ func TestStatusBindsTheSavedInstructionToOneActiveGeneration(t *testing.T) {
 	jup := instructionSource("JUP/USDC", now, 15, 300)
 	sol.snapshot.Summary.InstructionSHA256 = digest
 	jup.snapshot.Summary.InstructionSHA256 = digest
-	server, err := New([]Source{sol, jup})
+	perps := instructionSource("SOL-PERP", now, 15, 300)
+	server, err := New([]Source{sol, jup, perps})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +309,7 @@ func TestStatusBindsTheSavedInstructionToOneActiveGeneration(t *testing.T) {
 	}
 	view := server.snapshotWithRefresh(true)
 	if !view.Complete || !view.InstructionActive || view.InstructionSHA256 != digest ||
-		view.ActiveInstructionSHA256 != digest {
+		view.ActiveInstructionSHA256 != digest || view.Overview.EquityMicros != 300_000_000 {
 		t.Fatalf("active instruction view = %+v", view)
 	}
 	jup.mu.Lock()
@@ -318,6 +319,88 @@ func TestStatusBindsTheSavedInstructionToOneActiveGeneration(t *testing.T) {
 	if view.Complete || view.InstructionActive || view.ActiveInstructionSHA256 != "" ||
 		view.Overview.EquityMicros != 0 {
 		t.Fatalf("mixed generation was aggregated: %+v", view)
+	}
+}
+
+func TestOptionalExperimentCannotEraseAHealthyRequiredOverview(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	spot := instructionSource("SOL/USDC", now, 15, 300)
+	stalePerps := instructionSource("SOL-PERP", now.Add(-2*time.Hour), 60, 300)
+	stalePerps.snapshot.Summary.Instrument = "perpetual"
+	stalePerps.snapshot.Summary.RiskProfile = "balanced"
+	stalePerps.snapshot.Summary.PositionDirection = "flat"
+	stalePerps.snapshot.Summary.LeverageBPS = 20_000
+	stalePerps.snapshot.Summary.FundingTracked = true
+	server, err := New([]Source{spot, Optional(stalePerps)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return now }
+	view := server.snapshotWithRefresh(true)
+	if !view.Complete || view.Overview.EquityMicros != 100_000_000 ||
+		len(view.Markets) != 2 || view.Markets[1].Fresh || !view.Markets[1].Optional {
+		t.Fatalf("stale optional experiment damaged required overview: %+v", view)
+	}
+
+	missingPerps := &sourceStub{label: "BTC-PERP", err: io.EOF}
+	server, err = New([]Source{spot, Optional(missingPerps)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return now }
+	view = server.snapshotWithRefresh(true)
+	if !view.Complete || view.Overview.EquityMicros != 100_000_000 ||
+		len(view.Markets) != 2 || view.Markets[1].Available || !view.Markets[1].Optional {
+		t.Fatalf("missing optional experiment damaged required overview: %+v", view)
+	}
+
+	mislabeledPerps := instructionSource("BTC-PERP", now, 60, 300)
+	mislabeledPerps.label = "ETH-PERP"
+	server, err = New([]Source{spot, Optional(mislabeledPerps)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return now }
+	view = server.snapshotWithRefresh(true)
+	if !view.Complete || view.Overview.EquityMicros != 100_000_000 ||
+		len(view.Markets) != 2 || !view.Markets[1].Optional {
+		t.Fatalf("mislabeled optional experiment damaged required overview: %+v", view)
+	}
+
+	freshDifferentGeneration := instructionSource("ETH-PERP", now, 15, 300)
+	freshDifferentGeneration.snapshot.Summary.Instrument = "perpetual"
+	freshDifferentGeneration.snapshot.Summary.RiskProfile = "balanced"
+	freshDifferentGeneration.snapshot.Summary.PositionDirection = "flat"
+	freshDifferentGeneration.snapshot.Summary.LeverageBPS = 20_000
+	freshDifferentGeneration.snapshot.Summary.FundingTracked = true
+	freshDifferentGeneration.snapshot.Summary.InstructionSHA256 = strings.Repeat("b", 64)
+	server, err = New([]Source{spot, Optional(freshDifferentGeneration)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return now }
+	view = server.snapshotWithRefresh(true)
+	if !view.Complete || view.Overview.EquityMicros != 200_000_000 ||
+		len(view.Markets) != 2 || !view.Markets[1].Optional {
+		t.Fatalf("fresh independent experiment was not aggregated: %+v", view)
+	}
+
+	freshDifferentUnit := instructionSource("BTC-PERP", now, 15, 300)
+	freshDifferentUnit.snapshot.Summary.Instrument = "perpetual"
+	freshDifferentUnit.snapshot.Summary.RiskProfile = "balanced"
+	freshDifferentUnit.snapshot.Summary.PositionDirection = "flat"
+	freshDifferentUnit.snapshot.Summary.LeverageBPS = 20_000
+	freshDifferentUnit.snapshot.Summary.FundingTracked = true
+	freshDifferentUnit.snapshot.Summary.ValueUnit = "devUSDC"
+	server, err = New([]Source{spot, Optional(freshDifferentUnit)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return now }
+	view = server.snapshotWithRefresh(true)
+	if !view.Complete || view.Overview.EquityMicros != 100_000_000 ||
+		view.Overview.ValueUnit != "USD" || len(view.Markets) != 2 || !view.Markets[1].Optional {
+		t.Fatalf("incompatible optional unit damaged required overview: %+v", view)
 	}
 }
 
@@ -464,7 +547,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for path, wants := range map[string][]string{
-		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "class=\"overview-workspace\"", "id=\"market-switcher\"", "class=\"activity-table\"", "id=\"help-dialog\"", "Quick explanation", "strategy-brief", "/vendor/overclock.svg", "Automation setup", "Reviewed scope", "WIF, JTO, and PYTH", "Recorded-journal replay and doubled-cost scenario checks run in minutes", "six-hour paper checkpoint", "without blocking paper development", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Total paper budget", "Smallest order", "Largest order", "Paper loss stop", "saving never restarts Mithril", "About this paper account", "bot's UTC day", "/vendor/lightweight-charts-5.2.1.js", "TradingView Lightweight Charts™"},
+		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "class=\"overview-workspace\"", "id=\"market-switcher\"", "class=\"activity-table\"", "id=\"help-dialog\"", "Quick explanation", "strategy-brief", "/vendor/overclock.svg", "Automation setup", "Reviewed scope", "WIF, JTO, and PYTH", "Recorded replay and cost stress checks run in minutes", "short live checkpoints", "None proves profitability", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Total paper budget", "Smallest order", "Largest order", "Paper loss stop", "saving never restarts Mithril", "About this paper account", "bot's UTC day", "/vendor/lightweight-charts-5.2.1.js", "TradingView Lightweight Charts™"},
 		"/app.css": {
 			"@font-face", "/vendor/space-grotesk-latin.woff2", "--canvas: #000", "--green: #86efac", "--line-strong: #353535", "--text: #e7e7e7", "--subtle: #7f7f7f",
 			".tabs {", "position: fixed", ".tab.active", ".brand-logo", ".panel:focus-visible",
@@ -475,7 +558,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"@media (max-width: 1023px)", "@media (max-width: 767px)", "@media (max-width: 430px)", "prefers-reduced-motion",
 		},
 		"/app.js": {
-			"Paper account now", "Start of this run", "Result this run", "Versus holding", "Filled paper orders", "Compared with holding",
+			"Paper account now", "Start of this run", "Result this run", "Versus holding", "Paper executions", "Compared with holding",
 			"<button class=\"help\"", "data-help-copy=", "helpDialog.showModal()", "Waiting for fresh prices",
 			"?fresh=1", "Refreshing…", "Updated ✓",
 			"Checked ✓", "Data delayed", "requestSequence",
@@ -495,7 +578,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"Orders paused until tomorrow",
 			"Total traded this session", "Modeled fees this session", "renderActiveLimits",
 			"Largest market", "of the starting account", "Active order range",
-			"This exact paper setup is active in every current market", "Saved. The paper services are validating and applying this setup",
+			"This paper setup is active in the configurable spot markets", "Independent paper markets keep their own test setup", "Saved. The configurable spot paper services are validating and applying this setup",
 			"current.instruction_active", "instruction-cadence", "instruction-drawdown",
 			"Save experiment request", "validInstructionRequest",
 			"decisionReason", "marketStatus", "Fixed paper plan", "const watching=", "const deciding=",

@@ -478,6 +478,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"The SOL server is `mithril_paper`; the JUP server is `mithril_paper_jup`",
 		"infer one market's state", "at most one challenger per market per run",
 		"`unverified`", "requires an empty sources array",
+		"omit `retrieved_at`", "host inserts the exact successful",
 		"https://www.coinbase.com/cbbtc", "https://www.circle.com/transparency",
 		"not all-in execution guarantees",
 	} {
@@ -941,6 +942,12 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	dashboardEvidence := strings.Index(researchRunner, `--sessions "$dashboard_sessions" --packet "$projection"`)
 	if dashboardRecord < 0 || dashboardEvidence < 0 || dashboardRecord > dashboardEvidence {
 		t.Fatal("dashboard research packet is not validated before its retrieval evidence")
+	}
+	sessionExport := strings.Index(researchRunner, "sessions export --format jsonl --redact --yes")
+	bindPacket := strings.Index(researchRunner, `--bind-output "$bound_packet"`)
+	validatePacket := strings.Index(researchRunner, `--in "$bound_packet" --latest "$validated_research"`)
+	if sessionExport < 0 || bindPacket <= sessionExport || validatePacket <= bindPacket {
+		t.Fatal("Hermes source times are not host-bound before packet validation")
 	}
 	researchTimer := readDocumentation(t, "../../deploy/systemd/mithril-hermes-research.timer")
 	for _, want := range []string{

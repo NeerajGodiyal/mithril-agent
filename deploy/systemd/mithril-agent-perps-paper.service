@@ -1,0 +1,55 @@
+[Unit]
+Description=Mithril bounded signer-free perps paper experiment
+Wants=network-online.target
+After=network-online.target time-sync.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=mithril-agent-research
+Group=mithril-agent-research
+UMask=0077
+RuntimeDirectory=mithril-agent-perps-paper
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=no
+ExecStart=/usr/local/libexec/mithril-agent/mithril-agent shadow perps-paper-run --state-dir /run/mithril-agent-perps-paper --environment mainnet --symbols SOL,BTC,ETH --arm balanced --paper-usd-per-market 100 --cadence 15s --duration 1h
+Restart=no
+RuntimeMaxSec=65min
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+InaccessiblePaths=/proc
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateMounts=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+LockPersonality=yes
+CPUAccounting=yes
+CPUQuota=50%
+IOAccounting=yes
+MemoryAccounting=yes
+MemoryDenyWriteExecute=yes
+MemoryMax=256M
+MemorySwapMax=0
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+TasksMax=64
+LimitNOFILE=128
+
+[Install]
+WantedBy=multi-user.target

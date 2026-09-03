@@ -1,0 +1,19 @@
+[Unit]
+Description=Mithril bounded %I perps paper status socket
+BindsTo=mithril-agent-perps-paper.service
+After=mithril-agent-perps-paper.service
+
+[Socket]
+ListenStream=/run/mithril-agent-perps-%i-paper-status.sock
+SocketUser=root
+SocketGroup=mithril-agent-status
+SocketMode=0660
+FileDescriptorName=paper-status
+Service=mithril-agent-perps-paper-status-bridge@%i.service
+Accept=no
+Backlog=8
+FlushPending=no
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

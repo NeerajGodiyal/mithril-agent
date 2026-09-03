@@ -526,6 +526,16 @@ func TestReplayValidatesVenueBookEvenWithoutAnOrder(t *testing.T) {
 	}
 }
 
+func TestFilledNotionalMicrosUsesVenueQuantityScale(t *testing.T) {
+	notional, err := FilledNotionalMicros(SOL, Fill{FilledQuantity: 250_000_000, AveragePriceMicros: 100_000_000})
+	if err != nil || notional != 25_000_000 {
+		t.Fatalf("filled notional = %d, %v", notional, err)
+	}
+	if _, err := FilledNotionalMicros(SOL, Fill{}); err == nil {
+		t.Fatal("empty fill was accepted")
+	}
+}
+
 func sampledContext(symbol Symbol, price string) PriceContext {
 	return PriceContext{Symbol: symbol, MarkPx: price, OraclePx: price, ReceivedAt: 1}
 }

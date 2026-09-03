@@ -38,7 +38,7 @@ const (
 	defaultMinInterval     = time.Second
 	defaultExplainTime     = 5 * time.Second
 	statusSource           = "local bounded operator status"
-	maxPaperSources        = 4
+	maxPaperSources        = 8
 	maxPaperAlertChats     = 8
 	maxPaperAnnounced      = 2304
 	maxPaperAnnouncedBytes = 192 << 10
@@ -110,6 +110,25 @@ type Config struct {
 	PollTimeout       time.Duration
 	MinimumInterval   time.Duration
 	ExplanationLimit  time.Duration
+}
+
+type optionalPaperStatusReader struct{ PaperStatusReader }
+
+func (optionalPaperStatusReader) Optional() bool { return true }
+
+func (source optionalPaperStatusReader) SourceLabel() string {
+	return paperReaderLabel(source.PaperStatusReader)
+}
+
+// OptionalPaperSource keeps alerts from a bounded experiment while allowing
+// required paper summaries to remain concise after that experiment expires.
+func OptionalPaperSource(source PaperStatusReader) PaperStatusReader {
+	return optionalPaperStatusReader{PaperStatusReader: source}
+}
+
+func paperSourceOptional(source PaperStatusReader) bool {
+	optional, ok := source.(interface{ Optional() bool })
+	return ok && optional.Optional()
 }
 
 // Service has one sequential long-poll consumer. Read-only commands do not
@@ -375,20 +394,32 @@ func (s *Service) announce(ctx context.Context) {
 	}
 	snapshots := make([]paperstatus.Snapshot, len(s.paperSources))
 	errorsBySource := make([]error, len(s.paperSources))
-	summaries := make([]paperstatus.CurrentSummary, 0, len(s.paperSources))
+	requiredSummaries := make([]paperstatus.CurrentSummary, 0, len(s.paperSources))
+	optionalSummaries := make([]paperstatus.CurrentSummary, 0, len(s.paperSources))
+	required, readyRequired := 0, 0
 	now := s.now()
 	for index, source := range s.paperSources {
+		if !paperSourceOptional(source) {
+			required++
+		}
 		snapshots[index], errorsBySource[index] = source.Read()
 		if errorsBySource[index] == nil && paperstatus.ValidateSnapshot(snapshots[index]) == nil &&
 			paperSnapshotMatchesReader(source, snapshots[index]) &&
 			paperSnapshotFresh(snapshots[index], now) && snapshots[index].Summary != nil &&
 			snapshots[index].Summary.Day == now.UTC().Format("2006-01-02") {
-			summaries = append(summaries, *snapshots[index].Summary)
+			if paperSourceOptional(source) {
+				optionalSummaries = append(optionalSummaries, *snapshots[index].Summary)
+			} else {
+				requiredSummaries = append(requiredSummaries, *snapshots[index].Summary)
+				readyRequired++
+			}
 		}
 	}
 	portfolio := ""
-	if len(summaries) == len(s.paperSources) {
-		portfolio = paperPortfolioAlertSummary(summaries)
+	if readyRequired == required {
+		portfolio = paperPortfolioAlertSummary(
+			compatiblePaperSummaries(requiredSummaries, optionalSummaries),
+		)
 	}
 	for index, source := range s.paperSources {
 		s.announcePaperSource(
@@ -1001,10 +1032,16 @@ func (s *Service) paperReports() string {
 		return "Paper: not configured"
 	}
 	reports := make([]string, 0, len(s.paperSources))
-	summaries := make([]paperstatus.CurrentSummary, 0, len(s.paperSources))
+	requiredSummaries := make([]paperstatus.CurrentSummary, 0, len(s.paperSources))
+	optionalSummaries := make([]paperstatus.CurrentSummary, 0, len(s.paperSources))
 	now := s.now()
 	var oldestSummary time.Time
+	required, readyRequired := 0, 0
 	for _, source := range s.paperSources {
+		optional := paperSourceOptional(source)
+		if !optional {
+			required++
+		}
 		snapshot, err := source.Read()
 		label := ""
 		if len(s.paperSources) > 1 {
@@ -1012,6 +1049,9 @@ func (s *Service) paperReports() string {
 		}
 		if err != nil || paperstatus.ValidateSnapshot(snapshot) != nil ||
 			!paperSnapshotMatchesReader(source, snapshot) {
+			if optional {
+				continue
+			}
 			report := "PAPER ALERTS · ⚠️ Unavailable"
 			if label != "" {
 				report = "PAPER ALERTS · " + label + " · ⚠️ Unavailable"
@@ -1021,10 +1061,18 @@ func (s *Service) paperReports() string {
 		}
 		fresh := paperSnapshotFresh(snapshot, now)
 		if fresh && snapshot.Summary != nil && snapshot.Summary.Day == now.UTC().Format("2006-01-02") {
-			summaries = append(summaries, *snapshot.Summary)
+			if optional {
+				optionalSummaries = append(optionalSummaries, *snapshot.Summary)
+			} else {
+				requiredSummaries = append(requiredSummaries, *snapshot.Summary)
+				readyRequired++
+			}
 			if oldestSummary.IsZero() || snapshot.ObservedAt.Before(oldestSummary) {
 				oldestSummary = snapshot.ObservedAt
 			}
+		}
+		if optional && !fresh {
+			continue
 		}
 		if len(snapshot.Events) == 0 {
 			report := paperCurrentAge(snapshot.Current, fresh)
@@ -1046,7 +1094,8 @@ func (s *Service) paperReports() string {
 			paperAnnouncement(snapshot.Events[len(snapshot.Events)-1], label),
 		))
 	}
-	if len(summaries) == len(s.paperSources) {
+	if readyRequired == required {
+		summaries := compatiblePaperSummaries(requiredSummaries, optionalSummaries)
 		if aggregate := paperPortfolioSummary(summaries, oldestSummary); aggregate != "" {
 			return aggregate
 		}
@@ -1063,28 +1112,76 @@ func paperSnapshotMatchesReader(source PaperStatusReader, snapshot paperstatus.S
 	return snapshot.Summary == nil || paperSummaryMatchesReader(source, *snapshot.Summary)
 }
 
+func compatiblePaperSummaries(
+	required, optional []paperstatus.CurrentSummary,
+) []paperstatus.CurrentSummary {
+	if !paperSummariesCompatible(required) {
+		return nil
+	}
+	result := append([]paperstatus.CurrentSummary(nil), required...)
+	for _, candidate := range optional {
+		trial := append(append([]paperstatus.CurrentSummary(nil), result...), candidate)
+		if paperSummariesCompatible(trial) {
+			result = trial
+		}
+	}
+	return result
+}
+
+func paperSummariesCompatible(summaries []paperstatus.CurrentSummary) bool {
+	var opening, equity, deficit, hold, trades, signals uint64
+	valueUnit, instructionSHA256 := "", ""
+	for _, summary := range summaries {
+		if summary.ValueUnit == "" || valueUnit != "" && valueUnit != summary.ValueUnit ||
+			summary.InstructionSHA256 != "" && instructionSHA256 != "" &&
+				instructionSHA256 != summary.InstructionSHA256 ||
+			summary.OpeningEquityMicros > math.MaxUint64-opening ||
+			summary.EquityMicros > math.MaxUint64-equity ||
+			summary.DeficitMicros > math.MaxUint64-deficit ||
+			summary.HoldBenchmarkMicros > math.MaxUint64-hold ||
+			summary.Trades > math.MaxUint64-trades || summary.Signals > math.MaxUint64-signals {
+			return false
+		}
+		valueUnit = summary.ValueUnit
+		if summary.InstructionSHA256 != "" {
+			instructionSHA256 = summary.InstructionSHA256
+		}
+		opening += summary.OpeningEquityMicros
+		equity += summary.EquityMicros
+		deficit += summary.DeficitMicros
+		hold += summary.HoldBenchmarkMicros
+		trades += summary.Trades
+		signals += summary.Signals
+	}
+	return true
+}
+
 func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, _ time.Time) string {
 	if len(summaries) < 2 {
 		return ""
 	}
-	var opening, equity, hold, trades, signals uint64
+	var opening, equity, deficit, hold, trades, signals uint64
 	paused := 0
 	valueUnit := ""
 	instructionSHA256 := ""
 	haveInstruction := false
 	strategiesReady := true
+	allSpotFixed := true
 	strategies := make(map[string]struct{}, 2)
 	minimumCoverageBPS, coverageReady := uint64(10_000), true
 	for _, summary := range summaries {
 		if summary.ValueUnit == "" || valueUnit != "" && valueUnit != summary.ValueUnit ||
-			haveInstruction && instructionSHA256 != summary.InstructionSHA256 {
+			summary.InstructionSHA256 != "" && haveInstruction && instructionSHA256 != summary.InstructionSHA256 {
 			return ""
 		}
 		valueUnit = summary.ValueUnit
-		instructionSHA256 = summary.InstructionSHA256
-		haveInstruction = true
+		if summary.InstructionSHA256 != "" {
+			instructionSHA256 = summary.InstructionSHA256
+			haveInstruction = true
+		}
 		if summary.OpeningEquityMicros > math.MaxUint64-opening ||
 			summary.EquityMicros > math.MaxUint64-equity ||
+			summary.DeficitMicros > math.MaxUint64-deficit ||
 			summary.HoldBenchmarkMicros > math.MaxUint64-hold ||
 			summary.Trades > math.MaxUint64-trades ||
 			summary.Signals > math.MaxUint64-signals {
@@ -1092,6 +1189,7 @@ func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, _ time.Time) 
 		}
 		opening += summary.OpeningEquityMicros
 		equity += summary.EquityMicros
+		deficit += summary.DeficitMicros
 		hold += summary.HoldBenchmarkMicros
 		trades += summary.Trades
 		signals += summary.Signals
@@ -1106,6 +1204,9 @@ func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, _ time.Time) 
 		} else {
 			strategies[summary.Strategy] = struct{}{}
 		}
+		if summary.Instrument == "perpetual" || summary.Strategy != "fixed" {
+			allSpotFixed = false
+		}
 		if summary.RiskHalted {
 			paused++
 		}
@@ -1113,17 +1214,23 @@ func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, _ time.Time) 
 	var report strings.Builder
 	fmt.Fprintf(&report, "PAPER\n\n📊 ACCOUNT NOW\nTotal paper value: %s\nCombined result this run: %s\nCompared with just holding: %s",
 		paperAbsoluteValue(equity, valueUnit),
-		paperResultDisplay(paperResultChange(opening, equity, valueUnit)),
-		paperResultComparison(hold, equity, valueUnit))
+		paperResultDisplay(paperResultChangeWithDeficit(opening, equity, deficit, valueUnit)),
+		paperResultComparisonWithDeficit(hold, equity, deficit, valueUnit))
+	if deficit != 0 {
+		fmt.Fprintf(&report, "\nLiquidation deficit: %s", paperAbsoluteValue(deficit, valueUnit))
+	}
 	for _, summary := range summaries {
 		fmt.Fprintf(&report, "\n\n%s", paperMarketName(summary.Market))
 		if summary.PriceMicros != 0 {
 			fmt.Fprintf(&report, "\nMarket price: %s", formatUSDMicros(summary.PriceMicros))
 		}
 		fmt.Fprintf(&report, "\nPlan: %s\nPaper result this run: %s", paperMarketState(summary),
-			paperResultDisplay(paperResultChange(
-				summary.OpeningEquityMicros, summary.EquityMicros, valueUnit,
+			paperResultDisplay(paperResultChangeWithDeficit(
+				summary.OpeningEquityMicros, summary.EquityMicros, summary.DeficitMicros, valueUnit,
 			)))
+		if summary.DeficitMicros != 0 {
+			fmt.Fprintf(&report, "\nLiquidation deficit: %s", paperAbsoluteValue(summary.DeficitMicros, valueUnit))
+		}
 	}
 	coverage := "warming"
 	if coverageReady {
@@ -1139,7 +1246,7 @@ func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, _ time.Time) 
 	if strategiesReady && len(strategies) == 1 {
 		if _, adaptive := strategies["adaptive"]; adaptive {
 			line += "\nPlan · follows strong moves and rebounds · daily safety limit"
-		} else if _, fixed := strategies["fixed"]; fixed {
+		} else if _, fixed := strategies["fixed"]; fixed && allSpotFixed {
 			line += "\nPlan · trades at saved buy and sell prices"
 		}
 	}
@@ -1150,27 +1257,35 @@ func paperPortfolioAlertSummary(summaries []paperstatus.CurrentSummary) string {
 	if len(summaries) < 2 {
 		return ""
 	}
-	var opening, equity uint64
+	var opening, equity, deficit uint64
 	valueUnit := ""
 	instructionSHA256 := ""
 	haveInstruction := false
 	for _, summary := range summaries {
 		if summary.ValueUnit == "" || valueUnit != "" && valueUnit != summary.ValueUnit ||
-			haveInstruction && instructionSHA256 != summary.InstructionSHA256 ||
+			summary.InstructionSHA256 != "" && haveInstruction && instructionSHA256 != summary.InstructionSHA256 ||
 			summary.OpeningEquityMicros > math.MaxUint64-opening ||
-			summary.EquityMicros > math.MaxUint64-equity {
+			summary.EquityMicros > math.MaxUint64-equity ||
+			summary.DeficitMicros > math.MaxUint64-deficit {
 			return ""
 		}
 		valueUnit = summary.ValueUnit
-		instructionSHA256 = summary.InstructionSHA256
-		haveInstruction = true
+		if summary.InstructionSHA256 != "" {
+			instructionSHA256 = summary.InstructionSHA256
+			haveInstruction = true
+		}
 		opening += summary.OpeningEquityMicros
 		equity += summary.EquityMicros
+		deficit += summary.DeficitMicros
 	}
-	return "\n\nTOTAL PAPER VALUE NOW\n" + paperAbsoluteValue(equity, valueUnit) +
+	report := "\n\nTOTAL PAPER VALUE NOW\n" + paperAbsoluteValue(equity, valueUnit) +
 		"\nCash + current value of all paper holdings" +
 		"\n\nCOMBINED RESULT THIS RUN\n" +
-		paperResultDisplay(paperResultChange(opening, equity, valueUnit))
+		paperResultDisplay(paperResultChangeWithDeficit(opening, equity, deficit, valueUnit))
+	if deficit != 0 {
+		report += "\nLiquidation deficit: " + paperAbsoluteValue(deficit, valueUnit)
+	}
+	return report
 }
 
 func paperTradeCount(trades uint64) string {
@@ -1259,23 +1374,59 @@ func paperDataCoverageBPS(checks, unobservable uint64) (uint64, bool) {
 }
 
 func paperResultChange(reference, current uint64, unit string) string {
-	if current == reference {
+	return paperResultChangeWithDeficit(reference, current, 0, unit)
+}
+
+func paperResultChangeWithDeficit(reference, current, deficit uint64, unit string) string {
+	direction, magnitude, ok := paperDifference(reference, current, deficit)
+	if !ok {
+		return "unavailable"
+	}
+	if direction == 0 {
 		return "unchanged"
 	}
-	if current > reference {
-		return "up " + paperAbsoluteValue(current-reference, unit)
+	if direction > 0 {
+		return "up " + paperAbsoluteValue(magnitude, unit)
 	}
-	return "down " + paperAbsoluteValue(reference-current, unit)
+	return "down " + paperAbsoluteValue(magnitude, unit)
 }
 
 func paperResultComparison(reference, current uint64, unit string) string {
-	if current == reference {
+	return paperResultComparisonWithDeficit(reference, current, 0, unit)
+}
+
+func paperResultComparisonWithDeficit(reference, current, deficit uint64, unit string) string {
+	direction, magnitude, ok := paperDifference(reference, current, deficit)
+	if !ok {
+		return "unavailable"
+	}
+	if direction == 0 {
 		return "the same"
 	}
-	if current > reference {
-		return paperAbsoluteValue(current-reference, unit) + " better"
+	if direction > 0 {
+		return paperAbsoluteValue(magnitude, unit) + " better"
 	}
-	return paperAbsoluteValue(reference-current, unit) + " worse"
+	return paperAbsoluteValue(magnitude, unit) + " worse"
+}
+
+// paperDifference compares current equity after subtracting an explicit venue
+// deficit without forcing unsigned account values through int64.
+func paperDifference(reference, current, deficit uint64) (int, uint64, bool) {
+	if current >= reference {
+		gain := current - reference
+		if gain >= deficit {
+			if gain == deficit {
+				return 0, 0, true
+			}
+			return 1, gain - deficit, true
+		}
+		return -1, deficit - gain, true
+	}
+	loss := reference - current
+	if loss > math.MaxUint64-deficit {
+		return 0, 0, false
+	}
+	return -1, loss + deficit, true
 }
 
 func paperAbsoluteValue(value uint64, unit string) string {

@@ -240,6 +240,16 @@ func TestWriterUpdatesCurrentWithoutCreatingAnAlert(t *testing.T) {
 		t.Fatal("accepted an unsupported paper decision reason")
 	}
 	bad = *summary
+	bad.Instrument, bad.RiskProfile = "perpetual", "balanced"
+	bad.PositionDirection, bad.LeverageBPS, bad.FundingTracked = "long", 20_000, true
+	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err != nil {
+		t.Fatalf("rejected bounded perpetual metadata: %v", err)
+	}
+	bad.LeverageBPS = 0
+	if err := writer.UpdateCurrentSummary(start.Add(5*time.Second), current, &bad); err == nil {
+		t.Fatal("accepted perpetual metadata without bounded leverage")
+	}
+	bad = *summary
 	bad.ValueUnit = "BTC"
 	if err := writer.UpdateCurrentSummary(start.Add(4*time.Second), current, &bad); err == nil {
 		t.Fatal("accepted an unsupported paper value unit")

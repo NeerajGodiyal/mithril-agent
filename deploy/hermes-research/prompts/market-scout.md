@@ -124,8 +124,10 @@ and `valid_until`. Copy both exact values and do not invent, round, reuse, or
 calculate either timestamp. For each fact, `verified` and
 `contradicted` require two to four organization-independent sources that support
 the same claim, `single_source` requires exactly one source, and `unverified`
-requires an empty sources array. Use the retrieval time returned by each source
-tool for `retrieved_at`; do not invent it.
+requires an empty sources array. For a cited source, output its exact requested
+and returned URL and omit `retrieved_at`; the host inserts the exact successful
+`web_extract` result time from the redacted session trace before validating this
+response. Do not invent a retrieval time.
 
 {
   "version": 1,
@@ -140,7 +142,6 @@ tool for `retrieved_at`; do not invent it.
     "status": "verified, single_source, contradicted, or unverified",
     "sources": [{
       "url": "https://direct-source.example/path",
-      "retrieved_at": "UTC RFC3339 timestamp",
       "published_at": "optional UTC RFC3339 timestamp"
     }]
   }],

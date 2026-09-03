@@ -24,7 +24,7 @@ import (
 )
 
 const usage = `Usage:
-  mithril-agent-telegram --status-socket PATH [--paper-status-socket PATH] --cursor PATH [--explanations off|openai|local] [--explanation-budget PATH]
+  mithril-agent-telegram --status-socket PATH [--paper-status-socket PATH] [--optional-paper-status-socket PATH] --cursor PATH [--explanations off|openai|local] [--explanation-budget PATH]
   mithril-agent-telegram link    discover your chat ID (read-only; see link --help)
   mithril-agent-telegram test    send one test message to every allowed chat
 
@@ -96,11 +96,13 @@ func run(
 	flags := flag.NewFlagSet("mithril-agent-telegram", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var statusSockets socketPaths
-	var paperStatusSockets paperSocketPaths
+	var paperStatusSockets, optionalPaperStatusSockets paperSocketPaths
 	flags.Var(&statusSockets, "status-socket",
 		"bounded operator status socket; repeat once per strategy leg")
 	flags.Var(&paperStatusSockets, "paper-status-socket",
 		"bounded paper simulation status socket; may be repeated")
+	flags.Var(&optionalPaperStatusSockets, "optional-paper-status-socket",
+		"bounded paper experiment socket that may expire; may be repeated")
 	cursorPath := flags.String("cursor", "", "private Telegram update cursor")
 	explanations := flags.String("explanations", "", "off, openai, or local")
 	explanationBudgetPath := flags.String("explanation-budget", "", "private daily explanation request budget")
@@ -131,6 +133,17 @@ func run(
 		if socket.path == *cursorPath || statusSockets.contains(socket.path) ||
 			reservedStatePath(socket.path) {
 			return errors.New("paper status sockets must be distinct clean absolute paths")
+		}
+	}
+	for _, socket := range optionalPaperStatusSockets {
+		if socket.path == *cursorPath || statusSockets.contains(socket.path) ||
+			reservedStatePath(socket.path) || paperStatusSockets.contains(socket.path) {
+			return errors.New("optional paper status sockets must be distinct clean absolute paths")
+		}
+		for _, required := range paperStatusSockets {
+			if socket.label != "" && socket.label == required.label {
+				return errors.New("optional paper status socket labels must be unique")
+			}
 		}
 	}
 	if getenv == nil {
@@ -171,7 +184,7 @@ func run(
 		return err
 	}
 	if explanationBudget != nil &&
-		(statusSockets.contains(resolvedBudgetPath) || paperStatusSockets.contains(resolvedBudgetPath) ||
+		(statusSockets.contains(resolvedBudgetPath) || paperStatusSockets.contains(resolvedBudgetPath) || optionalPaperStatusSockets.contains(resolvedBudgetPath) ||
 			resolvedBudgetPath == *cursorPath || reservedStatePath(resolvedBudgetPath)) {
 		return errors.New("explanation budget path must be distinct from status socket and cursor paths")
 	}
@@ -182,6 +195,13 @@ func run(
 	paperSources, err := paperStatusReaders(paperStatusSockets)
 	if err != nil {
 		return err
+	}
+	optionalPaperSources, err := paperStatusReaders(optionalPaperStatusSockets)
+	if err != nil {
+		return err
+	}
+	for _, source := range optionalPaperSources {
+		paperSources = append(paperSources, telegramoperator.OptionalPaperSource(source))
 	}
 	if _, err := fmt.Fprintf(
 		output,
@@ -351,6 +371,11 @@ func (p *paperSocketPaths) Set(value string) error {
 	}
 	if p.contains(path) {
 		return errors.New("--paper-status-socket was given the same path twice")
+	}
+	for _, existing := range *p {
+		if label != "" && label == existing.label {
+			return errors.New("--paper-status-socket labels must be unique")
+		}
 	}
 	*p = append(*p, paperSocketPath{path: path, label: label})
 	return nil

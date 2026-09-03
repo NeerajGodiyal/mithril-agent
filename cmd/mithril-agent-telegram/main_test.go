@@ -54,6 +54,35 @@ func TestRunBuildsReadOnlyTelegramServiceWithoutExposingInputs(t *testing.T) {
 	}
 }
 
+func TestRunWiresOptionalPaperExperiment(t *testing.T) {
+	environment := map[string]string{
+		telegramoperator.BotTokenEnvironment:   commandTestToken,
+		telegramoperator.AllowedIDsEnvironment: "123",
+	}
+	var captured telegramoperator.Config
+	withServiceRunner(t, func(_ context.Context, config telegramoperator.Config) error {
+		captured = config
+		return nil
+	})
+	err := run(t.Context(), []string{
+		"--status-socket", "/private/operator.sock",
+		"--paper-status-socket", "SOL/USDC=/private/sol.sock",
+		"--optional-paper-status-socket", "SOL-PERP=/private/perp.sock",
+		"--cursor", "/private/cursor.json",
+	}, io.Discard, func(key string) string { return environment[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(captured.PaperSources) != 2 {
+		t.Fatalf("paper sources = %d", len(captured.PaperSources))
+	}
+	optional, ok := captured.PaperSources[1].(interface{ Optional() bool })
+	label, labeled := captured.PaperSources[1].(interface{ SourceLabel() string })
+	if !ok || !optional.Optional() || !labeled || label.SourceLabel() != "SOL-PERP" {
+		t.Fatalf("optional paper source = %T", captured.PaperSources[1])
+	}
+}
+
 func TestRunWiresOptionalOpenAIExplanation(t *testing.T) {
 	environment := map[string]string{
 		telegramoperator.BotTokenEnvironment:   commandTestToken,
@@ -110,6 +139,8 @@ func TestRunRejectsAmbiguousOrUnsafeConfiguration(t *testing.T) {
 		{name: "status aliases action dedup", args: []string{"--status-socket", "/private/announced-actions.json", "--cursor", "/private/cursor.json"}},
 		{name: "paper aliases paper dedup", args: []string{"--status-socket", "/private/status.sock", "--paper-status-socket", "/private/announced-paper-events.json", "--cursor", "/private/cursor.json"}},
 		{name: "invalid paper label", args: []string{"--status-socket", "/private/status.sock", "--paper-status-socket", "bad label=/private/paper.sock", "--cursor", "/private/cursor.json"}},
+		{name: "duplicate paper label", args: []string{"--status-socket", "/private/status.sock", "--paper-status-socket", "SOL=/private/sol-1.sock", "--paper-status-socket", "SOL=/private/sol-2.sock", "--cursor", "/private/cursor.json"}},
+		{name: "required optional label collision", args: []string{"--status-socket", "/private/status.sock", "--paper-status-socket", "SOL=/private/sol.sock", "--optional-paper-status-socket", "SOL=/private/sol-perp.sock", "--cursor", "/private/cursor.json"}},
 		{name: "unknown mode", args: []string{"--status-socket", "/private/status.sock", "--cursor", "/private/cursor.json", "--explanations", "other"}},
 		{name: "custom remote", args: []string{"--status-socket", "/private/status.sock", "--cursor", "/private/cursor.json", "--explanations", "local"}, env: map[string]string{
 			openAIKeyEnvironment: "test-api-key", openAIModelEnvironment: "gpt-test",

@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/internal/secureexec"
 	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
 	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
+	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 	"github.com/Overclock-Validator/mithril-agent/perpspaper"
 )
 
@@ -309,7 +311,7 @@ func updateShadowPerpsMarketUnlocked(
 		switch {
 		case lastClose == closedEnd.UnixMilli():
 			status := buildShadowPerpsStatus(config, replay, len(tape.Frames), false, now)
-			return status, writeShadowPerpsJSON(statusPath, status)
+			return status, writeShadowPerpsCycle(statusPath, filepath.Join(stateDir, name+"-paper-status.json"), status, config, replay, now)
 		case lastClose > closedEnd.UnixMilli():
 			return shadowPerpsStatus{}, errors.New("stored paper tape is ahead of the current completed candle")
 		case closedEnd.UnixMilli()-lastClose > int64(time.Minute/time.Millisecond):
@@ -369,7 +371,7 @@ func updateShadowPerpsMarketUnlocked(
 		}
 		if book.Time < latestClose {
 			status := buildShadowPerpsStatus(config, replay, len(tape.Frames), false, now)
-			return status, writeShadowPerpsJSON(statusPath, status)
+			return status, writeShadowPerpsCycle(statusPath, filepath.Join(stateDir, name+"-paper-status.json"), status, config, replay, now)
 		}
 		funding := []perpspaper.Funding(nil)
 		if len(tape.Frames) > 0 {
@@ -398,10 +400,182 @@ func updateShadowPerpsMarketUnlocked(
 		}
 	}
 	status := buildShadowPerpsStatus(config, replay, len(tape.Frames), newFrame, now)
-	if err := writeShadowPerpsJSON(statusPath, status); err != nil {
+	if err := writeShadowPerpsCycle(statusPath, filepath.Join(stateDir, name+"-paper-status.json"), status, config, replay, now); err != nil {
 		return shadowPerpsStatus{}, err
 	}
 	return status, nil
+}
+
+func writeShadowPerpsCycle(
+	statusPath, paperStatusPath string,
+	status shadowPerpsStatus,
+	config shadowPerpsTapeConfig,
+	replay perpspaper.TapeReplay,
+	now time.Time,
+) error {
+	if err := writeShadowPerpsJSON(statusPath, status); err != nil {
+		return err
+	}
+	writer, err := paperstatus.OpenWriter(paperStatusPath)
+	if err != nil {
+		return err
+	}
+	if len(replay.Results) > 0 {
+		last := replay.Results[len(replay.Results)-1]
+		kind, message := "", ""
+		switch last.Action {
+		case "opened":
+			kind = paperstatus.KindOrderFilled
+			direction := "price down"
+			if last.Decision.Direction == perpspaper.Direction(perpspaper.Long) {
+				direction = "price up"
+			}
+			message = fmt.Sprintf("PAPER · 🟣 PERPS POSITION OPENED\nDirection: %s\nPaper size: %s\nFilled near: %s\nNo real order was sent.", direction, formatPerpsFillNotional(config.Symbol, last.Fill), formatPerpsFillPrice(last.Fill))
+		case "closed":
+			kind = paperstatus.KindOrderFilled
+			message = fmt.Sprintf("PAPER · 🔵 PERPS POSITION CLOSED\nPaper size: %s\nFilled near: %s\nNo real order was sent.", formatPerpsFillNotional(config.Symbol, last.Fill), formatPerpsFillPrice(last.Fill))
+		case "liquidated":
+			kind = paperstatus.KindRiskHalted
+			message = "PAPER · 🔴 PAPER POSITION LIQUIDATED\nThe simulated maintenance-margin rule closed the position.\nNo real order was sent."
+		}
+		if kind != "" {
+			key := fmt.Sprintf("perps/%s/%s/%d", config.Symbol, last.Action, len(replay.Results))
+			if err := writer.Append(now, kind, key, message); err != nil {
+				return err
+			}
+		}
+	}
+	current, summary, err := shadowPerpsCurrent(config, replay, now)
+	if err != nil {
+		return err
+	}
+	return writer.UpdateCurrentSummary(now, current, &summary)
+}
+
+func shadowPerpsCurrent(
+	config shadowPerpsTapeConfig,
+	replay perpspaper.TapeReplay,
+	now time.Time,
+) (string, paperstatus.CurrentSummary, error) {
+	state := replay.State
+	if !state.Initialized || state.FeesPaidMicros > math.MaxInt64 ||
+		state.StartingCollateralMicros > math.MaxInt64 ||
+		state.BalanceMicros < math.MinInt64+int64(state.StartingCollateralMicros) ||
+		state.EquityMicros < math.MinInt64+int64(state.StartingCollateralMicros) {
+		return "", paperstatus.CurrentSummary{}, errors.New("perps paper state cannot be represented in operator status")
+	}
+	projectedEquity := state.EquityMicros
+	insolvent := projectedEquity < 0
+	deficit := uint64(0)
+	if insolvent {
+		if state.Position != nil {
+			return "", paperstatus.CurrentSummary{}, errors.New("negative perps paper equity still has an open position")
+		}
+		deficit = uint64(-(projectedEquity + 1)) + 1
+		if deficit > math.MaxInt64 {
+			return "", paperstatus.CurrentSummary{}, errors.New("perps paper deficit cannot be represented in operator status")
+		}
+		projectedEquity = 0
+	}
+	checks, signals, trades, turnover := uint64(len(replay.Results)), uint64(0), uint64(0), uint64(0)
+	for _, result := range replay.Results {
+		if result.Action != "flat" && result.Action != "marked" && result.Action != "liquidated" {
+			signals++
+		}
+		if result.Action == "opened" || result.Action == "closed" {
+			trades++
+			notional, err := perpspaper.FilledNotionalMicros(config.Symbol, *result.Fill)
+			if err != nil || turnover > math.MaxUint64-notional {
+				return "", paperstatus.CurrentSummary{}, errors.New("perps paper turnover cannot be represented in operator status")
+			}
+			turnover += notional
+		}
+	}
+	position := "No position open"
+	positionDirection := "flat"
+	if state.Position != nil {
+		position = "Price-down position open"
+		positionDirection = "short"
+		if state.Position.Side == perpspaper.Long {
+			position = "Price-up position open"
+			positionDirection = "long"
+		}
+	}
+	leverageBPS := min(uint32(10_000), config.VenueMaxLeverage*10_000)
+	if len(replay.Results) > 0 {
+		leverageBPS = min(replay.Results[len(replay.Results)-1].Decision.LeverageBPS, config.VenueMaxLeverage*10_000)
+	}
+	if state.Position != nil {
+		leverageBPS = state.Position.LeverageBPS
+	}
+	current := fmt.Sprintf(
+		"PAPER · %s perpetuals · %s\nTotal paper value now: %s\nResult this run: %s\nFunding: %s · Fees: %s",
+		config.Symbol, position, formatPerpsUSD(projectedEquity),
+		formatPerpsResult(state.EquityMicros-int64(state.StartingCollateralMicros)),
+		formatPerpsUSD(state.FundingPnLMicros), formatPerpsUSD(int64(state.FeesPaidMicros)),
+	)
+	if insolvent {
+		current += "\nSimulated deficit after liquidation: " + formatPerpsUSD(state.EquityMicros)
+	}
+	stateName, decisionReason := "watching", "watching"
+	if insolvent {
+		stateName, decisionReason = "paused", "risk_halt"
+	}
+	return current, paperstatus.CurrentSummary{
+		Market: string(config.Symbol) + "-PERP", Instrument: "perpetual",
+		RiskProfile: string(config.RiskArm), PositionDirection: positionDirection,
+		LeverageBPS: leverageBPS, ValueUnit: "USD", Day: now.Format("2006-01-02"),
+		TickSeconds: 60, OpeningEquityMicros: state.StartingCollateralMicros,
+		EquityMicros: uint64(projectedEquity), DeficitMicros: deficit,
+		HoldBenchmarkMicros: state.StartingCollateralMicros,
+		AccountingTracked:   true,
+		RealizedMicros:      state.BalanceMicros - int64(state.StartingCollateralMicros),
+		UnrealizedMicros:    state.UnrealizedPnLMicros, FeesMicros: int64(state.FeesPaidMicros),
+		FundingTracked: true, FundingMicros: state.FundingPnLMicros,
+		TurnoverMicros: turnover, Checks: checks, Signals: signals, Trades: trades, PriceMicros: state.LastMarkPriceMicros,
+		State: stateName, Strategy: "fixed", DecisionReason: decisionReason, RiskHalted: insolvent,
+	}, nil
+}
+
+func formatPerpsFillNotional(symbol perpspaper.Symbol, fill *perpspaper.Fill) string {
+	if fill == nil {
+		return "unavailable"
+	}
+	notional, err := perpspaper.FilledNotionalMicros(symbol, *fill)
+	if err != nil || notional > math.MaxInt64 {
+		return "unavailable"
+	}
+	return formatPerpsUSD(int64(notional))
+}
+
+func formatPerpsFillPrice(fill *perpspaper.Fill) string {
+	if fill == nil || fill.AveragePriceMicros > math.MaxInt64 {
+		return "unavailable"
+	}
+	return formatPerpsUSD(int64(fill.AveragePriceMicros))
+}
+
+func formatPerpsUSD(value int64) string {
+	negative := value < 0
+	magnitude := uint64(value)
+	if negative {
+		magnitude = uint64(-(value + 1)) + 1
+	}
+	sign := ""
+	if negative {
+		sign = "-"
+	}
+	return fmt.Sprintf("%s$%d.%02d", sign, magnitude/1_000_000, magnitude%1_000_000/10_000)
+}
+
+func formatPerpsResult(value int64) string {
+	if value > 0 {
+		return "up " + formatPerpsUSD(value)
+	}
+	if value < 0 {
+		return "down " + strings.TrimPrefix(formatPerpsUSD(value), "-")
+	}
+	return "unchanged"
 }
 
 func shadowPerpsMarketContext(

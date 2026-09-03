@@ -101,6 +101,7 @@ Other supported tools:
   mithril-agent shadow allocation --portfolio PATH --instruction PATH --out-dir PATH
   mithril-agent shadow run --policy PATH --dir PATH
   mithril-agent shadow perps-paper-run --state-dir PATH
+  mithril-agent shadow perps-tournament --tape PATH
   mithril-agent shadow report --policy PATH --dir PATH
   mithril-agent shadow review --policy PATH --dir PATH --days N
   mithril-agent shadow search --policy PATH --dir PATH --train-day DATE --validation-day DATE
@@ -334,6 +335,9 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		}
 		if len(args) > 1 && args[1] == "perps-paper-run" {
 			return runShadowPerpsPaper(ctx, args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "perps-tournament" {
+			return runShadowPerpsTournament(args[2:], output)
 		}
 		if len(args) > 1 && args[1] == "run" {
 			return runShadowRun(ctx, args[2:], output)
@@ -1810,6 +1814,9 @@ func runShadow(args []string, output io.Writer) error {
   mithril-agent shadow perps-paper-run --state-dir PATH
                                        run bounded, signer-free SOL/BTC/ETH perps
                                        paper scenarios from public market data
+  mithril-agent shadow perps-tournament --tape PATH
+                                       compare research strategies on one
+                                       verified private v3 paper tape; JSON only
   mithril-agent shadow market collect --market NAME --observe ADDR --journal PATH
                                        collect immutable market-admission evidence
   mithril-agent shadow market evaluate --journal PATH --out PATH

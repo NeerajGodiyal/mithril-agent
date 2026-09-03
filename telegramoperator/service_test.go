@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"os"
@@ -53,6 +54,27 @@ func (s *paperStatusStub) SourceID() string {
 		return s.sourceID
 	}
 	return "/run/paper-test.sock"
+}
+
+func TestNewAcceptsEightPaperSourcesAndRejectsNine(t *testing.T) {
+	sources := make([]PaperStatusReader, maxPaperSources+1)
+	for index := range sources {
+		sources[index] = &paperStatusStub{
+			sourceID: fmt.Sprintf("/run/paper-%d.sock", index),
+			label:    fmt.Sprintf("MARKET-%d", index),
+		}
+	}
+	config := Config{
+		Bot: &botStub{}, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
+		PaperSources: sources[:maxPaperSources], AllowedChatIDs: []int64{123},
+	}
+	if _, err := New(config); err != nil {
+		t.Fatalf("eight paper sources were rejected: %v", err)
+	}
+	config.PaperSources = sources
+	if _, err := New(config); err == nil || !strings.Contains(err.Error(), "at most 8 paper status readers") {
+		t.Fatalf("nine paper sources error = %v", err)
+	}
 }
 
 func TestPaperAnnouncementsAreCompactPersistentAndReadOnly(t *testing.T) {
@@ -734,6 +756,146 @@ func TestPaperCommandShowsCombinedCurrentPortfolioPnL(t *testing.T) {
 	}
 }
 
+func TestOptionalPaperExperimentDoesNotHideRequiredPortfolio(t *testing.T) {
+	now := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
+	build := func(id, market string, equity uint64) *paperStatusStub {
+		return &paperStatusStub{sourceID: id, label: market, snapshot: paperstatus.Snapshot{
+			Version: paperstatus.Version, ObservedAt: now,
+			Current: "PAPER · Watching",
+			Summary: &paperstatus.CurrentSummary{
+				Market: market, ValueUnit: "USD", Day: "2026-09-03", TickSeconds: 15,
+				OpeningEquityMicros: 100_000_000, EquityMicros: equity,
+				HoldBenchmarkMicros: 100_000_000, Checks: 1, Strategy: "adaptive",
+			},
+		}}
+	}
+	required := []PaperStatusReader{
+		build("/run/sol.sock", "SOL/USDC", 101_000_000),
+		build("/run/jup.sock", "JUP/USDC", 99_000_000),
+	}
+	stopped := &paperStatusStub{
+		sourceID: "/run/sol-perp.sock", label: "SOL-PERP", err: io.EOF,
+	}
+	service, err := New(Config{
+		Bot: &botStub{}, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
+		PaperSources:   append(required, OptionalPaperSource(stopped)),
+		AllowedChatIDs: []int64{123}, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report := service.paperReports(); !strings.Contains(report, "Total paper value: $200.00") ||
+		strings.Contains(report, "Unavailable") || strings.Contains(report, "SOL-PERP") {
+		t.Fatalf("stopped optional experiment damaged the required portfolio:\n%s", report)
+	}
+
+	active := build("/run/sol-perp.sock", "SOL-PERP", 102_000_000)
+	active.snapshot.Summary.Instrument = "perpetual"
+	active.snapshot.Summary.RiskProfile = "balanced"
+	active.snapshot.Summary.PositionDirection = "flat"
+	active.snapshot.Summary.LeverageBPS = 20_000
+	active.snapshot.Summary.FundingTracked = true
+	service.paperSources[2] = OptionalPaperSource(active)
+	if report := service.paperReports(); !strings.Contains(report, "Total paper value: $302.00") ||
+		!strings.Contains(report, "SOL-PERP") {
+		t.Fatalf("active optional experiment was omitted:\n%s", report)
+	}
+}
+
+func TestFreshIncompatibleOptionalExperimentCannotEraseRequiredReports(t *testing.T) {
+	now := time.Date(2026, time.September, 3, 12, 0, 0, 0, time.UTC)
+	build := func(id, market string) *paperStatusStub {
+		return &paperStatusStub{sourceID: id, label: market, snapshot: paperstatus.Snapshot{
+			Version: paperstatus.Version, ObservedAt: now, Current: "PAPER · Watching",
+			Summary: &paperstatus.CurrentSummary{
+				Market: market, ValueUnit: "USD", Day: "2026-09-03", TickSeconds: 15,
+				OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+				HoldBenchmarkMicros: 100_000_000, Checks: 1, Strategy: "adaptive",
+			},
+		}}
+	}
+	for name, mutate := range map[string]func([]*paperStatusStub, *paperStatusStub){
+		"different value unit": func(_ []*paperStatusStub, optional *paperStatusStub) {
+			optional.snapshot.Summary.ValueUnit = "devUSDC"
+		},
+		"different instruction": func(required []*paperStatusStub, optional *paperStatusStub) {
+			for _, source := range required {
+				source.snapshot.Summary.InstructionSHA256 = strings.Repeat("a", 64)
+			}
+			optional.snapshot.Summary.InstructionSHA256 = strings.Repeat("b", 64)
+		},
+		"overflowing aggregate": func(_ []*paperStatusStub, optional *paperStatusStub) {
+			optional.snapshot.Summary.OpeningEquityMicros = math.MaxUint64
+			optional.snapshot.Summary.EquityMicros = math.MaxUint64
+			optional.snapshot.Summary.HoldBenchmarkMicros = math.MaxUint64
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			required := []*paperStatusStub{
+				build("/run/sol.sock", "SOL/USDC"),
+				build("/run/jup.sock", "JUP/USDC"),
+			}
+			required[0].snapshot.Events = []paperstatus.Event{{
+				ID: strings.Repeat("c", 64), At: now, Kind: paperstatus.KindOrderFilled,
+				Message: "PAPER · 🔵 SOLD\nSold: 1 SOL",
+			}}
+			optional := build("/run/sol-perp.sock", "SOL-PERP")
+			optional.snapshot.Summary.Instrument = "perpetual"
+			optional.snapshot.Summary.RiskProfile = "balanced"
+			optional.snapshot.Summary.PositionDirection = "flat"
+			optional.snapshot.Summary.LeverageBPS = 20_000
+			optional.snapshot.Summary.FundingTracked = true
+			mutate(required, optional)
+			bot := &botStub{}
+			service, err := New(Config{
+				Bot: bot, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
+				PaperSources: []PaperStatusReader{
+					required[0], required[1], OptionalPaperSource(optional),
+				},
+				AllowedChatIDs: []int64{123}, Now: func() time.Time { return now },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report := service.paperReports(); !strings.Contains(report, "Total paper value: $200.00") ||
+				strings.Contains(report, "SOL-PERP") {
+				t.Fatalf("optional source erased /paper aggregate:\n%s", report)
+			}
+			service.announce(t.Context())
+			if len(bot.sent) != 1 || !strings.Contains(bot.sent[0].Text, "TOTAL PAPER VALUE NOW\n$200.00") {
+				t.Fatalf("optional source erased alert footer: %+v", bot.sent)
+			}
+		})
+	}
+}
+
+func TestPaperPortfolioShowsLiquidationDeficit(t *testing.T) {
+	summaries := []paperstatus.CurrentSummary{
+		{
+			Market: "SOL/USDC", ValueUnit: "USD", OpeningEquityMicros: 100_000_000,
+			EquityMicros: 100_000_000, HoldBenchmarkMicros: 100_000_000,
+		},
+		{
+			Market: "SOL-PERP", Instrument: "perpetual", ValueUnit: "USD",
+			OpeningEquityMicros: 100_000_000, EquityMicros: 0, DeficitMicros: 2_000_000,
+			HoldBenchmarkMicros: 100_000_000, RiskHalted: true,
+		},
+	}
+	for _, report := range []string{
+		paperPortfolioSummary(summaries, time.Time{}),
+		paperPortfolioAlertSummary(summaries),
+	} {
+		if !strings.Contains(report, "$2.00") ||
+			!strings.Contains(report, "🔴 ▼ $102.00 (loss)") ||
+			!strings.Contains(report, "Liquidation deficit: $2.00") {
+			t.Fatalf("liquidation deficit was hidden:\n%s", report)
+		}
+	}
+	if got := paperResultChangeWithDeficit(math.MaxUint64, 0, 1, "USD"); got != "unavailable" {
+		t.Fatalf("overflowing deficit comparison = %q", got)
+	}
+}
+
 func TestPaperStateLabelUsesPlainLanguage(t *testing.T) {
 	tests := map[string]string{
 		"":                 "watching",
@@ -819,6 +981,21 @@ func TestPaperPortfolioDoesNotMixInstructionGenerations(t *testing.T) {
 	}
 	if got := paperPortfolioAlertSummary(summaries); got != "" {
 		t.Fatalf("mixed-generation alert portfolio = %q", got)
+	}
+}
+
+func TestPaperPortfolioCombinesBoundAndIndependentSources(t *testing.T) {
+	summaries := []paperstatus.CurrentSummary{
+		{Market: "SOL/USDC", ValueUnit: "USD", InstructionSHA256: strings.Repeat("a", 64), OpeningEquityMicros: 1_000_000, EquityMicros: 1_000_000, HoldBenchmarkMicros: 1_000_000},
+		{Market: "SOL-PERP", Instrument: "perpetual", ValueUnit: "USD", OpeningEquityMicros: 1_000_000, EquityMicros: 1_000_000, HoldBenchmarkMicros: 1_000_000, Strategy: "fixed"},
+	}
+	if got := paperPortfolioSummary(summaries, time.Time{}); !strings.Contains(got, "Total paper value: $2.00") ||
+		!strings.Contains(got, "SOL/USDC") || !strings.Contains(got, "SOL-PERP") ||
+		strings.Contains(got, "saved buy and sell prices") {
+		t.Fatalf("bound and independent portfolio = %q", got)
+	}
+	if got := paperPortfolioAlertSummary(summaries); !strings.Contains(got, "TOTAL PAPER VALUE NOW\n$2.00") {
+		t.Fatalf("bound and independent alert portfolio = %q", got)
 	}
 }
 

@@ -40,6 +40,19 @@ type Source interface {
 	Read() (paperstatus.Snapshot, error)
 }
 
+type optionalSource struct{ Source }
+
+func (optionalSource) Optional() bool { return true }
+
+// Optional keeps a bounded experiment visible without letting its expected
+// absence or expiry erase the aggregate for required paper markets.
+func Optional(source Source) Source { return optionalSource{Source: source} }
+
+func sourceOptional(source Source) bool {
+	optional, ok := source.(interface{ Optional() bool })
+	return ok && optional.Optional()
+}
+
 type Server struct {
 	sources             []Source
 	instructionPath     string
@@ -80,6 +93,7 @@ type Overview struct {
 	ValueUnit           string `json:"value_unit,omitempty"`
 	OpeningEquityMicros uint64 `json:"opening_equity_micros,omitempty,string"`
 	EquityMicros        uint64 `json:"equity_micros,omitempty,string"`
+	DeficitMicros       uint64 `json:"deficit_micros,omitempty,string"`
 	HoldBenchmarkMicros uint64 `json:"hold_benchmark_micros,omitempty,string"`
 	AccountingTracked   bool   `json:"accounting_tracked,omitempty"`
 	RealizedMicros      int64  `json:"realized_micros,omitempty,string"`
@@ -94,6 +108,11 @@ type Overview struct {
 
 type Market struct {
 	Name                        string             `json:"name"`
+	Optional                    bool               `json:"optional,omitempty"`
+	Instrument                  string             `json:"instrument,omitempty"`
+	RiskProfile                 string             `json:"risk_profile,omitempty"`
+	PositionDirection           string             `json:"position_direction,omitempty"`
+	LeverageBPS                 uint32             `json:"leverage_bps,omitempty"`
 	ObservedAt                  *time.Time         `json:"observed_at,omitempty"`
 	Available                   bool               `json:"available"`
 	Ready                       bool               `json:"ready"`
@@ -105,11 +124,14 @@ type Market struct {
 	TickSeconds                 uint64             `json:"tick_seconds,omitempty"`
 	OpeningEquityMicros         uint64             `json:"opening_equity_micros,omitempty,string"`
 	EquityMicros                uint64             `json:"equity_micros,omitempty,string"`
+	DeficitMicros               uint64             `json:"deficit_micros,omitempty,string"`
 	HoldBenchmarkMicros         uint64             `json:"hold_benchmark_micros,omitempty,string"`
 	AccountingTracked           bool               `json:"accounting_tracked,omitempty"`
 	RealizedMicros              int64              `json:"realized_micros,omitempty,string"`
 	UnrealizedMicros            int64              `json:"unrealized_micros,omitempty,string"`
 	FeesMicros                  int64              `json:"fees_micros,omitempty,string"`
+	FundingTracked              bool               `json:"funding_tracked,omitempty"`
+	FundingMicros               int64              `json:"funding_micros,omitempty,string"`
 	TurnoverMicros              uint64             `json:"turnover_micros,omitempty,string"`
 	DrawdownMicros              uint64             `json:"drawdown_micros,omitempty,string"`
 	MaxDrawdownMicros           uint64             `json:"max_drawdown_micros,omitempty,string"`
@@ -310,38 +332,61 @@ func (s *Server) readSnapshot(now time.Time) View {
 	activeInstructions := make(map[string]struct{})
 	for _, source := range s.sources {
 		label := source.SourceLabel()
+		optional := sourceOptional(source)
 		snapshot, err := source.Read()
 		if err != nil || paperstatus.ValidateSnapshot(snapshot) != nil {
-			view.Complete = false
-			view.Markets = append(view.Markets, Market{Name: label})
-			coverageReady = false
+			if !optional {
+				view.Complete = false
+				coverageReady = false
+			}
+			view.Markets = append(view.Markets, Market{Name: label, Optional: optional})
 			continue
 		}
 		if snapshot.Summary == nil && snapshot.Current == paperstatus.UnconfiguredCurrent {
-			view.Markets = append(view.Markets, Market{Name: label})
+			view.Markets = append(view.Markets, Market{Name: label, Optional: optional})
+			continue
+		}
+		if snapshot.Summary == nil {
+			if !optional {
+				view.Complete = false
+				coverageReady = false
+			}
+			view.Markets = append(view.Markets, Market{Name: label, Optional: optional, Available: true})
 			continue
 		}
 		if snapshot.Summary != nil && snapshot.Summary.Market != label {
-			view.Complete = false
-			view.Markets = append(view.Markets, Market{Name: label})
-			coverageReady = false
+			if !optional {
+				view.Complete = false
+				coverageReady = false
+			}
+			view.Markets = append(view.Markets, Market{Name: label, Optional: optional})
 			continue
 		}
 		market := marketView(label, snapshot, now)
+		market.Optional = optional
 		view.Markets = append(view.Markets, market)
-		if snapshot.Summary != nil {
-			activeInstructions[snapshot.Summary.InstructionSHA256] = struct{}{}
+		if snapshot.Summary != nil && !optional {
+			if digest := snapshot.Summary.InstructionSHA256; digest != "" {
+				activeInstructions[digest] = struct{}{}
+			}
 		}
-		if !market.Fresh {
+		if !market.Fresh && !optional {
 			view.Complete = false
 		}
-		if market.Ready && (view.ObservedAt == nil || snapshot.ObservedAt.Before(*view.ObservedAt)) {
+		if market.Fresh && (view.ObservedAt == nil || snapshot.ObservedAt.Before(*view.ObservedAt)) {
 			observedAt := snapshot.ObservedAt
 			view.ObservedAt = &observedAt
 		}
-		if !market.Fresh || !addOverview(&view.Overview, *snapshot.Summary) {
-			view.Complete = false
-			coverageReady = false
+		if !market.Fresh {
+			if !optional {
+				view.Complete = false
+				coverageReady = false
+			}
+		} else if !addOverview(&view.Overview, *snapshot.Summary) {
+			if !optional {
+				view.Complete = false
+				coverageReady = false
+			}
 		} else if market.CoverageReady && market.CoverageBPS < minimumCoverage {
 			minimumCoverage = market.CoverageBPS
 		} else if !market.CoverageReady {
@@ -405,6 +450,10 @@ func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Mark
 	}
 	if summary := snapshot.Summary; summary != nil {
 		market.Ready = summary.ValueUnit != ""
+		market.Instrument = summary.Instrument
+		market.RiskProfile = summary.RiskProfile
+		market.PositionDirection = summary.PositionDirection
+		market.LeverageBPS = summary.LeverageBPS
 		market.Fresh = market.Ready && summary.State != "waiting for data" &&
 			summary.Day == now.UTC().Format("2006-01-02") && fresh(snapshot, now)
 		market.Day = summary.Day
@@ -413,11 +462,14 @@ func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Mark
 		market.TickSeconds = summary.TickSeconds
 		market.OpeningEquityMicros = summary.OpeningEquityMicros
 		market.EquityMicros = summary.EquityMicros
+		market.DeficitMicros = summary.DeficitMicros
 		market.HoldBenchmarkMicros = summary.HoldBenchmarkMicros
 		market.AccountingTracked = summary.AccountingTracked
 		market.RealizedMicros = summary.RealizedMicros
 		market.UnrealizedMicros = summary.UnrealizedMicros
 		market.FeesMicros = summary.FeesMicros
+		market.FundingTracked = summary.FundingTracked
+		market.FundingMicros = summary.FundingMicros
 		market.TurnoverMicros = summary.TurnoverMicros
 		market.DrawdownMicros = summary.DrawdownMicros
 		market.MaxDrawdownMicros = summary.MaxDrawdownMicros
@@ -468,37 +520,41 @@ func fresh(snapshot paperstatus.Snapshot, now time.Time) bool {
 }
 
 func addOverview(overview *Overview, summary paperstatus.CurrentSummary) bool {
-	if summary.ValueUnit == "" || overview.ValueUnit != "" && overview.ValueUnit != summary.ValueUnit {
+	next := *overview
+	if summary.ValueUnit == "" || next.ValueUnit != "" && next.ValueUnit != summary.ValueUnit {
 		return false
 	}
-	if overview.OpeningEquityMicros > math.MaxUint64-summary.OpeningEquityMicros ||
-		overview.EquityMicros > math.MaxUint64-summary.EquityMicros ||
-		overview.HoldBenchmarkMicros > math.MaxUint64-summary.HoldBenchmarkMicros ||
-		overview.TurnoverMicros > math.MaxUint64-summary.TurnoverMicros ||
-		overview.Signals > math.MaxUint64-summary.Signals ||
-		overview.Trades > math.MaxUint64-summary.Trades {
+	if next.OpeningEquityMicros > math.MaxUint64-summary.OpeningEquityMicros ||
+		next.EquityMicros > math.MaxUint64-summary.EquityMicros ||
+		next.DeficitMicros > math.MaxUint64-summary.DeficitMicros ||
+		next.HoldBenchmarkMicros > math.MaxUint64-summary.HoldBenchmarkMicros ||
+		next.TurnoverMicros > math.MaxUint64-summary.TurnoverMicros ||
+		next.Signals > math.MaxUint64-summary.Signals ||
+		next.Trades > math.MaxUint64-summary.Trades {
 		return false
 	}
 	tracked := summary.AccountingTracked
-	if overview.ValueUnit != "" {
-		tracked = overview.AccountingTracked && tracked
+	if next.ValueUnit != "" {
+		tracked = next.AccountingTracked && tracked
 	}
-	if tracked && (!addSigned(&overview.RealizedMicros, summary.RealizedMicros) ||
-		!addSigned(&overview.UnrealizedMicros, summary.UnrealizedMicros) ||
-		!addSigned(&overview.FeesMicros, summary.FeesMicros)) {
+	if tracked && (!addSigned(&next.RealizedMicros, summary.RealizedMicros) ||
+		!addSigned(&next.UnrealizedMicros, summary.UnrealizedMicros) ||
+		!addSigned(&next.FeesMicros, summary.FeesMicros)) {
 		return false
 	}
 	if !tracked {
-		overview.RealizedMicros, overview.UnrealizedMicros, overview.FeesMicros = 0, 0, 0
+		next.RealizedMicros, next.UnrealizedMicros, next.FeesMicros = 0, 0, 0
 	}
-	overview.AccountingTracked = tracked
-	overview.OpeningEquityMicros += summary.OpeningEquityMicros
-	overview.EquityMicros += summary.EquityMicros
-	overview.HoldBenchmarkMicros += summary.HoldBenchmarkMicros
-	overview.TurnoverMicros += summary.TurnoverMicros
-	overview.Signals += summary.Signals
-	overview.Trades += summary.Trades
-	overview.ValueUnit = summary.ValueUnit
+	next.AccountingTracked = tracked
+	next.OpeningEquityMicros += summary.OpeningEquityMicros
+	next.EquityMicros += summary.EquityMicros
+	next.DeficitMicros += summary.DeficitMicros
+	next.HoldBenchmarkMicros += summary.HoldBenchmarkMicros
+	next.TurnoverMicros += summary.TurnoverMicros
+	next.Signals += summary.Signals
+	next.Trades += summary.Trades
+	next.ValueUnit = summary.ValueUnit
+	*overview = next
 	return true
 }
 

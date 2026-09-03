@@ -20,7 +20,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 )
 
-const usage = "Usage: mithril-agent-paper-dashboard --paper-status-socket MARKET=/absolute/path [--instruction-path /absolute/path] [--research-packet-path /absolute/path] [--mithril-evidence-status-path /absolute/path]"
+const usage = "Usage: mithril-agent-paper-dashboard --paper-status-socket MARKET=/absolute/path [--optional-paper-status-socket MARKET=/absolute/path] [--instruction-path /absolute/path] [--research-packet-path /absolute/path] [--mithril-evidence-status-path /absolute/path]"
 
 var activatedListener = systemdUnixListener
 
@@ -43,9 +43,10 @@ func main() {
 func run(ctx context.Context, args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("mithril-agent-paper-dashboard", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	var sockets socketPaths
+	var sockets, optionalSockets socketPaths
 	var instructionPath, researchPath, mithrilEvidencePath, recordMithrilPath, mithrilStatus, renderInstructionPath, exportInstructionPath string
 	flags.Var(&sockets, "paper-status-socket", "MARKET=/absolute/path to a bounded paper status socket")
+	flags.Var(&optionalSockets, "optional-paper-status-socket", "MARKET=/absolute/path for a bounded experiment that may expire")
 	flags.StringVar(&instructionPath, "instruction-path", "", "private path for a bounded paper research preference")
 	flags.StringVar(&researchPath, "research-packet-path", "", "private path for the latest validated Hermes packet")
 	flags.StringVar(&mithrilEvidencePath, "mithril-evidence-status-path", "", "private status from the latest Hermes Mithril evidence check")
@@ -61,7 +62,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		return err
 	}
 	if recordMithrilPath != "" {
-		if flags.NArg() != 0 || len(sockets) != 0 || instructionPath != "" || researchPath != "" ||
+		if flags.NArg() != 0 || len(sockets) != 0 || len(optionalSockets) != 0 || instructionPath != "" || researchPath != "" ||
 			mithrilEvidencePath != "" || renderInstructionPath != "" || exportInstructionPath != "" ||
 			!cleanAbsolutePath(recordMithrilPath) ||
 			(mithrilStatus != "current" && mithrilStatus != "unavailable") {
@@ -72,7 +73,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		)
 	}
 	if renderInstructionPath != "" {
-		if flags.NArg() != 0 || len(sockets) != 0 || instructionPath != "" || researchPath != "" || mithrilEvidencePath != "" || mithrilStatus != "" ||
+		if flags.NArg() != 0 || len(sockets) != 0 || len(optionalSockets) != 0 || instructionPath != "" || researchPath != "" || mithrilEvidencePath != "" || mithrilStatus != "" ||
 			exportInstructionPath != "" ||
 			!cleanAbsolutePath(renderInstructionPath) {
 			return errors.New("--render-instruction requires one clean absolute path and no server flags")
@@ -85,7 +86,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		return err
 	}
 	if exportInstructionPath != "" {
-		if flags.NArg() != 0 || len(sockets) != 0 || instructionPath != "" || researchPath != "" || mithrilEvidencePath != "" || mithrilStatus != "" ||
+		if flags.NArg() != 0 || len(sockets) != 0 || len(optionalSockets) != 0 || instructionPath != "" || researchPath != "" || mithrilEvidencePath != "" || mithrilStatus != "" ||
 			!cleanAbsolutePath(exportInstructionPath) {
 			return errors.New("--export-instruction requires one clean absolute path and no server flags")
 		}
@@ -102,13 +103,27 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		(mithrilEvidencePath != "" && !cleanAbsolutePath(mithrilEvidencePath)) || mithrilStatus != "" {
 		return errors.New("at least one --paper-status-socket is required")
 	}
-	sources := make([]paperdashboard.Source, 0, len(sockets))
+	for _, optional := range optionalSockets {
+		for _, required := range sockets {
+			if optional.label == required.label || optional.path == required.path {
+				return errors.New("paper status socket labels and paths must be unique")
+			}
+		}
+	}
+	sources := make([]paperdashboard.Source, 0, len(sockets)+len(optionalSockets))
 	for _, socket := range sockets {
 		reader, err := paperstatus.NewLabeledSocketReader(socket.path, socket.label)
 		if err != nil {
 			return err
 		}
 		sources = append(sources, reader)
+	}
+	for _, socket := range optionalSockets {
+		reader, err := paperstatus.NewLabeledSocketReader(socket.path, socket.label)
+		if err != nil {
+			return err
+		}
+		sources = append(sources, paperdashboard.Optional(reader))
 	}
 	handler, err := paperdashboard.New(sources)
 	if err != nil {

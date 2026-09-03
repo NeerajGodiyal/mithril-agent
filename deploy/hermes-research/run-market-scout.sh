@@ -25,6 +25,7 @@ finalizer_query=/run/mithril-hermes-research/challenger-finalizer.md
 research_raw=/run/mithril-hermes-research/hermes-research.raw
 finalizer_raw=/run/mithril-hermes-research/hermes-finalizer.raw
 packet=/run/mithril-hermes-research/packet.raw
+bound_packet=/run/mithril-hermes-research/research-state/packet-bound.raw
 dashboard_packet=/run/mithril-hermes-research/packet-dashboard.raw
 research_state=/run/mithril-hermes-research/research-state
 validated_research=$research_state/validated.json
@@ -40,7 +41,7 @@ projection=/var/lib/mithril-agent-dashboard/research.json
 mithril_projection=/var/lib/mithril-agent-dashboard/mithril-evidence.json
 cleanup() {
 	/usr/bin/rm -f "$research_raw" "$finalizer_raw" "$packet" \
-		"$dashboard_packet" "$runtime_instruction"
+		"$dashboard_packet" "$bound_packet" "$runtime_instruction"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
@@ -153,18 +154,22 @@ run_finished_epoch=$(/usr/bin/date -u +%s.%N)
 /usr/bin/sed -n '/^[[:space:]]*{/,$p' "$research_raw" >"$packet"
 /usr/bin/chmod 0600 "$packet"
 /usr/bin/chown mithril-agent-research:mithril-agent-research "$packet"
-/usr/sbin/runuser -u mithril-agent-research -- \
-  /usr/local/libexec/mithril-agent/mithril-agent research packet-record \
-    --in "$packet" --latest "$validated_research" >/dev/null
-
 # Pinned Hermes v2026.8.27 exports one full session object per JSONL row,
 # including tool calls and results. Preserve the redacted trace and require
-# every packet citation to match a successful web_extract result.
+# every packet citation and retrieval time to match a successful web_extract result.
 /usr/bin/docker compose run --rm --no-TTY \
   hermes-research-parallel sessions export --format jsonl --redact --yes --after "$created_at" \
   /opt/research-data/sessions.jsonl >/dev/null
 /usr/bin/chmod 0600 "$session_export"
 /usr/bin/chown mithril-agent-research:mithril-agent-research "$session_export"
+/usr/sbin/runuser -u mithril-agent-research -- \
+  /usr/bin/python3 /opt/mithril-hermes-research/build-research-evidence.py \
+    --sessions "$session_export" --packet "$packet" \
+    --bind-output "$bound_packet" --run-started "$run_started_epoch" \
+    --run-finished "$run_finished_epoch"
+/usr/sbin/runuser -u mithril-agent-research -- \
+  /usr/local/libexec/mithril-agent/mithril-agent research packet-record \
+    --in "$bound_packet" --latest "$validated_research" >/dev/null
 /usr/sbin/runuser -u mithril-agent-research -- \
   /usr/bin/python3 /opt/mithril-hermes-research/build-research-evidence.py \
     --sessions "$session_export" --packet "$validated_research" \
@@ -179,7 +184,7 @@ digest_prefix=$(/usr/bin/printf '%s' "$session_digest" | /usr/bin/cut -c1-16)
   "$research_evidence" "$evidence_archive/$run_stamp-$digest_prefix.evidence.json"
 /usr/sbin/runuser -u mithril-agent-research -- \
   /usr/local/libexec/mithril-agent/mithril-agent research packet-record \
-    --in "$packet" \
+    --in "$bound_packet" \
     --archive-dir /var/lib/mithril-agent-research/reports \
     --latest "$latest"
 /usr/bin/install -o mithril-agent-research -g mithril-agent-research -m 0600 \
@@ -211,7 +216,7 @@ fi
 # Validate the dashboard projection again as the unprivileged dashboard user.
 # Root never follows a name from the dashboard-owned state directory.
 /usr/bin/install -o mithril-agent-dashboard -g mithril-agent-dashboard -m 0600 \
-  "$packet" "$dashboard_packet"
+  "$bound_packet" "$dashboard_packet"
 /usr/bin/install -o mithril-agent-dashboard -g mithril-agent-dashboard -m 0600 \
   "$session_export" "$dashboard_sessions"
 /usr/sbin/runuser -u mithril-agent-dashboard -- \

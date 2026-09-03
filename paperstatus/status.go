@@ -77,12 +77,17 @@ type Snapshot struct {
 
 type CurrentSummary struct {
 	Market              string `json:"market"`
+	Instrument          string `json:"instrument,omitempty"`
+	RiskProfile         string `json:"risk_profile,omitempty"`
+	PositionDirection   string `json:"position_direction,omitempty"`
+	LeverageBPS         uint32 `json:"leverage_bps,omitempty"`
 	ValueUnit           string `json:"value_unit,omitempty"`
 	Day                 string `json:"day"`
 	InstructionSHA256   string `json:"instruction_sha256,omitempty"`
 	TickSeconds         uint64 `json:"tick_seconds"`
 	OpeningEquityMicros uint64 `json:"opening_equity_micros"`
 	EquityMicros        uint64 `json:"equity_micros"`
+	DeficitMicros       uint64 `json:"deficit_micros,omitempty"`
 	HoldBenchmarkMicros uint64 `json:"hold_benchmark_micros"`
 	// Realized is the result from inventory already sold, after modeled fees.
 	// Unrealized is the mark-to-market result still held in open inventory.
@@ -90,6 +95,8 @@ type CurrentSummary struct {
 	RealizedMicros    int64  `json:"realized_micros,omitempty"`
 	UnrealizedMicros  int64  `json:"unrealized_micros,omitempty"`
 	FeesMicros        int64  `json:"fees_micros,omitempty"`
+	FundingTracked    bool   `json:"funding_tracked,omitempty"`
+	FundingMicros     int64  `json:"funding_micros,omitempty"`
 	TurnoverMicros    uint64 `json:"turnover_micros,omitempty"`
 	DrawdownMicros    uint64 `json:"drawdown_micros,omitempty"`
 	MaxDrawdownMicros uint64 `json:"max_drawdown_micros,omitempty"`
@@ -341,6 +348,7 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 		summary.Unobservable > summary.Checks || summary.Missed > summary.Signals ||
 		summary.FeesMicros < 0 ||
 		!validValueUnit(summary.ValueUnit) ||
+		!validInstrument(*summary) ||
 		!validAccounting(*summary) ||
 		!validCurrentState(summary.State) || !validCurrentStrategy(summary.Strategy) ||
 		!validNextAction(summary.NextAction) || !validDecisionReason(summary.DecisionReason) ||
@@ -362,6 +370,28 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 	return nil
 }
 
+func validInstrument(summary CurrentSummary) bool {
+	switch summary.Instrument {
+	case "", "spot":
+		return summary.RiskProfile == "" && summary.PositionDirection == "" &&
+			summary.LeverageBPS == 0 && !summary.FundingTracked && summary.FundingMicros == 0 &&
+			summary.DeficitMicros == 0
+	case "perpetual":
+		if summary.RiskProfile != "conservative" && summary.RiskProfile != "balanced" &&
+			summary.RiskProfile != "experimental" ||
+			summary.PositionDirection != "flat" && summary.PositionDirection != "long" &&
+				summary.PositionDirection != "short" ||
+			summary.LeverageBPS < 10_000 || summary.LeverageBPS > 500_000 ||
+			!summary.FundingTracked {
+			return false
+		}
+		return summary.DeficitMicros == 0 || summary.EquityMicros == 0 &&
+			summary.PositionDirection == "flat" && summary.RiskHalted
+	default:
+		return false
+	}
+}
+
 func validOptionalSHA256(value string) bool {
 	if value == "" {
 		return true
@@ -376,12 +406,16 @@ func validAccounting(summary CurrentSummary) bool {
 			summary.FeesMicros == 0
 	}
 	if summary.OpeningEquityMicros > math.MaxInt64 || summary.EquityMicros > math.MaxInt64 ||
+		summary.DeficitMicros > math.MaxInt64 ||
 		summary.UnrealizedMicros > 0 && summary.RealizedMicros > math.MaxInt64-summary.UnrealizedMicros ||
 		summary.UnrealizedMicros < 0 && summary.RealizedMicros < math.MinInt64-summary.UnrealizedMicros {
 		return false
 	}
-	return summary.RealizedMicros+summary.UnrealizedMicros ==
-		int64(summary.EquityMicros)-int64(summary.OpeningEquityMicros)
+	result := int64(summary.EquityMicros) - int64(summary.OpeningEquityMicros)
+	if result < math.MinInt64+int64(summary.DeficitMicros) {
+		return false
+	}
+	return summary.RealizedMicros+summary.UnrealizedMicros == result-int64(summary.DeficitMicros)
 }
 
 func validDecisionReason(reason string) bool {

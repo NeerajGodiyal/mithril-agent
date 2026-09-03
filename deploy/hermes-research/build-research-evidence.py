@@ -119,20 +119,16 @@ def iso_epoch(value: str) -> float:
         raise ValueError("validated packet creation time is invalid") from None
 
 
-def build_evidence(sessions_data: bytes, packet_data: bytes,
-                   run_started: float, run_finished: float) -> dict:
-    packet = json.loads(packet_data)
-    packet_digest = packet.get("content_sha256")
-    created_at = packet.get("created_at")
-    if not isinstance(packet_digest, str) or not SHA256.fullmatch(packet_digest):
-        raise ValueError("validated packet digest is missing")
-    if not isinstance(created_at, str) or not created_at.endswith("Z"):
-        raise ValueError("validated packet creation time is missing")
-    created_epoch = iso_epoch(created_at)
-    if (not math.isfinite(run_started) or not math.isfinite(run_finished) or
-            run_started > created_epoch or created_epoch > run_finished):
-        raise ValueError("research run time bounds are invalid")
+def rfc3339nano_epoch(timestamp: float) -> str:
+    encoded = datetime.datetime.fromtimestamp(
+        timestamp, datetime.timezone.utc,
+    ).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    whole, fraction = encoded[:-1].split(".")
+    fraction = fraction.rstrip("0")
+    return f"{whole}.{fraction}Z" if fraction else f"{whole}Z"
 
+
+def session_trace(sessions_data: bytes, run_started: float, run_finished: float) -> dict:
     sessions = []
     for line in sessions_data.splitlines():
         if line.strip():
@@ -145,6 +141,7 @@ def build_evidence(sessions_data: bytes, packet_data: bytes,
 
     call_names = {}
     call_arguments = {}
+    call_times = {}
     tool_counts = collections.Counter()
     messages = []
     message_count = 0
@@ -197,9 +194,10 @@ def build_evidence(sessions_data: bytes, packet_data: bytes,
                         raise ValueError("session export contains a duplicated tool call ID")
                     call_names[(session_id, call_id)] = name
                     call_arguments[(session_id, call_id)] = function.get("arguments")
+                    call_times[(session_id, call_id)] = message_at
 
     successful_searches = 0
-    retrieved = set()
+    retrieved = {}
     seen_results = set()
     for session_id, message in messages:
         if message.get("role") != "tool":
@@ -215,43 +213,107 @@ def build_evidence(sessions_data: bytes, packet_data: bytes,
             if not called_name or called_name != name or key in seen_results:
                 raise ValueError("web tool result does not match one recorded call")
             seen_results.add(key)
+            if message["timestamp"] < call_times[key]:
+                raise ValueError("web tool result predates its recorded call")
         result = decode_tool_result(message.get("content"), name)
         if name == "web_search" and result and result.get("success") is True:
             successful_searches += 1
         elif name == "web_extract":
-            retrieved.update(successful_retrievals(
-                result, requested_urls(call_arguments.get(key))
-            ))
+            for url in successful_retrievals(result, requested_urls(call_arguments.get(key))):
+                retrieved[url] = max(retrieved.get(url, float("-inf")), message["timestamp"])
             if len(retrieved) > MAX_URLS:
                 raise ValueError("session export contains too many retrieved URLs")
 
     if not tool_counts or not retrieved:
         raise ValueError("Hermes did not leave a successful page retrieval trace")
 
-    cited = set()
-    for fact in packet.get("verified_facts") or []:
+    return {
+        "tool_counts": tool_counts,
+        "successful_web_searches": successful_searches,
+        "retrieved": {
+            url: rfc3339nano_epoch(timestamp)
+            for url, timestamp in retrieved.items()
+        },
+        "session_count": len(sessions),
+    }
+
+
+def packet_created_at(packet: dict, run_started: float, run_finished: float) -> str:
+    created_at = packet.get("created_at")
+    if not isinstance(created_at, str) or not created_at.endswith("Z"):
+        raise ValueError("validated packet creation time is missing")
+    created_epoch = iso_epoch(created_at)
+    if (not math.isfinite(run_started) or not math.isfinite(run_finished) or
+            run_started > created_epoch or created_epoch > run_finished):
+        raise ValueError("research run time bounds are invalid")
+    return created_at
+
+
+def packet_sources(packet: dict):
+    facts = packet.get("verified_facts")
+    if not isinstance(facts, list):
+        raise ValueError("validated packet facts are invalid")
+    for fact in facts:
         if not isinstance(fact, dict):
             raise ValueError("validated packet facts are invalid")
-        for source in fact.get("sources") or []:
+        sources = fact.get("sources")
+        if not isinstance(sources, list):
+            raise ValueError("validated packet sources are invalid")
+        for source in sources:
             if not isinstance(source, dict) or not isinstance(source.get("url"), str):
                 raise ValueError("validated packet sources are invalid")
-            cited.add(source["url"])
-    missing = cited - retrieved
+            yield source
+
+
+def bind_source_times(sessions_data: bytes, packet_data: bytes,
+                      run_started: float, run_finished: float) -> bytes:
+    packet = json.loads(packet_data)
+    if "content_sha256" in packet:
+        raise ValueError("raw research packet cannot supply a content digest")
+    packet_created_at(packet, run_started, run_finished)
+    trace = session_trace(sessions_data, run_started, run_finished)
+    for source in packet_sources(packet):
+        if "retrieved_at" in source:
+            raise ValueError("raw research packet cannot supply a retrieval time")
+        retrieved_at = trace["retrieved"].get(source["url"])
+        if retrieved_at is None:
+            raise ValueError("packet cites a URL without a successful Hermes retrieval")
+        source["retrieved_at"] = retrieved_at
+    encoded = json.dumps(packet, separators=(",", ":"), sort_keys=True).encode() + b"\n"
+    if len(encoded) > 64 << 10:
+        raise ValueError("bound research packet exceeds the size limit")
+    return encoded
+
+
+def build_evidence(sessions_data: bytes, packet_data: bytes,
+                   run_started: float, run_finished: float) -> dict:
+    packet = json.loads(packet_data)
+    packet_digest = packet.get("content_sha256")
+    if not isinstance(packet_digest, str) or not SHA256.fullmatch(packet_digest):
+        raise ValueError("validated packet digest is missing")
+    created_at = packet_created_at(packet, run_started, run_finished)
+    trace = session_trace(sessions_data, run_started, run_finished)
+    sources = list(packet_sources(packet))
+    cited = {source["url"] for source in sources}
+    missing = cited - trace["retrieved"].keys()
     if missing:
         raise ValueError("packet cites a URL without a successful Hermes retrieval")
+    for source in sources:
+        if source.get("retrieved_at") != trace["retrieved"].get(source["url"]):
+            raise ValueError("packet source time does not match its Hermes retrieval")
 
     return {
         "version": 1,
         "created_at": created_at,
         "packet_sha256": packet_digest,
         "session_export_sha256": hashlib.sha256(sessions_data).hexdigest(),
-        "session_count": len(sessions),
+        "session_count": trace["session_count"],
         "tool_calls": [
             {"name": name, "count": count}
-            for name, count in sorted(tool_counts.items())
+            for name, count in sorted(trace["tool_counts"].items())
         ],
-        "successful_web_searches": successful_searches,
-        "retrieved_urls": sorted(retrieved),
+        "successful_web_searches": trace["successful_web_searches"],
+        "retrieved_urls": sorted(trace["retrieved"]),
         "official_pages_checked": len(cited),
     }
 
@@ -290,12 +352,19 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sessions", type=Path, required=True)
     parser.add_argument("--packet", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    destination = parser.add_mutually_exclusive_group(required=True)
+    destination.add_argument("--output", type=Path)
+    destination.add_argument("--bind-output", type=Path)
     parser.add_argument("--run-started", type=float, required=True)
     parser.add_argument("--run-finished", type=float, required=True)
     args = parser.parse_args()
     sessions = read_private(args.sessions, MAX_EXPORT_BYTES)
     packet = read_private(args.packet, 64 << 10)
+    if args.bind_output:
+        replace_private(args.bind_output, bind_source_times(
+            sessions, packet, args.run_started, args.run_finished,
+        ))
+        return
     evidence = build_evidence(sessions, packet, args.run_started, args.run_finished)
     replace_private(args.output, json.dumps(evidence, separators=(",", ":"), sort_keys=True).encode() + b"\n")
 

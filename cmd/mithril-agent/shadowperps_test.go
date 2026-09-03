@@ -78,7 +78,7 @@ func TestShadowPerpsPaperRunPersistsSignerFreePaperState(t *testing.T) {
 	if !status.PaperOnly || status.ExecutionEnabled || status.AccountingModel != shadowPerpsModel || !status.NewFrame || status.Frames != 1 || status.Symbol != perpspaper.SOL {
 		t.Fatalf("status = %+v", status)
 	}
-	for _, name := range []string{"sol-tape.json", "sol-status.json"} {
+	for _, name := range []string{"sol-tape.json", "sol-status.json", "sol-paper-status.json"} {
 		info, err := os.Stat(filepath.Join(directory, name))
 		if err != nil || info.Mode().Perm() != 0o600 {
 			t.Fatalf("%s mode = %v, %v", name, info.Mode().Perm(), err)

@@ -134,6 +134,18 @@ func TestRunRequiresSourcesAndActivatedSocket(t *testing.T) {
 	}, &bytes.Buffer{}); err == nil || err.Error() != "not activated" {
 		t.Fatalf("activation error = %v", err)
 	}
+	if err := run(t.Context(), []string{
+		"--paper-status-socket", "SOL/USDC=/run/sol.sock",
+		"--optional-paper-status-socket", "SOL-PERP=/run/sol-perp.sock",
+	}, &bytes.Buffer{}); err == nil || err.Error() != "not activated" {
+		t.Fatalf("optional activation error = %v", err)
+	}
+	if err := run(t.Context(), []string{
+		"--paper-status-socket", "SOL/USDC=/run/sol.sock",
+		"--optional-paper-status-socket", "SOL/USDC=/run/other.sock",
+	}, &bytes.Buffer{}); err == nil {
+		t.Fatal("optional source duplicated a required label")
+	}
 }
 
 func TestRenderInstructionModeDoesNotOpenAListener(t *testing.T) {

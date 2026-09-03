@@ -99,17 +99,21 @@ type TapeReplay struct {
 }
 
 type ReplayConfig struct {
-	StartingCollateralMicros uint64
-	Symbol                   Symbol
-	RiskArm                  RiskArm
-	Quantity                 uint64 // optional maximum quantity; zero uses the arm's notional allocation
-	VenueMaxLeverage         uint32 // multiplier reported by venue metadata
-	VenueSzDecimals          uint8
+	StartingCollateralMicros uint64  `json:"starting_collateral_micros"`
+	Symbol                   Symbol  `json:"symbol"`
+	RiskArm                  RiskArm `json:"risk_arm"`
+	Quantity                 uint64  `json:"quantity"`           // optional maximum quantity; zero uses the arm's notional allocation
+	VenueMaxLeverage         uint32  `json:"venue_max_leverage"` // multiplier reported by venue metadata
+	VenueSzDecimals          uint8   `json:"venue_sz_decimals"`
 }
 
 // ReplayTape binds every modeled fill to the hash-chained paper book. It uses
 // no clock or network input, so an identical tape has an identical result.
 func ReplayTape(config ReplayConfig, frames []TapeFrame) (TapeReplay, error) {
+	return replayTape(config, frames, Decide)
+}
+
+func replayTape(config ReplayConfig, frames []TapeFrame, decide func(Symbol, RiskArm, []Candle) (Decision, error)) (TapeReplay, error) {
 	if _, err := lotSize(config.Symbol, config.VenueSzDecimals); len(frames) == 0 || err != nil || config.VenueMaxLeverage == 0 || config.VenueMaxLeverage > MaxLeverageBPS/uint32(basisPoints) || config.Quantity != 0 && !validLot(config.Symbol, config.Quantity, config.VenueSzDecimals) {
 		return TapeReplay{}, errors.New("paper replay configuration is invalid")
 	}
@@ -198,7 +202,7 @@ func ReplayTape(config ReplayConfig, frames []TapeFrame) (TapeReplay, error) {
 				return TapeReplay{}, fmt.Errorf("frame %d mark: %w", i, err)
 			}
 		}
-		decision, err := Decide(config.Symbol, config.RiskArm, frame.Candles)
+		decision, err := decide(config.Symbol, config.RiskArm, frame.Candles)
 		if err != nil {
 			return TapeReplay{}, fmt.Errorf("frame %d decision: %w", i, err)
 		}
@@ -394,6 +398,15 @@ type Fill struct {
 	FilledQuantity     uint64 `json:"filled_quantity"`
 	AveragePriceMicros uint64 `json:"average_price_micros"`
 	Complete           bool   `json:"complete"`
+}
+
+// FilledNotionalMicros returns the USD notional represented by a visible-book
+// fill using the venue quantity scale for the selected market.
+func FilledNotionalMicros(symbol Symbol, fill Fill) (uint64, error) {
+	if fill.FilledQuantity == 0 || fill.AveragePriceMicros == 0 {
+		return 0, errors.New("fill has no executed quantity or price")
+	}
+	return notionalMicros(symbol, fill.FilledQuantity, fill.AveragePriceMicros)
 }
 
 // WalkBook models a market entry using only visible liquidity. Levels[0] are
