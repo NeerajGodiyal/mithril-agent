@@ -20,5 +20,5 @@ ExecStartPre=/opt/mithril-hermes-research/check-network.sh
 ExecStartPre=/usr/sbin/iptables -C DOCKER-USER -s 172.30.77.0/28 -j MITHRIL_HERMES
 ExecStartPre=/usr/sbin/iptables -C INPUT -s 172.30.77.0/28 -j REJECT
 ExecStart=/opt/mithril-hermes-research/run-market-scout.sh
-TimeoutStartSec=12min
+TimeoutStartSec=18min
 TimeoutStopSec=1min

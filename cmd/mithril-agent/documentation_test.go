@@ -857,7 +857,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"RuntimeDirectory=mithril-hermes-research", "RuntimeDirectoryMode=0711",
 		"iptables -C DOCKER-USER", "iptables -C INPUT",
 		"ExecStart=/opt/mithril-hermes-research/run-market-scout.sh",
-		"TimeoutStartSec=12min", "TimeoutStopSec=1min",
+		"TimeoutStartSec=18min", "TimeoutStopSec=1min",
 	} {
 		if !strings.Contains(hermesUnit, want) {
 			t.Errorf("Hermes systemd owner is missing %q", want)
@@ -927,11 +927,14 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"--render-perps-research \"ETH-PERP=$eth_perps_status\"",
 		"Trusted content-hashed completed perps paper research.",
 		"cannot authorize, promote, or execute anything",
-		"research_raw=/run/mithril-hermes-research/hermes-research.raw",
 		"finalizer_raw=/run/mithril-hermes-research/hermes-finalizer.raw",
-		"/usr/bin/docker compose run --rm --no-TTY hermes-research-parallel >\"$research_raw\"",
-		"/usr/bin/sed -n '/^[[:space:]]*{/,$p' \"$research_raw\" >\"$packet\"",
-		"/usr/bin/rm -f \"$research_raw\" \"$finalizer_raw\" \"$packet\"",
+		"/usr/bin/docker compose run --rm --no-TTY hermes-research-parallel >\"$packet\"",
+		"/usr/bin/rm -f \"$finalizer_raw\" \"$packet\"",
+		"collect_research_packet() (", "set +e\n  collect_research_packet\n  result=$?\n  set -e",
+		"Hermes pre-publication validation failed; retrying once with fresh state",
+		`/usr/bin/find "$research_state" -mindepth 1 -xdev -depth -delete`,
+		`/dev/null "$research_state/.no-bundled-skills"`,
+		`/usr/bin/printf '%s\n%s\n' "$run_started" "$run_finished" >"$run_bounds"`,
 		"/usr/bin/chmod 0644 \"$research_query\"",
 		"export MITHRIL_HERMES_QUERY_FILE=\"$research_query\"",
 		"--latest \"$validated_research\" >/dev/null",
@@ -953,6 +956,15 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		if !strings.Contains(researchRunner, want) {
 			t.Errorf("Hermes market scout wrapper is missing %q", want)
 		}
+	}
+	if strings.Contains(researchRunner, "research_raw=") || strings.Contains(researchRunner, "/^[[:space:]]*{/,$p") {
+		t.Fatal("Hermes wrapper heuristically extracts JSON instead of validating its complete reply")
+	}
+	validatedEvidence := strings.Index(researchRunner, `--output "$research_evidence"`)
+	retryStop := strings.Index(researchRunner, "collect_research_packet\n  result=$?")
+	persistentArchive := strings.Index(researchRunner, `"$session_export" "$evidence_archive/`)
+	if validatedEvidence < 0 || retryStop <= validatedEvidence || persistentArchive <= retryStop {
+		t.Fatal("Hermes retry boundary is not between validation and persistent publication")
 	}
 	if sol := strings.Index(researchRunner, `--render-perps-research "SOL-PERP=$sol_perps_status"`); sol < 0 {
 		t.Fatal("Hermes wrapper is missing SOL perps research")

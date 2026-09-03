@@ -1027,6 +1027,15 @@ paper champion after the fixed forward gate; Hermes cannot call it. An identical
 digest in the champion pointer is the durable paper-selection acknowledgement and permits the next research cycle without
 deleting or resetting either observer.
 
+Malformed replies and pre-publication validation failures keep the last
+validated research packet and dashboard research projection unchanged. The
+runner permits one isolated retry before publication; malformed model JSON is never repaired or
+partially accepted. The retry gets fresh state, timestamps, and a Hermes session
+trace. Once validated evidence may be persisted or the bounded paper finalizer
+may run, the retry phase is over and later failures do not repeat the workflow.
+The complete unit retains an 18-minute ceiling for two five-minute research
+attempts, one five-minute finalizer, and bounded validation overhead.
+
 Hourly scans accelerate paper experiments without granting control over a
 wallet, policy, or selector. Monitor the pinned
 provider/model, timer age, service result, Codex usage-limit errors, and keyless

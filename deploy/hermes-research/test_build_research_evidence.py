@@ -102,6 +102,42 @@ class ResearchEvidenceTest(unittest.TestCase):
                     self.sessions(), json.dumps(raw).encode(), self.created, self.created + 5,
                 )
 
+    def test_binding_rejects_malformed_model_json(self):
+        for packet in (
+            b'{"created_at":"2026-09-02T12:00:00Z" "verified_facts":[]}',
+            b'{"created_at":"2026-09-02T12:00:00Z","verified_facts":[',
+            b'{"created_at":"2026-09-02T12:00:00Z","verified_facts":{',
+        ):
+            with self.subTest(packet=packet):
+                with self.assertRaises(json.JSONDecodeError):
+                    evidence.bind_source_times(
+                        self.sessions(), packet, self.created, self.created + 5,
+                    )
+
+    def test_strict_json_object_rejects_ambiguous_documents(self):
+        for document in (
+            '{"created_at":"first","created_at":"second"}',
+            '{"outer":{"sources":[],"Sources":[]}}',
+            '{"value":NaN}',
+            '{"value":Infinity}',
+            '{"value":1e9999}',
+            '{"value":-1e9999}',
+            '```json\n{"value":1}\n```',
+            '{"value":1} trailing prose',
+            '{"value":1}{"value":2}',
+            '[{"value":1}]',
+            b'{"value":"\xff"}',
+        ):
+            with self.subTest(document=document):
+                with self.assertRaises((UnicodeDecodeError, ValueError)):
+                    evidence.strict_json_object(document)
+
+    def test_strict_json_object_accepts_one_whitespace_wrapped_object(self):
+        self.assertEqual(
+            evidence.strict_json_object(' \n {"value":1,"nested":{"ok":true}}\t'),
+            {"value": 1, "nested": {"ok": True}},
+        )
+
     def test_rejects_a_source_time_not_bound_to_the_session_trace(self):
         packet = json.loads(self.packet())
         packet["verified_facts"][0]["sources"][0]["retrieved_at"] = "2026-09-02T12:00:02Z"

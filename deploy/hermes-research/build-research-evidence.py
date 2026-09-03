@@ -32,6 +32,43 @@ UNTRUSTED_TOOL_NOTICE = (
 )
 
 
+def strict_json_object(data):
+    if isinstance(data, (bytes, bytearray)):
+        data = data.decode("utf-8")
+    if not isinstance(data, str):
+        raise ValueError("JSON input must be text")
+
+    def unique_object(pairs):
+        decoded = {}
+        names = set()
+        for name, value in pairs:
+            folded = name.casefold()
+            if folded in names:
+                raise ValueError("JSON contains a duplicate object name")
+            names.add(folded)
+            decoded[name] = value
+        return decoded
+
+    def reject_constant(value):
+        raise ValueError(f"JSON contains non-finite number {value}")
+
+    def finite_float(value):
+        decoded = float(value)
+        if not math.isfinite(decoded):
+            raise ValueError(f"JSON contains non-finite number {value}")
+        return decoded
+
+    decoded = json.loads(
+        data,
+        object_pairs_hook=unique_object,
+        parse_constant=reject_constant,
+        parse_float=finite_float,
+    )
+    if not isinstance(decoded, dict):
+        raise ValueError("JSON document must be an object")
+    return decoded
+
+
 def read_private(path: Path, maximum: int) -> bytes:
     info = path.lstat()
     if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
@@ -63,10 +100,10 @@ def decode_tool_result(content, tool_name=None):
             if "untrusted_tool_result" in content.casefold():
                 return None
     try:
-        decoded = json.loads(content)
-    except json.JSONDecodeError:
+        decoded = strict_json_object(content)
+    except (UnicodeDecodeError, ValueError):
         return None
-    return decoded if isinstance(decoded, dict) else None
+    return decoded
 
 
 def valid_retrieval_url(raw_url):
@@ -132,9 +169,7 @@ def session_trace(sessions_data: bytes, run_started: float, run_finished: float)
     sessions = []
     for line in sessions_data.splitlines():
         if line.strip():
-            session = json.loads(line)
-            if not isinstance(session, dict):
-                raise ValueError("session export contains a non-object row")
+            session = strict_json_object(line)
             sessions.append(session)
     if not sessions or len(sessions) > MAX_SESSIONS:
         raise ValueError("session export count is invalid")
@@ -267,7 +302,7 @@ def packet_sources(packet: dict):
 
 def bind_source_times(sessions_data: bytes, packet_data: bytes,
                       run_started: float, run_finished: float) -> bytes:
-    packet = json.loads(packet_data)
+    packet = strict_json_object(packet_data)
     if "content_sha256" in packet:
         raise ValueError("raw research packet cannot supply a content digest")
     packet_created_at(packet, run_started, run_finished)
@@ -279,7 +314,9 @@ def bind_source_times(sessions_data: bytes, packet_data: bytes,
         if retrieved_at is None:
             raise ValueError("packet cites a URL without a successful Hermes retrieval")
         source["retrieved_at"] = retrieved_at
-    encoded = json.dumps(packet, separators=(",", ":"), sort_keys=True).encode() + b"\n"
+    encoded = json.dumps(
+        packet, allow_nan=False, separators=(",", ":"), sort_keys=True,
+    ).encode() + b"\n"
     if len(encoded) > 64 << 10:
         raise ValueError("bound research packet exceeds the size limit")
     return encoded
@@ -287,7 +324,7 @@ def bind_source_times(sessions_data: bytes, packet_data: bytes,
 
 def build_evidence(sessions_data: bytes, packet_data: bytes,
                    run_started: float, run_finished: float) -> dict:
-    packet = json.loads(packet_data)
+    packet = strict_json_object(packet_data)
     packet_digest = packet.get("content_sha256")
     if not isinstance(packet_digest, str) or not SHA256.fullmatch(packet_digest):
         raise ValueError("validated packet digest is missing")
@@ -366,7 +403,9 @@ def main() -> None:
         ))
         return
     evidence = build_evidence(sessions, packet, args.run_started, args.run_finished)
-    replace_private(args.output, json.dumps(evidence, separators=(",", ":"), sort_keys=True).encode() + b"\n")
+    replace_private(args.output, json.dumps(
+        evidence, allow_nan=False, separators=(",", ":"), sort_keys=True,
+    ).encode() + b"\n")
 
 
 if __name__ == "__main__":
