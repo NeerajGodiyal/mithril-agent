@@ -367,6 +367,10 @@ func updateShadowPerpsMarketUnlocked(
 		if bookTime.Before(bookObservedAt.Add(-shadowPerpsMaxBookAge)) {
 			return shadowPerpsStatus{}, errors.New("Hyperliquid paper book is stale")
 		}
+		if book.Time < latestClose {
+			status := buildShadowPerpsStatus(config, replay, len(tape.Frames), false, now)
+			return status, writeShadowPerpsJSON(statusPath, status)
+		}
 		funding := []perpspaper.Funding(nil)
 		if len(tape.Frames) > 0 {
 			lastBook := tape.Frames[len(tape.Frames)-1].Book.Time

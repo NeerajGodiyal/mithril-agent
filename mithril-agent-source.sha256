@@ -141,8 +141,8 @@ ec3ac95154a41c2847932b34291a85b5876fde8073dfaca139e38514a6b97db3  ./cmd/mithril-
 2bf287910e07d2427a830d4474966b4e333871453e047c4aede8f422e8d5780d  ./cmd/mithril-agent/shadowmarket_test.go
 2ca828a3bfccb09e541ee3db07bdc02b60f064ee076b567a95a8010e72fec99d  ./cmd/mithril-agent/shadowmarketcurve.go
 c0037506045b3fd661aab30397c358d9e9b728b4a3d634fa95e286a3b47be19d  ./cmd/mithril-agent/shadowmarketcurve_test.go
-c4f98695bba9e2a067dd9396397bec3db66a2f26b485ca7d6b27f88b46ee0029  ./cmd/mithril-agent/shadowperps.go
-840245f502e0d56ae5fdfe9276361cf120bf536df31bd2fd51acb7d6949d94b3  ./cmd/mithril-agent/shadowperps_test.go
+58c52b2a341f201d313d617f40718e4e29d8855dc32f6dc1c08c0df7905d00b2  ./cmd/mithril-agent/shadowperps.go
+371350e5e1d1acf9a3370298df49d63ea45b7c9f0a625fb74a9d3dbbbbeaee96  ./cmd/mithril-agent/shadowperps_test.go
 af31373f2248902b71073f0c9d3d466b016dcb5941b2e3fda4a72d10528bc0f8  ./cmd/mithril-agent/shadowpolicy.go
 b0df1a529fad5a75765aa47d03e99c057117f83012056bf6c5cf611bd0f87dc2  ./cmd/mithril-agent/shadowpolicy_test.go
 bbdc2dfe9ff76d8ff07f7b4cffe8516712d7df6d56195967b0592ba3dffcf2ee  ./cmd/mithril-agent/shadowportfolio.go

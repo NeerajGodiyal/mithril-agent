@@ -142,6 +142,44 @@ func TestShadowPerpsPaperRunResumesOnlyNewCausalFrames(t *testing.T) {
 	}
 }
 
+func TestShadowPerpsPaperRunWaitsForBookAfterCandleClose(t *testing.T) {
+	now := time.Date(2026, 9, 2, 12, 5, 30, 0, time.UTC)
+	reader := validStubShadowPerpsReader(now)
+	directory := filepath.Join(t.TempDir(), "perps")
+	factory := func(perpspaper.Environment) (shadowPerpsReader, error) { return reader, nil }
+	args := []string{"--state-dir", directory, "--symbols", "SOL", "--once"}
+	if err := runShadowPerpsPaperWith(t.Context(), args, &bytes.Buffer{}, func() time.Time { return now }, factory); err != nil {
+		t.Fatal(err)
+	}
+
+	now = now.Truncate(time.Minute).Add(time.Minute + 500*time.Millisecond)
+	reader.candles = paperCandles(now, "100", "101")
+	latestClose := reader.candles[len(reader.candles)-1].CloseTime
+	reader.book.Time = latestClose - 1
+	var waiting bytes.Buffer
+	if err := runShadowPerpsPaperWith(t.Context(), args, &waiting, func() time.Time { return now }, factory); err != nil {
+		t.Fatal(err)
+	}
+	var waitingStatus shadowPerpsStatus
+	if err := json.Unmarshal(waiting.Bytes(), &waitingStatus); err != nil || waitingStatus.NewFrame || waitingStatus.Frames != 1 {
+		t.Fatalf("waiting status = %+v, %v", waitingStatus, err)
+	}
+	var tape shadowPerpsTape
+	if err := readStrictJSON(filepath.Join(directory, "sol-tape.json"), &tape); err != nil || len(tape.Frames) != 1 {
+		t.Fatalf("pre-close book changed tape: %d frames, %v", len(tape.Frames), err)
+	}
+
+	reader.book.Time = latestClose + 1
+	var advanced bytes.Buffer
+	if err := runShadowPerpsPaperWith(t.Context(), args, &advanced, func() time.Time { return now }, factory); err != nil {
+		t.Fatal(err)
+	}
+	var advancedStatus shadowPerpsStatus
+	if err := json.Unmarshal(advanced.Bytes(), &advancedStatus); err != nil || !advancedStatus.NewFrame || advancedStatus.Frames != 2 {
+		t.Fatalf("advanced status = %+v, %v", advancedStatus, err)
+	}
+}
+
 func TestShadowPerpsPaperRunRefusesMissedMinutes(t *testing.T) {
 	now := time.Date(2026, 9, 2, 12, 5, 30, 0, time.UTC)
 	reader := validStubShadowPerpsReader(now)
