@@ -71,6 +71,12 @@ type Research struct {
 type perpsResearchMarket struct {
 	Market                        string                             `json:"market"`
 	PaperStatusSHA256             string                             `json:"paper_status_sha256"`
+	DecisionSource                string                             `json:"decision_source,omitempty"`
+	ProposalSource                string                             `json:"proposal_source,omitempty"`
+	RunStrategy                   string                             `json:"run_strategy,omitempty"`
+	RunRiskProfile                string                             `json:"run_risk_profile,omitempty"`
+	RunPlanSHA256                 string                             `json:"run_plan_sha256,omitempty"`
+	PerpsPlanOutcome              *paperstatus.PerpsPlanOutcome      `json:"perps_plan_outcome,omitempty"`
 	QualificationInputSHA256      string                             `json:"qualification_input_sha256"`
 	QualificationOutcome          string                             `json:"qualification_outcome"`
 	QualificationTapes            uint64                             `json:"qualification_tapes"`
@@ -109,7 +115,7 @@ func RenderPerpsResearch(paths map[string]string) ([]byte, error) {
 		return nil, errors.New("perps research requires exactly three paper status paths")
 	}
 	result := perpsResearchSummary{
-		Version: 1, PaperOnly: true, AdvisoryOnly: true,
+		Version: 2, PaperOnly: true, AdvisoryOnly: true,
 		Markets: make([]perpsResearchMarket, 0, len(expected)),
 	}
 	for _, market := range expected {
@@ -134,9 +140,20 @@ func RenderPerpsResearch(paths map[string]string) ([]byte, error) {
 		}
 		summary := snapshot.Summary
 		sourceDigest := sha256.Sum256(raw)
+		var outcome *paperstatus.PerpsPlanOutcome
+		if summary.PerpsPlanOutcome != nil {
+			copy := *summary.PerpsPlanOutcome
+			outcome = &copy
+		}
 		result.Markets = append(result.Markets, perpsResearchMarket{
 			Market:                        market,
 			PaperStatusSHA256:             hex.EncodeToString(sourceDigest[:]),
+			DecisionSource:                summary.DecisionSource,
+			ProposalSource:                summary.ProposalSource,
+			RunStrategy:                   summary.Strategy,
+			RunRiskProfile:                summary.RiskProfile,
+			RunPlanSHA256:                 summary.RunPlanSHA256,
+			PerpsPlanOutcome:              outcome,
 			QualificationInputSHA256:      summary.QualificationSHA256,
 			QualificationOutcome:          summary.QualificationOutcome,
 			QualificationTapes:            summary.QualificationTapes,

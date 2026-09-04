@@ -24,7 +24,8 @@ const (
 	accountingVersion    = 3
 	qualificationVersion = 4
 	multiTapeVersion     = 5
-	Version              = 6
+	perpsPlanVersion     = 6
+	Version              = 7
 	MaxEvents            = 64
 	MaxHistoryPoints     = 144
 	MaxMessageBytes      = 3000
@@ -94,26 +95,30 @@ type CurrentSummary struct {
 	HoldBenchmarkMicros uint64 `json:"hold_benchmark_micros"`
 	// Realized is the result from inventory already sold, after modeled fees.
 	// Unrealized is the mark-to-market result still held in open inventory.
-	AccountingTracked bool   `json:"accounting_tracked,omitempty"`
-	RealizedMicros    int64  `json:"realized_micros,omitempty"`
-	UnrealizedMicros  int64  `json:"unrealized_micros,omitempty"`
-	FeesMicros        int64  `json:"fees_micros,omitempty"`
-	FundingTracked    bool   `json:"funding_tracked,omitempty"`
-	FundingMicros     int64  `json:"funding_micros,omitempty"`
-	TurnoverMicros    uint64 `json:"turnover_micros,omitempty"`
-	DrawdownMicros    uint64 `json:"drawdown_micros,omitempty"`
-	MaxDrawdownMicros uint64 `json:"max_drawdown_micros,omitempty"`
-	Checks            uint64 `json:"checks"`
-	Signals           uint64 `json:"signals"`
-	Trades            uint64 `json:"trades"`
-	Unobservable      uint64 `json:"unobservable,omitempty"`
-	Missed            uint64 `json:"missed,omitempty"`
-	PriceMicros       uint64 `json:"price_micros,omitempty"`
-	State             string `json:"state,omitempty"`
-	Strategy          string `json:"strategy,omitempty"`
-	NextAction        string `json:"next_action,omitempty"`
-	DecisionReason    string `json:"decision_reason,omitempty"`
-	RiskHalted        bool   `json:"risk_halted,omitempty"`
+	AccountingTracked bool              `json:"accounting_tracked,omitempty"`
+	RealizedMicros    int64             `json:"realized_micros,omitempty"`
+	UnrealizedMicros  int64             `json:"unrealized_micros,omitempty"`
+	FeesMicros        int64             `json:"fees_micros,omitempty"`
+	FundingTracked    bool              `json:"funding_tracked,omitempty"`
+	FundingMicros     int64             `json:"funding_micros,omitempty"`
+	TurnoverMicros    uint64            `json:"turnover_micros,omitempty"`
+	DrawdownMicros    uint64            `json:"drawdown_micros,omitempty"`
+	MaxDrawdownMicros uint64            `json:"max_drawdown_micros,omitempty"`
+	Checks            uint64            `json:"checks"`
+	Signals           uint64            `json:"signals"`
+	Trades            uint64            `json:"trades"`
+	Unobservable      uint64            `json:"unobservable,omitempty"`
+	Missed            uint64            `json:"missed,omitempty"`
+	PriceMicros       uint64            `json:"price_micros,omitempty"`
+	State             string            `json:"state,omitempty"`
+	Strategy          string            `json:"strategy,omitempty"`
+	DecisionSource    string            `json:"decision_source,omitempty"`
+	ProposalSource    string            `json:"proposal_source,omitempty"`
+	RunPlanSHA256     string            `json:"run_plan_sha256,omitempty"`
+	PerpsPlanOutcome  *PerpsPlanOutcome `json:"perps_plan_outcome,omitempty"`
+	NextAction        string            `json:"next_action,omitempty"`
+	DecisionReason    string            `json:"decision_reason,omitempty"`
+	RiskHalted        bool              `json:"risk_halted,omitempty"`
 	// InitialLot is the configured first paper leg. Later legs use the
 	// simulated proceeds, so it is deliberately not described as a fixed order
 	// size. These fields expose no address, provider, policy path, or key.
@@ -155,6 +160,13 @@ type CurrentSummary struct {
 	QualificationHoldoutMicros    int64                  `json:"qualification_holdout_micros,omitempty"`
 	QualificationStressMicros     int64                  `json:"qualification_stress_micros,omitempty"`
 	QualificationAttempts         []QualificationAttempt `json:"qualification_attempts,omitempty"`
+}
+
+// PerpsPlanOutcome binds a selected plan's total paper-run result to the later,
+// immutable tape that produced it without exposing the exact paper balance.
+type PerpsPlanOutcome struct {
+	TapeSHA256 string `json:"tape_sha256"`
+	Result     string `json:"result"`
 }
 
 // QualificationAttempt is a bounded, read-only projection of one completed
@@ -350,6 +362,7 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		snapshot.Version != accountingVersion &&
 		snapshot.Version != qualificationVersion &&
 		snapshot.Version != multiTapeVersion &&
+		snapshot.Version != perpsPlanVersion &&
 		snapshot.Version != Version ||
 		snapshot.ObservedAt.IsZero() ||
 		!snapshot.ObservedAt.Equal(snapshot.ObservedAt.UTC()) ||
@@ -358,8 +371,13 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		(snapshot.Current != "" && (len(snapshot.Current) > maxCurrentBytes ||
 			!validMessage(snapshot.Current))) ||
 		(snapshot.Current == "" && snapshot.Summary != nil) ||
-		(snapshot.Version != Version && snapshot.Summary != nil &&
+		(snapshot.Version < perpsPlanVersion && snapshot.Summary != nil &&
 			len(snapshot.Summary.QualificationAttempts) != 0) ||
+		(snapshot.Version < Version && snapshot.Summary != nil &&
+			(validQualificationStrategy(snapshot.Summary.Strategy) ||
+				snapshot.Summary.DecisionSource != "" || snapshot.Summary.ProposalSource != "" ||
+				snapshot.Summary.RunPlanSHA256 != "" ||
+				snapshot.Summary.PerpsPlanOutcome != nil)) ||
 		len(snapshot.History) > MaxHistoryPoints ||
 		validateCurrentSummary(snapshot.Summary) != nil {
 		return errors.New("paper alert snapshot is invalid")
@@ -441,7 +459,8 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 		!validValueUnit(summary.ValueUnit) ||
 		!validInstrument(*summary) ||
 		!validAccounting(*summary) ||
-		!validCurrentState(summary.State) || !validCurrentStrategy(summary.Strategy) ||
+		!validCurrentState(summary.State) || !validCurrentStrategy(*summary) ||
+		!validPerpsPlanOutcome(*summary) ||
 		!validNextAction(summary.NextAction) || !validDecisionReason(summary.DecisionReason) ||
 		!validQualification(*summary) ||
 		!validPaperSettings(*summary) {
@@ -460,6 +479,49 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 		return errors.New("paper current summary is invalid")
 	}
 	return nil
+}
+
+func validPerpsPlanOutcome(summary CurrentSummary) bool {
+	present := validQualificationStrategy(summary.Strategy) ||
+		summary.DecisionSource != "" || summary.ProposalSource != "" ||
+		summary.RunPlanSHA256 != "" || summary.PerpsPlanOutcome != nil
+	if !present {
+		return true
+	}
+	if summary.Instrument != "perpetual" || !validOptionalSHA256(summary.RunPlanSHA256) ||
+		summary.RunPlanSHA256 == "" {
+		return false
+	}
+	switch summary.DecisionSource {
+	case "legacy_fixed_policy":
+		return summary.ProposalSource == "built_in" && summary.Strategy == "fixed" &&
+			summary.PerpsPlanOutcome == nil
+	case "selected_paper_plan":
+		if summary.ProposalSource != "deterministic_search" || !validQualificationStrategy(summary.Strategy) {
+			return false
+		}
+	default:
+		return false
+	}
+	if summary.PerpsPlanOutcome == nil {
+		return true
+	}
+	outcome := summary.PerpsPlanOutcome
+	if !validOptionalSHA256(outcome.TapeSHA256) || outcome.TapeSHA256 == "" {
+		return false
+	}
+	result, ok := currentResultMicros(summary)
+	if !ok {
+		return false
+	}
+	switch {
+	case result > 0:
+		return outcome.Result == "gain"
+	case result < 0:
+		return outcome.Result == "loss"
+	default:
+		return outcome.Result == "flat"
+	}
 }
 
 func validQualification(summary CurrentSummary) bool {
@@ -588,11 +650,23 @@ func validAccounting(summary CurrentSummary) bool {
 		summary.UnrealizedMicros < 0 && summary.RealizedMicros < math.MinInt64-summary.UnrealizedMicros {
 		return false
 	}
-	result := int64(summary.EquityMicros) - int64(summary.OpeningEquityMicros)
-	if result < math.MinInt64+int64(summary.DeficitMicros) {
+	result, ok := currentResultMicros(summary)
+	if !ok {
 		return false
 	}
-	return summary.RealizedMicros+summary.UnrealizedMicros == result-int64(summary.DeficitMicros)
+	return summary.RealizedMicros+summary.UnrealizedMicros == result
+}
+
+func currentResultMicros(summary CurrentSummary) (int64, bool) {
+	if summary.OpeningEquityMicros > math.MaxInt64 || summary.EquityMicros > math.MaxInt64 ||
+		summary.DeficitMicros > math.MaxInt64 {
+		return 0, false
+	}
+	result := int64(summary.EquityMicros) - int64(summary.OpeningEquityMicros)
+	if result < math.MinInt64+int64(summary.DeficitMicros) {
+		return 0, false
+	}
+	return result - int64(summary.DeficitMicros), true
 }
 
 func validDecisionReason(reason string) bool {
@@ -710,8 +784,9 @@ func validValueUnit(unit string) bool {
 	return unit == "" || unit == "USD" || unit == "devUSDC"
 }
 
-func validCurrentStrategy(strategy string) bool {
-	return strategy == "" || strategy == "fixed" || strategy == "adaptive"
+func validCurrentStrategy(summary CurrentSummary) bool {
+	return summary.Strategy == "" || summary.Strategy == "fixed" || summary.Strategy == "adaptive" ||
+		summary.Instrument == "perpetual" && validQualificationStrategy(summary.Strategy)
 }
 
 func validNextAction(action string) bool {

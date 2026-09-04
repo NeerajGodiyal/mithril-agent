@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+var (
+	ErrSourceTimestampSkew = errors.New("price evidence timestamps disagree")
+	ErrSourceDeviation     = errors.New("price evidence exceeds the deviation limit")
+)
+
 const (
 	Version               = uint32(1)
 	MultiFeedVersion      = uint32(2)
@@ -390,12 +395,12 @@ func validatePair(
 		skew = -skew
 	}
 	if skew > time.Duration(maxSourceSkewSeconds)*time.Second {
-		return errors.New("price evidence timestamps disagree")
+		return ErrSourceTimestampSkew
 	}
 	higher := max(primary.PriceMicros, secondary.PriceMicros)
 	lower := min(primary.PriceMicros, secondary.PriceMicros)
 	if !ratioWithinBPS(higher-lower, higher, maxDeviationBPS) {
-		return errors.New("price evidence exceeds the deviation limit")
+		return ErrSourceDeviation
 	}
 	return nil
 }

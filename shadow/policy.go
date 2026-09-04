@@ -164,7 +164,7 @@ type Policy struct {
 	// source-and-route qualification artifact. Incumbent SOL/JUP policies leave
 	// it empty because their contracts are code-owned.
 	MarketEvidenceSHA256 string `json:"market_evidence_sha256,omitempty"`
-	// MarketEvidenceClass keeps a six-hour paper-only checkpoint distinct from
+	// MarketEvidenceClass keeps a two-hour paper-only checkpoint distinct from
 	// long-run market admission. Empty remains accepted only for previously
 	// written admitted policies.
 	MarketEvidenceClass string `json:"market_evidence_class,omitempty"`

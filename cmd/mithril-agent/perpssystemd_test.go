@@ -27,6 +27,15 @@ func TestPerpsPaperSystemdIsBoundedSignerFreeAndPrivate(t *testing.T) {
 			t.Errorf("perps paper collector contains %q", forbidden)
 		}
 	}
+	timer := readDocumentation(t, "../../deploy/systemd/mithril-agent-perps-paper.timer")
+	for _, want := range []string{
+		"OnBootSec=2min", "OnUnitInactiveSec=2min", "AccuracySec=5s",
+		"Persistent=true", "Unit=mithril-agent-perps-paper.service", "WantedBy=timers.target",
+	} {
+		if !strings.Contains(timer, want) {
+			t.Errorf("perps paper timer is missing %q", want)
+		}
+	}
 
 	bridge := readDocumentation(t, "../../deploy/systemd/mithril-agent-perps-paper-status-bridge@.service")
 	for _, want := range []string{
@@ -79,6 +88,25 @@ func TestDashboardAndTelegramConsumeThreeLabeledPerpsSources(t *testing.T) {
 			if strings.HasPrefix(line, "Wants=") && strings.Contains(line, "perps") {
 				t.Errorf("%s restart can relaunch the bounded perps experiment: %q", name, line)
 			}
+		}
+	}
+}
+
+func TestPerpsPaperREADMEInstallsVerifiesAndEnablesTimerAndSockets(t *testing.T) {
+	readme := readDocumentation(t, "../../deploy/hermes-research/README.md")
+	for _, want := range []string{
+		"systemd/mithril-agent-perps-paper.service",
+		"systemd/mithril-agent-perps-paper.timer",
+		"systemd/mithril-agent-perps-paper-status@.socket",
+		"systemd/mithril-agent-perps-paper-status-bridge@.service",
+		"sudo systemctl enable --now mithril-agent-perps-paper.timer",
+		"mithril-agent-perps-paper-status@sol.socket",
+		"mithril-agent-perps-paper-status@btc.socket",
+		"mithril-agent-perps-paper-status@eth.socket",
+		"sudo systemctl list-timers mithril-agent-perps-paper.timer",
+	} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("perps deployment instructions are missing %q", want)
 		}
 	}
 }

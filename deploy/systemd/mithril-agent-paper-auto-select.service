@@ -4,6 +4,7 @@ After=time-sync.target mithril-agent-paper-champion.service mithril-agent-paper-
 PartOf=mithril-agent-paper-generation.target
 ConditionPathExists=/etc/mithril-agent/paper-active/selection/sol/champion/active.json
 ConditionPathExists=/etc/mithril-agent/paper-active/selection/sol/challenger/active.json
+ConditionPathIsDirectory=/var/lib/mithril-agent-research/outcomes
 
 [Service]
 Type=oneshot
@@ -12,7 +13,7 @@ Group=mithril-agent-research
 UMask=0077
 ExecStart=/opt/mithril-hermes-research/run-paper-generation.sh auto-select sol
 ReadOnlyPaths=/var/lib/mithril-agent-research/allocations
-ReadWritePaths=/etc/mithril-agent/paper-active/selection/sol/champion /etc/mithril-agent/paper-active/selection/sol/challenger
+ReadWritePaths=/etc/mithril-agent/paper-active/selection/sol/champion /etc/mithril-agent/paper-active/selection/sol/challenger /var/lib/mithril-agent-research/outcomes
 InaccessiblePaths=/proc
 NoNewPrivileges=yes
 CapabilityBoundingSet=

@@ -681,7 +681,9 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	for _, want := range []string{
 		"run-paper-generation.sh auto-select sol", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
 		"ReadOnlyPaths=/var/lib/mithril-agent-research/allocations",
+		"ConditionPathIsDirectory=/var/lib/mithril-agent-research/outcomes",
 		"ReadWritePaths=/etc/mithril-agent/paper-active/selection/sol/champion /etc/mithril-agent/paper-active/selection/sol/challenger",
+		"/var/lib/mithril-agent-research/outcomes",
 	} {
 		if !strings.Contains(autoSelectUnit, want) {
 			t.Errorf("paper auto-selector is missing %q", want)
@@ -730,6 +732,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		`"$policy" "$runs/base" "$selection/champion" "$selection/challenger"`,
 		`"$generation/instruction.json"`,
 		`--rollback-pointer "$selection/champion/previous.json"`,
+		`--outcome-journal "$outcomes/$market.jsonl"`,
 		`/usr/bin/touch -- "$status/champion-owned"`,
 	} {
 		if !strings.Contains(generationRunner, want) {
@@ -1146,7 +1149,9 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	for _, want := range []string{
 		"run-paper-generation.sh auto-select jup",
 		"ReadOnlyPaths=/var/lib/mithril-agent-research/allocations",
+		"ConditionPathIsDirectory=/var/lib/mithril-agent-research/outcomes",
 		"ReadWritePaths=/etc/mithril-agent/paper-active/selection/jup/champion /etc/mithril-agent/paper-active/selection/jup/challenger",
+		"/var/lib/mithril-agent-research/outcomes",
 		"PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
 	} {
 		if !strings.Contains(jupAutoSelect, want) {
@@ -1177,9 +1182,6 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	for _, want := range []string{
 		"SOL/USDC=/run/mithril-agent-paper-status.sock",
 		"JUP/USDC=/run/mithril-agent-paper-jup-status.sock",
-		"--optional-paper-status-socket WIF/USDC=/run/mithril-agent-market-wif-paper-status.sock",
-		"--optional-paper-status-socket JTO/USDC=/run/mithril-agent-market-jto-paper-status.sock",
-		"--optional-paper-status-socket PYTH/USDC=/run/mithril-agent-market-pyth-paper-status.sock",
 	} {
 		if !strings.Contains(telegramPaper, want) {
 			t.Errorf("paper Telegram opt-in is missing %q", want)
@@ -1216,15 +1218,19 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"InaccessiblePaths=/var/lib/mithril-agent",
 		"SOL/USDC=/run/mithril-agent-paper-status.sock",
 		"JUP/USDC=/run/mithril-agent-paper-jup-status.sock",
-		"--optional-paper-status-socket WIF/USDC=/run/mithril-agent-market-wif-paper-status.sock",
-		"--optional-paper-status-socket JTO/USDC=/run/mithril-agent-market-jto-paper-status.sock",
-		"--optional-paper-status-socket PYTH/USDC=/run/mithril-agent-market-pyth-paper-status.sock",
 		"--research-packet-path /var/lib/mithril-agent-dashboard/research.json",
 		"--mithril-evidence-status-path /var/lib/mithril-agent-dashboard/mithril-evidence.json",
 		"--market-admission-status-path /var/lib/mithril-agent-dashboard/market-admission.json",
 	} {
 		if !strings.Contains(dashboardUnit, want) {
 			t.Errorf("paper dashboard unit is missing %q", want)
+		}
+	}
+	for name, unit := range map[string]string{"paper dashboard": dashboardUnit, "paper Telegram": telegramPaper} {
+		for _, forbidden := range []string{"WIF/USDC=/run/mithril-agent-market", "JTO/USDC=/run/mithril-agent-market", "PYTH/USDC=/run/mithril-agent-market"} {
+			if strings.Contains(unit, forbidden) {
+				t.Errorf("%s exposes an unadmitted market through %q", name, forbidden)
+			}
 		}
 	}
 	for _, forbidden := range []string{"EnvironmentFile=", "ReadWritePaths=", "AF_INET", "--listen"} {
@@ -1332,10 +1338,12 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"mithril-agent-market-status.timer",
 		"systemctl restart mithril-agent-market-candidate@wif.service",
 		"mithril-agent-market-wif.service` must remain disabled",
+		"Market-admission v4 changes the source-alignment contract",
+		"archive/market-admission-v3-$STAMP", "This is an evidence rotation, not deletion",
 		"systemd credentials",
 		"cannot traverse",
 		"PUMP remains excluded", "Token-2022",
-		"shadow market paper-check", "first four hours",
+		"shadow market paper-check", "first 80 minutes", "final 40 minutes",
 		"code-owned 25 bps", "50 bps stress", "--result-out", "--candidate-policy-out",
 		"MITHRIL_AGENT_PAPER_CHECK=$MARKET_DIR/paper-check-$STAMP.json",
 		"readiness notification",

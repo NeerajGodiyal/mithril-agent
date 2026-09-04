@@ -131,6 +131,7 @@ func TestMarketAdmissionFreshnessIsPerCollectorAndDoesNotAffectHealth(t *testing
 	view := server.readSnapshot(now)
 	if !view.Complete || view.MarketResearchError || len(view.MarketResearch) != 3 ||
 		!view.MarketResearch[0].Fresh || view.MarketResearch[1].Fresh ||
+		view.MarketResearch[0].WindowHours != marketadmission.DashboardStatusWindowHours ||
 		view.MarketResearch[1].ReadyForPaperCheck || !view.MarketResearch[2].Fresh {
 		t.Fatalf("view = %+v", view)
 	}
@@ -175,12 +176,12 @@ func dashboardStatus(market string, updatedAt time.Time) marketadmission.Dashboa
 		Market: market, UpdatedAt: updatedAt.UTC(), WindowHours: marketadmission.DashboardStatusWindowHours,
 		Diagnostic: marketadmission.Diagnostic{
 			Version: marketadmission.Version, Market: market,
-			From: through.Add(-6 * time.Hour), Through: through,
-			DiagnosticOnly: true, ExpectedBuckets: 360, ObservedBuckets: 10,
-			AvailableBuckets: 9, AvailabilityBPS: 250,
+			From: through.Add(-2 * time.Hour), Through: through,
+			DiagnosticOnly: true, ExpectedBuckets: 120, ObservedBuckets: 10,
+			AvailableBuckets: 9, AvailabilityBPS: 750,
 			MedianRouteCostBPS: 8, P95RouteCostBPS: 12,
 			MedianQuoteLatencyMillis: 400, P95QuoteLatencyMillis: 700,
-			FailureCounts: map[string]uint64{"missing_bucket": 350, "mint_state_unavailable": 1},
+			FailureCounts: map[string]uint64{"missing_bucket": 110, "mint_state_unavailable": 1},
 		},
 	}
 }

@@ -131,7 +131,7 @@ func TestShadowMarketProvisionalWritesAnImmutablePaperOnlyCheckpoint(t *testing.
 		t.Fatalf("invalid provisional artifact: %+v, %v", artifact, err)
 	}
 	if artifact.ProvisionalPaperReady || !artifact.PaperOnly || artifact.Authorized ||
-		artifact.ExpectedBuckets != 360 || artifact.ObservedBuckets != 1 {
+		artifact.ExpectedBuckets != 120 || artifact.ObservedBuckets != 1 {
 		t.Fatalf("unexpected provisional artifact: %+v", artifact)
 	}
 	if !strings.Contains(output.String(), `"status":"development_provisional"`) {
@@ -365,7 +365,7 @@ func TestMarketEvidenceClassIsValidatedAndFingerprinted(t *testing.T) {
 }
 
 func writeReadyProvisionalEvidence(t *testing.T) (string, string, time.Time) {
-	return writeProvisionalEvidence(t, 18, nil)
+	return writeProvisionalEvidence(t, 6, nil)
 }
 
 func writePassingProvisionalEvidence(t *testing.T) (string, string, time.Time) {
@@ -396,13 +396,13 @@ func writeProvisionalEvidence(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Append(through.Add(-6*time.Hour), marketadmission.EventOpened, opening.ContentSHA256, opening); err != nil {
+	if _, err := store.Append(through.Add(-2*time.Hour), marketadmission.EventOpened, opening.ContentSHA256, opening); err != nil {
 		t.Fatal(err)
 	}
 	marketPrimary, _ := candidate.Pyth.IdentitySHA256()
 	marketSecondary, _ := candidate.Kraken.IdentitySHA256()
 	index := 0
-	for bucket := through.Add(-6*time.Hour + time.Duration(missingMinutes)*time.Minute); bucket.Before(through); bucket = bucket.Add(time.Minute) {
+	for bucket := through.Add(-2*time.Hour + time.Duration(missingMinutes)*time.Minute); bucket.Before(through); bucket = bucket.Add(time.Minute) {
 		observed := bucket.Add(time.Second)
 		price := uint64(200_000)
 		if priceAt != nil {
@@ -466,7 +466,7 @@ func writeProvisionalEvidence(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !artifact.ProvisionalPaperReady || artifact.AvailableBuckets != uint64(360-missingMinutes) {
+	if !artifact.ProvisionalPaperReady || artifact.AvailableBuckets != uint64(120-missingMinutes) {
 		t.Fatalf("provisional artifact is not ready: %+v", artifact)
 	}
 	encoded, err := json.Marshal(artifact)
@@ -614,7 +614,7 @@ func TestMarketCollectorStatusStartsMissingAndUpdatesAfterAppend(t *testing.T) {
 		t.Fatal(err)
 	}
 	if initial.Diagnostic.ObservedBuckets != 0 ||
-		initial.Diagnostic.FailureCounts["missing_bucket"] != 360 {
+		initial.Diagnostic.FailureCounts["missing_bucket"] != 120 {
 		t.Fatalf("initial dashboard status = %+v", initial)
 	}
 
@@ -644,7 +644,7 @@ func TestMarketCollectorStatusStartsMissingAndUpdatesAfterAppend(t *testing.T) {
 	if updated.UpdatedAt != updatedAt || updated.Diagnostic.ObservedBuckets != 1 ||
 		updated.Diagnostic.AvailableBuckets != 0 ||
 		updated.Diagnostic.FailureCounts[marketadmission.FailureBuyQuote] != 1 ||
-		updated.Diagnostic.FailureCounts["missing_bucket"] != 359 ||
+		updated.Diagnostic.FailureCounts["missing_bucket"] != 119 ||
 		bytes.Equal(initialRaw, updatedRaw) {
 		t.Fatalf("updated dashboard status = %+v", updated)
 	}
@@ -826,9 +826,9 @@ func TestAdmittedPolicyBindsTheQualifiedMarketContract(t *testing.T) {
 		policy.Market != shadow.MarketWIFUSDC ||
 		policy.MarketEvidenceSHA256 != strings.Repeat("a", 64) ||
 		policy.QuoteRoute != shadow.MainnetMarketQuoteRoute(shadow.MarketWIFUSDC, false) ||
-		policy.Trigger.MaxSourceSkewSeconds != 30 ||
-		policy.NativeFeePrice.MaxSourceSkewSeconds != 30 ||
-		policy.QuotePeg.MaxSourceSkewSeconds != 30 {
+		policy.Trigger.MaxSourceSkewSeconds != 75 ||
+		policy.NativeFeePrice.MaxSourceSkewSeconds != 75 ||
+		policy.QuotePeg.MaxSourceSkewSeconds != 75 {
 		t.Fatalf("admitted policy = %+v", policy)
 	}
 	artifact := marketadmission.Artifact{
@@ -859,10 +859,10 @@ func TestAdmittedPolicyBindsTheQualifiedMarketContract(t *testing.T) {
 		})
 	}
 	for name, mutate := range map[string]func(*shadow.Policy){
-		"trigger skew":      func(value *shadow.Policy) { value.Trigger.MaxSourceSkewSeconds = 31 },
+		"trigger skew":      func(value *shadow.Policy) { value.Trigger.MaxSourceSkewSeconds = 76 },
 		"return deviation":  func(value *shadow.Policy) { value.ReturnTrigger.MaxDeviationBPS = 201 },
 		"native confidence": func(value *shadow.Policy) { value.NativeFeePrice.MaxConfidenceBPS = 201 },
-		"peg skew":          func(value *shadow.Policy) { value.QuotePeg.MaxSourceSkewSeconds = 31 },
+		"peg skew":          func(value *shadow.Policy) { value.QuotePeg.MaxSourceSkewSeconds = 76 },
 		"quote impact":      func(value *shadow.Policy) { value.Adaptive.MaxQuoteImpactBPS = 501 },
 		"notional":          func(value *shadow.Policy) { value.InputAmount++ },
 		"slippage":          func(value *shadow.Policy) { value.SlippageBPS++ },

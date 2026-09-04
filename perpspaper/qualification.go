@@ -30,6 +30,26 @@ type QualificationKey struct {
 	Strategy Strategy `json:"strategy"`
 }
 
+// ReplaySelected applies one qualified strategy and risk arm to a causal paper tape.
+func ReplaySelected(config ReplayConfig, frames []TapeFrame, key QualificationKey) (TapeReplay, error) {
+	if config.RiskArm != key.RiskArm {
+		return TapeReplay{}, errors.New("selected risk arm does not match replay configuration")
+	}
+	if _, _, _, err := armPolicy(key.RiskArm); err != nil {
+		return TapeReplay{}, fmt.Errorf("selected risk arm: %w", err)
+	}
+	switch key.Strategy {
+	case StrategyMomentum, StrategyMeanReversion, StrategyBreakout, StrategyRegime:
+	default:
+		return TapeReplay{}, fmt.Errorf("unsupported selected strategy %q", key.Strategy)
+	}
+	causal, err := tournamentCausalFrames(config, frames)
+	if err != nil {
+		return TapeReplay{}, err
+	}
+	return replayTournamentStrategy(config, causal, 0, key.Strategy)
+}
+
 type QualificationTrial struct {
 	QualificationKey
 	Eligible         bool             `json:"eligible"`
@@ -43,6 +63,24 @@ type QualificationEvidence struct {
 	Eligible         bool             `json:"eligible"`
 	IneligibleReason string           `json:"ineligible_reason,omitempty"`
 	Score            *TournamentScore `json:"score,omitempty"`
+}
+
+// EvaluateFixedPlan scores one frozen paper decision plan on the whole tape,
+// both normally and with the same double-fee stress used by qualification. An
+// empty strategy means the legacy fixed decision rule.
+func EvaluateFixedPlan(config QualificationConfig, key QualificationKey, frames []TapeFrame) (QualificationEvidence, QualificationEvidence, error) {
+	normal, err := evaluateFixedPlan(config.replayConfig(key.RiskArm), frames, key)
+	if err != nil {
+		return QualificationEvidence{}, QualificationEvidence{}, err
+	}
+	stressConfig := config.replayConfig(key.RiskArm)
+	entryFee, _, _ := armAccounting(key.RiskArm)
+	stressConfig.AdditionalFeeBPS = entryFee
+	stress, err := evaluateFixedPlan(stressConfig, frames, key)
+	if err != nil {
+		return QualificationEvidence{}, QualificationEvidence{}, err
+	}
+	return *qualificationEvidence(key, "", normal), *qualificationEvidence(key, qualificationStressRule, stress), nil
 }
 
 // Qualification is research evidence only. A passing result is eligible only
@@ -175,6 +213,26 @@ func evaluateTournamentStrategy(config ReplayConfig, frames []TapeFrame, strateg
 		return TournamentResult{}, err
 	}
 	return scoreTournamentStrategy(config, frames[len(frames)-1].Book, strategy, replay)
+}
+
+func evaluateFixedPlan(config ReplayConfig, frames []TapeFrame, key QualificationKey) (TournamentResult, error) {
+	if config.RiskArm != key.RiskArm {
+		return TournamentResult{}, errors.New("fixed plan risk arm does not match replay configuration")
+	}
+	causal, err := tournamentCausalFrames(config, frames)
+	if err != nil {
+		return TournamentResult{}, err
+	}
+	var replay TapeReplay
+	if key.Strategy == "" {
+		replay, err = replayTape(config, causal, Decide)
+	} else {
+		replay, err = replayTournamentStrategy(config, causal, 0, key.Strategy)
+	}
+	if err != nil {
+		return TournamentResult{}, err
+	}
+	return scoreTournamentStrategy(config, causal[len(causal)-1].Book, key.Strategy, replay)
 }
 
 func evaluateQualificationHoldout(config ReplayConfig, causal []TapeFrame, split int, strategy Strategy) (TournamentResult, error) {

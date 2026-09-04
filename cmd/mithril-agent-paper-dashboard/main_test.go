@@ -133,9 +133,9 @@ func TestRecordMarketAdmissionModeIsExclusiveAndDoesNotOpenAListener(t *testing.
 			Market: market, UpdatedAt: now, WindowHours: marketadmission.DashboardStatusWindowHours,
 			Diagnostic: marketadmission.Diagnostic{
 				Version: marketadmission.Version, Market: market,
-				From: through.Add(-6 * time.Hour), Through: through,
-				DiagnosticOnly: true, ExpectedBuckets: 360,
-				FailureCounts: map[string]uint64{"missing_bucket": 360},
+				From: through.Add(-2 * time.Hour), Through: through,
+				DiagnosticOnly: true, ExpectedBuckets: 120,
+				FailureCounts: map[string]uint64{"missing_bucket": 120},
 			},
 		}
 		raw, err := json.Marshal(status)

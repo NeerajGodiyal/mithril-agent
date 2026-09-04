@@ -22,12 +22,12 @@ import (
 )
 
 const (
-	// Version 3 prevents evidence collected under earlier source and diagnostic
-	// contracts from being resumed or mixed with current evidence.
-	Version = uint32(3)
+	// Version 4 prevents evidence collected under the earlier 30-second source
+	// alignment contract from being resumed or mixed with current evidence.
+	Version = uint32(4)
 
 	ProvisionalStatus                 = "development_provisional"
-	ProvisionalWindowHours            = uint16(6)
+	ProvisionalWindowHours            = uint16(2)
 	ProvisionalMinimumAvailabilityBPS = uint16(9_500)
 
 	mainnetUSDCMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -186,7 +186,7 @@ func DefaultThresholds() Thresholds {
 	return Thresholds{
 		Version: Version, CadenceSeconds: 60, MinimumDays: 30,
 		MinimumAvailabilityBPS: 9_900, MedianRouteCostBPS: 20, P95RouteCostBPS: 50,
-		MaximumSourceAgeSeconds: 120, MaximumSourceSkewSeconds: 30,
+		MaximumSourceAgeSeconds: 120, MaximumSourceSkewSeconds: 75,
 		MaximumSourceDeviationBPS: 200, MaximumConfidenceBPS: 200,
 		MaximumQuoteImpactBPS:     500,
 		MaximumQuoteLatencyMillis: 15_000,
@@ -367,7 +367,7 @@ type Diagnostic struct {
 }
 
 // ReadyForProvisionalPaperCheck applies the same availability and route-cost
-// gates as a six-hour provisional artifact. It grants no activation authority.
+// gates as a two-hour provisional artifact. It grants no activation authority.
 func (diagnostic Diagnostic) ReadyForProvisionalPaperCheck() bool {
 	return len(provisionalMetricReasons(
 		diagnostic.AvailabilityBPS, diagnostic.AvailableBuckets,
@@ -376,7 +376,7 @@ func (diagnostic Diagnostic) ReadyForProvisionalPaperCheck() bool {
 }
 
 // ProvisionalArtifact is a short, current paper-testing checkpoint. It is
-// deliberately a different type from Artifact: six hours can expose broken
+// deliberately a different type from Artifact: two hours can expose broken
 // sources, rate limits, and unusable routes, but it cannot establish long-run
 // reliability or authorize an executable proposal.
 type ProvisionalArtifact struct {
@@ -420,7 +420,7 @@ type ProvisionalReplayPoint struct {
 	NativeSecondary            pricetrigger.Sample `json:"native_secondary,omitzero"`
 }
 
-// EvaluateProvisionalJournal derives the most recent six complete hours from
+// EvaluateProvisionalJournal derives the most recent two complete hours from
 // one exact durable prefix. It never creates a long-run admission artifact.
 func EvaluateProvisionalJournal(
 	path string,
@@ -460,7 +460,7 @@ func evaluateProvisional(
 	window := time.Duration(ProvisionalWindowHours) * time.Hour
 	if from.IsZero() || from != from.Truncate(cadence) ||
 		through != through.Truncate(cadence) || through.Sub(from) != window {
-		return ProvisionalArtifact{}, errors.New("provisional market evidence must cover exactly six complete hours")
+		return ProvisionalArtifact{}, errors.New("provisional market evidence must cover exactly two complete hours")
 	}
 	expected := uint64(window / cadence)
 	selected := make([]Observation, 0, expected)
@@ -516,7 +516,7 @@ func provisionalMetricReasons(
 ) []string {
 	var reasons []string
 	if availabilityBPS < ProvisionalMinimumAvailabilityBPS {
-		reasons = append(reasons, "six-hour bidirectional availability is below the paper-testing minimum")
+		reasons = append(reasons, "two-hour bidirectional availability is below the paper-testing minimum")
 	}
 	if availableBuckets == 0 {
 		reasons = append(reasons, "no complete bidirectional quote evidence is available")
@@ -948,11 +948,11 @@ func observationUsability(opening Opening, observation Observation) (uint16, str
 		opening.Candidate.Pyth.Feed, marketPrimary,
 		mustIdentity(opening.Candidate.Kraken.IdentitySHA256()), thresholds,
 	)
-	if pricetrigger.ValidateObservation(
+	if err := pricetrigger.ValidateObservation(
 		marketPolicy, observation.MarketPrimary.Sample, observation.MarketSecondary,
 		observation.ObservedAt,
-	) != nil {
-		return 0, "market_sources_rejected", false
+	); err != nil {
+		return 0, sourceRejection("market", err), false
 	}
 	usdcSpec := pricesource.PythPushUSDCSpec()
 	if !validPythObservation(
@@ -983,14 +983,14 @@ func observationUsability(opening Opening, observation Observation) (uint16, str
 	) {
 		return 0, "native_primary_rejected", false
 	}
-	if pricetrigger.ValidateObservation(
+	if err := pricetrigger.ValidateObservation(
 		observationPolicy(
 			pricetrigger.FeedSOLUSD, pricesource.PythPushIdentitySHA256(),
 			pricesource.KrakenSOLIdentitySHA256(), thresholds,
 		),
 		observation.SOLPrimary.Sample, observation.SOLSecondary, observation.ObservedAt,
-	) != nil {
-		return 0, "native_sources_rejected", false
+	); err != nil {
+		return 0, sourceRejection("native", err), false
 	}
 	if !validQuote(opening, observation.Buy, false, observation, thresholds) {
 		return 0, "buy_quote_rejected", false
@@ -1005,6 +1005,17 @@ func observationUsability(opening Opening, observation Observation) (uint16, str
 		return 0, "quote_price_rejected", false
 	}
 	return routeCostBPS(opening.Candidate.QuoteNotionalUSDC, observation.Sell.EstimatedOutput), "", true
+}
+
+func sourceRejection(kind string, err error) string {
+	switch {
+	case errors.Is(err, pricetrigger.ErrSourceTimestampSkew):
+		return kind + "_source_time_alignment_rejected"
+	case errors.Is(err, pricetrigger.ErrSourceDeviation):
+		return kind + "_source_price_disagreement_rejected"
+	default:
+		return kind + "_sources_rejected"
+	}
 }
 
 func quotePricesUsable(candidate Candidate, observation Observation, maximumBPS uint16) bool {

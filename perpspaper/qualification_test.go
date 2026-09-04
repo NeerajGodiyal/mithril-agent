@@ -44,6 +44,103 @@ func TestQualificationRejectsNoTradeTieAndComparesAllPairs(t *testing.T) {
 	}
 }
 
+func TestReplaySelectedIsCausalDeterministicAndDoesNotMutateInput(t *testing.T) {
+	config := tournamentTestConfig()
+	frames := tournamentTestFrames([]int{100, 102, 98, 102, 98, 101})
+	before := cloneTournamentFrames(frames)
+	key := QualificationKey{RiskArm: Balanced, Strategy: StrategyMomentum}
+
+	first, err := ReplaySelected(config, frames, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ReplaySelected(config, frames, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, second) || !reflect.DeepEqual(frames, before) {
+		t.Fatal("selected replay is not deterministic or mutated its input")
+	}
+	if got := first.Results[len(first.Results)-1].Decision.Direction; got != Direction(Long) {
+		t.Fatalf("final momentum direction = %s, want %s; causal prefixes were not accumulated", got, Direction(Long))
+	}
+}
+
+func TestReplaySelectedUsesRequestedStrategy(t *testing.T) {
+	config := tournamentTestConfig()
+	frames := tournamentTestFrames([]int{10_000, 10_200, 9_800, 10_200, 9_800, 10_080})
+
+	momentum, err := ReplaySelected(config, frames, QualificationKey{RiskArm: Balanced, Strategy: StrategyMomentum})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meanReversion, err := ReplaySelected(config, frames, QualificationKey{RiskArm: Balanced, Strategy: StrategyMeanReversion})
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := len(frames) - 1
+	if got := momentum.Results[last].Decision.Direction; got != Direction(Long) {
+		t.Fatalf("momentum direction = %s, want %s", got, Direction(Long))
+	}
+	if got := meanReversion.Results[last].Decision.Direction; got != Direction(Short) {
+		t.Fatalf("mean-reversion direction = %s, want %s", got, Direction(Short))
+	}
+}
+
+func TestReplaySelectedRejectsInvalidKey(t *testing.T) {
+	frames := tournamentTestFrames([]int{100, 101})
+	for name, test := range map[string]struct {
+		config ReplayConfig
+		key    QualificationKey
+	}{
+		"risk mismatch": {
+			config: tournamentTestConfig(),
+			key:    QualificationKey{RiskArm: Conservative, Strategy: StrategyMomentum},
+		},
+		"unsupported risk": {
+			config: func() ReplayConfig {
+				config := tournamentTestConfig()
+				config.RiskArm = RiskArm("reckless")
+				return config
+			}(),
+			key: QualificationKey{RiskArm: RiskArm("reckless"), Strategy: StrategyMomentum},
+		},
+		"unsupported strategy": {
+			config: tournamentTestConfig(),
+			key:    QualificationKey{RiskArm: Balanced, Strategy: Strategy("oracle")},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ReplaySelected(test.config, frames, test.key); err == nil {
+				t.Fatal("invalid selected replay key was accepted")
+			}
+		})
+	}
+}
+
+func TestEvaluateFixedPlanScoresLegacyAndSelectedPlansWithFeeStress(t *testing.T) {
+	config := qualificationTestConfig()
+	frames := tournamentTestFrames(qualificationWavePrices(3))
+	for name, key := range map[string]QualificationKey{
+		"legacy":   {RiskArm: Balanced},
+		"selected": {RiskArm: Experimental, Strategy: StrategyRegime},
+	} {
+		t.Run(name, func(t *testing.T) {
+			forward, stress, err := EvaluateFixedPlan(config, key, frames)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if forward.QualificationKey != key || stress.QualificationKey != key ||
+				forward.StressRule != "" || stress.StressRule != qualificationStressRule ||
+				forward.Score == nil || stress.Score == nil ||
+				stress.Score.FeesPaidMicros <= forward.Score.FeesPaidMicros ||
+				stress.Score.EndingEquityMicros > forward.Score.EndingEquityMicros {
+				t.Fatalf("fixed plan evidence = forward %+v, stress %+v", forward, stress)
+			}
+		})
+	}
+}
+
 func TestQualificationUsesTrainingOnlyForSelectionAndChecksDoubleFees(t *testing.T) {
 	common := qualificationWavePrices(4)
 	leftPrices := append(append([]int(nil), common...), qualificationWavePrices(2)...)

@@ -481,8 +481,11 @@ func TestDashboardProjectsQualificationWithoutPrivateTapeIdentity(t *testing.T) 
 			ValueUnit: "USD", Day: "2026-09-03", TickSeconds: 60,
 			OpeningEquityMicros: 100_000_000, EquityMicros: 100_100_000,
 			HoldBenchmarkMicros: 100_000_000, AccountingTracked: true,
-			UnrealizedMicros: 100_000,
-			Checks:           60, Trades: 2, Signals: 2, State: "watching", Strategy: "fixed",
+			RealizedMicros: 100_000,
+			Checks:         60, Trades: 2, Signals: 2, State: "watching", Strategy: "fixed",
+			DecisionSource: "selected_paper_plan", ProposalSource: "deterministic_search",
+			RunPlanSHA256:        strings.Repeat("e", 64),
+			PerpsPlanOutcome:     &paperstatus.PerpsPlanOutcome{TapeSHA256: strings.Repeat("d", 64), Result: "gain"},
 			QualificationTracked: true,
 			QualificationOutcome: "candidate_ready_for_more_paper_testing",
 			QualificationSHA256:  digest, QualificationTapes: 1, QualificationFrames: 60, QualificationMinimumFrames: 24,
@@ -498,6 +501,7 @@ func TestDashboardProjectsQualificationWithoutPrivateTapeIdentity(t *testing.T) 
 			},
 		},
 	}}
+	source.snapshot.Summary.Strategy = "momentum"
 	server, err := New([]Source{Optional(source)})
 	if err != nil {
 		t.Fatal(err)
@@ -505,7 +509,9 @@ func TestDashboardProjectsQualificationWithoutPrivateTapeIdentity(t *testing.T) 
 	server.now = func() time.Time { return now }
 	response := httptest.NewRecorder()
 	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://localhost/api/v1/status", nil))
-	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), digest) {
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), digest) ||
+		strings.Contains(response.Body.String(), strings.Repeat("e", 64)) ||
+		strings.Contains(response.Body.String(), strings.Repeat("d", 64)) {
 		t.Fatalf("qualification response leaked private identity or failed: %d %s", response.Code, response.Body.String())
 	}
 	var view View
@@ -520,6 +526,9 @@ func TestDashboardProjectsQualificationWithoutPrivateTapeIdentity(t *testing.T) 
 		!view.Markets[0].QualificationHoldoutScored || !view.Markets[0].QualificationStressScored ||
 		view.Markets[0].QualificationHoldoutMicros != 100_000 ||
 		view.Markets[0].QualificationStressMicros != 50_000 ||
+		view.Markets[0].DecisionSource != "selected_paper_plan" ||
+		view.Markets[0].ProposalSource != "deterministic_search" ||
+		view.Markets[0].PerpsPlanOutcome != "gain" ||
 		len(view.Markets[0].QualificationAttempts) != 3 ||
 		view.Markets[0].QualificationAttempts[0].Strategy != "momentum" ||
 		view.Markets[0].QualificationAttempts[2].Liquidations != 1 {
@@ -662,23 +671,22 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"@media (max-width: 1023px)", "@media (max-width: 767px)", "@media (max-width: 430px)", "prefers-reduced-motion",
 		},
 		"/app.js": {
-			"Live spot account", "Spot account start", "Spot result", "Spot versus holding", "Spot executions", "Compared with holding",
+			"Live spot account", "Spot account start", "Spot result", "Spot versus holding", "Spot executions",
 			"Completed experiment", "Not selected", "Best completed training attempts", "Training candidate",
 			"Final untouched recording", "separate recordings",
 			"<button class=\"help\"", "data-help-copy=", "helpDialog.showModal()", "Waiting for fresh prices",
 			"?fresh=1", "Refreshing…", "Updated ✓",
 			"Checked ✓", "Data delayed", "requestSequence",
 			"Market-responsive paper plan", "not strategy quality", "deltaValue",
-			"readableActivity", "Use Refresh to try again.", "liveUpdates&&!$('refresh').disabled",
-			"This market value:", "This market's result today:", "readableActivityResult", "(profit?'profit':'loss')",
-			"compactActivityDollars", "Paper gain\\/loss", "ahead of holding", "behind holding",
+			"activityStatus", "activityStatusMarkup", "Use Refresh to try again.", "liveUpdates&&!$('refresh').disabled",
+			"Order status", "Placed", "Filled", "Data status", "Delayed", "Restored",
 			"Plan tried to trade once",
 			"Performance", "marketStatus(m,feeBudgetUsed)",
 			"integer(micros)>0n&&integer(micros)<10000n?'<$0.01'",
 			"amount>=1000000n?2:amount>=10000n?4:6",
 			"marketPriceChart", "LightweightCharts.createChart", "chartSegments", "View exact chart values", "data-chart-action=\"zoom-in\"", "activeChart.remove()", "Bot strategy", "If simply held", "Ahead by ", "Behind by ", "older events omitted", "Proposal ready", "Nous Hermes",
 			"chartPointAvailable", "key!=='price_micros'||integer(point[key])>0n", "m.state==='waiting for data'", "price-values", "performance-values", "pnl===0n?'→'", "Paper values')+' unavailable", "readout.innerHTML=original",
-			"Rejected output", "No valid run yet", "Deterministic replay gates decide whether any paper plan may change.", "open-order-history", "Starting trade lot", "Loss pause",
+			"Rejected output", "No valid run yet", "Deterministic replay gates alone decide whether any paper plan may change.", "open-order-history", "Starting trade lot", "Loss pause",
 			"Minimum opportunity", "saveInstruction", "X-Mithril-Paper-Request",
 			"Fee budget left", "Orders left this session", "No more orders this run",
 			"Orders paused until tomorrow",

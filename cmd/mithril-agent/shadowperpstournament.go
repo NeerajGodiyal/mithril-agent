@@ -15,13 +15,13 @@ import (
 
 const shadowPerpsTournamentUsage = `Usage: mithril-agent shadow perps-tournament --tape PATH
 
-Compares deterministic research strategies against one verified private v3
+Compares deterministic research strategies against one verified private v3/v4
 paper tape. It only prints JSON and cannot trade, sign, promote, or change tape.`
 
 func runShadowPerpsTournament(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("shadow perps-tournament", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	tapePath := flags.String("tape", "", "private v3 paper tape")
+	tapePath := flags.String("tape", "", "private v3/v4 paper tape")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, shadowPerpsTournamentUsage)

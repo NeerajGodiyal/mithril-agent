@@ -13,7 +13,7 @@ import (
 
 const shadowPerpsWalkForwardUsage = `Usage: mithril-agent shadow perps-walk-forward --tape PATH --tape PATH [--tape PATH ...]
 
-Reads two or more write-once, content-addressed v3 paper tapes in chronological
+Reads two or more write-once, content-addressed versioned paper tapes in chronological
 order. It selects only on earlier non-overlapping tapes and evaluates that fixed
 strategy/risk pair on the final held-out tape with normal and doubled
 fees. It prints research JSON and cannot trade, sign, promote, or change tape.`
@@ -31,7 +31,7 @@ func runShadowPerpsWalkForward(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("shadow perps-walk-forward", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var paths repeatedPathFlag
-	flags.Var(&paths, "tape", "private content-addressed v3 paper tape; repeat in chronological order")
+	flags.Var(&paths, "tape", "private content-addressed paper tape; repeat in chronological order")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, shadowPerpsWalkForwardUsage)

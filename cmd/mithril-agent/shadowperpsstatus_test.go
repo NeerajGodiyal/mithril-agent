@@ -52,6 +52,47 @@ func TestShadowPerpsCurrentProjectsNetAccounting(t *testing.T) {
 	}
 }
 
+func TestShadowPerpsSelectedPlanAttributionRequiresLaterBoundTape(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	tapeDigest := strings.Repeat("b", 64)
+	config := shadowPerpsTapeConfig{
+		Symbol: perpspaper.SOL, RiskArm: perpspaper.Balanced,
+		StartingCollateralMicros: 100_000_000, VenueMaxLeverage: 20,
+		DecisionMode: shadowPerpsDecisionSelected, Strategy: perpspaper.StrategyMomentum,
+		PlanSHA256: digest,
+	}
+	replay := perpspaper.TapeReplay{State: perpspaper.State{
+		Initialized: true, StartingCollateralMicros: 100_000_000,
+		BalanceMicros: 102_000_000, EquityMicros: 99_000_000,
+		UnrealizedPnLMicros: -3_000_000,
+	}}
+	_, summary, err := shadowPerpsCurrent(config, replay, time.Date(2026, 9, 4, 15, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.DecisionSource != "selected_paper_plan" || summary.ProposalSource != "deterministic_search" ||
+		summary.Strategy != "momentum" || summary.RunPlanSHA256 != digest {
+		t.Fatalf("selected plan attribution = %+v", summary)
+	}
+	walkForward := &perpspaper.WalkForwardQualification{Tapes: []perpspaper.WalkForwardTapeEvidence{
+		{ContentSHA256: strings.Repeat("c", 64)}, {ContentSHA256: tapeDigest},
+	}}
+	if got := shadowPerpsOutcomeTapeSHA256(config, tapeDigest, walkForward); got != tapeDigest {
+		t.Fatalf("bound later outcome tape = %q", got)
+	}
+	if got := shadowPerpsOutcomeTapeSHA256(config, strings.Repeat("d", 64), walkForward); got != "" {
+		t.Fatalf("non-final outcome tape was accepted: %q", got)
+	}
+	config.DecisionMode = shadowPerpsDecisionLegacy
+	if got := shadowPerpsOutcomeTapeSHA256(config, tapeDigest, walkForward); got != "" {
+		t.Fatalf("built-in plan received selected-plan outcome: %q", got)
+	}
+	if summary.RealizedMicros <= 0 || shadowPerpsOutcomeResult(summary.RealizedMicros+summary.UnrealizedMicros) != "loss" ||
+		shadowPerpsOutcomeResult(0) != "flat" || shadowPerpsOutcomeResult(-1) != "loss" {
+		t.Fatal("total paper-run outcome categories are incorrect")
+	}
+}
+
 func TestShadowPerpsCurrentCapsPostLiquidationDeficitWithoutStoppingStatus(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	config := shadowPerpsTapeConfig{Symbol: perpspaper.SOL, RiskArm: perpspaper.Experimental, StartingCollateralMicros: 100_000_000, VenueMaxLeverage: 20}

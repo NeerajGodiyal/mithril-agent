@@ -12,7 +12,7 @@ const (
 	// DashboardStatusKind identifies the diagnostic-only projection schema.
 	DashboardStatusKind = "market_collection_dashboard_status"
 	// DashboardStatusWindowHours fixes the recent collection window.
-	DashboardStatusWindowHours = uint16(6)
+	DashboardStatusWindowHours = uint16(2)
 	// MaxDashboardStatusBytes bounds a serialized dashboard projection.
 	MaxDashboardStatusBytes = 16 << 10
 
@@ -68,7 +68,7 @@ type DashboardStatus struct {
 }
 
 // DiagnosticTracker retains only the recent observations needed for the
-// dashboard's fixed six-hour window.
+// dashboard's fixed two-hour window.
 type DiagnosticTracker struct {
 	opening      Opening
 	observations []Observation
@@ -102,7 +102,7 @@ func NewDiagnosticTracker(
 }
 
 // BuildDashboardStatus validates one collector's current records and derives
-// an exact recent six-hour diagnostic.
+// an exact recent two-hour diagnostic.
 func BuildDashboardStatus(
 	opening Opening,
 	records []journal.Record,
@@ -386,8 +386,10 @@ func validDiagnosticFailure(value string) bool {
 	switch value {
 	case "observation_deadline_rejected", "mint_evidence_rejected",
 		"market_primary_rejected", "market_sources_rejected",
+		"market_source_time_alignment_rejected", "market_source_price_disagreement_rejected",
 		"quote_primary_rejected", "quote_peg_rejected",
 		"native_primary_rejected", "native_sources_rejected",
+		"native_source_time_alignment_rejected", "native_source_price_disagreement_rejected",
 		"buy_quote_rejected", "sell_quote_rejected",
 		"round_trip_rejected", "quote_price_rejected":
 		return true

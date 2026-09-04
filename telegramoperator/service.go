@@ -542,7 +542,49 @@ func paperAnnouncement(event paperstatus.Event, label string) string {
 	if label != "" {
 		message = paperMarketMessage(message)
 	}
+	if event.Kind == paperstatus.KindOrderFilled && strings.Contains(label, "/") {
+		message = compactSpotFill(message)
+	}
 	return stackPaperMessage(message, paperMarketName(label))
+}
+
+func compactSpotFill(message string) string {
+	lines := strings.Split(message, "\n")
+	if len(lines) == 0 || !strings.Contains(lines[0], "BOUGHT") && !strings.Contains(lines[0], "SOLD") {
+		return message
+	}
+	compact := []string{lines[0]}
+	var estimate, fill, tradeResult string
+	for _, line := range lines[1:] {
+		switch {
+		case strings.HasPrefix(line, "Bought: "):
+			compact[0] += " " + strings.TrimPrefix(line, "Bought: ")
+		case strings.HasPrefix(line, "Sold: "):
+			compact[0] += " " + strings.TrimPrefix(line, "Sold: ")
+		case strings.HasPrefix(line, "Paid: "), strings.HasPrefix(line, "Received: "):
+			compact = append(compact, line)
+		case strings.HasPrefix(line, "Estimated price for 1 "):
+			_, estimate, _ = strings.Cut(line, ": ")
+		case strings.HasPrefix(line, "Actual paper price for 1 "):
+			_, fill, _ = strings.Cut(line, ": ")
+		case strings.HasPrefix(line, "This completed trade: "),
+			strings.HasPrefix(line, "This completed buy + sell: "):
+			_, tradeResult, _ = strings.Cut(line, ": ")
+		}
+	}
+	if fill != "" {
+		price := "Paper price: " + fill
+		if estimate != "" {
+			price += " (estimate " + estimate + ")"
+		}
+		compact = append(compact, price)
+	} else if estimate != "" {
+		compact = append(compact, "Estimated price: "+estimate)
+	}
+	if tradeResult != "" {
+		compact = append(compact, "Trade result: "+tradeResult)
+	}
+	return strings.Join(compact, "\n")
 }
 
 func paperTradeAsset(message string) string {
@@ -567,10 +609,10 @@ func paperCurrentAge(message string, fresh bool) string {
 	if strings.HasPrefix(message, "PAPER · ⚠️ WAITING FOR PRICES") {
 		header = "PAPER · ⚠️ PRICE DATA DELAYED"
 	}
+	message = strings.Replace(message, "\nTotal paper value now:", "\nLast recorded paper value:", 1)
 	for _, current := range []string{
 		"\nPaper gain/loss today:",
 		"\nGain/loss today:",
-		"\nToday's estimated paper value:",
 		"\nToday's result:",
 		"\nResult since this plan started:",
 		"\nToday's paper result:",
@@ -609,7 +651,7 @@ func readablePaperMessage(message string) string {
 		}
 		lines[index] = strings.ReplaceAll(lines[index], "Paper gain/loss today:", "Paper result this run:")
 		lines[index] = strings.ReplaceAll(lines[index], "Gain/loss today:", "Paper result this run:")
-		lines[index] = strings.ReplaceAll(lines[index], "Today's estimated paper value:", "Paper result this run:")
+		lines[index] = strings.ReplaceAll(lines[index], "Today's estimated paper value:", "Total paper value now:")
 		lines[index] = strings.ReplaceAll(lines[index], "Today's result:", "Paper result this run:")
 		lines[index] = strings.ReplaceAll(lines[index], "Today's paper result:", "Paper result this run:")
 		lines[index] = strings.ReplaceAll(lines[index], "Result since this plan started:", "Paper result this run:")
@@ -1184,8 +1226,8 @@ func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, _ time.Time) 
 		}
 	}
 	var report strings.Builder
-	fmt.Fprintf(&report, "PAPER\n\n📊 ACCOUNT NOW\nTotal paper value: %s\nCombined result this run: %s\nCompared with just holding: %s",
-		paperAbsoluteValue(equity, valueUnit),
+	fmt.Fprintf(&report, "PAPER\n\n📊 SPOT PAPER ACCOUNT\nSpot paper value: %s\nCombined result this run: %s\nCompared with just holding: %s",
+		paperPortfolioValue(equity, deficit, valueUnit),
 		paperResultDisplay(paperResultChangeWithDeficit(opening, equity, deficit, valueUnit)),
 		paperResultComparisonWithDeficit(hold, equity, deficit, valueUnit))
 	if deficit != 0 {
@@ -1250,9 +1292,8 @@ func paperPortfolioAlertSummary(summaries []paperstatus.CurrentSummary) string {
 		equity += summary.EquityMicros
 		deficit += summary.DeficitMicros
 	}
-	report := "\n\nTOTAL PAPER VALUE NOW\n" + paperAbsoluteValue(equity, valueUnit) +
-		"\nCash + current value of all paper holdings" +
-		"\n\nCOMBINED RESULT THIS RUN\n" +
+	report := "\n\nAccount value: " + paperPortfolioValue(equity, deficit, valueUnit) +
+		"\nTotal result: " +
 		paperResultDisplay(paperResultChangeWithDeficit(opening, equity, deficit, valueUnit))
 	if deficit != 0 {
 		report += "\nLiquidation deficit: " + paperAbsoluteValue(deficit, valueUnit)
@@ -1406,6 +1447,13 @@ func paperAbsoluteValue(value uint64, unit string) string {
 		return formatPaperUSD(value)
 	}
 	return formatMicroUnits(value) + " " + unit
+}
+
+func paperPortfolioValue(equity, deficit uint64, unit string) string {
+	if equity >= deficit {
+		return paperAbsoluteValue(equity-deficit, unit)
+	}
+	return "-" + paperAbsoluteValue(deficit-equity, unit)
 }
 
 func formatPaperUSD(value uint64) string {

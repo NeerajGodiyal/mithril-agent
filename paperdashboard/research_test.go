@@ -224,7 +224,7 @@ func TestRenderPerpsResearchIsDeterministicContentBoundAndMinimal(t *testing.T) 
 	}
 	for _, forbidden := range []string{
 		"wallet-secret-marker", "policy-secret-marker", "human-event-marker",
-		`"events"`, `"current"`, `"equity_micros"`, `"history"`, `"path"`,
+		`"events"`, `"current"`, `"equity_micros"`, `"realized_micros"`, `"history"`, `"path"`,
 	} {
 		if bytes.Contains(first, []byte(forbidden)) {
 			t.Errorf("perps research output contains %q", forbidden)
@@ -235,7 +235,7 @@ func TestRenderPerpsResearchIsDeterministicContentBoundAndMinimal(t *testing.T) 
 		t.Fatal(err)
 	}
 	wantDigest, err := perpsResearchFingerprint(summary)
-	if err != nil || summary.ContentSHA256 != wantDigest || summary.Version != 1 ||
+	if err != nil || summary.ContentSHA256 != wantDigest || summary.Version != 2 ||
 		!summary.PaperOnly || !summary.AdvisoryOnly || summary.Authorized || summary.Promotable ||
 		!summary.ObservedAt.Equal(now) || len(summary.Markets) != 3 {
 		t.Fatalf("summary = %+v, digest error = %v", summary, err)
@@ -248,6 +248,7 @@ func TestRenderPerpsResearchIsDeterministicContentBoundAndMinimal(t *testing.T) 
 		}
 		sourceDigest := sha256.Sum256(raw)
 		if item.Market != market || item.PaperStatusSHA256 != fmt.Sprintf("%x", sourceDigest) ||
+			item.DecisionSource == "" || item.ProposalSource == "" || item.RunPlanSHA256 == "" ||
 			item.QualificationOutcome != "candidate_ready_for_more_paper_testing" ||
 			item.QualificationInputSHA256 == "" || item.QualificationTapes != 4 ||
 			item.QualificationFrames != 421 || item.QualificationTrainingFrames != 390 ||
@@ -255,6 +256,17 @@ func TestRenderPerpsResearchIsDeterministicContentBoundAndMinimal(t *testing.T) 
 			!item.QualificationStressScored || len(item.QualificationAttempts) != 1 ||
 			item.QualificationAttempts[0].ClosedPositions != 2 {
 			t.Fatalf("market %d = %+v", index, item)
+		}
+		if index == 0 {
+			if item.DecisionSource != "selected_paper_plan" || item.ProposalSource != "deterministic_search" ||
+				item.RunStrategy != "momentum" || item.RunRiskProfile != "balanced" ||
+				item.PerpsPlanOutcome == nil || item.PerpsPlanOutcome.Result != "gain" ||
+				item.PerpsPlanOutcome.TapeSHA256 != strings.Repeat("f", 64) {
+				t.Fatalf("selected plan outcome = %+v", item)
+			}
+		} else if item.DecisionSource != "legacy_fixed_policy" || item.ProposalSource != "built_in" ||
+			item.RunStrategy != "fixed" || item.PerpsPlanOutcome != nil {
+			t.Fatalf("built-in plan attribution = %+v", item)
 		}
 	}
 	tampered := summary
@@ -375,6 +387,19 @@ func writePerpsResearchStatuses(t *testing.T, observedAt time.Time) map[string]s
 					FilledOrders: 2, ClosedPositions: 2,
 				}},
 			},
+		}
+		snapshot.Summary.DecisionSource = "legacy_fixed_policy"
+		snapshot.Summary.ProposalSource = "built_in"
+		snapshot.Summary.RunPlanSHA256 = strings.Repeat(string(rune('1'+index)), 64)
+		if index == 0 {
+			snapshot.Summary.Strategy = "momentum"
+			snapshot.Summary.DecisionSource = "selected_paper_plan"
+			snapshot.Summary.ProposalSource = "deterministic_search"
+			snapshot.Summary.RealizedMicros = 100_000
+			snapshot.Summary.UnrealizedMicros = 0
+			snapshot.Summary.PerpsPlanOutcome = &paperstatus.PerpsPlanOutcome{
+				TapeSHA256: strings.Repeat("f", 64), Result: "gain",
+			}
 		}
 		if err := paperstatus.ValidateSnapshot(snapshot); err != nil {
 			t.Fatalf("fixture %s is invalid: %v", market, err)

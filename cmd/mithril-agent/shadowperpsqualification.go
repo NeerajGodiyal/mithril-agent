@@ -15,7 +15,7 @@ import (
 
 const shadowPerpsQualificationUsage = `Usage: mithril-agent shadow perps-qualify --tape PATH
 
-Compares all fixed strategy and paper-risk pairs on a verified private v3 tape,
+Compares all fixed strategy and paper-risk pairs on a verified private v3/v4 tape,
 then checks one training leader on a held-out replay that was not used for
 selection in that run, followed by a doubled-fee replay.
 It only prints research JSON and cannot trade, sign, promote, or change tape.`
@@ -23,7 +23,7 @@ It only prints research JSON and cannot trade, sign, promote, or change tape.`
 func runShadowPerpsQualification(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("shadow perps-qualify", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	tapePath := flags.String("tape", "", "private v3 paper tape")
+	tapePath := flags.String("tape", "", "private v3/v4 paper tape")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, shadowPerpsQualificationUsage)

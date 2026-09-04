@@ -142,7 +142,7 @@ func TestDiagnoseMeasuresAPartialWindowWithoutQualifyingIt(t *testing.T) {
 	}
 }
 
-func TestDiagnoseNamesRejectedEvidenceLayer(t *testing.T) {
+func TestDiagnoseNamesRejectedEvidenceCause(t *testing.T) {
 	candidate, _ := Lookup(MarketWIFUSDC)
 	opening, err := NewOpening(candidate, testObserve, DefaultThresholds())
 	if err != nil {
@@ -152,27 +152,53 @@ func TestDiagnoseNamesRejectedEvidenceLayer(t *testing.T) {
 	from := through.Add(-time.Hour)
 	observations := observationsFor(t, opening, from, through, 12)
 	observations[0].MarketSecondary.PublishedAt =
-		observations[0].MarketPrimary.Sample.PublishedAt.Add(-time.Minute)
+		observations[0].MarketPrimary.Sample.PublishedAt.Add(-76 * time.Second)
+	observations[1].MarketSecondary.PriceMicros =
+		observations[1].MarketPrimary.Sample.PriceMicros * 2
 	diagnostic, err := diagnose(opening, observations, through, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if diagnostic.AvailableBuckets != 59 ||
-		diagnostic.FailureCounts["market_sources_rejected"] != 1 {
+	if diagnostic.AvailableBuckets != 58 ||
+		diagnostic.FailureCounts["market_source_time_alignment_rejected"] != 1 ||
+		diagnostic.FailureCounts["market_source_price_disagreement_rejected"] != 1 {
 		t.Fatalf("diagnostic = %+v", diagnostic)
 	}
 }
 
-func TestProvisionalArtifactIsSixHoursPaperOnlyAndExpiresQuickly(t *testing.T) {
+func TestSourceAlignmentAcceptsOneHeartbeatAndSlack(t *testing.T) {
 	candidate, _ := Lookup(MarketWIFUSDC)
 	opening, err := NewOpening(candidate, testObserve, DefaultThresholds())
 	if err != nil {
 		t.Fatal(err)
 	}
 	through := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
-	from := through.Add(-6 * time.Hour)
+	from := through.Add(-time.Hour)
+	observations := observationsFor(t, opening, from, through, 12)
+	observations[0].MarketSecondary.PublishedAt =
+		observations[0].MarketPrimary.Sample.PublishedAt.Add(-75 * time.Second)
+	observations[1].MarketSecondary.PublishedAt =
+		observations[1].MarketPrimary.Sample.PublishedAt.Add(-76 * time.Second)
+	diagnostic, err := diagnose(opening, observations, through, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diagnostic.AvailableBuckets != 59 ||
+		diagnostic.FailureCounts["market_source_time_alignment_rejected"] != 1 {
+		t.Fatalf("diagnostic = %+v", diagnostic)
+	}
+}
+
+func TestProvisionalArtifactIsTwoHoursPaperOnlyAndExpiresQuickly(t *testing.T) {
+	candidate, _ := Lookup(MarketWIFUSDC)
+	opening, err := NewOpening(candidate, testObserve, DefaultThresholds())
+	if err != nil {
+		t.Fatal(err)
+	}
+	through := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
+	from := through.Add(-2 * time.Hour)
 	observations := observationsFor(t, opening, from, through, 10)
-	for index := 0; index < 18; index++ {
+	for index := 0; index < 6; index++ {
 		observations[index].Failure = FailureBuyQuote
 	}
 	artifact, err := evaluateProvisional(opening, from, through, testPrefix(), observations)
@@ -180,8 +206,8 @@ func TestProvisionalArtifactIsSixHoursPaperOnlyAndExpiresQuickly(t *testing.T) {
 		t.Fatal(err)
 	}
 	if artifact.Status != ProvisionalStatus || !artifact.PaperOnly || artifact.Authorized ||
-		!artifact.ProvisionalPaperReady || artifact.ExpectedBuckets != 360 ||
-		artifact.ObservedBuckets != 360 || artifact.AvailableBuckets != 342 ||
+		!artifact.ProvisionalPaperReady || artifact.ExpectedBuckets != 120 ||
+		artifact.ObservedBuckets != 120 || artifact.AvailableBuckets != 114 ||
 		artifact.AvailabilityBPS != ProvisionalMinimumAvailabilityBPS ||
 		artifact.Validate() != nil {
 		t.Fatalf("provisional artifact = %+v", artifact)
@@ -190,7 +216,7 @@ func TestProvisionalArtifactIsSixHoursPaperOnlyAndExpiresQuickly(t *testing.T) {
 		artifact.Current(through.Add(3*time.Minute)) || artifact.Current(through.Add(24*time.Hour)) {
 		t.Fatal("provisional artifact freshness crossed its bounded startup window")
 	}
-	observations[18].Failure = FailureBuyQuote
+	observations[6].Failure = FailureBuyQuote
 	failed, err := evaluateProvisional(opening, from, through, testPrefix(), observations)
 	if err != nil {
 		t.Fatal(err)
@@ -208,7 +234,7 @@ func TestProvisionalArtifactIsSixHoursPaperOnlyAndExpiresQuickly(t *testing.T) {
 
 func TestDiagnosticProvisionalReadinessUsesTheSharedCoverageAndCostGates(t *testing.T) {
 	diagnostic := Diagnostic{
-		AvailableBuckets: 342, AvailabilityBPS: ProvisionalMinimumAvailabilityBPS,
+		AvailableBuckets: 114, AvailabilityBPS: ProvisionalMinimumAvailabilityBPS,
 		MedianRouteCostBPS: DefaultThresholds().MedianRouteCostBPS,
 		P95RouteCostBPS:    DefaultThresholds().P95RouteCostBPS,
 	}
@@ -235,7 +261,7 @@ func TestProvisionalReplayPointsBindTheExactPrefixAndPreserveGaps(t *testing.T) 
 		t.Fatal(err)
 	}
 	through := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
-	from := through.Add(-6 * time.Hour)
+	from := through.Add(-2 * time.Hour)
 	observations := observationsFor(t, opening, from, through, 10)
 	observations[1].Failure = FailureBuyQuote
 	store, err := journal.OpenRotating(path)
@@ -268,7 +294,7 @@ func TestProvisionalReplayPointsBindTheExactPrefixAndPreserveGaps(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(points) != 360 || !points[0].Available || points[1].Available ||
+	if len(points) != 120 || !points[0].Available || points[1].Available ||
 		points[1].At != observations[1].ObservedAt.UTC() || points[2].Available ||
 		points[2].At != points[2].Bucket.Add(time.Minute) ||
 		points[1].MarketPrimaryPublishedAt != observations[1].MarketPrimary.Sample.PublishedAt.UTC() ||

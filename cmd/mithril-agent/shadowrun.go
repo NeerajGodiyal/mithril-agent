@@ -49,7 +49,7 @@ signed and nothing is submitted; no wallet signing key is loaded at any point.
   --admission-journal PATH
                         exact journal bound by that artifact
   --provisional-artifact PATH
-                        six-hour paper-only evidence for a candidate market
+                        two-hour paper-only evidence for a candidate market
   --provisional-journal PATH
                         exact journal bound by that checkpoint
   --paper-check-artifact PATH
@@ -116,7 +116,7 @@ func runShadowRun(ctx context.Context, args []string, output io.Writer) error {
 	flags.StringVar(&options.portfolioBook, "portfolio-book", "", "paper-capital book ID")
 	flags.StringVar(&options.admissionArtifact, "admission-artifact", "", "qualified market evidence")
 	flags.StringVar(&options.admissionJournal, "admission-journal", "", "market evidence journal")
-	flags.StringVar(&options.provisionalArtifact, "provisional-artifact", "", "six-hour paper-only market evidence")
+	flags.StringVar(&options.provisionalArtifact, "provisional-artifact", "", "two-hour paper-only market evidence")
 	flags.StringVar(&options.provisionalJournal, "provisional-journal", "", "provisional market evidence journal")
 	flags.StringVar(&options.paperCheckArtifact, "paper-check-artifact", "", "passing short paper-check result")
 	flags.StringVar(&options.alertStatus, "alert-status", "", "private paper-event snapshot")

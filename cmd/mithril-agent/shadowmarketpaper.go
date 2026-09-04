@@ -20,9 +20,9 @@ import (
 )
 
 const (
-	marketPaperCheckVersion       = uint32(1)
-	marketPaperCheckTrainingHours = 4
-	marketPaperCheckHoldoutHours  = 2
+	marketPaperCheckVersion         = uint32(2)
+	marketPaperCheckTrainingMinutes = 80
+	marketPaperCheckHoldoutMinutes  = 40
 	// Two baseline legs equal the code-owned 50 bps p95 round-trip admission
 	// ceiling; the stress lane doubles this per-leg spread.
 	marketPaperCheckSpreadBPS     = uint16(25)
@@ -83,7 +83,7 @@ func runShadowMarketPaperCheck(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("shadow market paper-check", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	policyPath := flags.String("policy", "", "provisional candidate-market policy")
-	artifactPath := flags.String("provisional-artifact", "", "six-hour paper checkpoint")
+	artifactPath := flags.String("provisional-artifact", "", "two-hour paper checkpoint")
 	journalPath := flags.String("journal", "", "checkpoint evidence journal")
 	dashboardStatusPath := flags.String("dashboard-status", "", "optional sibling dashboard-status.json")
 	candidatePolicyOut := flags.String("candidate-policy-out", "", "optional immutable checked paper policy")
@@ -354,8 +354,8 @@ func checkProvisionalMarketPaper(
 	if policy.Adaptive == nil || policy.TickSeconds != uint64(artifact.Thresholds.CadenceSeconds) {
 		return marketPaperCheckResult{}, errors.New("paper-check policy cadence must match the evidence cadence")
 	}
-	trainingThrough := artifact.From.Add(marketPaperCheckTrainingHours * time.Hour)
-	if trainingThrough.Add(marketPaperCheckHoldoutHours*time.Hour) != artifact.Through {
+	trainingThrough := artifact.From.Add(marketPaperCheckTrainingMinutes * time.Minute)
+	if trainingThrough.Add(marketPaperCheckHoldoutMinutes*time.Minute) != artifact.Through {
 		return marketPaperCheckResult{}, errors.New("paper-check window split is invalid")
 	}
 	spreadBPS := marketPaperCheckSpreadBPS

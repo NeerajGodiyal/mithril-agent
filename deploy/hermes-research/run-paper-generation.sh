@@ -2,6 +2,7 @@
 set -eu
 
 allocations=/var/lib/mithril-agent-research/allocations
+outcomes=/var/lib/mithril-agent-research/outcomes
 selector=/etc/mithril-agent/paper-active
 exec 9<"$allocations"
 /usr/bin/flock -s 9
@@ -11,7 +12,6 @@ generation=$(/usr/bin/readlink -e -- "$selector")
   echo "paper-active must resolve to one direct allocation generation" >&2
   exit 1
 }
-
 action=${1-}
 market=${2-}
 case "$market" in
@@ -57,6 +57,10 @@ bootstrap)
 	    "$generation/instruction.json"
   ;;
 auto-select)
+  [ -d "$outcomes" ] && [ ! -L "$outcomes" ] || {
+    echo "paper outcome directory is unavailable" >&2
+    exit 1
+  }
   exec /usr/local/libexec/mithril-agent/mithril-agent shadow auto-select \
     --policy "$policy" \
     --champion-pointer "$selection/champion/active.json" \
@@ -64,7 +68,8 @@ auto-select)
     --champion-dir "$runs/champion" \
     --challenger-dir "$runs/challenger" --days 7 \
     --rollback-pointer "$selection/champion/previous.json" \
-    --lifecycle-lock "$selection/challenger/lifecycle.lock"
+    --lifecycle-lock "$selection/challenger/lifecycle.lock" \
+    --outcome-journal "$outcomes/$market.jsonl"
   ;;
 status-handoff)
   [ ! -e "$status/champion-owned" ] || exit 0

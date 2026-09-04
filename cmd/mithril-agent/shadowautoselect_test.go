@@ -503,3 +503,201 @@ func TestShadowAutoSelectHelpStatesThePaperOnlyBoundary(t *testing.T) {
 		}
 	}
 }
+
+func TestShadowAutoSelectRecordsHermesOutcomeAndReconcilesExactRetry(t *testing.T) {
+	base, champion, challenger, _, challenge := shadowResearchOutcomeFixture(t)
+	root := privateTestDirectory(t)
+	championControl := filepath.Join(root, "champion")
+	challengerControl := filepath.Join(root, "challenger")
+	championRoot := filepath.Join(root, "champion-run")
+	challengerRoot := filepath.Join(root, "challenger-run")
+	for _, directory := range []string{
+		championControl, challengerControl, championRoot, challengerRoot,
+	} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if champion.CandidatePolicySHA256 == challenger.CandidatePolicySHA256 {
+		t.Fatal("fixture did not produce a distinct paper champion")
+	}
+	championPath := filepath.Join(championControl, "champion.json")
+	challengerPath := filepath.Join(challengerControl, "challenger.json")
+	if err := writeShadowPaperCandidate(championPath, champion); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeShadowPaperCandidate(challengerPath, challenger); err != nil {
+		t.Fatal(err)
+	}
+	_, championSHA256, err := loadBoundShadowPaperCandidate(championPath, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, challengerSHA256, err := loadBoundShadowPaperCandidate(challengerPath, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	championPointer := filepath.Join(championControl, "active.json")
+	challengerPointer := filepath.Join(challengerControl, "active.json")
+	if err := replaceShadowCandidatePointer(
+		championPointer, championPath, championSHA256, champion.CandidatePolicySHA256,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceShadowCandidatePointerSelected(
+		challengerPointer, challengerPath, challengerSHA256,
+		challenger.CandidatePolicySHA256,
+		time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC), 7,
+	); err != nil {
+		t.Fatal(err)
+	}
+	challenge.ChallengerCandidateSHA256 = challengerSHA256
+	challenge.ChallengerPolicySHA256 = challenger.CandidatePolicySHA256
+	originalEvaluate := shadowAutoSelectEvaluate
+	defer func() { shadowAutoSelectEvaluate = originalEvaluate }()
+	shadowAutoSelectEvaluate = func(
+		shadow.Policy, string, string, string, string, uint32, time.Time, time.Time,
+	) (shadowChallengeResult, error) {
+		return challenge, nil
+	}
+	now := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	collisionPath := filepath.Join(root, "outcomes", "collision.jsonl")
+	collision, err := newShadowResearchOutcomeReceipt(
+		base, challenger, challengerSHA256, challenge,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collision.CompleteDays++
+	if appended, err := appendShadowResearchOutcome(
+		collisionPath, now, shadowResearchForwardEvaluated, collision,
+	); err != nil || !appended {
+		t.Fatalf("prepare outcome collision = %t, %v", appended, err)
+	}
+	championBefore, err := os.ReadFile(championPointer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := autoSelectShadowChallengerWithOutcomes(
+		base, championPointer, challengerPointer, championRoot, challengerRoot,
+		filepath.Join(championControl, "previous.json"),
+		filepath.Join(challengerControl, "lifecycle.lock"), 7, now, collisionPath,
+	); err == nil {
+		t.Fatal("outcome collision did not stop selection")
+	}
+	championAfter, err := os.ReadFile(championPointer)
+	if err != nil || !bytes.Equal(championBefore, championAfter) {
+		t.Fatalf("outcome failure changed champion pointer: %v", err)
+	}
+
+	outcomePath := filepath.Join(root, "outcomes", "sol.jsonl")
+	result, err := autoSelectShadowChallengerWithOutcomes(
+		base, championPointer, challengerPointer, championRoot, challengerRoot,
+		filepath.Join(championControl, "previous.json"),
+		filepath.Join(challengerControl, "lifecycle.lock"), 7, now, outcomePath,
+	)
+	if err != nil || result.Status != "qualified_paper_challenger_selected" {
+		t.Fatalf("outcome-backed auto select = %+v, %v", result, err)
+	}
+	summary, err := readShadowResearchOutcomeSummary(outcomePath)
+	if err != nil || summary.CandidatesEvaluated != 1 || summary.SelectionsConfirmed != 1 {
+		t.Fatalf("selection outcome summary = %+v, %v", summary, err)
+	}
+
+	recoveryPath := filepath.Join(root, "outcomes", "recovery.jsonl")
+	if _, appended, err := recordShadowResearchForwardOutcome(
+		recoveryPath, now, base, challenger, challengerSHA256, challenge,
+	); err != nil || !appended {
+		t.Fatalf("prepare recovery outcome = %t, %v", appended, err)
+	}
+	retry, err := autoSelectShadowChallengerWithOutcomes(
+		base, championPointer, challengerPointer, championRoot, challengerRoot,
+		filepath.Join(championControl, "previous.json"),
+		filepath.Join(challengerControl, "lifecycle.lock"), 7, now.Add(time.Second), recoveryPath,
+	)
+	if err != nil || retry.Status != "paper_challenger_already_selected" {
+		t.Fatalf("outcome reconciliation retry = %+v, %v", retry, err)
+	}
+	recovered, err := readShadowResearchOutcomeSummary(recoveryPath)
+	if err != nil || recovered.SelectionsConfirmed != 1 {
+		t.Fatalf("recovered outcome summary = %+v, %v", recovered, err)
+	}
+
+	emptyPath := filepath.Join(root, "outcomes", "empty.jsonl")
+	if err := os.WriteFile(emptyPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacyRetry, err := autoSelectShadowChallengerWithOutcomes(
+		base, championPointer, challengerPointer, championRoot, challengerRoot,
+		filepath.Join(championControl, "previous.json"),
+		filepath.Join(challengerControl, "lifecycle.lock"), 7, now.Add(2*time.Second), emptyPath,
+	)
+	if err != nil || legacyRetry.Status != "paper_challenger_already_selected" {
+		t.Fatalf("empty legacy outcome retry = %+v, %v", legacyRetry, err)
+	}
+	emptySummary, err := readShadowResearchOutcomeSummary(emptyPath)
+	if err != nil || emptySummary.Records != 0 {
+		t.Fatalf("empty legacy outcome summary = %+v, %v", emptySummary, err)
+	}
+
+	missingPath := filepath.Join(root, "outcomes", "missing.jsonl")
+	legacyRetry, err = autoSelectShadowChallengerWithOutcomes(
+		base, championPointer, challengerPointer, championRoot, challengerRoot,
+		filepath.Join(championControl, "previous.json"),
+		filepath.Join(challengerControl, "lifecycle.lock"), 7, now.Add(3*time.Second), missingPath,
+	)
+	if err != nil || legacyRetry.Status != "paper_challenger_already_selected" {
+		t.Fatalf("missing legacy outcome retry = %+v, %v", legacyRetry, err)
+	}
+	if _, err := os.Lstat(missingPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing legacy outcome journal was created: %v", err)
+	}
+
+	nonmatchingPath := filepath.Join(root, "outcomes", "nonmatching.jsonl")
+	unrelated := collision
+	unrelated.CandidateSHA256 = strings.Repeat("e", 64)
+	if appended, err := appendShadowResearchOutcome(
+		nonmatchingPath, now, shadowResearchForwardEvaluated, unrelated,
+	); err != nil || !appended {
+		t.Fatalf("prepare unrelated outcome = %t, %v", appended, err)
+	}
+	if _, err := autoSelectShadowChallengerWithOutcomes(
+		base, championPointer, challengerPointer, championRoot, challengerRoot,
+		filepath.Join(championControl, "previous.json"),
+		filepath.Join(challengerControl, "lifecycle.lock"), 7, now.Add(4*time.Second), nonmatchingPath,
+	); err == nil {
+		t.Fatal("nonmatching nonempty outcome journal was treated as legacy state")
+	}
+}
+
+func TestShadowAutoSelectOutcomeJournalRequiresHermesBoundCandidate(t *testing.T) {
+	fixture := newShadowAutoSelectFixture(t)
+	outcomePath := filepath.Join(privateTestDirectory(t), "outcomes.jsonl")
+	_, err := autoSelectShadowChallengerWithOutcomes(
+		fixture.base, fixture.championPointer, fixture.challengerPointer,
+		fixture.championRoot, fixture.challengerRoot, fixture.rollbackPointer,
+		fixture.lifecycleLock, 7, time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC),
+		outcomePath,
+	)
+	if err == nil || !strings.Contains(err.Error(), "Hermes-bound") {
+		t.Fatalf("unbound outcome candidate error = %v", err)
+	}
+	if err := runShadowAutoSelect([]string{
+		"--policy", fixture.policyPath,
+		"--champion-pointer", fixture.championPointer,
+		"--challenger-pointer", fixture.challengerPointer,
+		"--champion-dir", fixture.championRoot,
+		"--challenger-dir", fixture.challengerRoot,
+		"--days", "7", "--rollback-pointer", fixture.rollbackPointer,
+		"--lifecycle-lock", fixture.lifecycleLock,
+		"--outcome-journal", outcomePath,
+	}, io.Discard); err == nil || !strings.Contains(err.Error(), "Hermes-bound") {
+		t.Fatalf("auto-select outcome flag error = %v", err)
+	}
+	if validShadowAutoSelectOutcomePath(
+		filepath.Join(filepath.Dir(fixture.challengerPointer), "outcomes.jsonl"),
+		[]string{fixture.challengerPointer},
+	) {
+		t.Fatal("outcome journal was allowed beside the Hermes-writable challenger pointer")
+	}
+}

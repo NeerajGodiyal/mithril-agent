@@ -30,9 +30,9 @@ Collect attempts one immutable, hash-chained observation per minute; missed
  buckets count unavailable. Curve samples serial $10/$25/$50/$100 Jupiter
  round trips and emits diagnostic-only size evidence. Diagnose prints a recent 1-168 hour operational
 summary but cannot qualify a market or create an artifact. Provisional writes
-a paper-only six-hour checkpoint which expires quickly and cannot authorize a
-proposal. Paper-check selects only on the first four hours, then runs normal
-plus doubled-modelled-spread replays on the final two untouched hours. Its JSON is research-only and cannot
+a paper-only two-hour checkpoint which expires quickly and cannot authorize a
+proposal. Paper-check selects only on the first 80 minutes, then runs normal
+plus doubled-modelled-spread replays on the final 40 untouched minutes. Its JSON is research-only and cannot
 activate or promote a market. On a passing result, --candidate-policy-out can
 write the exact immutable policy for further paper testing. Evaluate checks the latest 30 complete UTC days from that exact durable journal prefix
 and writes a new artifact without replacing an existing file. Qualification

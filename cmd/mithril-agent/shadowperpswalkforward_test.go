@@ -37,14 +37,14 @@ func TestShadowPerpsWalkForwardReadsOnlySealedCompatibleTapes(t *testing.T) {
 	}
 }
 
-func TestSettledCaptureKeepsVerifiedV3ReplayTapesCompatible(t *testing.T) {
+func TestSettledCaptureKeepsVerifiedV3ReplayTapesReadable(t *testing.T) {
 	base := t.TempDir()
 	config := shadowPerpsTapeConfig{
 		Environment: perpspaper.Mainnet, Symbol: perpspaper.SOL, RiskArm: perpspaper.Balanced,
 		StartingCollateralMicros: 100_000_000, VenueMaxLeverage: 20, VenueSzDecimals: 2,
 	}
-	// Sampling delay is recorded by frame timestamps; it does not change the v3
-	// tape schema, accounting, or replay rules.
+	// Sampling delay is recorded by frame timestamps; a v3 tape remains immutable
+	// and readable after the selected-plan v4 format is introduced.
 	legacy := shadowPerpsTape{
 		Version: 3, PaperOnly: true, AccountingModel: "hyperliquid_causal_sampled_context_stress_v3",
 		Config: config, Frames: flatShadowPerpsTestFrames(0, perpspaper.QualificationMinimumFrames),
@@ -60,7 +60,7 @@ func TestSettledCaptureKeepsVerifiedV3ReplayTapesCompatible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if read.Version != shadowPerpsTapeVersion || read.AccountingModel != shadowPerpsModel || !compatibleShadowPerpsTapes(config, read.Config) {
+	if read.Version != 3 || read.AccountingModel != shadowPerpsLegacyModel || !compatibleShadowPerpsTapes(config, read.Config) {
 		t.Fatalf("verified v3 tape became incompatible: %+v", read)
 	}
 }
@@ -222,7 +222,7 @@ func TestFinalizePreservesTapesAndPublishesMultiTapeSummary(t *testing.T) {
 	write := func(offset int64) {
 		t.Helper()
 		tape := shadowPerpsTape{
-			Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
+			Version: 3, PaperOnly: true, AccountingModel: shadowPerpsLegacyModel,
 			Config: config, Frames: flatShadowPerpsTestFrames(offset, perpspaper.QualificationMinimumFrames),
 		}
 		if err := writeShadowPerpsJSON(filepath.Join(stateDir, "sol-tape.json"), tape); err != nil {
@@ -295,7 +295,7 @@ func TestPreparePreservesCompleteTapeAfterInterruptedRun(t *testing.T) {
 		Environment: perpspaper.Mainnet, Symbol: perpspaper.SOL, RiskArm: perpspaper.Balanced,
 		StartingCollateralMicros: 100_000_000, VenueMaxLeverage: 20, VenueSzDecimals: 2,
 	}
-	tape := shadowPerpsTape{Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
+	tape := shadowPerpsTape{Version: 3, PaperOnly: true, AccountingModel: shadowPerpsLegacyModel,
 		Config: config, Frames: flatShadowPerpsTestFrames(0, perpspaper.QualificationMinimumFrames)}
 	if err := writeShadowPerpsJSON(filepath.Join(stateDir, "sol-tape.json"), tape); err != nil {
 		t.Fatal(err)
@@ -333,7 +333,7 @@ func TestPrepareDoesNotSealOrArchiveCausallyInvalidCompletedTape(t *testing.T) {
 	frames[1].Candles[0].Close = "101"
 	tapePath := filepath.Join(stateDir, "sol-tape.json")
 	if err := writeShadowPerpsJSON(tapePath, shadowPerpsTape{
-		Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
+		Version: 3, PaperOnly: true, AccountingModel: shadowPerpsLegacyModel,
 		Config: config, Frames: frames,
 	}); err != nil {
 		t.Fatal(err)
@@ -373,7 +373,7 @@ func TestResearchFailureStillPublishesValidSingleTapeStatus(t *testing.T) {
 		Environment: perpspaper.Mainnet, Symbol: perpspaper.SOL, RiskArm: perpspaper.Balanced,
 		StartingCollateralMicros: 100_000_000, VenueMaxLeverage: 20, VenueSzDecimals: 2,
 	}
-	tape := shadowPerpsTape{Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
+	tape := shadowPerpsTape{Version: 3, PaperOnly: true, AccountingModel: shadowPerpsLegacyModel,
 		Config: config, Frames: flatShadowPerpsTestFrames(0, perpspaper.QualificationMinimumFrames)}
 	if err := writeShadowPerpsJSON(filepath.Join(stateDir, "sol-tape.json"), tape); err != nil {
 		t.Fatal(err)

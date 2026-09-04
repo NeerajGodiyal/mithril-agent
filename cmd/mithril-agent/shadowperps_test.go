@@ -114,6 +114,70 @@ func TestShadowPerpsPaperRunPersistsSignerFreePaperState(t *testing.T) {
 	}
 }
 
+func TestShadowPerpsPaperRunUsesQualifiedPlanOnlyOnNextBoundedRun(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 5, 30, 0, time.UTC)
+	reader := validStubShadowPerpsReader(now)
+	base := t.TempDir()
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stateDir, archiveDir := filepath.Join(base, "current"), filepath.Join(base, "runs")
+	factory := func(perpspaper.Environment) (shadowPerpsReader, error) { return reader, nil }
+	args := []string{
+		"--state-dir", stateDir, "--archive-dir", archiveDir,
+		"--symbols", "SOL", "--arm", "balanced", "--once",
+	}
+	var first bytes.Buffer
+	if err := runShadowPerpsPaperWith(t.Context(), args, &first, func() time.Time { return now }, factory); err != nil {
+		t.Fatal(err)
+	}
+	var firstStatus shadowPerpsStatus
+	if json.Unmarshal(first.Bytes(), &firstStatus) != nil ||
+		firstStatus.DecisionMode != shadowPerpsDecisionLegacy || firstStatus.Strategy != "" {
+		t.Fatalf("first status = %+v", firstStatus)
+	}
+	var firstTape shadowPerpsTape
+	if err := readStrictJSON(filepath.Join(stateDir, "sol-tape.json"), &firstTape); err != nil {
+		t.Fatal(err)
+	}
+	qualification := qualifiedShadowPerpsWalkForward(t, stateDir, firstTape.Config.qualificationConfig(), 3)
+	receipt, err := selectQualifiedShadowPerpsPlan(
+		stateDir, perpspaper.Mainnet, firstTape.Config.PlanSHA256, qualification, now.Add(10*time.Second),
+	)
+	if err != nil || !receipt.PointerUpdated {
+		t.Fatalf("select next plan = %+v, %v", receipt, err)
+	}
+	// The stored tape remains bound to the plan that produced it.
+	stored, _, err := readShadowPerpsTape(filepath.Join(stateDir, "sol-tape.json"), firstTape.Config)
+	if err != nil || stored.Config.DecisionMode != shadowPerpsDecisionLegacy {
+		t.Fatalf("in-flight tape was reinterpreted: %+v, %v", stored.Config, err)
+	}
+
+	now = now.Add(time.Minute)
+	reader.candles = paperCandles(now, "100", "101")
+	reader.book.Time = now.UnixMilli()
+	var next bytes.Buffer
+	if err := runShadowPerpsPaperWith(t.Context(), args, &next, func() time.Time { return now }, factory); err != nil {
+		t.Fatal(err)
+	}
+	var nextStatus shadowPerpsStatus
+	if json.Unmarshal(next.Bytes(), &nextStatus) != nil ||
+		nextStatus.DecisionMode != shadowPerpsDecisionSelected ||
+		nextStatus.Strategy != qualification.Candidate.Strategy ||
+		nextStatus.RiskArm != qualification.Candidate.RiskArm ||
+		nextStatus.PlanSHA256 != receipt.PlanSHA256 {
+		t.Fatalf("next status = %+v", nextStatus)
+	}
+	var nextTape shadowPerpsTape
+	if err := readStrictJSON(filepath.Join(stateDir, "sol-tape.json"), &nextTape); err != nil {
+		t.Fatal(err)
+	}
+	if nextTape.Version != shadowPerpsTapeVersion ||
+		nextTape.Config.QualificationInputSHA256 != qualification.InputSHA256 {
+		t.Fatalf("next tape = %+v", nextTape)
+	}
+}
+
 func TestShadowPerpsPaperRunWaitsForCandleSettlement(t *testing.T) {
 	now := time.Date(2026, 9, 2, 12, 5, 30, 0, time.UTC)
 	reader := validStubShadowPerpsReader(now)

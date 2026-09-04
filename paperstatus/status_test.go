@@ -157,6 +157,125 @@ func TestVersionFiveMultiTapeSummaryRemainsReadable(t *testing.T) {
 	}
 }
 
+func TestVersionSixQualificationAttemptsRemainReadableAndUpgradable(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	summary := &CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced", PositionDirection: "flat",
+		LeverageBPS: 20_000, FundingTracked: true, ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_100_000, HoldBenchmarkMicros: 100_000_000,
+		AccountingTracked: true, RealizedMicros: 100_000, Checks: 60, Signals: 2, Trades: 2,
+		State: "watching", Strategy: "fixed", QualificationTracked: true,
+		QualificationOutcome: "candidate_ready_for_more_paper_testing", QualificationSHA256: strings.Repeat("a", 64),
+		QualificationTapes: 2, QualificationFrames: 48, QualificationMinimumFrames: 48,
+		QualificationTrainingFrames: 24, QualificationHoldoutFrames: 24,
+		QualificationStrategy: "momentum", QualificationRiskProfile: "balanced",
+		QualificationHoldoutEvaluated: true, QualificationStressEvaluated: true,
+		QualificationHoldoutScored: true, QualificationStressScored: true,
+		QualificationHoldoutMicros: 100_000, QualificationStressMicros: 50_000,
+		QualificationAttempts: []QualificationAttempt{{
+			RiskProfile: "balanced", Strategy: "momentum", NetPnLMicros: 90_000,
+			FeesMicros: 10_000, MaxDrawdownMicros: 25_000, FilledOrders: 2, ClosedPositions: 2,
+		}},
+	}
+	snapshot := Snapshot{Version: perpsPlanVersion, ObservedAt: now, Current: "PAPER · checkpoint", Summary: summary}
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("version six snapshot: %v", err)
+	}
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "status.json")
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := securefile.ReplacePrivate(path, append(raw, '\n'), maxSnapshotBytes); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := OpenWriter(path)
+	if err != nil {
+		t.Fatalf("open version six status: %v", err)
+	}
+	if err := writer.UpdateCurrentSummary(now.Add(time.Second), snapshot.Current, summary); err != nil {
+		t.Fatalf("upgrade version six status: %v", err)
+	}
+	upgradedRaw, err := securefile.ReadPrivate(path, maxSnapshotBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var upgraded Snapshot
+	if err := strictjson.Decode(upgradedRaw, &upgraded); err != nil || upgraded.Version != Version ||
+		len(upgraded.Summary.QualificationAttempts) != 1 {
+		t.Fatalf("upgraded version six status = %+v, %v", upgraded, err)
+	}
+}
+
+func TestVersionSevenBindsPerpsDecisionSourceAndLaterOutcome(t *testing.T) {
+	now := time.Date(2026, 9, 4, 14, 0, 0, 0, time.UTC)
+	summary := &CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 99_000_000,
+		HoldBenchmarkMicros: 100_000_000, AccountingTracked: true,
+		RealizedMicros: 1_000_000, UnrealizedMicros: -2_000_000,
+		Checks: 96, Signals: 2, Trades: 2,
+		State: "watching", Strategy: "momentum",
+		DecisionSource: "selected_paper_plan", ProposalSource: "deterministic_search",
+		RunPlanSHA256:    strings.Repeat("a", 64),
+		PerpsPlanOutcome: &PerpsPlanOutcome{TapeSHA256: strings.Repeat("b", 64), Result: "loss"},
+	}
+	snapshot := Snapshot{Version: Version, ObservedAt: now, Current: "PAPER · checkpoint", Summary: summary}
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("version seven selected-plan outcome: %v", err)
+	}
+	for name, mutate := range map[string]func(*CurrentSummary){
+		"decision source": func(value *CurrentSummary) { value.DecisionSource = "hermes" },
+		"proposal source": func(value *CurrentSummary) { value.ProposalSource = "hermes" },
+		"plan digest":     func(value *CurrentSummary) { value.RunPlanSHA256 = "bad" },
+		"tape digest":     func(value *CurrentSummary) { value.PerpsPlanOutcome.TapeSHA256 = "bad" },
+		"result sign":     func(value *CurrentSummary) { value.PerpsPlanOutcome.Result = "gain" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := *summary
+			outcome := *summary.PerpsPlanOutcome
+			candidate.PerpsPlanOutcome = &outcome
+			mutate(&candidate)
+			if err := validateCurrentSummary(&candidate); err == nil {
+				t.Fatal("invalid selected-plan attribution was accepted")
+			}
+		})
+	}
+
+	legacy := snapshot
+	legacy.Version = perpsPlanVersion
+	if err := ValidateSnapshot(legacy); err == nil {
+		t.Fatal("version six snapshot accepted version seven decision attribution")
+	}
+	legacy.Summary = &CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+		HoldBenchmarkMicros: 100_000_000, State: "watching", Strategy: "momentum",
+	}
+	if err := ValidateSnapshot(legacy); err == nil {
+		t.Fatal("version six snapshot accepted a selected perps strategy")
+	}
+	missingAttribution := *summary
+	missingAttribution.DecisionSource = ""
+	missingAttribution.ProposalSource = ""
+	missingAttribution.RunPlanSHA256 = ""
+	missingAttribution.PerpsPlanOutcome = nil
+	if err := validateCurrentSummary(&missingAttribution); err == nil {
+		t.Fatal("version seven selected perps strategy omitted its run attribution")
+	}
+}
+
 func TestVersionFiveZeroResultCandidateKeepsExplicitScores(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	snapshot := Snapshot{Version: multiTapeVersion, ObservedAt: now, Current: "PAPER · checkpoint", Summary: &CurrentSummary{

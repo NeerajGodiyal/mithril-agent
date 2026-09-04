@@ -444,8 +444,8 @@ func TestMarketAnnouncementDoesNotLookLikeTheCombinedPaperAccount(t *testing.T) 
 	}
 	message := paperAnnouncement(event, "SOL/USDC")
 	for _, want := range []string{
-		"PAPER\n\n🔵 SOLD\nMarket: SOL/USDC",
-		"Market value: $25.17",
+		"PAPER\n\n🔵 SOLD 0.24 SOL\nMarket: SOL/USDC",
+		"Received: 25 USDC",
 	} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("market announcement omits %q: %q", want, message)
@@ -468,17 +468,22 @@ func TestMarketFillExplainsEstimatedAndActualUnitPrices(t *testing.T) {
 	}
 	message := paperAnnouncement(event, "JUP/USDC")
 	for _, want := range []string{
-		"Bought: 320 JUP",
+		"🟢 BOUGHT 320 JUP",
 		"Paid: 69 USDC",
-		"Estimated price for 1 JUP: $0.214878",
-		"Actual paper price for 1 JUP: $0.214826",
-		"Paper cash left: 26 USDC",
-		"JUP held now: 320 JUP",
-		"This completed buy + sell: 🟢 ▲ $2.14 (profit)",
+		"Paper price: $0.214826 (estimate $0.214878)",
+		"Trade result: 🟢 ▲ $2.14 (profit)",
 	} {
 		if !strings.Contains(message, want) {
 			t.Errorf("paper fill omits %q: %q", want, message)
 		}
+	}
+	for _, omitted := range []string{"Paper cash left:", "JUP held now:", "Market value:"} {
+		if strings.Contains(message, omitted) {
+			t.Errorf("compact paper fill retained %q: %q", omitted, message)
+		}
+	}
+	if lines := strings.Split(message, "\n"); len(lines) > 7 {
+		t.Fatalf("compact paper fill grew to %d lines: %q", len(lines), message)
 	}
 	unlabeled := paperAnnouncement(event, "")
 	for _, want := range []string{
@@ -530,9 +535,9 @@ func TestFilledMarketAnnouncementIncludesOnlyACompletePortfolioTotal(t *testing.
 		t.Fatalf("paper sends = %+v", bot.sent)
 	}
 	for _, want := range []string{
-		"PAPER\n\n🔵 SOLD\nMarket: SOL/USDC",
-		"TOTAL PAPER VALUE NOW\n$278.20\nCash + current value of all paper holdings",
-		"COMBINED RESULT THIS RUN\n🟢 ▲ $2.11 (profit)",
+		"PAPER\n\n🔵 SOLD 0.24 SOL\nMarket: SOL/USDC",
+		"Account value: $278.20",
+		"Total result: 🟢 ▲ $2.11 (profit)",
 	} {
 		if !strings.Contains(bot.sent[0].Text, want) {
 			t.Errorf("portfolio fill alert omits %q:\n%s", want, bot.sent[0].Text)
@@ -548,8 +553,8 @@ func TestFilledMarketAnnouncementIncludesOnlyACompletePortfolioTotal(t *testing.
 	first.snapshot.Events = []paperstatus.Event{*event}
 	bot.sent = nil
 	service.announce(t.Context())
-	if len(bot.sent) != 1 || strings.Contains(bot.sent[0].Text, "TOTAL PAPER VALUE NOW") ||
-		strings.Contains(bot.sent[0].Text, "COMBINED RESULT THIS RUN") {
+	if len(bot.sent) != 1 || strings.Contains(bot.sent[0].Text, "Account value:") ||
+		strings.Contains(bot.sent[0].Text, "Total result:") {
 		t.Fatalf("partial portfolio was labeled as complete: %+v", bot.sent)
 	}
 }
@@ -571,6 +576,16 @@ func TestReadablePaperMessageUpgradesRetainedCopyWithoutChangingHistory(t *testi
 	wantExperiment := "PAPER · 🧪 STRATEGY CHECK\nExperiment result: no paper plan passed every training gate\nFinal untouched recording: kept closed"
 	if got := readablePaperMessage(legacyExperiment); got != wantExperiment {
 		t.Fatalf("readable retained experiment result = %q, want %q", got, wantExperiment)
+	}
+}
+
+func TestReadablePaperMessageDoesNotCallAccountValueAResult(t *testing.T) {
+	legacy := "PAPER · 👀 WATCHING\nToday's estimated paper value: $95.10"
+	if got := readablePaperMessage(legacy); got != "PAPER · 👀 WATCHING\nTotal paper value now: $95.10" {
+		t.Fatalf("readable retained paper value = %q", got)
+	}
+	if got := paperCurrentAge(legacy, false); !strings.Contains(got, "Last recorded paper value: $95.10") || strings.Contains(got, "run result") {
+		t.Fatalf("delayed retained paper value = %q", got)
 	}
 }
 
@@ -740,7 +755,7 @@ func TestPaperCommandShowsCombinedCurrentPortfolioPnL(t *testing.T) {
 	}
 	report := service.paperReports()
 	for _, want := range []string{
-		"PAPER\n\n📊 ACCOUNT NOW", "Total paper value: $150.50", "Combined result this run: 🟢 ▲ $0.50 (profit)",
+		"PAPER\n\n📊 SPOT PAPER ACCOUNT", "Spot paper value: $150.50", "Combined result this run: 🟢 ▲ $0.50 (profit)",
 		"Compared with just holding: $1.00 better",
 		"SOL/USDC\nMarket price: $100.25\nPlan: waiting to sell\nPaper result this run: 🟢 ▲ $1.00 (profit)",
 		"JUP/USDC\nMarket price: $100.25\nPlan: waiting to buy\nPaper result this run: 🔴 ▼ $0.50 (loss)",
@@ -754,7 +769,7 @@ func TestPaperCommandShowsCombinedCurrentPortfolioPnL(t *testing.T) {
 	if strings.Contains(report, "SRC ") {
 		t.Fatalf("portfolio report used anonymous source tags:\n%s", report)
 	}
-	if strings.Count(report, "PAPER") != 1 {
+	if strings.Count(report, "PAPER\n\n") != 1 {
 		t.Fatalf("portfolio report repeated per-market blocks:\n%s", report)
 	}
 	if strings.Contains(report, "UTC") {
@@ -791,7 +806,7 @@ func TestOptionalPaperExperimentDoesNotHideRequiredPortfolio(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report := service.paperReports(); !strings.Contains(report, "Total paper value: $200.00") ||
+	if report := service.paperReports(); !strings.Contains(report, "Spot paper value: $200.00") ||
 		strings.Contains(report, "Unavailable") || strings.Contains(report, "SOL-PERP") {
 		t.Fatalf("stopped optional experiment damaged the required portfolio:\n%s", report)
 	}
@@ -807,15 +822,15 @@ func TestOptionalPaperExperimentDoesNotHideRequiredPortfolio(t *testing.T) {
 		Message: "PAPER · 🔵 SOLD\nSold: 1 SOL\nReceived: 100 USDC\nMarket value: $102.00",
 	}}
 	service.paperSources[2] = OptionalPaperSource(active)
-	if report := service.paperReports(); !strings.Contains(report, "Total paper value: $200.00") ||
+	if report := service.paperReports(); !strings.Contains(report, "Spot paper value: $200.00") ||
 		!strings.Contains(report, "PERPS PAPER EXPERIMENT") || !strings.Contains(report, "SOL-PERP") ||
-		strings.Contains(report, "Total paper value: $302.00") {
+		strings.Contains(report, "Spot paper value: $302.00") {
 		t.Fatalf("active optional experiment was omitted:\n%s", report)
 	}
 	service.announce(t.Context())
 	if len(bot.sent) != 1 || !strings.Contains(bot.sent[0].Text, "PERPS PAPER EXPERIMENT") ||
 		!strings.Contains(bot.sent[0].Text, "SOL-PERP") ||
-		strings.Contains(bot.sent[0].Text, "TOTAL PAPER VALUE NOW") {
+		strings.Contains(bot.sent[0].Text, "📊 SPOT PAPER ACCOUNT") {
 		t.Fatalf("perps experiment was confused with the spot account: %+v", bot.sent)
 	}
 
@@ -892,12 +907,12 @@ func TestOptionalExperimentCannotChangeRequiredAccountTotals(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if report := service.paperReports(); !strings.Contains(report, "Total paper value: $200.00") ||
+			if report := service.paperReports(); !strings.Contains(report, "Spot paper value: $200.00") ||
 				!strings.Contains(report, "PERPS PAPER EXPERIMENT") || !strings.Contains(report, "SOL-PERP") {
 				t.Fatalf("optional source erased /paper aggregate:\n%s", report)
 			}
 			service.announce(t.Context())
-			if len(bot.sent) != 1 || !strings.Contains(bot.sent[0].Text, "TOTAL PAPER VALUE NOW\n$200.00") {
+			if len(bot.sent) != 1 || !strings.Contains(bot.sent[0].Text, "Account value: $200.00") {
 				t.Fatalf("optional source erased alert footer: %+v", bot.sent)
 			}
 		})
@@ -920,7 +935,8 @@ func TestPaperPortfolioShowsLiquidationDeficit(t *testing.T) {
 		paperPortfolioSummary(summaries, time.Time{}),
 		paperPortfolioAlertSummary(summaries),
 	} {
-		if !strings.Contains(report, "$2.00") ||
+		if !strings.Contains(report, "Spot paper value: $98.00") && !strings.Contains(report, "Account value: $98.00") ||
+			!strings.Contains(report, "$2.00") ||
 			!strings.Contains(report, "🔴 ▼ $102.00 (loss)") ||
 			!strings.Contains(report, "Liquidation deficit: $2.00") {
 			t.Fatalf("liquidation deficit was hidden:\n%s", report)

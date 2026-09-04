@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
@@ -29,6 +30,7 @@ const shadowAutoSelectUsage = `Usage: mithril-agent shadow auto-select --policy 
        --champion-pointer PATH --challenger-pointer PATH
        --champion-dir PATH --challenger-dir PATH
        --days N --rollback-pointer PATH --lifecycle-lock PATH
+       [--outcome-journal PATH]
 
 Selects a challenger only after its fixed forward paper challenge qualifies.
 It first preserves the current champion pointer, copies the immutable candidate
@@ -71,6 +73,7 @@ func runShadowAutoSelect(args []string, output io.Writer) error {
 	challengerRoot := flags.String("challenger-dir", "", "challenger run root")
 	rollbackPointer := flags.String("rollback-pointer", "", "preserved previous champion pointer")
 	lifecycleLock := flags.String("lifecycle-lock", "", "shared paper lifecycle lock")
+	outcomeJournal := flags.String("outcome-journal", "", "optional Hermes-bound paper outcome journal")
 	days := flags.Uint("days", 0, "required forward challenge days, 7..3650")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -82,21 +85,41 @@ func runShadowAutoSelect(args []string, output io.Writer) error {
 	if flags.NArg() != 0 || *days < 7 || *days > 3650 || !validShadowAutoSelectPaths(
 		*policyPath, *championPointer, *challengerPointer, *championRoot, *challengerRoot,
 		*rollbackPointer, *lifecycleLock,
-	) {
+	) || !validShadowAutoSelectOutcomePath(*outcomeJournal, []string{
+		*policyPath, *championPointer, *challengerPointer, *championRoot, *challengerRoot,
+		*rollbackPointer, *lifecycleLock,
+	}) {
 		return errors.New("shadow auto-select requires distinct fixed absolute private paper paths")
 	}
 	base, err := loadActiveShadowPolicy(*policyPath)
 	if err != nil {
 		return err
 	}
-	result, err := autoSelectShadowChallenger(
+	result, err := autoSelectShadowChallengerWithOutcomes(
 		base, *championPointer, *challengerPointer, *championRoot, *challengerRoot,
-		*rollbackPointer, *lifecycleLock, uint32(*days), time.Now().UTC(),
+		*rollbackPointer, *lifecycleLock, uint32(*days), time.Now().UTC(), *outcomeJournal,
 	)
 	if err != nil {
 		return err
 	}
 	return json.NewEncoder(output).Encode(result)
+}
+
+func validShadowAutoSelectOutcomePath(path string, protected []string) bool {
+	if path == "" {
+		return true
+	}
+	if !absoluteClean(path) {
+		return false
+	}
+	for _, other := range protected {
+		if path == other || filepath.Dir(path) == other ||
+			filepath.Dir(path) == filepath.Dir(other) ||
+			strings.HasPrefix(path, other+string(os.PathSeparator)) {
+			return false
+		}
+	}
+	return true
 }
 
 func validShadowAutoSelectPaths(
@@ -130,7 +153,27 @@ func autoSelectShadowChallenger(
 	expectedDays uint32,
 	now time.Time,
 ) (shadowAutoSelectResult, error) {
+	return autoSelectShadowChallengerWithOutcomes(
+		base, championPointer, challengerPointer, championRoot, challengerRoot,
+		rollbackPointer, lifecycleLock, expectedDays, now, "",
+	)
+}
+
+func autoSelectShadowChallengerWithOutcomes(
+	base shadow.Policy,
+	championPointer, challengerPointer, championRoot, challengerRoot,
+	rollbackPointer, lifecycleLock string,
+	expectedDays uint32,
+	now time.Time,
+	outcomeJournal string,
+) (shadowAutoSelectResult, error) {
 	result := shadowAutoSelectResult{PaperOnly: true}
+	if !validShadowAutoSelectOutcomePath(outcomeJournal, []string{
+		championPointer, challengerPointer, championRoot, challengerRoot,
+		rollbackPointer, lifecycleLock,
+	}) {
+		return result, errors.New("paper outcome journal path is invalid")
+	}
 	err := withShadowLifecycleLock(lifecycleLock, func() error {
 		championPointerBefore, err := securefile.ReadPrivate(
 			championPointer, shadowCandidatePointerBytes,
@@ -151,11 +194,21 @@ func autoSelectShadowChallenger(
 			selection.ChallengeGateVersion != shadowChallengeGateVersion {
 			return errors.New("paper challenger pointer is not forward-qualified evidence")
 		}
+		if outcomeJournal != "" && challenger.ResearchPacket == nil {
+			return errors.New("paper outcome journaling requires a Hermes-bound challenger")
+		}
 		_, championPath, championSHA256, err := loadBoundSelectedShadowCandidate(championPointer, base)
 		if err != nil {
 			return errors.New("paper champion pointer is invalid")
 		}
 		if championSHA256 == challengerSHA256 {
+			if outcomeJournal != "" {
+				if _, err := reconcileShadowResearchSelectionFromForward(
+					outcomeJournal, now.UTC(), challengerSHA256,
+				); err != nil {
+					return errors.New("could not reconcile the paper research selection outcome")
+				}
+			}
 			result.Status = "paper_challenger_already_selected"
 			result.CandidatePolicySHA256 = challenger.CandidatePolicySHA256
 			return nil
@@ -175,6 +228,13 @@ func autoSelectShadowChallenger(
 		}
 		if err != nil {
 			return err
+		}
+		if outcomeJournal != "" {
+			if _, _, err := recordShadowResearchForwardOutcome(
+				outcomeJournal, now.UTC(), base, challenger, challengerSHA256, challenge,
+			); err != nil {
+				return errors.New("could not record the paper research forward outcome")
+			}
 		}
 		result.Status = challenge.Status
 		result.Reasons = challenge.Reasons
@@ -227,6 +287,13 @@ func autoSelectShadowChallenger(
 			challenger.CandidatePolicySHA256,
 		); err != nil {
 			return errors.New("could not update the paper champion pointer")
+		}
+		if outcomeJournal != "" {
+			if _, _, err := recordShadowResearchSelectionConfirmation(
+				outcomeJournal, now.UTC(), base, challenger, challengerSHA256, challenge,
+			); err != nil {
+				return errors.New("paper champion changed but its research outcome confirmation needs reconciliation")
+			}
 		}
 		result.Status = "qualified_paper_challenger_selected"
 		result.ChampionPointerUpdated = true

@@ -148,6 +148,9 @@ type Market struct {
 	CoverageReady                 bool               `json:"coverage_ready"`
 	State                         string             `json:"state,omitempty"`
 	Strategy                      string             `json:"strategy,omitempty"`
+	DecisionSource                string             `json:"decision_source,omitempty"`
+	ProposalSource                string             `json:"proposal_source,omitempty"`
+	PerpsPlanOutcome              string             `json:"perps_plan_outcome,omitempty"`
 	NextAction                    string             `json:"next_action,omitempty"`
 	DecisionReason                string             `json:"decision_reason,omitempty"`
 	RiskHalted                    bool               `json:"risk_halted,omitempty"`
@@ -530,6 +533,11 @@ func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Mark
 		market.CoverageBPS, market.CoverageReady = coverage(summary.Checks, summary.Unobservable)
 		market.State = summary.State
 		market.Strategy = summary.Strategy
+		market.DecisionSource = summary.DecisionSource
+		market.ProposalSource = summary.ProposalSource
+		if summary.PerpsPlanOutcome != nil {
+			market.PerpsPlanOutcome = summary.PerpsPlanOutcome.Result
+		}
 		market.NextAction = summary.NextAction
 		market.DecisionReason = summary.DecisionReason
 		market.RiskHalted = summary.RiskHalted

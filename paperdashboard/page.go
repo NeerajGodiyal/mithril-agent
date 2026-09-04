@@ -43,6 +43,7 @@ const indexHTML = `<!doctype html>
   <main id="main" class="shell">
     <div id="notice" class="notice" role="status" aria-live="polite"></div>
     <section id="overview" class="panel active" role="tabpanel" aria-labelledby="tab-overview" tabindex="0">
+      <section id="agent-now" class="agent-now" aria-label="Current paper agent decisions"><div class="agent-now-head"><div><span class="eyebrow">Agent now</span><strong>Loading current paper decisions…</strong></div><span class="paper-boundary">Paper only · No real orders</span></div></section>
       <div id="metrics" class="metrics" aria-label="Paper account summary"></div>
       <div class="overview-workspace">
         <div id="markets" class="market-grid" role="tabpanel" aria-label="Selected live spot market performance"></div>
@@ -69,7 +70,7 @@ const indexHTML = `<!doctype html>
         </label>
       </div>
       <div class="activity-table">
-        <div class="activity-list-head" aria-hidden="true"><span>Event</span><span>Summary</span><span>Result</span><span>When</span></div>
+        <div class="activity-list-head" aria-hidden="true"><span>Event</span><span>Summary</span><span>Status</span><span>When</span></div>
         <div id="activity-list" class="activity-list"></div>
       </div>
     </section>
@@ -428,11 +429,23 @@ function renderMetrics(){
   const ready=(current.markets||[]).filter(m=>!m.optional&&m.available&&m.ready),largest=ready.reduce((found,m)=>integer(m.opening_equity_micros)>integer(found?.opening_equity_micros||0)?m:found,null);
 	  const spotNames=ready.map(m=>m.name.split('/')[0]).join(' + ')||'SOL + JUP';
 	  const accountFoot=spotNames+' spot only'+(largest?' · Largest market '+exposure(largest.opening_equity_micros,o.opening_equity_micros):'')+(deficit?' · '+paperValue(deficit,o.value_unit)+' liquidation deficit shown in the result':'');
-  $('metrics').innerHTML=metric('Live spot account',paperValue(o.equity_micros,o.value_unit),accountFoot,'neutral','Current value of the live SOL and JUP paper simulations. Completed perps research is not included.')+
+  $('metrics').innerHTML=metric('Live spot account',paperValue(effective,o.value_unit),accountFoot,'neutral','Current value of the live SOL and JUP paper simulations after any simulated liquidation deficit. Completed perps research is not included.')+
 	  metric('Spot account start',paperValue(o.opening_equity_micros,o.value_unit),'Opening SOL + JUP paper value','neutral','Combined simulated value when the live spot runs began.')+
 	  metric('Spot result',signedAmount(pnl,o.value_unit),breakdown,tone(pnl),'Change across the live SOL and JUP spot simulations since these runs began.',tone(pnl),changePercent(o.opening_equity_micros,effective))+
     metric('Spot versus holding',holdingText,hold===0n?'Same result as holding':'Same starting assets',tone(hold),'Compares the spot strategies with leaving the same starting assets untouched.',tone(hold))+
 	    metric('Spot executions',String(o.trades||0),paperValue(o.turnover_micros,o.value_unit)+' filled · '+paperValue(o.fees_micros,o.value_unit)+' costs','neutral','Completed simulated spot fills. Perps research fills are shown separately.');
+}
+function renderAgentNow(){
+	const target=$('agent-now'),markets=(current?.markets||[]).filter(market=>!isPerps(market)&&!market.optional);
+	const cards=markets.map(m=>{
+		const view=strategyView(m),ready=m.available&&m.ready,feeBudgetUsed=ready&&m.fresh&&Boolean(m.fee_budget_tracked)&&!Number(m.estimated_fills_remaining||0);
+		const status=!m.available?{label:'Unavailable',tone:'red'}:!m.ready?{label:'Updating',tone:'amber'}:marketStatus(m,feeBudgetUsed);
+		const decision=!m.available?'Status source unavailable':!m.ready?'Waiting for current market data':view.status;
+		const next=!m.available?'The agent cannot act until this status source returns':!m.ready?'Waiting for verified prices':view.next;
+		const pnl=ready?resultWithDeficit(m):'—',pnlLabel=m.fresh?'P&amp;L this run ':'Last recorded P&amp;L ';
+		return '<article class="agent-now-card"><header><span class="asset-orb" aria-hidden="true">'+safe(m.name.slice(0,1))+'</span><div><h2>'+safe(m.name)+'</h2><small>Autonomous paper plan</small></div><span class="badge '+status.tone+'">'+safe(status.label)+'</span></header><div class="agent-now-decision"><span class="agent-now-icon" aria-hidden="true">'+uiIcon(m.risk_halted?'protect':m.state==='order pending'?'pending':'watch')+'</span><div><small>'+(m.fresh?'Right now':'Last recorded')+'</small><strong>'+safe(decision)+'</strong></div></div><footer><span>'+safe(next)+'</span><strong class="'+tone(ready?effectiveEquity(m)-integer(m.opening_equity_micros):0n)+'">'+pnlLabel+safe(pnl)+'</strong></footer></article>';
+	}).join('');
+	target.innerHTML='<div class="agent-now-head"><div><span class="eyebrow">Agent now</span><strong>What the autonomous paper plans are doing</strong></div><span class="paper-boundary">Paper only · No real orders</span></div><div class="agent-now-grid">'+(cards||'<p class="empty">Waiting for paper markets.</p>')+'</div>';
 }
 function marketCard(m){
 	  if(!m.available)return '<article class="market"><div class="market-head"><h3>'+safe(m.name)+'</h3><span class="badge red">Unavailable</span></div><p class="strategy-next">Status is unavailable</p><p class="market-context">Combined totals are withheld until this required status returns.</p></article>';
@@ -451,9 +464,20 @@ function qualificationView(m){
   case 'insufficient_evidence': return {label:'Recording ended too early',tone:'amber',status:frames+' of '+minimum+' required price checks',next:'No paper plan was selected because the completed recording was too short.'};
   case 'no_training_candidate': return {label:'No plan passed',tone:'amber',status:multi?'12 plans across '+(tapes-1)+' earlier recording'+(tapes===2?'':'s'):'12 paper plans checked',next:multi?'No plan met every training gate across the earlier recordings: profit after costs, complete fills, recorded fees, and no forced close.':'No plan met every training gate: profit after costs, complete fills, recorded fees, and no forced close.'};
   case 'candidate_rejected': return {label:'Plan did not pass',tone:'amber',status:humanToken(m.qualification_strategy)+' · '+humanToken(m.qualification_risk_profile),next:multi?'The best training attempt did not pass the final untouched recording or higher-cost check.':'The best training attempt did not pass the final or higher-cost check.'};
-  case 'candidate_ready_for_more_paper_testing': return {label:'Ready for another paper test',tone:'green',status:humanToken(m.qualification_strategy)+' · '+humanToken(m.qualification_risk_profile),next:multi?'The plan passed the final untouched recording and higher-cost check. This does not authorize real trading.':'The plan passed the final and higher-cost checks. This does not authorize real trading.'};
+  case 'candidate_ready_for_more_paper_testing': return {label:'Candidate passed replay',tone:'green',status:humanToken(m.qualification_strategy)+' · '+humanToken(m.qualification_risk_profile),next:(multi?'The candidate passed the final untouched recording and higher-cost check. ':'The candidate passed the final and higher-cost checks. ')+'The completed run plan shown here is unchanged; only a separate selection can change the next bounded paper test. This does not authorize real trading.'};
   default: return {label:'Checkpoint unavailable',tone:'amber',status:'Recorded evidence rejected',next:'The saved qualification outcome was not recognized.'};
   }
+}
+function perpsPlanSource(m){
+  if(m.decision_source==='selected_paper_plan'&&m.proposal_source==='deterministic_search')return 'Selected paper plan proposed by deterministic search';
+  if(m.decision_source==='legacy_fixed_policy'&&m.proposal_source==='built_in')return 'Built-in fixed paper plan';
+  return 'Paper plan source unavailable';
+}
+function perpsLaterOutcome(m){
+  if(m.perps_plan_outcome==='gain')return 'Later verified paper run: Gain';
+  if(m.perps_plan_outcome==='loss')return 'Later verified paper run: Loss';
+  if(m.perps_plan_outcome==='flat')return 'Later verified paper run: Flat';
+  return '';
 }
 function qualificationStrip(m){
   const view=qualificationView(m);
@@ -479,7 +503,8 @@ function perpsResearchCard(m){
   const terms=help('Perps test terms','Trade fees are simulated execution charges. A funding adjustment is the simulated carry charge or credit. Largest drop is the worst fall from a prior high. A forced close means the safety model closed a leveraged position.');
   const body=leader?'<div class="attempt-grid" aria-label="Best completed training attempts"><div class="attempt-kicker"><span>Strongest completed attempt</span>'+terms+'</div>'+perpsAttemptCard(leader,m,maxMagnitude)+(others.length?'<details class="attempt-more"><summary>Compare '+others.length+' other risk level'+(others.length===1?'':'s')+'</summary><div class="attempt-grid">'+others.map(attempt=>perpsAttemptCard(attempt,m,maxMagnitude)).join('')+'</div></details>':'')+'</div>':'<p class="perps-empty">No completed training attempts are available to compare.</p>';
   const button=m.available&&m.ready?'<button class="plan-trigger" type="button" data-research-market="'+safe(m.name)+'" aria-haspopup="dialog">View experiment details'+uiIcon('arrow')+'</button>':'';
-  return '<article class="perps-research-card"><header><div class="strategy-market-name"><span class="asset-orb" aria-hidden="true">'+safe(m.name.slice(0,1))+'</span><div><h3>'+safe(m.name)+'</h3><span>'+safe(detail)+'</span></div></div><span class="badge '+stateTone+'">'+safe(stateLabel)+'</span></header><div class="perps-outcome"><span>'+uiIcon('score')+'</span><div><small>Latest gate</small><strong>'+safe(outcome)+'</strong></div>'+button+'</div>'+body+'</article>';
+  const laterOutcome=perpsLaterOutcome(m);
+  return '<article class="perps-research-card"><header><div class="strategy-market-name"><span class="asset-orb" aria-hidden="true">'+safe(m.name.slice(0,1))+'</span><div><h3>'+safe(m.name)+'</h3><span>'+safe(detail)+'</span></div></div><span class="badge '+stateTone+'">'+safe(stateLabel)+'</span></header><div class="perps-outcome"><span>'+uiIcon('score')+'</span><div><small>Completed run used</small><strong>'+safe(perpsPlanSource(m))+'</strong>'+(laterOutcome?'<small>'+safe(laterOutcome)+'</small>':'')+'</div>'+button+'</div>'+body+'</article>';
 }
 function strategyGroup(title,description,markets){
   if(!markets.length)return '';
@@ -495,7 +520,7 @@ function strategyView(m){
     feeBudgetUsed,
 	    label:qualification?qualification.label:completed?(perps?'Perps experiment completed':'Paper run completed'):unavailable?'Unavailable':m.ready?(perps?'Perps paper experiment':m.strategy==='adaptive'?'Market-responsive paper plan':m.strategy||'Saved plan'):'Updating',
 	    next:qualification?qualification.next:completed?(perps?'This completed recording is kept for comparison only':'This bounded paper run finished; its result is kept for review'):unavailable?'Status source unavailable':!m.ready?'Waiting for status':!m.fresh?'Waiting for fresh prices':m.risk_halted?(perps?'Simulation paused after liquidation':'New buys paused; sells can still reduce risk'):perps?position:feeBudgetUsed?'Orders paused until tomorrow; the simulated fee budget is used up':m.next_action?'Ready to '+m.next_action+' when the opportunity clears every limit':'Watching for the next opportunity',
-	    status:qualification?qualification.status:completed?'Completed experiment':unavailable?'Unavailable':m.ready?state(m.state):'Status updating',
+	    status:qualification?qualification.status:completed?'Completed experiment':unavailable?'Unavailable':m.ready?(m.fresh?state(m.state):'Last recorded · '+state(m.state)):'Status updating',
 	trades:unavailable||!m.ready?'—':(m.trades||0)+' filled · '+attempts(m.signals).toLowerCase()+' '+(m.fresh?'this run':'in the last recorded run')
   };
 }
@@ -577,6 +602,8 @@ function openPerpsPlanDialog(m){
   $('help-dialog-extra').innerHTML=snapshot+
     '</div><details class="plan-more"><summary>Current accounting and boundaries</summary><dl class="limit-grid">'+
 	(qualification&&m.qualification_strategy?'<div><dt>Training candidate</dt><dd>'+safe(humanToken(m.qualification_strategy))+'</dd></div><div><dt>Candidate risk</dt><dd>'+safe(humanToken(m.qualification_risk_profile))+'</dd></div>':'')+
+	'<div><dt>Completed run used</dt><dd>'+safe(perpsPlanSource(m))+'</dd></div>'+
+	(perpsLaterOutcome(m)?'<div><dt>Later plan outcome</dt><dd>'+safe(perpsLaterOutcome(m))+'</dd></div>':'')+
     '<div><dt>Position</dt><dd>'+safe(position)+' · '+safe(positionTone)+'</dd></div>'+
     '<div><dt>Paper value now</dt><dd>'+safe(paperValue(m.equity_micros,m.value_unit))+'</dd></div>'+
 	    '<div><dt>Result this run</dt><dd>'+safe(signedAmount(effectiveEquity(m)-integer(m.opening_equity_micros),m.value_unit))+'</dd></div>'+
@@ -695,50 +722,8 @@ function renderMarkets(){
 	$('strategy-markets').innerHTML=strategyGroup('Spot paper plans','Only core SOL and JUP are combined in the live paper account above.',spotMarkets)+strategyGroup('Perps research','Independent experiments; completed results are not live account positions.',perpsMarkets);
   renderInstruction();
 }
-function activityUSD(amount){
-  const value=Number(amount);
-  if(!Number.isFinite(value))return '$'+amount;
-  return value>0&&value<.005?'<$0.01':'$'+value.toFixed(2);
-}
-const compactActivityDollars=text=>text.replace(/\$([0-9]+(?:\.[0-9]+)?)/g,(_,amount)=>activityUSD(amount));
-function readableActivityResult(line){
-  const value=line.match(/^(?:This market value|Paper value now): \$([0-9]+(?:\.[0-9]+)?)$/);
-  if(value)return 'Paper value now: '+activityUSD(value[1]);
-  const result=line.match(/^((?:This market(?:'s result)? (?:today|gain\/loss)|Today's result after trade|Paper result this run|Paper gain\/loss(?: today)?):) (up|down) \$([0-9]+(?:\.[0-9]+)?)(.*)$/);
-  if(!result)return line;
-  const profit=result[2]==='up';
-  return result[1]+' '+(profit?'🟢 ▲ ':'🔴 ▼ ')+activityUSD(result[3])+' ('+(profit?'profit':'loss')+')'+compactActivityDollars(result[4]).replaceAll(' better than holding',' ahead of holding').replaceAll(' worse than holding',' behind holding');
-}
-function readableActivity(message){
-  const lines=String(message||'').split('\n');
-  lines[0]=(lines[0]||'').replace(/SELL filled/i,'SOLD').replace(/BUY filled/i,'BOUGHT');
-  const experiment=/STRATEGY CHECK/i.test(lines[0]);
-  for(let index=1;index<lines.length;index++){
-    lines[index]=readableActivityResult(lines[index]
-      .replace('Practice account:','This market value:').replace('Total paper account:','This market value:').replace(/^Equity /,'This market value: ')
-      .replace(/^Paper value /,'This market value: ').replace(/^Result:/,experiment?'Experiment result:':'This market gain/loss:')
-	      .replace('Gain/loss today:',"Plan result at that update:").replace("Today's result:","Plan result at that update:").replace("Today's estimated paper value:","Plan result at that update:").replace('Paper result this run:',"Plan result at that update:")
-      .replaceAll('better than no trading','better than holding').replaceAll('worse than no trading','worse than holding').replaceAll('same as no trading','same as holding')
-      .replace(/\b1 trade\b/g,'1 filled paper order').replace(/\b(\d+) trades\b/g,'$1 filled paper orders')
-      .replace('Versus no trading:','Compared with holding:').replace('Compared with no trading:','Compared with holding:'));
-  }
-  if(/\b(?:BOUGHT|SOLD)\b/.test(lines[0]))for(let index=1;index<lines.length;index++)lines[index]=lines[index].replace('This market value:','Paper value now:').replace("This market's result today:","Today's result after trade:");
-  if(lines[1]?.includes(' → ')){
-    const [movement,...rest]=lines[1].split(' · '),[from,to]=movement.split(' → ');
-    if(from&&to){const sell=/\bSOLD\b/i.test(lines[0]);lines.splice(1,1,(sell?'Sold ':'Paid ')+from,(sell?'Received ':'Bought ')+to,...rest);}
-  }
-  return lines.map(line=>compactActivityDollars(line)
-    .replace(/^Price data ([0-9.]+)% · some data missing$/,'Not enough price information · $1% available')
-    .replace(/^Price data ([0-9.]+)%$/,'Price information available: $1%')
-    .replace(/(\d+\.\d{2})\d*(?=\s+(?:USD|USDC)\b)/g,'$1')
-    .replace(/(\d+\.\d{4})\d*(?=\s+[A-Z][A-Z0-9]{1,9}\b)/g,'$1')).join('\n');
-}
-function activityResultMarkup(result,resultTone){
-  const split=result.indexOf(': '),rawLabel=split>=0?result.slice(0,split):'Result',label=rawLabel.replace("Today's result after trade",'Market P&L after trade').replace("This market's result today",'Market P&L today').replace('This market gain/loss','Market P&L').replace('Paper gain/loss','Market P&L'),raw=split>=0?result.slice(split+2):result;
-  const value=raw.replace(/🟢\s*▲\s*|🔴\s*▼\s*/g,'').replace(/^up\s+/i,'').replace(/^down\s+/i,'');
-  const icon=resultTone==='positive'?'up':resultTone==='negative'?'down':'flat';
-  return '<span class="activity-result-label">'+safe(label)+'</span><span class="activity-result-value">'+uiIcon(icon)+'<span>'+safe(value)+'</span></span>';
-}
+const activityStatus=kind=>({order_opened:{label:'Order status',value:'Placed',icon:'pending',tone:''},order_filled:{label:'Order status',value:'Filled',icon:'filled',tone:''},order_refused:{label:'Order status',value:'Refused',icon:'protect',tone:'negative'},order_missed:{label:'Order status',value:'Not filled',icon:'pending',tone:''},risk_halted:{label:'Safety status',value:'Paused',icon:'protect',tone:'negative'},data_unavailable:{label:'Data status',value:'Delayed',icon:'data',tone:'negative'},data_restored:{label:'Data status',value:'Restored',icon:'data',tone:'positive'},strategy_changed:{label:'Plan status',value:'Changed',icon:'strategy',tone:''},strategy_active:{label:'Plan status',value:'Active',icon:'strategy',tone:'positive'},period_closed:{label:'Run status',value:'Finished',icon:'filled',tone:''},experiment_completed:{label:'Test status',value:'Finished',icon:'filled',tone:''}}[kind]||{label:'Event status',value:'Recorded',icon:'flat',tone:''});
+function activityStatusMarkup(status){return '<span class="activity-result-label">'+safe(status.label)+'</span><span class="activity-result-value">'+uiIcon(status.icon)+'<span>'+safe(status.value)+'</span></span>';}
 function renderActivity(){
   if(!current)return;
   const openDetails=new Set([...document.querySelectorAll('#activity-list .activity-more[open]')].map(detail=>detail.dataset.detail));
@@ -749,15 +734,13 @@ function renderActivity(){
   const omitted=Number(current.activity_omitted||0);
   $('activity-summary').textContent=items.length+' shown · Recent retained totals: '+opened+' opened, '+filled+' filled'+(omitted?' · '+omitted+' older events omitted':'');
   $('activity-list').innerHTML=items.length?items.map(item=>{
-    const lines=readableActivity(item.message).split('\n');
+    const lines=String(item.message||'').split('\n');
     const title=(lines.shift()||item.kind).replace(/^PAPER · /,'').replace(/^[^A-Z0-9]+/i,'');
-    const resultIndex=lines.findIndex(line=>/(?:result|gain\/loss|profit|loss)/i.test(line));
-	    const result=resultIndex>=0?lines.splice(resultIndex,1)[0]:item.kind==='order_opened'?'Waiting to fill':item.kind==='order_filled'?'Paper fill recorded':'—';
     const summary=lines.splice(0,2).join(' · ')||'Recorded by the paper agent';
     const detailKey=item.at+'|'+item.kind+'|'+item.market;
     const more=lines.length?'<details class="activity-more" data-detail="'+safe(detailKey)+'"><summary>More details</summary><p>'+safe(lines.join('\n'))+'</p></details>':'';
-    const resultTone=/profit|🟢|▲|\bup\b/i.test(result)?'positive':/loss|🔴|▼|\bdown\b/i.test(result)?'negative':'';
-    return '<article class="activity-item"><div class="activity-event"><span class="event-mark '+safe(item.kind)+'" aria-hidden="true">'+activityIcon(item.kind)+'</span><div><span>'+safe(item.market)+'</span><h3>'+safe(title)+'</h3></div></div><div class="activity-copy"><p>'+safe(summary)+'</p>'+more+'</div><p class="activity-result '+resultTone+'">'+activityResultMarkup(result,resultTone)+'</p><time class="activity-time" datetime="'+safe(item.at)+'">'+safe(eventTime(item.at))+'</time></article>';
+    const status=activityStatus(item.kind);
+    return '<article class="activity-item"><div class="activity-event"><span class="event-mark '+safe(item.kind)+'" aria-hidden="true">'+activityIcon(item.kind)+'</span><div><span>'+safe(item.market)+'</span><h3>'+safe(title)+'</h3></div></div><div class="activity-copy"><p>'+safe(summary)+'</p>'+more+'</div><p class="activity-result '+status.tone+'">'+activityStatusMarkup(status)+'</p><time class="activity-time" datetime="'+safe(item.at)+'">'+safe(eventTime(item.at))+'</time></article>';
   }).join(''):'<div class="empty">No matching activity yet.</div>';
   openDetails.forEach(detail=>$('activity-list').querySelector('.activity-more[data-detail="'+CSS.escape(detail)+'"]')?.setAttribute('open',''));
 }
@@ -771,12 +754,13 @@ function researchView(){
 	const retrieved=packet.retrieved_pages+' page'+(packet.retrieved_pages===1?'':'s')+' retrieved from '+packet.successful_web_searches+' successful search'+(packet.successful_web_searches===1?'':'es');
 	const outcomes=packet.two_source_claims+' two-source fact'+(packet.two_source_claims===1?'':'s')+' · '+packet.single_source_facts+' one-source fact'+(packet.single_source_facts===1?'':'s')+' · '+packet.contradicted_facts+' contradicted · '+packet.unverified_facts+' unverified';
 	const evidence=retrieved+'; '+cited+'; '+outcomes;
-  if(!packet.current)return {label:'Expired',tone:'amber',description:packet.market+' research expired. '+evidence+'.',detail:'It cannot be used for a new paper experiment.'};
+	const sourceFreshness='Individual source publication freshness is unavailable in this bounded view; packet age is not source age.';
+  if(!packet.current)return {label:'Expired',tone:'amber',description:packet.market+' research expired. '+evidence+'.',detail:'It cannot be used for a new paper experiment. '+sourceFreshness};
   const passed=packet.risk_decision==='pass';
-  const label=packet.disposition==='candidate'&&packet.actionable?'Proposal ready':packet.disposition==='blocked'?'Vetoed':'No change';
+  const label=packet.disposition==='candidate'&&packet.actionable?'Proposal ready':packet.disposition==='blocked'?'Hermes advised no change':'No change';
   const tone=packet.disposition==='candidate'&&packet.actionable?'blue':packet.disposition==='blocked'?'red':'green';
   const changes=(packet.proposed_changes||[]).map(change=>change.name.replaceAll('_',' ')+' '+change.current+' → '+change.proposed).join(' · ');
-	  return {label,tone,description:packet.market+' · '+evidence+' · '+age(packet.created_at)+'.',detail:'Hermes reported its risk decision as '+(passed?'pass':'reject')+': '+packet.risk_reason+(changes?' Proposed only: '+changes+'.':'')+' Deterministic replay gates decide whether any paper plan may change.'};
+	  return {label,tone,description:packet.market+' · '+evidence+' · '+age(packet.created_at)+'.',detail:'Hermes risk review (advisory): '+(passed?'continue to deterministic testing':'do not propose this change')+' · '+packet.risk_reason+(changes?' Proposed only: '+changes+'.':'')+' Deterministic replay gates alone decide whether any paper plan may change. '+sourceFreshness};
 }
 function mithrilEvidenceView(){
   if(!current.mithril_evidence_enabled)return {label:'Not connected',tone:'amber',description:'No host-produced Mithril evidence status is configured.'};
@@ -787,7 +771,7 @@ function mithrilEvidenceView(){
   return {label:'Withheld',tone:'amber',description:'No rooted index passed the freshness gate when Hermes started · '+age(evidence.checked_at)+'. Hermes could not use Mithril evidence in that run.'};
 }
 function researchFailure(counts){
-  const labels={missing_bucket:'A scheduled check is still missing',mint_state_unavailable:'Token details were unavailable',market_price_unavailable:'A market price was unavailable',quote_peg_unavailable:'A USDC price check was unavailable',native_fee_price_unavailable:'A SOL fee price was unavailable',buy_quote_unavailable:'A buy route was unavailable',sell_quote_unavailable:'A sell route was unavailable',observation_deadline_rejected:'A price check arrived too late',mint_evidence_rejected:'Token details did not pass validation',market_primary_rejected:'The primary market price did not pass validation',market_sources_rejected:'The market prices did not agree',quote_primary_rejected:'The primary USDC price did not pass validation',quote_peg_rejected:'The USDC prices did not agree',native_primary_rejected:'The primary SOL price did not pass validation',native_sources_rejected:'The SOL prices did not agree',buy_quote_rejected:'A buy route did not pass validation',sell_quote_rejected:'A sell route did not pass validation',round_trip_rejected:'A complete buy-and-sell route did not pass validation',quote_price_rejected:'The quoted token price did not pass validation'};
+  const labels={missing_bucket:'A scheduled check is still missing',mint_state_unavailable:'Token details were unavailable',market_price_unavailable:'A market price was unavailable',quote_peg_unavailable:'A USDC price check was unavailable',native_fee_price_unavailable:'A SOL fee price was unavailable',buy_quote_unavailable:'A buy route was unavailable',sell_quote_unavailable:'A sell route was unavailable',observation_deadline_rejected:'A price check arrived too late',mint_evidence_rejected:'Token details did not pass validation',market_primary_rejected:'The primary market price did not pass validation',market_sources_rejected:'The market price checks did not align',market_source_time_alignment_rejected:'The two market prices were sampled too far apart',market_source_price_disagreement_rejected:'The two market prices differed too much',quote_primary_rejected:'The primary USDC price did not pass validation',quote_peg_rejected:'The USDC prices did not agree',native_primary_rejected:'The primary SOL price did not pass validation',native_sources_rejected:'The SOL price checks did not align',native_source_time_alignment_rejected:'The two SOL prices were sampled too far apart',native_source_price_disagreement_rejected:'The two SOL prices differed too much',buy_quote_rejected:'A buy route did not pass validation',sell_quote_rejected:'A sell route did not pass validation',round_trip_rejected:'A complete buy-and-sell route did not pass validation',quote_price_rejected:'The quoted token price did not pass validation'};
   const failures=Object.entries(counts||{}).map(([key,value])=>({key,count:Number(value||0)})).filter(item=>item.count>0).sort((left,right)=>right.count-left.count||left.key.localeCompare(right.key));
   if(!failures.length)return '';
   const first=failures[0],other=failures.slice(1).reduce((total,item)=>total+item.count,0),label=labels[first.key]||'A market check did not pass validation';
@@ -839,6 +823,7 @@ function researchMarketCard(m){
   const expected=Number(m.expected_buckets||0),observed=Number(m.observed_buckets||0),usable=Number(m.available_buckets||0);
   const progress=expected?Math.max(0,Math.min(100,observed*100/expected)):0;
   const progressLabel=(progress<100?progress.toFixed(1):'100').replace(/\.0$/,'');
+	const windowHours=Math.max(1,Number(m.window_hours||0)),windowLabel=windowHours===1?'One-hour window':windowHours+'-hour window';
   const usableRate=Math.max(0,Math.min(100,Number(m.availability_bps||0)/100));
   const issue=researchFailure(m.failure_counts);
   const ready=m.fresh&&Boolean(m.ready_for_paper_check);
@@ -848,10 +833,10 @@ function researchMarketCard(m){
   const route=usable>0?percent(m.p95_route_cost_bps):'—';
   const latency=usable>0?(Number(m.p95_quote_latency_millis||0)/1000).toFixed(2).replace(/\.00$/,'')+' sec':'—';
   const priorNote=check?'Last result: '+check.label+'. '+check.note+' '+age(m.paper_check.checked_at)+'.':'';
-  const note=!m.fresh?'The latest collector update is older than expected.':check&&checkCurrent?check.note:issue||(!ready?Math.max(0,expected-observed)+' scheduled checks remain in this six-hour window.':'Enough current data is available for the separate paper strategy check.');
+	const note=!m.fresh?'The latest collector update is older than expected.':check&&checkCurrent?check.note:issue||(!ready?Math.max(0,expected-observed)+' scheduled checks remain in this '+windowLabel.toLowerCase()+'.':'Enough current data is available for the separate paper strategy check.');
   const history=check&&!checkCurrent?'<p class="research-history">'+safe(priorNote)+'</p>':'';
   const replay=m.paper_check&&['candidate_rejected','candidate_ready_for_more_paper_testing'].includes(m.paper_check.outcome)?'<div class="research-check" aria-label="Latest short paper replay"><span><small>Untouched replay</small><strong class="'+tone(integer(m.paper_check.holdout_after_cost_net_return_micros))+'">'+safe(signedAmount(m.paper_check.holdout_after_cost_net_return_micros,'USD'))+'</strong></span><span><small>Versus holding</small><strong class="'+tone(integer(m.paper_check.holdout_after_cost_versus_hold_micros))+'">'+safe(signedAmount(m.paper_check.holdout_after_cost_versus_hold_micros,'USD'))+'</strong></span><span><small>Higher-cost replay</small><strong class="'+tone(integer(m.paper_check.stress_after_cost_net_return_micros))+'">'+safe(signedAmount(m.paper_check.stress_after_cost_net_return_micros,'USD'))+'</strong></span></div>':'';
-  return '<article class="market-research-card"><div class="research-market-head"><div class="research-market-name"><span aria-hidden="true">'+safe(m.market.split('/')[0].slice(0,2))+'</span><div><h3>'+safe(m.market)+'</h3><small>'+safe(age(m.updated_at))+'</small></div></div><span class="badge '+status.tone+'">'+safe(status.label)+'</span></div><div class="research-progress-head"><span>Six-hour window</span><strong>'+progressLabel+'%</strong></div><progress class="research-progress" aria-label="'+safe(m.market)+' six-hour collection progress" max="100" value="'+progress.toFixed(2)+'"></progress><div class="research-stats"><span><small>Usable in window</small><strong>'+usable+' / '+expected+'</strong><em>'+usableRate.toFixed(1).replace(/\.0$/,'')+'% of scheduled checks</em></span><span><small>Round-trip cost</small><strong>'+route+'</strong><em>95% were at or below this cost</em></span><span><small>Round-trip time</small><strong>'+latency+'</strong><em>95% finished within this time</em></span></div>'+replay+'<p>'+safe(note)+'</p>'+history+'</article>';
+	return '<article class="market-research-card"><div class="research-market-head"><div class="research-market-name"><span aria-hidden="true">'+safe(m.market.split('/')[0].slice(0,2))+'</span><div><h3>'+safe(m.market)+'</h3><small>'+safe(age(m.updated_at))+'</small></div></div><span class="badge '+status.tone+'">'+safe(status.label)+'</span></div><div class="research-progress-head"><span>'+safe(windowLabel)+'</span><strong>'+progressLabel+'%</strong></div><progress class="research-progress" aria-label="'+safe(m.market)+' '+safe(windowLabel.toLowerCase())+' collection progress" max="100" value="'+progress.toFixed(2)+'"></progress><div class="research-stats"><span><small>Usable in window</small><strong>'+usable+' / '+expected+'</strong><em>'+usableRate.toFixed(1).replace(/\.0$/,'')+'% of scheduled checks</em></span><span><small>Round-trip cost</small><strong>'+route+'</strong><em>95% were at or below this cost</em></span><span><small>Round-trip time</small><strong>'+latency+'</strong><em>95% finished within this time</em></span></div>'+replay+'<p>'+safe(note)+'</p>'+history+'</article>';
 }
 function renderMarketResearch(){
   const target=$('market-research');
@@ -870,7 +855,7 @@ function renderSystem(){
     automationCard('engines','BOT','Paper engines',healthy===total&&total?'Running':'Needs attention',healthy===total&&total?'green':'amber',healthy+' of '+total+' core spot observers are current. '+healthyAdditionalSpots+' of '+additionalSpots.length+' additional spot observers are current; '+completedAdditionalSpots+' completed. '+completedPerps+' of '+perpsMarkets.length+' perps recordings are completed.')+
     automationCard('hermes','H','Nous Hermes',research.label,research.tone,research.description)+
     automationCard('mithril','M','Mithril evidence',mithril.label,mithril.tone,mithril.description)+
-    automationCard('strategy','AD','Versioned learning','Gate required','blue','Spot rules adapt on current prices. Perps strategies are compared on causal, after-cost replay. Passing only makes a candidate eligible for another bounded paper experiment; it changes no plan automatically.')+
+    automationCard('strategy','AD','Versioned learning','Gate required','blue','Spot rules adapt to current prices. A perps challenger must beat the current paper plan on untouched normal-cost and doubled-fee replay before it can become the next bounded paper test. This never enables real execution.')+
     automationCard('alerts','TG','Telegram alerts','Open + filled','amber','Sends concise open-order, filled-order, safety, data, and daily-result messages. Unfilled attempts appear in Recent activity instead of creating Telegram noise.');
 	  $('system-list').innerHTML=current.markets.map(m=>{const completed=Boolean(m.completed),healthy=marketDataHealthy(m),updating=m.available&&!m.ready&&!completed,checking=m.available&&m.ready&&m.fresh&&!m.coverage_ready,limited=m.available&&m.ready&&m.fresh&&m.coverage_ready&&Number(m.coverage_bps||0)<9900;const description=healthy?'Paper observer and price data are current.':completed?(isPerps(m)?'This completed experiment is saved for comparison. Live spot totals are unaffected.':'This bounded spot paper run finished and its result is saved for review.'):updating?'Waiting for the first complete paper status.':checking?'Checking whether enough recent price data is usable.':limited?'Only '+priceCoverage(m)+' of recent price checks were usable. New evidence is still being collected.':m.available?'Observer status is older than expected.':'Status source could not be read. Other markets continue independently.';const label=healthy?'Healthy':completed?(isPerps(m)?'Completed experiment':'Completed paper run'):updating?'Updating':checking?'Checking data':limited?'Limited data':m.available?'Stale':'Unavailable';return '<article class="system-row"><p><strong>'+safe(m.name)+'</strong></p><p class="description">'+description+'</p><span class="badge '+(healthy?'green':completed||m.available?'amber':'red')+'">'+label+'</span></article>';}).join('');
 	$('research-evidence').innerHTML='<span class="badge '+research.tone+'">'+safe(research.label)+'</span><h3>Latest Hermes research</h3><p>'+safe(research.description)+'<br>'+safe(research.detail)+'</p>';
@@ -887,7 +872,7 @@ function captureRenderFocus(){
 function setNotice(message){if($('notice').textContent!==message)$('notice').textContent=message;}
 function render(){
 	const focus=captureRenderFocus();
-	renderMetrics();renderMarkets();renderActivity();renderMarketResearch();renderSystem();
+	renderAgentNow();renderMetrics();renderMarkets();renderActivity();renderMarketResearch();renderSystem();
 	if(focus)document.querySelector(focus.selector)?.focus({preventScroll:true});
 	setNotice(current.complete?'':'Some market status is delayed. Available markets remain visible.');
   $('checked').textContent=current.observed_at?(current.complete?'Live · ':'Delayed · ')+age(current.observed_at):'Delayed · no current data';

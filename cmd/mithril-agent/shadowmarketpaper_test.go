@@ -410,9 +410,9 @@ func writeTestMarketDashboardStatus(
 		WindowHours: marketadmission.DashboardStatusWindowHours,
 		Diagnostic: marketadmission.Diagnostic{
 			Version: marketadmission.Version, Market: market,
-			From: through.Add(-6 * time.Hour), Through: through,
-			DiagnosticOnly: true, ExpectedBuckets: 360,
-			FailureCounts: map[string]uint64{"missing_bucket": 360},
+			From: through.Add(-2 * time.Hour), Through: through,
+			DiagnosticOnly: true, ExpectedBuckets: 120,
+			FailureCounts: map[string]uint64{"missing_bucket": 120},
 		},
 	}
 	if err := status.Validate(); err != nil {
@@ -497,8 +497,8 @@ func TestProvisionalMarketPaperCheckSelectsThenPassesUntouchedHoldoutAndStress(t
 	prices := []uint64{200_000, 200_000, 196_000, 196_000, 204_000, 204_000, 200_000, 200_000}
 	for index := range points {
 		phase := index
-		if index >= marketPaperCheckTrainingHours*60 {
-			phase -= marketPaperCheckTrainingHours * 60
+		if index >= marketPaperCheckTrainingMinutes {
+			phase -= marketPaperCheckTrainingMinutes
 		}
 		at := points[index].Bucket.Add(time.Second)
 		points[index].At, points[index].Available = at, true
@@ -554,7 +554,7 @@ func TestProvisionalMarketPaperCheckSelectsThenPassesUntouchedHoldoutAndStress(t
 	}
 
 	changedHoldout := append([]marketadmission.ProvisionalReplayPoint(nil), points...)
-	for index := marketPaperCheckTrainingHours * 60; index < len(changedHoldout); index++ {
+	for index := marketPaperCheckTrainingMinutes; index < len(changedHoldout); index++ {
 		changedHoldout[index].MarketPrimary.PriceMicros = 210_000
 		changedHoldout[index].MarketSecondary.PriceMicros = 210_000
 	}
@@ -675,7 +675,7 @@ func TestProvisionalMarketPaperCheckCarriesSourceChronologyIntoHoldout(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	boundary := marketPaperCheckTrainingHours * 60
+	boundary := marketPaperCheckTrainingMinutes
 	points[boundary].MarketPrimary.PublishedAt = points[boundary-1].MarketPrimary.PublishedAt
 	points[boundary].MarketSecondary.PublishedAt = points[boundary-1].MarketSecondary.PublishedAt
 	for index := boundary + 1; index <= boundary+6; index++ {
@@ -686,7 +686,7 @@ func TestProvisionalMarketPaperCheckCarriesSourceChronologyIntoHoldout(t *testin
 		t.Fatal(err)
 	}
 	if result.Outcome != marketadmission.DashboardPaperOutcomeInsufficientEvidence ||
-		result.HoldoutCoverageBPS != 9_416 {
+		result.HoldoutCoverageBPS != 8_250 {
 		t.Fatalf("boundary-repeat holdout coverage = %d, outcome %q",
 			result.HoldoutCoverageBPS, result.Outcome)
 	}

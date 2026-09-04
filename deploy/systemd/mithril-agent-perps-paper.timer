@@ -1,0 +1,12 @@
+[Unit]
+Description=Repeat bounded signer-free Mithril perps paper experiments
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+AccuracySec=5s
+Persistent=true
+Unit=mithril-agent-perps-paper.service
+
+[Install]
+WantedBy=timers.target

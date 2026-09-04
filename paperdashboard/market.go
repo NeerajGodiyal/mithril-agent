@@ -34,6 +34,7 @@ type MarketResearch struct {
 	Market                   string            `json:"market"`
 	UpdatedAt                time.Time         `json:"updated_at"`
 	Fresh                    bool              `json:"fresh"`
+	WindowHours              uint16            `json:"window_hours"`
 	ExpectedBuckets          uint64            `json:"expected_buckets"`
 	ObservedBuckets          uint64            `json:"observed_buckets"`
 	AvailableBuckets         uint64            `json:"available_buckets"`
@@ -161,7 +162,7 @@ func readMarketAdmission(path string, now time.Time) ([]MarketResearch, error) {
 			}
 		}
 		result = append(result, MarketResearch{
-			Market: status.Market, UpdatedAt: status.UpdatedAt,
+			Market: status.Market, UpdatedAt: status.UpdatedAt, WindowHours: status.WindowHours,
 			Fresh:           fresh,
 			ExpectedBuckets: diagnostic.ExpectedBuckets, ObservedBuckets: diagnostic.ObservedBuckets,
 			AvailableBuckets: diagnostic.AvailableBuckets, AvailabilityBPS: diagnostic.AvailabilityBPS,

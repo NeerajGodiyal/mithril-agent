@@ -236,6 +236,10 @@ sudo install -o root -g root -m 0644 \
   deploy/systemd/mithril-agent-market-paper-status-bridge@.service \
   deploy/systemd/mithril-agent-market-status.service \
   deploy/systemd/mithril-agent-market-status.timer \
+  deploy/systemd/mithril-agent-perps-paper.service \
+  deploy/systemd/mithril-agent-perps-paper.timer \
+  deploy/systemd/mithril-agent-perps-paper-status@.socket \
+  deploy/systemd/mithril-agent-perps-paper-status-bridge@.service \
   deploy/systemd/mithril-agent-paper-dashboard.service \
   deploy/systemd/mithril-agent-telegram-paper.conf \
   deploy/systemd/mithril-hermes-research-egress.service \
@@ -409,14 +413,24 @@ sudo install -o root -g root -m 0644 \
   systemd/mithril-agent-paper-instruction.service \
   systemd/mithril-agent-paper-pre-champion.service \
   systemd/mithril-agent-paper-status-handoff.service \
+  systemd/mithril-agent-perps-paper.service \
+  systemd/mithril-agent-perps-paper.timer \
+  systemd/mithril-agent-perps-paper-status@.socket \
+  systemd/mithril-agent-perps-paper-status-bridge@.service \
   /etc/systemd/system/
 sudo install -d -o root -g root -m 0755 \
   /var/lib/mithril-agent-research/allocations
+sudo install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
+  /var/lib/mithril-agent-research/outcomes
 sudo systemd-analyze verify \
   /etc/systemd/system/mithril-agent-paper-{base,champion,challenger}.service \
   /etc/systemd/system/mithril-agent-paper-{pre-champion,status-handoff,instruction}.service \
   /etc/systemd/system/mithril-agent-paper-{bootstrap,auto-select}.service \
   /etc/systemd/system/mithril-agent-paper-{champion.path,challenger.path,instruction.path,bootstrap.timer,auto-select.timer} \
+  /etc/systemd/system/mithril-agent-perps-paper.service \
+  /etc/systemd/system/mithril-agent-perps-paper.timer \
+  /etc/systemd/system/mithril-agent-perps-paper-status@.socket \
+  /etc/systemd/system/mithril-agent-perps-paper-status-bridge@.service \
   /etc/systemd/system/mithril-agent-paper-generation.target
 sudo systemctl enable --now systemd-time-wait-sync.service
 test "$(timedatectl show -p NTPSynchronized --value)" = yes
@@ -424,9 +438,20 @@ sudo systemctl daemon-reload
 sudo systemctl enable mithril-agent-paper-generation.target \
   mithril-agent-paper-instruction.service
 sudo systemctl enable --now mithril-agent-paper-instruction.path
+sudo systemctl enable --now mithril-agent-perps-paper.timer \
+  mithril-agent-perps-paper-status@sol.socket \
+  mithril-agent-perps-paper-status@btc.socket \
+  mithril-agent-perps-paper-status@eth.socket
+sudo systemctl list-timers mithril-agent-perps-paper.timer
+sudo systemctl status \
+  mithril-agent-perps-paper-status@sol.socket \
+  mithril-agent-perps-paper-status@btc.socket \
+  mithril-agent-perps-paper-status@eth.socket
 ```
 
-These commands install supervision but do not start a legacy journal. Complete
+These commands install the bounded SOL, BTC, and ETH perps paper timer and its
+read-only status sockets; no signer or exchange account is configured. They do
+not start a legacy spot journal. Complete
 the optional JUP portfolio setup below, save the dashboard instruction, and use
 the atomic activation procedure before expecting paper observers to run.
 
@@ -471,6 +496,13 @@ The hourly auto-selector does nothing while evidence is pending or a challenger
 fails any gate. When the exact forward challenger qualifies, it copies the
 content-addressed artifact outside Hermes' writable tree, preserves the old
 champion in `champion/previous.json`, and selects the copy for the next UTC day.
+For Hermes-bound challengers it first appends the fixed forward result to the
+per-market hash-chained journal in `/var/lib/mithril-agent-research/outcomes`,
+then appends a matching confirmation only after the champion pointer changes.
+An exact retry reconciles a missing confirmation after revalidating the current
+champion digest. The journal contains bounded identifiers, parameter changes,
+measurements, and reason codes only—never source prose, paths, policy JSON, keys,
+or authority.
 The next status call recognizes the identical digest, after which Hermes may
 prepare a new challenger. Nothing in this lifecycle grants live execution authority.
 Manual `shadow select` remains available when the auto-selector timer is disabled.
@@ -716,6 +748,39 @@ The older `mithril-agent-market-wif.service` must remain disabled. The systemd
 conflict prevents both WIF units from owning the same evidence journal if it is
 accidentally enabled again.
 
+Market-admission v4 changes the source-alignment contract from 30 to 75
+seconds, so v3 journals must not be resumed or mixed with new observations.
+Before the first v4 collector restart, preserve each complete v3 directory and
+the derived dashboard projection, then recreate empty private collector
+directories. This is an evidence rotation, not deletion:
+
+```sh
+set -eu
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+sudo systemctl stop mithril-agent-market-status.timer \
+  mithril-agent-market-candidate@wif.service \
+  mithril-agent-market-candidate@jto.service \
+  mithril-agent-market-candidate@pyth.service
+sudo install -d -o root -g root -m 0700 \
+  "/var/lib/mithril-agent-research/archive/market-admission-v3-$STAMP"
+for market in wif jto pyth; do
+  sudo mv --no-target-directory \
+    "/var/lib/mithril-agent-research/market-admission-$market" \
+    "/var/lib/mithril-agent-research/archive/market-admission-v3-$STAMP/$market"
+  sudo install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
+    "/var/lib/mithril-agent-research/market-admission-$market"
+done
+if sudo test -f /var/lib/mithril-agent-dashboard/market-admission.json; then
+  sudo mv --no-target-directory /var/lib/mithril-agent-dashboard/market-admission.json \
+    "/var/lib/mithril-agent-research/archive/market-admission-v3-$STAMP/dashboard-projection.json"
+fi
+sudo systemctl start \
+  mithril-agent-market-candidate@wif.service \
+  mithril-agent-market-candidate@jto.service \
+  mithril-agent-market-candidate@pyth.service \
+  mithril-agent-market-status.timer
+```
+
 For fast operational feedback, stop one collector briefly and run a diagnostic
 over 6 hours, 24 hours, or up to 168 hours. It reports missing and rejected
 buckets, bidirectional availability, route cost, and quote latency to stdout.
@@ -732,7 +797,7 @@ sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
 sudo systemctl start mithril-agent-market-candidate@wif.service
 ```
 
-After at least six complete hours, development can create a short-lived,
+After at least two complete hours, development can create a short-lived,
 paper-only checkpoint instead of waiting 30 days before exercising the runner.
 The checkpoint command refuses a live collector and refuses to replace an existing file.
 The resulting artifact is only the evidence checkpoint; it is not a strategy.
@@ -782,7 +847,7 @@ sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
   --out "$MARKET_DIR/base-policy-$STAMP.json"
 
 # This reads only the checkpoint's exact journal prefix. It selects on the
-# first four hours, checks the fixed candidate on the final two hours at a
+# first 80 minutes, checks the fixed candidate on the final 40 minutes at a
 # fixed, code-owned 25 bps symmetric spread and again at the 50 bps stress
 # spread, then prints JSON. Observed route-cost percentiles remain operational
 # evidence; held-out observations cannot lower or choose the model.
@@ -1145,6 +1210,11 @@ challenger pointer. The separately confined auto-selector decides only the
 paper champion after the fixed forward gate; Hermes cannot call it. An identical
 digest in the champion pointer is the durable paper-selection acknowledgement and permits the next research cycle without
 deleting or resetting either observer.
+
+The auto-selector keeps a local, hash-chained SOL or JUP outcome journal. An
+operator can inspect its bounded read-only summary with `shadow
+research-outcomes --journal PATH --limit 16`. This local evidence is not added
+to the Hermes scout prompt and grants no authorization or execution capability.
 
 Malformed replies and pre-publication validation failures keep the last
 validated research packet and dashboard research projection unchanged. The

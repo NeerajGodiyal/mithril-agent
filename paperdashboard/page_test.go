@@ -32,6 +32,70 @@ func TestDashboardSeparatesLiveSpotAccountFromPerpsResearch(t *testing.T) {
 	}
 }
 
+func TestDashboardMakesCurrentAutonomousDecisionAndPaperBoundaryUnavoidable(t *testing.T) {
+	for _, want := range []string{
+		`id="agent-now"`,
+		`Paper only · No real orders`,
+		`function renderAgentNow()`,
+		`const view=strategyView(m)`,
+		`P&amp;L this run`,
+		`Last recorded P&amp;L`,
+		`renderAgentNow();renderMetrics()`,
+	} {
+		if !strings.Contains(indexHTML+appJS, want) {
+			t.Errorf("current agent summary omits %q", want)
+		}
+	}
+	for _, want := range []string{
+		`.agent-now-grid { display: grid; grid-template-columns: repeat(2`,
+		`.agent-now-grid { grid-template-columns: 1fr; }`,
+		`.checked #checked { display: block;`,
+	} {
+		if !strings.Contains(dashboardCSS, want) {
+			t.Errorf("responsive current agent design omits %q", want)
+		}
+	}
+}
+
+func TestDashboardDoesNotPresentHermesAsTradingAuthority(t *testing.T) {
+	for _, want := range []string{
+		`Hermes advised no change`,
+		`Hermes risk review (advisory)`,
+		`Deterministic replay gates alone decide whether any paper plan may change.`,
+		`Individual source publication freshness is unavailable in this bounded view; packet age is not source age.`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Errorf("Hermes boundary copy omits %q", want)
+		}
+	}
+	if strings.Contains(appJS, `?'Vetoed'`) {
+		t.Fatal("dashboard still presents Hermes as a veto authority")
+	}
+}
+
+func TestDashboardExplainsAutomaticPerpsPlanSelectionTruthfully(t *testing.T) {
+	for _, want := range []string{
+		`must beat the current paper plan`,
+		`untouched normal-cost and doubled-fee replay`,
+		`next bounded paper test`,
+		`never enables real execution`,
+		`Selected paper plan proposed by deterministic search`,
+		`Built-in fixed paper plan`,
+		`Later verified paper run: Gain`,
+		`The completed run plan shown here is unchanged; only a separate selection can change`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Errorf("automatic perps selection copy omits %q", want)
+		}
+	}
+	if strings.Contains(appJS, `it changes no plan automatically`) {
+		t.Fatal("dashboard denies the automatic next-run perps selection")
+	}
+	if strings.Contains(appJS, `Hermes selected`) || strings.Contains(appJS, `Hermes proposed`) {
+		t.Fatal("dashboard attributes deterministic perps selection to Hermes")
+	}
+}
+
 func TestPerpsTrainingAttemptsStayCompactAndUnapproved(t *testing.T) {
 	for _, want := range []string{
 		`qualification_attempts||[]).slice(0,3)`,
@@ -75,13 +139,30 @@ func TestPerpsTrainingAttemptsStayCompactAndUnapproved(t *testing.T) {
 	}
 }
 
-func TestActivityDoesNotMislabelExperimentOutcomeAsProfitOrLoss(t *testing.T) {
+func TestActivityKeepsProducerFactsExactAndDerivesOnlyEventStatus(t *testing.T) {
 	for _, want := range []string{
-		`const experiment=/STRATEGY CHECK/i.test(lines[0])`,
-		`experiment?'Experiment result:':'This market gain/loss:'`,
+		`const lines=String(item.message||'').split('\n')`,
+		`const status=activityStatus(item.kind)`,
+		`order_refused:{label:'Order status',value:'Refused'`,
+		`order_opened:{label:'Order status',value:'Placed'`,
+		`order_filled:{label:'Order status',value:'Filled'`,
 	} {
 		if !strings.Contains(appJS, want) {
 			t.Errorf("activity display omits %q", want)
 		}
+	}
+	for _, forbidden := range []string{`compactActivityDollars`, `readableActivityResult`, `Plan result at that update`} {
+		if strings.Contains(appJS, forbidden) {
+			t.Errorf("activity display still rewrites producer facts through %q", forbidden)
+		}
+	}
+}
+
+func TestMarketResearchWindowDoesNotMixBigIntWithNumberMath(t *testing.T) {
+	if !strings.Contains(appJS, `Math.max(1,Number(m.window_hours||0))`) {
+		t.Fatal("market research window is not converted to Number before Math.max")
+	}
+	if strings.Contains(appJS, `Math.max(1,integer(m.window_hours))`) {
+		t.Fatal("market research window still passes a BigInt to Math.max")
 	}
 }

@@ -41,7 +41,7 @@ you; everything else has a working default.
 	--admission-journal PATH
 	                    exact journal bound by that artifact
 	--provisional-artifact PATH
-	                    six-hour paper-only evidence for a candidate market
+	                    two-hour paper-only evidence for a candidate market
 	--provisional-journal PATH
 	                    exact journal bound by that checkpoint
   --budget-sol N    total simulated SOL budget, including fees and setup rent
@@ -88,7 +88,7 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	market := flags.String("market", "", "paper mandate market")
 	admissionArtifact := flags.String("admission-artifact", "", "qualified market evidence")
 	admissionJournal := flags.String("admission-journal", "", "market evidence journal")
-	provisionalArtifact := flags.String("provisional-artifact", "", "six-hour paper-only market evidence")
+	provisionalArtifact := flags.String("provisional-artifact", "", "two-hour paper-only market evidence")
 	provisionalJournal := flags.String("provisional-journal", "", "provisional market evidence journal")
 	budgetSOL := flags.String("budget-sol", "", "total simulated SOL budget")
 	budgetUSDC := flags.String("budget-usdc", "", "simulated USDC budget")
@@ -512,7 +512,9 @@ func buildAdaptiveQuoteMarketPolicy(
 		PrimarySourceSHA256: primarySource, SecondarySourceSHA256: secondarySource,
 	}
 	if version == shadow.AdmittedVersion {
-		trigger.MaxSourceSkewSeconds = 30
+		trigger.MaxSourceSkewSeconds = uint64(
+			marketadmission.DefaultThresholds().MaximumSourceSkewSeconds,
+		)
 	}
 	returnTrigger := trigger
 	returnTrigger.Direction = pricetrigger.SellAtOrAbove
@@ -526,7 +528,9 @@ func buildAdaptiveQuoteMarketPolicy(
 		SecondarySourceSHA256: pricesource.KrakenSOLIdentitySHA256(),
 	}
 	if version == shadow.AdmittedVersion {
-		nativeFeePrice.MaxSourceSkewSeconds = 30
+		nativeFeePrice.MaxSourceSkewSeconds = uint64(
+			marketadmission.DefaultThresholds().MaximumSourceSkewSeconds,
+		)
 	}
 	adaptive, err := shadow.DefaultAdaptiveQuotePolicy(
 		slippageBPS, feeLamports, nativeFeePriceCeilingMicros,
@@ -559,7 +563,9 @@ func buildAdaptiveQuoteMarketPolicy(
 		},
 	}
 	if version == shadow.AdmittedVersion {
-		policy.QuotePeg.MaxSourceSkewSeconds = 30
+		policy.QuotePeg.MaxSourceSkewSeconds = uint64(
+			marketadmission.DefaultThresholds().MaximumSourceSkewSeconds,
+		)
 	}
 	if err := policy.Validate(); err != nil {
 		return shadow.Policy{}, err

@@ -10,7 +10,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/journal"
 )
 
-func TestDashboardStatusIsAValidatedSanitizedSixHourDiagnostic(t *testing.T) {
+func TestDashboardStatusIsAValidatedSanitizedTwoHourDiagnostic(t *testing.T) {
 	candidate, _ := Lookup(MarketWIFUSDC)
 	opening, err := NewOpening(candidate, testObserve, DefaultThresholds())
 	if err != nil {
@@ -26,12 +26,12 @@ func TestDashboardStatusIsAValidatedSanitizedSixHourDiagnostic(t *testing.T) {
 	}
 	if status.Validate() != nil || status.Kind != DashboardStatusKind ||
 		status.Market != MarketWIFUSDC || status.WindowHours != DashboardStatusWindowHours ||
-		status.Diagnostic.From != through.Add(-6*time.Hour) ||
-		status.Diagnostic.Through != through || status.Diagnostic.ExpectedBuckets != 360 ||
+		status.Diagnostic.From != through.Add(-2*time.Hour) ||
+		status.Diagnostic.Through != through || status.Diagnostic.ExpectedBuckets != 120 ||
 		status.Diagnostic.ObservedBuckets != 2 || status.Diagnostic.AvailableBuckets != 1 ||
-		status.Diagnostic.AvailabilityBPS != 27 ||
+		status.Diagnostic.AvailabilityBPS != 83 ||
 		status.Diagnostic.FailureCounts[FailureSellQuote] != 1 ||
-		status.Diagnostic.FailureCounts["missing_bucket"] != 358 {
+		status.Diagnostic.FailureCounts["missing_bucket"] != 118 {
 		t.Fatalf("dashboard status = %+v", status)
 	}
 	raw, err := json.Marshal(status)
@@ -72,10 +72,10 @@ func TestDashboardStatusRejectsIncoherentOrOperationalClaims(t *testing.T) {
 			value.Diagnostic.FailureCounts = map[string]uint64{}
 		},
 		"unknown failure": func(value *DashboardStatus) {
-			value.Diagnostic.FailureCounts = map[string]uint64{"secret provider error": 360}
+			value.Diagnostic.FailureCounts = map[string]uint64{"secret provider error": 120}
 		},
 		"misclassified missing buckets": func(value *DashboardStatus) {
-			value.Diagnostic.FailureCounts = map[string]uint64{FailureBuyQuote: 360}
+			value.Diagnostic.FailureCounts = map[string]uint64{FailureBuyQuote: 120}
 		},
 		"measurement without data": func(value *DashboardStatus) {
 			value.Diagnostic.P95RouteCostBPS = 1
@@ -269,7 +269,7 @@ func TestDashboardStatusRefusesRecordsForAnotherOpening(t *testing.T) {
 	}
 }
 
-func TestDiagnosticTrackerKeepsOnlySixHoursPlusTheCurrentBoundary(t *testing.T) {
+func TestDiagnosticTrackerKeepsOnlyTwoHoursPlusTheCurrentBoundary(t *testing.T) {
 	candidate, _ := Lookup(MarketWIFUSDC)
 	opening, err := NewOpening(candidate, testObserve, DefaultThresholds())
 	if err != nil {
@@ -283,11 +283,11 @@ func TestDiagnosticTrackerKeepsOnlySixHoursPlusTheCurrentBoundary(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(tracker.observations); got != 360 {
-		t.Fatalf("retained startup observations = %d, want 360", got)
+	if got := len(tracker.observations); got != 120 {
+		t.Fatalf("retained startup observations = %d, want 120", got)
 	}
-	if got := cap(tracker.observations); got > 361 {
-		t.Fatalf("retained startup capacity = %d, want at most 361", got)
+	if got := cap(tracker.observations); got > 121 {
+		t.Fatalf("retained startup capacity = %d, want at most 121", got)
 	}
 	boundary := Observation{
 		Version: Version, OpeningSHA256: opening.ContentSHA256,
@@ -296,11 +296,11 @@ func TestDiagnosticTrackerKeepsOnlySixHoursPlusTheCurrentBoundary(t *testing.T) 
 	if err := tracker.Add(boundary); err != nil {
 		t.Fatal(err)
 	}
-	if got := len(tracker.observations); got != 361 {
-		t.Fatalf("retained boundary observations = %d, want 361", got)
+	if got := len(tracker.observations); got != 121 {
+		t.Fatalf("retained boundary observations = %d, want 121", got)
 	}
-	if got := cap(tracker.observations); got > 361 {
-		t.Fatalf("retained boundary capacity = %d, want at most 361", got)
+	if got := cap(tracker.observations); got > 121 {
+		t.Fatalf("retained boundary capacity = %d, want at most 121", got)
 	}
 	if err := tracker.Add(boundary); err == nil {
 		t.Fatal("duplicate dashboard observation was accepted")
@@ -309,7 +309,7 @@ func TestDiagnosticTrackerKeepsOnlySixHoursPlusTheCurrentBoundary(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Diagnostic.ObservedBuckets != 360 || status.Diagnostic.AvailableBuckets != 360 {
+	if status.Diagnostic.ObservedBuckets != 120 || status.Diagnostic.AvailableBuckets != 120 {
 		t.Fatalf("boundary leaked into incomplete window: %+v", status.Diagnostic)
 	}
 }
