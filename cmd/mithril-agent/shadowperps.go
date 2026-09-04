@@ -24,7 +24,7 @@ import (
 
 const (
 	shadowPerpsTapeVersion     uint32 = 4
-	shadowPerpsStatusVersion   uint32 = 4
+	shadowPerpsStatusVersion   uint32 = 5
 	shadowPerpsMaxFrames              = 1_500
 	shadowPerpsMaxFileBytes    int64  = 16 << 20
 	shadowPerpsModel                  = "hyperliquid_causal_sampled_context_stress_v4"
@@ -1045,6 +1045,23 @@ func shadowPerpsCurrent(
 	if state.Position != nil {
 		leverageBPS = state.Position.LeverageBPS
 	}
+	priceMicros := replay.LastMarkPriceMicros
+	decisionReason := "watching"
+	decisionSignalKind := ""
+	decisionSignalBPS, decisionThresholdBPS := int64(0), int64(0)
+	minimumResearchFrames := uint64(0)
+	if len(replay.Results) > 0 {
+		last := replay.Results[len(replay.Results)-1]
+		reason, err := shadowPerpsDecisionReason(last)
+		if err != nil {
+			return "", paperstatus.CurrentSummary{}, err
+		}
+		decisionReason = reason
+		decisionSignalKind = last.Decision.SignalKind
+		decisionSignalBPS = last.Decision.ChangeBPS
+		decisionThresholdBPS = last.Decision.ThresholdBPS
+		minimumResearchFrames = perpspaper.QualificationMinimumFrames
+	}
 	current := fmt.Sprintf(
 		"PAPER · %s perpetuals · %s\nTotal paper value now: %s\nResult this run: %s\nFunding: %s · Fees: %s",
 		config.Symbol, position, formatPerpsUSD(projectedEquity),
@@ -1054,7 +1071,7 @@ func shadowPerpsCurrent(
 	if insolvent {
 		current += "\nSimulated deficit after liquidation: " + formatPerpsUSD(state.EquityMicros)
 	}
-	stateName, decisionReason := "watching", "watching"
+	stateName := "watching"
 	if insolvent {
 		stateName, decisionReason = "paused", "risk_halt"
 	}
@@ -1069,12 +1086,43 @@ func shadowPerpsCurrent(
 		RealizedMicros:      state.BalanceMicros - int64(state.StartingCollateralMicros),
 		UnrealizedMicros:    state.UnrealizedPnLMicros, FeesMicros: int64(state.FeesPaidMicros),
 		FundingTracked: true, FundingMicros: state.FundingPnLMicros,
-		TurnoverMicros: turnover, Checks: checks, Signals: signals, Trades: trades, PriceMicros: state.LastMarkPriceMicros,
+		TurnoverMicros: turnover, Checks: checks, Signals: signals, Trades: trades, PriceMicros: priceMicros,
 		State: stateName, Strategy: shadowPerpsCurrentStrategy(config),
 		DecisionSource: shadowPerpsDecisionSource(config), ProposalSource: shadowPerpsProposalSource(config),
 		RunPlanSHA256:  config.PlanSHA256,
-		DecisionReason: decisionReason, RiskHalted: insolvent,
+		DecisionReason: decisionReason, DecisionSignalKind: decisionSignalKind,
+		DecisionSignalBPS: decisionSignalBPS, DecisionThresholdBPS: decisionThresholdBPS,
+		MinimumResearchFrames: minimumResearchFrames,
+		RiskHalted:            insolvent,
 	}, nil
+}
+
+func shadowPerpsDecisionReason(result perpspaper.TapeResult) (string, error) {
+	switch result.Action {
+	case "flat":
+		switch result.Decision.SignalKind {
+		case perpspaper.SignalHistoryWarmup:
+			return "collecting_history", nil
+		case perpspaper.SignalBreakoutRange:
+			return "inside_breakout_range", nil
+		default:
+			return "action_level_not_met", nil
+		}
+	case "marked":
+		return "watching", nil
+	case "below_minimum_lot":
+		return "minimum_order_size", nil
+	case "no_visible_fill", "waiting_for_full_close":
+		return "visible_liquidity_limit", nil
+	case "slippage_limit":
+		return "slippage_limit", nil
+	case "opened", "closed":
+		return "order_filled", nil
+	case "liquidated":
+		return "liquidation", nil
+	default:
+		return "", fmt.Errorf("unsupported perps paper action %q", result.Action)
+	}
 }
 
 func shadowPerpsCurrentStrategy(config shadowPerpsTapeConfig) string {

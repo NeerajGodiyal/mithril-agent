@@ -19,24 +19,26 @@ import (
 )
 
 const (
-	legacyVersion         = 1
-	settingsVersion       = 2
-	accountingVersion     = 3
-	qualificationVersion  = 4
-	multiTapeVersion      = 5
-	perpsPlanVersion      = 6
-	decisionSourceVersion = 7
-	Version               = 8
-	MaxEvents             = 64
-	MaxHistoryPoints      = 144
-	MaxMessageBytes       = 3000
-	maxCurrentBytes       = 512
-	maxSnapshotBytes      = 256 << 10
-	historyInterval       = 10 * time.Minute
-	messagePrefix         = "PAPER ·"
-	legacyMessagePrefix   = "PAPER SIMULATION —"
-	legacyDisclaimer      = "No transaction was signed or submitted."
-	UnconfiguredCurrent   = "PAPER · NOT ENABLED"
+	legacyVersion           = 1
+	settingsVersion         = 2
+	accountingVersion       = 3
+	qualificationVersion    = 4
+	multiTapeVersion        = 5
+	perpsPlanVersion        = 6
+	decisionSourceVersion   = 7
+	latestCompletedVersion  = 8
+	decisionEvidenceVersion = 9
+	Version                 = decisionEvidenceVersion
+	MaxEvents               = 64
+	MaxHistoryPoints        = 144
+	MaxMessageBytes         = 3000
+	maxCurrentBytes         = 512
+	maxSnapshotBytes        = 256 << 10
+	historyInterval         = 10 * time.Minute
+	messagePrefix           = "PAPER ·"
+	legacyMessagePrefix     = "PAPER SIMULATION —"
+	legacyDisclaimer        = "No transaction was signed or submitted."
+	UnconfiguredCurrent     = "PAPER · NOT ENABLED"
 )
 
 const (
@@ -108,30 +110,34 @@ type CurrentSummary struct {
 	HoldBenchmarkMicros uint64 `json:"hold_benchmark_micros"`
 	// Realized is the result from inventory already sold, after modeled fees.
 	// Unrealized is the mark-to-market result still held in open inventory.
-	AccountingTracked bool              `json:"accounting_tracked,omitempty"`
-	RealizedMicros    int64             `json:"realized_micros,omitempty"`
-	UnrealizedMicros  int64             `json:"unrealized_micros,omitempty"`
-	FeesMicros        int64             `json:"fees_micros,omitempty"`
-	FundingTracked    bool              `json:"funding_tracked,omitempty"`
-	FundingMicros     int64             `json:"funding_micros,omitempty"`
-	TurnoverMicros    uint64            `json:"turnover_micros,omitempty"`
-	DrawdownMicros    uint64            `json:"drawdown_micros,omitempty"`
-	MaxDrawdownMicros uint64            `json:"max_drawdown_micros,omitempty"`
-	Checks            uint64            `json:"checks"`
-	Signals           uint64            `json:"signals"`
-	Trades            uint64            `json:"trades"`
-	Unobservable      uint64            `json:"unobservable,omitempty"`
-	Missed            uint64            `json:"missed,omitempty"`
-	PriceMicros       uint64            `json:"price_micros,omitempty"`
-	State             string            `json:"state,omitempty"`
-	Strategy          string            `json:"strategy,omitempty"`
-	DecisionSource    string            `json:"decision_source,omitempty"`
-	ProposalSource    string            `json:"proposal_source,omitempty"`
-	RunPlanSHA256     string            `json:"run_plan_sha256,omitempty"`
-	PerpsPlanOutcome  *PerpsPlanOutcome `json:"perps_plan_outcome,omitempty"`
-	NextAction        string            `json:"next_action,omitempty"`
-	DecisionReason    string            `json:"decision_reason,omitempty"`
-	RiskHalted        bool              `json:"risk_halted,omitempty"`
+	AccountingTracked     bool              `json:"accounting_tracked,omitempty"`
+	RealizedMicros        int64             `json:"realized_micros,omitempty"`
+	UnrealizedMicros      int64             `json:"unrealized_micros,omitempty"`
+	FeesMicros            int64             `json:"fees_micros,omitempty"`
+	FundingTracked        bool              `json:"funding_tracked,omitempty"`
+	FundingMicros         int64             `json:"funding_micros,omitempty"`
+	TurnoverMicros        uint64            `json:"turnover_micros,omitempty"`
+	DrawdownMicros        uint64            `json:"drawdown_micros,omitempty"`
+	MaxDrawdownMicros     uint64            `json:"max_drawdown_micros,omitempty"`
+	Checks                uint64            `json:"checks"`
+	Signals               uint64            `json:"signals"`
+	Trades                uint64            `json:"trades"`
+	Unobservable          uint64            `json:"unobservable,omitempty"`
+	Missed                uint64            `json:"missed,omitempty"`
+	PriceMicros           uint64            `json:"price_micros,omitempty"`
+	State                 string            `json:"state,omitempty"`
+	Strategy              string            `json:"strategy,omitempty"`
+	DecisionSource        string            `json:"decision_source,omitempty"`
+	ProposalSource        string            `json:"proposal_source,omitempty"`
+	RunPlanSHA256         string            `json:"run_plan_sha256,omitempty"`
+	PerpsPlanOutcome      *PerpsPlanOutcome `json:"perps_plan_outcome,omitempty"`
+	NextAction            string            `json:"next_action,omitempty"`
+	DecisionReason        string            `json:"decision_reason,omitempty"`
+	DecisionSignalKind    string            `json:"decision_signal_kind,omitempty"`
+	DecisionSignalBPS     int64             `json:"decision_signal_bps,omitempty"`
+	DecisionThresholdBPS  int64             `json:"decision_threshold_bps,omitempty"`
+	MinimumResearchFrames uint64            `json:"minimum_research_frames,omitempty"`
+	RiskHalted            bool              `json:"risk_halted,omitempty"`
 	// InitialLot is the configured first paper leg. Later legs use the
 	// simulated proceeds, so it is deliberately not described as a fixed order
 	// size. These fields expose no address, provider, policy path, or key.
@@ -396,6 +402,7 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		snapshot.Version != multiTapeVersion &&
 		snapshot.Version != perpsPlanVersion &&
 		snapshot.Version != decisionSourceVersion &&
+		snapshot.Version != latestCompletedVersion &&
 		snapshot.Version != Version ||
 		snapshot.ObservedAt.IsZero() ||
 		!snapshot.ObservedAt.Equal(snapshot.ObservedAt.UTC()) ||
@@ -411,7 +418,10 @@ func ValidateSnapshot(snapshot Snapshot) error {
 				snapshot.Summary.DecisionSource != "" || snapshot.Summary.ProposalSource != "" ||
 				snapshot.Summary.RunPlanSHA256 != "" ||
 				snapshot.Summary.PerpsPlanOutcome != nil)) ||
-		(snapshot.Version < Version && snapshot.LatestCompleted != nil) ||
+		(snapshot.Version < latestCompletedVersion && snapshot.LatestCompleted != nil) ||
+		(snapshot.Version < decisionEvidenceVersion &&
+			(hasDecisionEvidence(snapshot.Summary) ||
+				snapshot.LatestCompleted != nil && hasDecisionEvidence(&snapshot.LatestCompleted.Summary))) ||
 		len(snapshot.History) > MaxHistoryPoints ||
 		validateCurrentSummary(snapshot.Summary) != nil ||
 		(snapshot.Summary != nil && snapshot.LatestCompleted != nil &&
@@ -639,6 +649,7 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 		!validCurrentState(summary.State) || !validCurrentStrategy(*summary) ||
 		!validPerpsPlanOutcome(*summary) ||
 		!validNextAction(summary.NextAction) || !validDecisionReason(summary.DecisionReason) ||
+		!validDecisionEvidence(*summary) ||
 		!validQualification(*summary) ||
 		!validPaperSettings(*summary) {
 		return errors.New("paper current summary is invalid")
@@ -853,7 +864,71 @@ func validDecisionReason(reason string) bool {
 		"sell_leg_waiting", "trend_aligned_sell", "buy_leg_waiting",
 		"range_high_sell", "range_low_buy", "signal_below_cost_hurdle",
 		"data_unavailable", "fee_budget_used", "route_cost_limit",
-		"order_pending", "order_filled", "fill_limit", "trade_unavailable":
+		"order_pending", "order_filled", "fill_limit", "trade_unavailable",
+		"action_level_not_met", "inside_breakout_range", "minimum_order_size",
+		"visible_liquidity_limit", "slippage_limit", "liquidation":
+		return true
+	default:
+		return false
+	}
+}
+
+func validDecisionEvidence(summary CurrentSummary) bool {
+	decisionPresent := hasDecisionEvidence(&summary)
+	if summary.MinimumResearchFrames != 0 &&
+		(summary.Instrument != "perpetual" || summary.MinimumResearchFrames < 2 ||
+			summary.MinimumResearchFrames > 1_500) {
+		return false
+	}
+	if !decisionPresent {
+		return true
+	}
+	if summary.Instrument != "perpetual" || summary.PriceMicros == 0 ||
+		summary.MinimumResearchFrames == 0 || !validDecisionSignalKind(summary.DecisionSignalKind) ||
+		summary.DecisionThresholdBPS < 0 || summary.DecisionThresholdBPS > 10_000 {
+		return false
+	}
+	switch summary.DecisionSignalKind {
+	case "history_warmup":
+		return summary.DecisionSignalBPS == 0 && summary.DecisionThresholdBPS == 0 &&
+			summary.DecisionReason == "collecting_history"
+	case "breakout_range":
+		return summary.DecisionSignalBPS == 0 && summary.DecisionThresholdBPS > 0 &&
+			summary.DecisionReason == "inside_breakout_range"
+	default:
+		if summary.DecisionThresholdBPS == 0 {
+			return false
+		}
+		return summary.DecisionReason != "action_level_not_met" ||
+			summary.DecisionSignalBPS > -summary.DecisionThresholdBPS &&
+				summary.DecisionSignalBPS < summary.DecisionThresholdBPS
+	}
+}
+
+func hasDecisionEvidence(summary *CurrentSummary) bool {
+	if summary == nil {
+		return false
+	}
+	return summary.DecisionSignalKind != "" || summary.DecisionSignalBPS != 0 ||
+		summary.DecisionThresholdBPS != 0 || summary.MinimumResearchFrames != 0 ||
+		perpsDecisionEvidenceReason(summary.DecisionReason)
+}
+
+func perpsDecisionEvidenceReason(reason string) bool {
+	switch reason {
+	case "action_level_not_met", "inside_breakout_range", "minimum_order_size",
+		"visible_liquidity_limit", "slippage_limit", "liquidation":
+		return true
+	default:
+		return false
+	}
+}
+
+func validDecisionSignalKind(kind string) bool {
+	switch kind {
+	case "two_candle_move", "history_warmup", "momentum", "mean_reversion",
+		"breakout_high", "breakout_low", "breakout_range", "regime_momentum",
+		"regime_mean_reversion", "regime_breakout_high", "regime_breakout_low":
 		return true
 	default:
 		return false

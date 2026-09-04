@@ -463,13 +463,17 @@ func TestPublishShadowPerpsCarriesTheLastCompletedReceiptIntoALiveRun(t *testing
 	}
 	completedAt := time.Date(2026, 9, 4, 18, 0, 0, 0, time.UTC)
 	completed := shadowPerpsTestSummary(completedAt, true)
+	eventID := strings.Repeat("a", 64)
 	previous := paperstatus.Snapshot{
 		Version: paperstatus.Version - 1, ObservedAt: completedAt,
 		Current: "PAPER · Completed", Summary: &completed,
 		Events: []paperstatus.Event{{
-			ID: strings.Repeat("a", 64), At: completedAt,
+			ID: eventID, At: completedAt,
 			Kind: paperstatus.KindExperimentDone, Message: "PAPER · Completed",
 		}},
+		LatestCompleted: &paperstatus.CompletedSnapshot{
+			ObservedAt: completedAt, EventID: eventID, Summary: completed,
+		},
 	}
 	writeShadowPerpsTestSnapshot(t, filepath.Join(publishedDir, "sol-paper-status.json"), previous)
 

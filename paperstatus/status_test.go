@@ -276,6 +276,71 @@ func TestVersionSevenBindsPerpsDecisionSourceAndLaterOutcome(t *testing.T) {
 	}
 }
 
+func TestVersionNineBindsCurrentPerpsDecisionEvidence(t *testing.T) {
+	now := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+	summary := CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+		HoldBenchmarkMicros: 100_000_000, Checks: 1, State: "watching", Strategy: "fixed",
+		PriceMicros: 101_250_000, DecisionReason: "action_level_not_met",
+		DecisionSignalKind: "two_candle_move", DecisionSignalBPS: 20,
+		DecisionThresholdBPS: 50, MinimumResearchFrames: 24,
+	}
+	snapshot := Snapshot{
+		Version: decisionEvidenceVersion, ObservedAt: now, Current: "PAPER · Watching",
+		Summary: &summary,
+	}
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("version nine decision evidence: %v", err)
+	}
+	legacy := snapshot
+	legacy.Version = latestCompletedVersion
+	if err := ValidateSnapshot(legacy); err == nil {
+		t.Fatal("version eight snapshot accepted version nine decision evidence")
+	}
+	for name, mutate := range map[string]func(*CurrentSummary){
+		"no mark":          func(value *CurrentSummary) { value.PriceMicros = 0 },
+		"no research gate": func(value *CurrentSummary) { value.MinimumResearchFrames = 0 },
+		"unknown reading":  func(value *CurrentSummary) { value.DecisionSignalKind = "oracle" },
+		"level reached":    func(value *CurrentSummary) { value.DecisionSignalBPS = 50 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := summary
+			mutate(&candidate)
+			if err := validateCurrentSummary(&candidate); err == nil {
+				t.Fatal("invalid perps decision evidence was accepted")
+			}
+		})
+	}
+	warmup := summary
+	warmup.DecisionSignalKind, warmup.DecisionSignalBPS = "history_warmup", 0
+	warmup.DecisionThresholdBPS, warmup.DecisionReason = 0, "collecting_history"
+	if err := validateCurrentSummary(&warmup); err != nil {
+		t.Fatalf("valid warmup evidence: %v", err)
+	}
+	warmup.DecisionThresholdBPS = 1
+	if err := validateCurrentSummary(&warmup); err == nil {
+		t.Fatal("warmup accepted an active action level")
+	}
+}
+
+func TestVersionEightLatestCompletedReceiptRemainsReadable(t *testing.T) {
+	now := time.Date(2026, 9, 5, 10, 30, 0, 0, time.UTC)
+	receipt := CompletedSnapshot{
+		ObservedAt: now, EventID: strings.Repeat("a", 64),
+		Summary: completedPerpsTestSummary(now, "SOL-PERP"),
+	}
+	snapshot := Snapshot{Version: latestCompletedVersion, ObservedAt: now, LatestCompleted: &receipt}
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("version eight receipt: %v", err)
+	}
+	if got, ok := LatestCompletedSnapshot(snapshot); !ok || got.EventID != receipt.EventID {
+		t.Fatalf("version eight latest receipt = %+v, %v", got, ok)
+	}
+}
+
 func TestLatestCompletedReceiptSurvivesRetryAndTheNextLiveRun(t *testing.T) {
 	directory, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {

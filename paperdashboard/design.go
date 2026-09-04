@@ -739,6 +739,9 @@ footer.shell {
 .attempt-meter.positive::-moz-progress-bar { background: var(--green); }
 .attempt-meter.negative::-moz-progress-bar { background: var(--red); }
 .attempt-card p, .perps-empty { margin: 8px 0 0; color: var(--subtle); font-size: .75rem; line-height: 1.5; }
+.perps-current-evidence { margin-top: 14px; }
+.perps-progress-head { margin-top: 14px; }
+.perps-current-reason { margin: 11px 0 0; color: var(--muted); font-size: .7rem; line-height: 1.5; }
 .attempt-kicker { display: flex; min-height: 26px; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: .75rem; font-weight: 600; }
 .attempt-kicker .help { flex: 0 0 auto; }
 .attempt-more { margin-top: 2px; }

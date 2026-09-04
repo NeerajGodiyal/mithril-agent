@@ -134,6 +134,8 @@ func tournamentDecision(strategy Strategy, symbol Symbol, arm RiskArm, candles [
 	}
 	decision.Direction, decision.ChangeBPS = Flat, 0
 	if len(candles) <= tournamentLookback {
+		decision.SignalKind = SignalHistoryWarmup
+		decision.ThresholdBPS = 0
 		return decision, nil
 	}
 	switch strategy {
@@ -155,6 +157,7 @@ func tournamentMomentum(decision Decision, candles []Candle) (Decision, error) {
 	if err != nil {
 		return Decision{}, err
 	}
+	decision.SignalKind = SignalMomentum
 	return tournamentDirectionalDecision(decision, baseline, current, false)
 }
 
@@ -172,6 +175,7 @@ func tournamentMeanReversion(decision Decision, candles []Candle) (Decision, err
 	if err != nil {
 		return Decision{}, err
 	}
+	decision.SignalKind = SignalMeanReversion
 	return tournamentDirectionalDecision(decision, sum/tournamentLookback, current, true)
 }
 
@@ -197,19 +201,33 @@ func tournamentBreakout(decision Decision, candles []Candle) (Decision, error) {
 	if err != nil {
 		return Decision{}, err
 	}
-	if change, err := signedChangeBPS(high, current); err != nil {
-		return Decision{}, err
-	} else if change >= threshold {
-		decision.Direction, decision.ChangeBPS = Direction(Long), change
-		return decision, nil
-	}
-	change, err := signedChangeBPS(low, current)
+	decision.ThresholdBPS = threshold
+	highChange, err := signedChangeBPS(high, current)
 	if err != nil {
 		return Decision{}, err
 	}
-	decision.ChangeBPS = change
-	if change <= -threshold {
+	if highChange >= threshold {
+		decision.SignalKind = SignalBreakoutHigh
+		decision.Direction, decision.ChangeBPS = Direction(Long), highChange
+		return decision, nil
+	}
+	lowChange, err := signedChangeBPS(low, current)
+	if err != nil {
+		return Decision{}, err
+	}
+	if lowChange <= -threshold {
+		decision.SignalKind = SignalBreakoutLow
+		decision.ChangeBPS = lowChange
 		decision.Direction = Direction(Short)
+	} else if highChange > 0 {
+		decision.SignalKind = SignalBreakoutHigh
+		decision.ChangeBPS = highChange
+	} else if lowChange < 0 {
+		decision.SignalKind = SignalBreakoutLow
+		decision.ChangeBPS = lowChange
+	} else {
+		decision.SignalKind = SignalBreakoutRange
+		decision.ChangeBPS = 0
 	}
 	return decision, nil
 }
@@ -217,6 +235,11 @@ func tournamentBreakout(decision Decision, candles []Candle) (Decision, error) {
 func tournamentRegime(decision Decision, candles []Candle) (Decision, error) {
 	breakout, err := tournamentBreakout(decision, candles)
 	if err != nil || breakout.Direction != Flat {
+		if breakout.SignalKind == SignalBreakoutHigh {
+			breakout.SignalKind = SignalRegimeBreakoutHigh
+		} else if breakout.SignalKind == SignalBreakoutLow {
+			breakout.SignalKind = SignalRegimeBreakoutLow
+		}
 		return breakout, err
 	}
 	momentum, err := tournamentMomentum(decision, candles)
@@ -228,9 +251,15 @@ func tournamentRegime(decision Decision, candles []Candle) (Decision, error) {
 		return Decision{}, err
 	}
 	if momentum.ChangeBPS >= threshold*2 || momentum.ChangeBPS <= -threshold*2 {
+		momentum.SignalKind = SignalRegimeMomentum
+		momentum.ThresholdBPS = threshold * 2
 		return momentum, nil
 	}
-	return tournamentMeanReversion(decision, candles)
+	meanReversion, err := tournamentMeanReversion(decision, candles)
+	if err == nil {
+		meanReversion.SignalKind = SignalRegimeMeanReversion
+	}
+	return meanReversion, err
 }
 
 func tournamentDirectionalDecision(decision Decision, baseline, current uint64, reverse bool) (Decision, error) {
@@ -242,6 +271,7 @@ func tournamentDirectionalDecision(decision Decision, baseline, current uint64, 
 	if err != nil {
 		return Decision{}, err
 	}
+	decision.ThresholdBPS = threshold
 	decision.ChangeBPS = change
 	if change >= threshold {
 		decision.Direction = Direction(Long)

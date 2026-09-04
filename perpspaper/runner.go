@@ -25,13 +25,29 @@ type Direction string
 const Flat Direction = "flat"
 
 type Decision struct {
-	Symbol      Symbol    `json:"symbol"`
-	Direction   Direction `json:"direction"`
-	RiskArm     RiskArm   `json:"risk_arm"`
-	ChangeBPS   int64     `json:"change_bps"`
-	NotionalBPS uint16    `json:"notional_bps"`
-	LeverageBPS uint32    `json:"leverage_bps"`
+	Symbol       Symbol    `json:"symbol"`
+	Direction    Direction `json:"direction"`
+	RiskArm      RiskArm   `json:"risk_arm"`
+	SignalKind   string    `json:"signal_kind"`
+	ChangeBPS    int64     `json:"change_bps"`
+	ThresholdBPS int64     `json:"threshold_bps"`
+	NotionalBPS  uint16    `json:"notional_bps"`
+	LeverageBPS  uint32    `json:"leverage_bps"`
 }
+
+const (
+	SignalTwoCandleMove       = "two_candle_move"
+	SignalHistoryWarmup       = "history_warmup"
+	SignalMomentum            = "momentum"
+	SignalMeanReversion       = "mean_reversion"
+	SignalBreakoutHigh        = "breakout_high"
+	SignalBreakoutLow         = "breakout_low"
+	SignalBreakoutRange       = "breakout_range"
+	SignalRegimeMomentum      = "regime_momentum"
+	SignalRegimeMeanReversion = "regime_mean_reversion"
+	SignalRegimeBreakoutHigh  = "regime_breakout_high"
+	SignalRegimeBreakoutLow   = "regime_breakout_low"
+)
 
 type PriceContext struct {
 	Symbol     Symbol `json:"symbol"`
@@ -74,7 +90,10 @@ func Decide(symbol Symbol, arm RiskArm, candles []Candle) (Decision, error) {
 	} else if change <= -threshold {
 		direction = Direction(Short)
 	}
-	return Decision{Symbol: symbol, Direction: direction, RiskArm: arm, ChangeBPS: change, NotionalBPS: allocation, LeverageBPS: leverage}, nil
+	return Decision{
+		Symbol: symbol, Direction: direction, RiskArm: arm, SignalKind: SignalTwoCandleMove,
+		ChangeBPS: change, ThresholdBPS: threshold, NotionalBPS: allocation, LeverageBPS: leverage,
+	}, nil
 }
 
 type TapeFrame struct {
@@ -85,17 +104,19 @@ type TapeFrame struct {
 }
 
 type TapeResult struct {
-	Decision     Decision `json:"decision"`
-	Fill         *Fill    `json:"fill,omitempty"`
-	VisibleQuote *Fill    `json:"visible_quote,omitempty"`
-	Action       string   `json:"action"`
-	Records      []Record `json:"records,omitempty"`
+	Decision        Decision `json:"decision"`
+	MarkPriceMicros uint64   `json:"mark_price_micros"`
+	Fill            *Fill    `json:"fill,omitempty"`
+	VisibleQuote    *Fill    `json:"visible_quote,omitempty"`
+	Action          string   `json:"action"`
+	Records         []Record `json:"records,omitempty"`
 }
 
 type TapeReplay struct {
-	Results []TapeResult `json:"results"`
-	Records []Record     `json:"records"`
-	State   State        `json:"state"`
+	Results             []TapeResult `json:"results"`
+	Records             []Record     `json:"records"`
+	State               State        `json:"state"`
+	LastMarkPriceMicros uint64       `json:"last_mark_price_micros"`
 }
 
 type ReplayConfig struct {
@@ -152,6 +173,7 @@ func replayTape(config ReplayConfig, frames []TapeFrame, decide func(Symbol, Ris
 		if err != nil {
 			return TapeReplay{}, fmt.Errorf("frame %d price context: %w", i, err)
 		}
+		results[i].MarkPriceMicros = markPrice
 		contextBookSeparation := frame.Book.Time - frame.Context.ReceivedAt
 		if frame.Context.ReceivedAt > frame.Book.Time {
 			contextBookSeparation = frame.Context.ReceivedAt - frame.Book.Time
@@ -279,7 +301,10 @@ func replayTape(config ReplayConfig, frames []TapeFrame, decide func(Symbol, Ris
 		results[i].Records = append([]Record(nil), records[before:]...)
 		lastBookTime, lastCandleClose = frame.Book.Time, finalClose
 	}
-	return TapeReplay{Results: results, Records: book.Records(), State: book.State()}, nil
+	return TapeReplay{
+		Results: results, Records: book.Records(), State: book.State(),
+		LastMarkPriceMicros: results[len(results)-1].MarkPriceMicros,
+	}, nil
 }
 
 func priceContextMicros(context PriceContext, symbol Symbol) (uint64, uint64, error) {

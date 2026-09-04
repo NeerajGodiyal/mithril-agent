@@ -172,6 +172,32 @@ func TestPerpsTrainingAttemptsStayCompactAndUnapproved(t *testing.T) {
 	}
 }
 
+func TestDashboardExplainsCurrentPerpsDecisionWithoutImplyingAnOrder(t *testing.T) {
+	for _, want := range []string{
+		`recording?perpsCurrentEvidence(m):''`,
+		`Latest sampled mark`,
+		`Latest plan reading`,
+		`Action level`,
+		`Research checkpoint`,
+		`completed one-minute market snapshots`,
+		`decisionReason(m.decision_reason)`,
+		`No real order has been sent.`,
+		`Not a resting exchange order`,
+		`latest sampled mark values an open paper position`,
+		`breakout_range`,
+		`regime_breakout_high`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Errorf("current perps explanation omits %q", want)
+		}
+	}
+	for _, want := range []string{".perps-current-evidence", ".perps-progress-head", ".perps-current-reason"} {
+		if !strings.Contains(dashboardCSS, want) {
+			t.Errorf("current perps design omits %q", want)
+		}
+	}
+}
+
 func TestActivityKeepsProducerFactsExactAndDerivesOnlyEventStatus(t *testing.T) {
 	for _, want := range []string{
 		`const lines=String(item.message||'').split('\n')`,

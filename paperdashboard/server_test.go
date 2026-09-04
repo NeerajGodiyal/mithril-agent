@@ -97,6 +97,9 @@ func TestPerpsViewKeepsLiveStateSeparateFromLatestCompletedEvidence(t *testing.T
 		OpeningEquityMicros: 100_000_000, EquityMicros: 101_000_000,
 		HoldBenchmarkMicros: 100_000_000, AccountingTracked: true, RealizedMicros: 1_000_000,
 		Checks: 60, Signals: 2, Trades: 2, State: "watching", Strategy: "fixed",
+		PriceMicros: 99_000_000, DecisionReason: "action_level_not_met",
+		DecisionSignalKind: "two_candle_move", DecisionSignalBPS: 10,
+		DecisionThresholdBPS: 50, MinimumResearchFrames: 24,
 		DecisionSource: "legacy_fixed_policy", ProposalSource: "built_in",
 		RunPlanSHA256: strings.Repeat("b", 64), QualificationTracked: true,
 		QualificationOutcome: "candidate_ready_for_more_paper_testing",
@@ -118,7 +121,9 @@ func TestPerpsViewKeepsLiveStateSeparateFromLatestCompletedEvidence(t *testing.T
 		ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
 		OpeningEquityMicros: 200_000_000, EquityMicros: 205_000_000,
 		HoldBenchmarkMicros: 201_000_000, Checks: 7, Signals: 1, Trades: 1,
-		State: "watching", Strategy: "fixed",
+		State: "watching", Strategy: "fixed", PriceMicros: 105_000_000,
+		DecisionReason: "watching", DecisionSignalKind: "momentum",
+		DecisionSignalBPS: 60, DecisionThresholdBPS: 40, MinimumResearchFrames: 24,
 	}
 	source := &sourceStub{label: "SOL-PERP", snapshot: paperstatus.Snapshot{
 		Version: paperstatus.Version, ObservedAt: now, Current: "PAPER · Recording", Summary: live,
@@ -142,12 +147,22 @@ func TestPerpsViewKeepsLiveStateSeparateFromLatestCompletedEvidence(t *testing.T
 	market := view.Markets[0]
 	if !market.Available || !market.Ready || !market.Fresh || market.Completed ||
 		market.EquityMicros != live.EquityMicros || market.Checks != live.Checks ||
+		market.PriceMicros != live.PriceMicros ||
+		market.DecisionSignalKind != live.DecisionSignalKind ||
+		market.DecisionSignalBPS != live.DecisionSignalBPS ||
+		market.DecisionThresholdBPS != live.DecisionThresholdBPS ||
+		market.MinimumResearchFrames != live.MinimumResearchFrames ||
 		market.QualificationTracked || market.LatestCompleted == nil {
 		t.Fatalf("live market projection = %+v", market)
 	}
 	latest := market.LatestCompleted
 	if latest.ObservedAt == nil || !latest.Completed || latest.Fresh || latest.State != "completed" ||
 		!latest.ObservedAt.Equal(completedAt) || latest.EquityMicros != completed.EquityMicros ||
+		latest.PriceMicros != completed.PriceMicros ||
+		latest.DecisionSignalKind != completed.DecisionSignalKind ||
+		latest.DecisionSignalBPS != completed.DecisionSignalBPS ||
+		latest.DecisionThresholdBPS != completed.DecisionThresholdBPS ||
+		latest.MinimumResearchFrames != completed.MinimumResearchFrames ||
 		!latest.QualificationTracked || latest.QualificationFrames != completed.QualificationFrames ||
 		latest.InstructionSHA256 != "" || latest.LatestCompleted != nil || len(latest.History) != 0 {
 		t.Fatalf("latest completed projection = %+v", latest)

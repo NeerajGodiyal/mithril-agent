@@ -154,6 +154,10 @@ type Market struct {
 	PerpsPlanOutcome              string             `json:"perps_plan_outcome,omitempty"`
 	NextAction                    string             `json:"next_action,omitempty"`
 	DecisionReason                string             `json:"decision_reason,omitempty"`
+	DecisionSignalKind            string             `json:"decision_signal_kind,omitempty"`
+	DecisionSignalBPS             int64              `json:"decision_signal_bps,omitempty,string"`
+	DecisionThresholdBPS          int64              `json:"decision_threshold_bps,omitempty,string"`
+	MinimumResearchFrames         uint64             `json:"minimum_research_frames,omitempty"`
 	RiskHalted                    bool               `json:"risk_halted,omitempty"`
 	InitialLotUnits               uint64             `json:"initial_lot_units,omitempty,string"`
 	InitialLotDecimals            uint8              `json:"initial_lot_decimals,omitempty"`
@@ -587,6 +591,10 @@ func applyMarketSummary(market *Market, summary paperstatus.CurrentSummary) {
 	}
 	market.NextAction = summary.NextAction
 	market.DecisionReason = summary.DecisionReason
+	market.DecisionSignalKind = summary.DecisionSignalKind
+	market.DecisionSignalBPS = summary.DecisionSignalBPS
+	market.DecisionThresholdBPS = summary.DecisionThresholdBPS
+	market.MinimumResearchFrames = summary.MinimumResearchFrames
 	market.RiskHalted = summary.RiskHalted
 	market.InitialLotUnits = summary.InitialLotUnits
 	market.InitialLotDecimals = summary.InitialLotDecimals
