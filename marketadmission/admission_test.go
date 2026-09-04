@@ -3,6 +3,7 @@ package marketadmission
 import (
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -202,6 +203,75 @@ func TestProvisionalArtifactIsSixHoursPaperOnlyAndExpiresQuickly(t *testing.T) {
 	tampered.Authorized = true
 	if tampered.Validate() == nil {
 		t.Fatal("an authorized provisional artifact was accepted")
+	}
+}
+
+func TestProvisionalReplayPointsBindTheExactPrefixAndPreserveGaps(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "provisional-replay.jsonl")
+	candidate, _ := Lookup(MarketWIFUSDC)
+	opening, err := NewOpening(candidate, testObserve, DefaultThresholds())
+	if err != nil {
+		t.Fatal(err)
+	}
+	through := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
+	from := through.Add(-6 * time.Hour)
+	observations := observationsFor(t, opening, from, through, 10)
+	observations[1].Failure = FailureBuyQuote
+	store, err := journal.OpenRotating(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(from, EventOpened, opening.ContentSHA256, opening); err != nil {
+		t.Fatal(err)
+	}
+	for index, observation := range observations {
+		if index == 2 {
+			continue
+		}
+		if _, err := store.Append(
+			observation.ObservedAt, EventObserved,
+			observation.Bucket.Format(time.RFC3339), observation,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prefix, err := store.DurablePrefix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := EvaluateProvisionalJournal(path, prefix, through.Add(30*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	points, err := artifact.ReplayPoints(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(points) != 360 || !points[0].Available || points[1].Available ||
+		points[1].At != observations[1].ObservedAt.UTC() || points[2].Available ||
+		points[2].At != points[2].Bucket.Add(time.Minute) ||
+		!reflect.DeepEqual(points[1].MarketPrimary, pricetrigger.Sample{}) ||
+		!reflect.DeepEqual(points[1].NativePrimary, pricetrigger.Sample{}) ||
+		points[3].MarketPrimary.PriceMicros == 0 || points[3].NativePrimary.PriceMicros == 0 {
+		t.Fatalf("replay points = %+v", points[:4])
+	}
+	if _, err := store.Append(
+		through, "market_admission.unsupported", "tail", map[string]string{"invalid": "tail"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := artifact.ReplayPoints(path)
+	if err != nil || !reflect.DeepEqual(points, again) {
+		t.Fatal("an appended journal tail changed the exact-prefix replay")
+	}
+	tampered := artifact
+	tampered.Journal.ChainHeadSHA256 = strings.Repeat("f", 64)
+	if _, err := tampered.ReplayPoints(path); err == nil {
+		t.Fatal("a foreign replay prefix was accepted")
 	}
 }
 

@@ -163,7 +163,7 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 		}
 		if strategy != nil && !tick.PeriodClose {
 			if tick.PrimaryPrice == nil || tick.SecondaryPrice == nil ||
-				!adaptiveSampleAdvances(
+				!AdaptiveSampleAdvances(
 					primaryPublishedAt, secondaryPublishedAt,
 					tick.PrimaryPrice.PublishedAt.UTC(), tick.SecondaryPrice.PublishedAt.UTC(),
 				) {

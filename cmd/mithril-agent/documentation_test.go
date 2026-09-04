@@ -1241,6 +1241,8 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"mithril-agent-market-candidate@jto.service",
 		"mithril-agent-market-candidate@pyth.service",
 		"PUMP remains excluded", "Token-2022",
+		"shadow market paper-check", "first four hours",
+		"code-owned 25 bps", "50 bps stress", "cannot write a candidate",
 		"id -g mithril-agent-research",
 		"Do not copy or hand-edit `events.jsonl`",
 		"/opt/mithril-hermes-research",

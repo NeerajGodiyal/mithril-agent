@@ -96,6 +96,30 @@ func TestRoundTripClosingMarkUsesTheCandidateFinalDirection(t *testing.T) {
 	}
 }
 
+func TestAdaptiveRoundTripRejectsRepeatedSourceSamples(t *testing.T) {
+	policy := roundTripPolicy(t, 100)
+	policy.Adaptive = &AdaptivePolicy{
+		Version: AdaptiveVersion, FastWindow: 2, SlowWindow: 3,
+		MinimumSignalBPS: 100, MaxVolatilityBPS: 500,
+		MaxQuoteImpactBPS: 500, MaxDrawdownBPS: 300,
+		MaxObservationGapSeconds: 120,
+	}
+	now := time.Unix(1_700_000_000, 0).UTC()
+	primary := pricetrigger.Sample{
+		SourceSHA256: policy.Trigger.PrimarySourceSHA256, Feed: policy.Trigger.Feed,
+		PriceMicros: 20_000_000, ConfidenceMicros: 1, PublishedAt: now,
+	}
+	secondary := primary
+	secondary.SourceSHA256 = policy.Trigger.SecondarySourceSHA256
+	ticks := []Tick{
+		{At: now, Event: EventWaiting, PriceMicros: primary.PriceMicros, PrimaryPrice: &primary, SecondaryPrice: &secondary},
+		{At: now.Add(time.Minute), Event: EventWaiting, PriceMicros: primary.PriceMicros, PrimaryPrice: &primary, SecondaryPrice: &secondary},
+	}
+	if _, err := ReplayRoundTripTicks(policy, ticks, tightQuote()); err == nil {
+		t.Fatal("adaptive round-trip replay accepted repeated provider samples")
+	}
+}
+
 func TestRoundTripComparisonMarksPartialInventoryAtOneSellPrice(t *testing.T) {
 	policy := roundTripPolicy(t, 100)
 	now := time.Unix(1_700_000_000, 0).UTC()
@@ -299,6 +323,21 @@ func TestRoundTripCountsAPendingDecisionMissedAtPeriodClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.Counts.Missed != 1 || result.Counts.Sells != 0 || result.Counts.Buys != 0 {
+		t.Fatalf("terminal pending decision counts = %+v", result.Counts)
+	}
+}
+
+func TestRoundTripReportsAPendingDecisionAtWindowEnd(t *testing.T) {
+	policy := roundTripPolicy(t, 100)
+	start := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+	result, err := ReplayRoundTripTicks(policy, []Tick{
+		{At: start, Event: EventWaiting, PriceMicros: 20_000_000},
+		{At: start.Add(time.Minute), Event: EventSignal, PriceMicros: 23_000_000},
+	}, tightQuote())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Counts.Pending || result.Counts.Sells != 0 || result.Counts.Buys != 0 {
 		t.Fatalf("terminal pending decision counts = %+v", result.Counts)
 	}
 }

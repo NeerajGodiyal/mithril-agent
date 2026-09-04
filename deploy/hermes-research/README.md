@@ -695,9 +695,10 @@ paper-only checkpoint instead of waiting 30 days before exercising the runner.
 The command refuses a live collector and refuses to replace an existing file.
 The resulting artifact is only the evidence checkpoint; it is not a strategy.
 Use it to generate a `development_provisional` policy and pass the same artifact
-and journal to the runner. The first paper run creates the strategy journal that
-the replay and stress checks evaluate. Neither the artifact nor that policy can
-authorize a proposal or real-money execution.
+and journal to the runner. The check below replays only validated market samples
+with modelled fills; it does not treat a runner journal as execution evidence.
+Neither the artifact nor that policy can authorize a proposal or real-money
+execution.
 
 ```sh
 sudo systemctl stop mithril-agent-market-wif.service
@@ -716,6 +717,18 @@ sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
   --provisional-artifact /var/lib/mithril-agent-research/market-admission-wif/provisional.json \
   --provisional-journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl \
   --out /var/lib/mithril-agent-research/market-admission-wif/paper-policy.json
+
+# This reads only the checkpoint's exact journal prefix. It selects on the
+# first four hours, checks the fixed candidate on the final two hours at an
+# fixed, code-owned 25 bps symmetric spread and again at the 50 bps stress
+# spread, then prints JSON. Observed route-cost percentiles remain operational
+# evidence; held-out observations cannot lower or choose the model.
+# It cannot write a candidate, select a policy, or start a runner.
+sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
+  shadow market paper-check \
+  --policy /var/lib/mithril-agent-research/market-admission-wif/paper-policy.json \
+  --provisional-artifact /var/lib/mithril-agent-research/market-admission-wif/provisional.json \
+  --journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl
 
 sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
   shadow portfolio \

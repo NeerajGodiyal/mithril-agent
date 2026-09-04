@@ -46,6 +46,9 @@ type RoundTripCounts struct {
 	// Missed counts a decision whose settlement time arrived without an
 	// observable market price, matching the live runner's fail-closed behavior.
 	Missed uint64 `json:"missed"`
+	// Pending reports a decision whose settlement time was beyond the bounded
+	// replay window. Qualification must not mistake it for a closed book.
+	Pending bool `json:"pending,omitempty"`
 	// SellSignals and BuySignals are ticks where the active rule fired. Comparing
 	// them with completed legs and refusals shows whether the route could act on
 	// the prices the strategy selected.
@@ -127,6 +130,7 @@ func replayRoundTripTicks(
 		return RoundTripResult{}, err
 	}
 	observations := make([]roundTripObservation, 0, len(ticks))
+	var previousPrimary, previousSecondary time.Time
 	for _, tick := range ticks {
 		if tick.PeriodClose {
 			if tick.Event != EventClosed && tick.Event != EventMissed {
@@ -140,6 +144,17 @@ func replayRoundTripTicks(
 		if tick.PriceMicros == 0 && tick.Event != EventUnobservable ||
 			tick.PriceMicros != 0 && tick.Event == EventUnobservable {
 			return RoundTripResult{}, errors.New("round-trip tick has inconsistent observability")
+		}
+		if policy.Adaptive != nil && tick.PriceMicros != 0 {
+			if tick.PrimaryPrice == nil || tick.SecondaryPrice == nil ||
+				!AdaptiveSampleAdvances(
+					previousPrimary, previousSecondary,
+					tick.PrimaryPrice.PublishedAt.UTC(), tick.SecondaryPrice.PublishedAt.UTC(),
+				) {
+				return RoundTripResult{}, errors.New("round-trip adaptive tick has no distinct chronological market sample")
+			}
+			previousPrimary = tick.PrimaryPrice.PublishedAt.UTC()
+			previousSecondary = tick.SecondaryPrice.PublishedAt.UTC()
 		}
 		observations = append(observations, roundTripObservation{
 			at: tick.At, priceMicros: tick.PriceMicros, observable: tick.PriceMicros != 0,
@@ -473,6 +488,7 @@ func replayRoundTrip(
 			break
 		}
 	}
+	result.Counts.Pending = pending != nil
 	if liquidationMarks {
 		result.LiquidationLedger = liquidationLedger
 		result.LiquidationMaxDrawdownMicros = liquidationLedger.MaxDrawdownMicros

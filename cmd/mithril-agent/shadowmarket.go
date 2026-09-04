@@ -23,6 +23,7 @@ const shadowMarketUsage = `Usage:
   mithril-agent shadow market curve --market NAME --observe ADDR
   mithril-agent shadow market diagnose --journal PATH [--hours 6]
   mithril-agent shadow market provisional --journal PATH --out PATH
+  mithril-agent shadow market paper-check --policy PATH --provisional-artifact PATH --journal PATH
   mithril-agent shadow market evaluate --journal PATH --out PATH
 
 Collect attempts one immutable, hash-chained observation per minute; missed
@@ -30,7 +31,9 @@ Collect attempts one immutable, hash-chained observation per minute; missed
  round trips and emits diagnostic-only size evidence. Diagnose prints a recent 1-168 hour operational
 summary but cannot qualify a market or create an artifact. Provisional writes
 a paper-only six-hour checkpoint which expires quickly and cannot authorize a
-proposal. Evaluate checks the latest 30 complete UTC days from that exact durable journal prefix
+proposal. Paper-check selects only on the first four hours, then runs normal
+plus doubled-route-cost replays on the final two untouched hours. Its JSON is research-only and cannot
+activate or promote a market. Evaluate checks the latest 30 complete UTC days from that exact durable journal prefix
 and writes a new artifact without replacing an existing file. Qualification
 covers market-data and route quality only; it does not start a paper strategy.
 
@@ -53,10 +56,12 @@ func runShadowMarket(ctx context.Context, args []string, output io.Writer) error
 		return runShadowMarketDiagnose(args[1:], output)
 	case "provisional":
 		return runShadowMarketProvisional(args[1:], output)
+	case "paper-check":
+		return runShadowMarketPaperCheck(args[1:], output)
 	case "evaluate":
 		return runShadowMarketEvaluate(args[1:], output)
 	default:
-		return errors.New("shadow market expects collect, curve, diagnose, provisional, or evaluate")
+		return errors.New("shadow market expects collect, curve, diagnose, provisional, paper-check, or evaluate")
 	}
 }
 

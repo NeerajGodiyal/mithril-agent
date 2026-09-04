@@ -38,6 +38,8 @@ named spread. The result is research_only and can never authorize a trade.
 When --candidate-out is set, it also writes one immutable, paper-only policy
 bound to the base policy and both journals' verified chain heads.`
 
+var errNoAdaptiveTrainingRoundTrip = errors.New("no adaptive candidate completed a training round trip")
+
 type shadowSearchScore struct {
 	FullRoundTrips    uint64 `json:"full_round_trips"`
 	VersusHoldMicros  int64  `json:"versus_hold_micros"`
@@ -608,7 +610,7 @@ func searchAdaptiveCandidateScored(
 		best.Training = training
 	}
 	if !bestSet {
-		return shadowSearchResult{}, errors.New("no adaptive candidate completed a training round trip")
+		return shadowSearchResult{}, errNoAdaptiveTrainingRoundTrip
 	}
 	candidate, err := shadowSearchCandidatePolicy(policy, best.Candidate)
 	if err != nil {

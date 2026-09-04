@@ -511,7 +511,7 @@ func (r *Runner) StepObservation(
 	if r.strategy != nil {
 		primaryAt := observation.primary.PublishedAt.UTC()
 		secondaryAt := observation.secondary.PublishedAt.UTC()
-		if !adaptiveSampleAdvances(
+		if !AdaptiveSampleAdvances(
 			r.primaryPublishedAt, r.secondaryPublishedAt, primaryAt, secondaryAt,
 		) {
 			return r.emitUnobservable(now, ReasonMarketPriceNotAdvanced)
@@ -926,7 +926,10 @@ func (r *Runner) emit(now time.Time, tick Tick, fill *Fill) (Tick, error) {
 	return tick, nil
 }
 
-func adaptiveSampleAdvances(previousPrimary, previousSecondary, primary, secondary time.Time) bool {
+// AdaptiveSampleAdvances reports whether an independently sourced price pair
+// adds chronological information. Verified replay adapters use the same rule
+// as the live runner so repeated provider samples cannot manufacture history.
+func AdaptiveSampleAdvances(previousPrimary, previousSecondary, primary, secondary time.Time) bool {
 	if primary.IsZero() || secondary.IsZero() ||
 		!previousPrimary.IsZero() && primary.Before(previousPrimary) ||
 		!previousSecondary.IsZero() && secondary.Before(previousSecondary) {

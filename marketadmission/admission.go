@@ -395,6 +395,20 @@ type ProvisionalArtifact struct {
 	ContentSHA256         string                `json:"content_sha256"`
 }
 
+// ProvisionalReplayPoint is the bounded price evidence needed by paper
+// strategy replay. Unavailable buckets carry no price samples and retain the
+// time their absence became known, so a caller cannot turn a missing or
+// rejected observation into a price or move it earlier in the replay.
+type ProvisionalReplayPoint struct {
+	Bucket          time.Time           `json:"bucket"`
+	At              time.Time           `json:"at"`
+	Available       bool                `json:"available"`
+	MarketPrimary   pricetrigger.Sample `json:"market_primary,omitzero"`
+	MarketSecondary pricetrigger.Sample `json:"market_secondary,omitzero"`
+	NativePrimary   pricetrigger.Sample `json:"native_primary,omitzero"`
+	NativeSecondary pricetrigger.Sample `json:"native_secondary,omitzero"`
+}
+
 // EvaluateProvisionalJournal derives the most recent six complete hours from
 // one exact durable prefix. It never creates a long-run admission artifact.
 func EvaluateProvisionalJournal(
@@ -540,24 +554,64 @@ func (artifact ProvisionalArtifact) Current(now time.Time) bool {
 }
 
 func (artifact ProvisionalArtifact) VerifyJournal(path string) error {
+	_, _, err := artifact.verifiedJournal(path)
+	return err
+}
+
+// ReplayPoints returns every scheduled bucket in the artifact's exact durable
+// prefix. It preserves gaps and exposes samples only after the full admission
+// observation, including its mint, peg, route, and latency checks, is usable.
+func (artifact ProvisionalArtifact) ReplayPoints(path string) ([]ProvisionalReplayPoint, error) {
+	opening, observations, err := artifact.verifiedJournal(path)
+	if err != nil {
+		return nil, err
+	}
+	byBucket := make(map[int64]Observation, len(observations))
+	for _, observation := range observations {
+		if !observation.Bucket.Before(artifact.From) && observation.Bucket.Before(artifact.Through) {
+			byBucket[observation.Bucket.Unix()] = observation
+		}
+	}
+	cadence := time.Duration(opening.Thresholds.CadenceSeconds) * time.Second
+	points := make([]ProvisionalReplayPoint, 0, artifact.ExpectedBuckets)
+	for bucket := artifact.From; bucket.Before(artifact.Through); bucket = bucket.Add(cadence) {
+		// An absent bucket is not known to be unavailable until its collection
+		// deadline. A recorded rejection is known at its actual observation time.
+		point := ProvisionalReplayPoint{Bucket: bucket, At: bucket.Add(cadence)}
+		if observation, ok := byBucket[bucket.Unix()]; ok {
+			point.At = observation.ObservedAt.UTC()
+			if _, usable := usableObservation(opening, observation); usable {
+				point.Available = true
+				point.MarketPrimary = observation.MarketPrimary.Sample
+				point.MarketSecondary = observation.MarketSecondary
+				point.NativePrimary = observation.SOLPrimary.Sample
+				point.NativeSecondary = observation.SOLSecondary
+			}
+		}
+		points = append(points, point)
+	}
+	return points, nil
+}
+
+func (artifact ProvisionalArtifact) verifiedJournal(path string) (Opening, []Observation, error) {
 	if err := artifact.Validate(); err != nil {
-		return err
+		return Opening{}, nil, err
 	}
 	records, err := journal.ReadDurablePrefix(path, artifact.Journal)
 	if err != nil {
-		return err
+		return Opening{}, nil, err
 	}
 	opening, observations, err := decodeRecords(records)
 	if err != nil {
-		return err
+		return Opening{}, nil, err
 	}
 	want, err := evaluateProvisional(
 		opening, artifact.From, artifact.Through, artifact.Journal, observations,
 	)
 	if err != nil || want.ContentSHA256 != artifact.ContentSHA256 {
-		return errors.New("provisional market evidence artifact does not match its journal")
+		return Opening{}, nil, errors.New("provisional market evidence artifact does not match its journal")
 	}
-	return nil
+	return opening, observations, nil
 }
 
 // DiagnoseJournal derives a recent read-only operational summary from one
