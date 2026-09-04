@@ -536,19 +536,23 @@ func paperAnnouncement(event paperstatus.Event, label string) string {
 		asset = paperTradeAsset(message)
 	}
 	if asset != "" {
-		message = strings.Replace(message, "Expected price:", "Estimated price for 1 "+asset+":", 1)
-		message = strings.Replace(message, "Filled price:", "Actual paper price for 1 "+asset+":", 1)
+		for _, label := range []string{"Expected price:", "Price when order opened:"} {
+			message = strings.Replace(message, label, "Estimate when opened for 1 "+asset+":", 1)
+		}
+		for _, label := range []string{"Filled price:", "Price when filled:"} {
+			message = strings.Replace(message, label, "Filled price for 1 "+asset+":", 1)
+		}
 	}
 	if label != "" {
 		message = paperMarketMessage(message)
 	}
 	if event.Kind == paperstatus.KindOrderFilled && strings.Contains(label, "/") {
-		message = compactSpotFill(message)
+		message = compactSpotFill(message, asset)
 	}
 	return stackPaperMessage(message, paperMarketName(label))
 }
 
-func compactSpotFill(message string) string {
+func compactSpotFill(message, asset string) string {
 	lines := strings.Split(message, "\n")
 	if len(lines) == 0 || !strings.Contains(lines[0], "BOUGHT") && !strings.Contains(lines[0], "SOLD") {
 		return message
@@ -563,19 +567,28 @@ func compactSpotFill(message string) string {
 			compact[0] += " " + strings.TrimPrefix(line, "Sold: ")
 		case strings.HasPrefix(line, "Paid: "), strings.HasPrefix(line, "Received: "):
 			compact = append(compact, line)
-		case strings.HasPrefix(line, "Estimated price for 1 "):
+		case strings.HasPrefix(line, "Estimated price for 1 "),
+			strings.HasPrefix(line, "Estimate when opened for 1 "):
 			_, estimate, _ = strings.Cut(line, ": ")
-		case strings.HasPrefix(line, "Actual paper price for 1 "):
+		case strings.HasPrefix(line, "Actual paper price for 1 "),
+			strings.HasPrefix(line, "Filled price for 1 "):
 			_, fill, _ = strings.Cut(line, ": ")
 		case strings.HasPrefix(line, "This completed trade: "),
+			strings.HasPrefix(line, "This completed trade cycle: "),
 			strings.HasPrefix(line, "This completed buy + sell: "):
 			_, tradeResult, _ = strings.Cut(line, ": ")
 		}
 	}
 	if fill != "" {
-		price := "Paper price: " + fill
+		price := "Filled price: " + fill
+		if asset != "" {
+			price += " per " + asset
+		}
 		if estimate != "" {
-			price += " (estimate " + estimate + ")"
+			price += "\nEstimate when opened: " + estimate
+			if asset != "" {
+				price += " per " + asset
+			}
 		}
 		compact = append(compact, price)
 	} else if estimate != "" {
@@ -664,7 +677,9 @@ func readablePaperMessage(message string) string {
 		lines[index] = strings.ReplaceAll(lines[index], "same as no trading", "same as holding")
 		lines[index] = readablePaperTradeCount(lines[index])
 		if !strings.HasPrefix(lines[index], "Expected price:") &&
-			!strings.HasPrefix(lines[index], "Filled price:") {
+			!strings.HasPrefix(lines[index], "Filled price:") &&
+			!strings.HasPrefix(lines[index], "Price when order opened:") &&
+			!strings.HasPrefix(lines[index], "Price when filled:") {
 			lines[index] = shortenPaperUSD(lines[index])
 		}
 		for _, action := range []string{"Sold", "Received", "Paid", "Bought"} {
@@ -697,6 +712,7 @@ func paperDisplayResultLines(message string) string {
 		for _, label := range []string{
 			"Paper gain/loss:", "Paper result this run:", "Result since this plan started:",
 			"Combined result this run:", "This completed trade:",
+			"This completed trade cycle:",
 			"This completed buy + sell:",
 			"Last recorded run result:",
 		} {

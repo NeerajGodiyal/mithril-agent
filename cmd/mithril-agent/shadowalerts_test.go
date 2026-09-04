@@ -323,7 +323,7 @@ func TestPaperFillAndAccountLinesSeparateAmountsFromGainLoss(t *testing.T) {
 	if got := paperFillPriceLines(policy, shadow.Fill{
 		Sell: true, SpentUnits: 250_000_000, ReceivedUnits: 24_750_000,
 		DecisionQuote: shadow.Quote{InputAmount: 250_000_000, EstimatedOutput: 25_000_000},
-	}, sol, usdc); got != "Expected price: $100\nFilled price: $99" {
+	}, sol, usdc); got != "Price when order opened: $100\nPrice when filled: $99" {
 		t.Fatalf("paper fill prices = %q", got)
 	}
 	if got := paperAccountLine(policy, 100_000_000, 101_000_000); got !=
@@ -357,10 +357,10 @@ func TestPaperFillAndAccountLinesSeparateAmountsFromGainLoss(t *testing.T) {
 		result *int64
 		want   string
 	}{
-		{nil, "Trade result: still open\nProfit or loss appears after the matching order"},
-		{&positive, "This completed buy + sell: up $2.14"},
-		{&negative, "This completed buy + sell: down $0.75"},
-		{&flat, "This completed buy + sell: unchanged"},
+		{nil, "Trade result: waiting for the next matching order"},
+		{&positive, "This completed trade cycle: up $2.14"},
+		{&negative, "This completed trade cycle: down $0.75"},
+		{&flat, "This completed trade cycle: unchanged"},
 	} {
 		if got := paperRoundTripLine(test.result, "USD"); got != test.want {
 			t.Errorf("round-trip result line = %q, want %q", got, test.want)
@@ -843,7 +843,7 @@ func TestLegacyRecoveredRoundTripSaysItsResultIsUnavailable(t *testing.T) {
 	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 2 {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
-	if !strings.Contains(snapshot.Events[0].Message, "Trade result: still open") ||
+	if !strings.Contains(snapshot.Events[0].Message, "Trade result: waiting for the next matching order") ||
 		!strings.Contains(snapshot.Events[1].Message, "result unavailable for this recovered older record") {
 		t.Fatalf("legacy recovered round trip = %+v", snapshot.Events)
 	}

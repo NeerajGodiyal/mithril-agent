@@ -724,8 +724,8 @@ func paperFillPriceLines(
 	if quotedErr != nil || filledErr != nil {
 		return ""
 	}
-	return "Expected price: " + paperMarketPrice(policy, quoted) +
-		"\nFilled price: " + paperMarketPrice(policy, filled)
+	return "Price when order opened: " + paperMarketPrice(policy, quoted) +
+		"\nPrice when filled: " + paperMarketPrice(policy, filled)
 }
 
 func paperEffectivePrice(
@@ -769,14 +769,14 @@ func paperBalanceLines(policy shadow.Policy, ledger shadow.Ledger) string {
 
 func paperRoundTripLine(result *int64, unit string) string {
 	if result == nil {
-		return "Trade result: still open\nProfit or loss appears after the matching order"
+		return "Trade result: waiting for the next matching order"
 	}
-	return "This completed buy + sell: " + formatPaperSignedChange(*result, unit)
+	return "This completed trade cycle: " + formatPaperSignedChange(*result, unit)
 }
 
 func paperRoundTripLineForFill(result *int64, unit string, complete bool) string {
 	if result == nil && complete {
-		return "This completed buy + sell: result unavailable for this recovered older record"
+		return "This completed trade cycle: result unavailable for this recovered older record"
 	}
 	return paperRoundTripLine(result, unit)
 }

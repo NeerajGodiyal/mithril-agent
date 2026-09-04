@@ -462,15 +462,15 @@ func TestMarketFillExplainsEstimatedAndActualUnitPrices(t *testing.T) {
 		ID: strings.Repeat("a", 64), At: time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC),
 		Kind: paperstatus.KindOrderFilled,
 		Message: "PAPER · 🟢 BOUGHT\nBought 320 JUP\nPaid 69 USDC\n" +
-			"Expected price: $0.214878\nFilled price: $0.214826\n" +
+			"Price when order opened: $0.214878\nPrice when filled: $0.214826\n" +
 			"Paper cash left: 26 USDC\nJUP held now: 320 JUP\n" +
-			"This completed buy + sell: up $2.14",
+			"This completed trade cycle: up $2.14",
 	}
 	message := paperAnnouncement(event, "JUP/USDC")
 	for _, want := range []string{
 		"🟢 BOUGHT 320 JUP",
 		"Paid: 69 USDC",
-		"Paper price: $0.214826 (estimate $0.214878)",
+		"Filled price: $0.214826 per JUP\nEstimate when opened: $0.214878 per JUP",
 		"Trade result: 🟢 ▲ $2.14 (profit)",
 	} {
 		if !strings.Contains(message, want) {
@@ -482,13 +482,22 @@ func TestMarketFillExplainsEstimatedAndActualUnitPrices(t *testing.T) {
 			t.Errorf("compact paper fill retained %q: %q", omitted, message)
 		}
 	}
-	if lines := strings.Split(message, "\n"); len(lines) > 7 {
+	if lines := strings.Split(message, "\n"); len(lines) > 8 {
 		t.Fatalf("compact paper fill grew to %d lines: %q", len(lines), message)
+	}
+	legacy := event
+	legacy.Message = strings.NewReplacer(
+		"Price when order opened:", "Expected price:",
+		"Price when filled:", "Filled price:",
+		"This completed trade cycle:", "This completed buy + sell:",
+	).Replace(event.Message)
+	if got := paperAnnouncement(legacy, "JUP/USDC"); got != message {
+		t.Fatalf("legacy immutable fill rendered differently: %q, want %q", got, message)
 	}
 	unlabeled := paperAnnouncement(event, "")
 	for _, want := range []string{
-		"Estimated price for 1 JUP: $0.214878",
-		"Actual paper price for 1 JUP: $0.214826",
+		"Estimate when opened for 1 JUP: $0.214878",
+		"Filled price for 1 JUP: $0.214826",
 	} {
 		if !strings.Contains(unlabeled, want) {
 			t.Errorf("single-market fill omits %q: %q", want, unlabeled)
