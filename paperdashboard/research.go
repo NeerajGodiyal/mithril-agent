@@ -70,7 +70,7 @@ type Research struct {
 
 type perpsResearchMarket struct {
 	Market                        string                             `json:"market"`
-	PaperStatusSHA256             string                             `json:"paper_status_sha256"`
+	CompletedSnapshotSHA256       string                             `json:"completed_snapshot_sha256"`
 	DecisionSource                string                             `json:"decision_source,omitempty"`
 	ProposalSource                string                             `json:"proposal_source,omitempty"`
 	RunStrategy                   string                             `json:"run_strategy,omitempty"`
@@ -115,7 +115,7 @@ func RenderPerpsResearch(paths map[string]string) ([]byte, error) {
 		return nil, errors.New("perps research requires exactly three paper status paths")
 	}
 	result := perpsResearchSummary{
-		Version: 2, PaperOnly: true, AdvisoryOnly: true,
+		Version: 3, PaperOnly: true, AdvisoryOnly: true,
 		Markets: make([]perpsResearchMarket, 0, len(expected)),
 	}
 	for _, market := range expected {
@@ -128,18 +128,23 @@ func RenderPerpsResearch(paths map[string]string) ([]byte, error) {
 			return nil, errors.New("read perps research paper status")
 		}
 		var snapshot paperstatus.Snapshot
-		if strictjson.Decode(raw, &snapshot) != nil || paperstatus.ValidateSnapshot(snapshot) != nil ||
-			snapshot.Summary == nil || snapshot.Summary.Market != market ||
-			snapshot.Summary.Instrument != "perpetual" || !snapshot.Summary.QualificationTracked {
+		if strictjson.Decode(raw, &snapshot) != nil || paperstatus.ValidateSnapshot(snapshot) != nil {
+			return nil, errors.New("perps research paper status is invalid")
+		}
+		completed, ok := paperstatus.LatestCompletedSnapshot(snapshot)
+		if !ok || completed.Summary.Market != market {
 			return nil, errors.New("perps research paper status is invalid")
 		}
 		if result.ObservedAt.IsZero() {
-			result.ObservedAt = snapshot.ObservedAt
-		} else if !result.ObservedAt.Equal(snapshot.ObservedAt) {
+			result.ObservedAt = completed.ObservedAt
+		} else if !result.ObservedAt.Equal(completed.ObservedAt) {
 			return nil, errors.New("perps research paper statuses are from different runs")
 		}
-		summary := snapshot.Summary
-		sourceDigest := sha256.Sum256(raw)
+		summary := &completed.Summary
+		completedDigest, err := paperstatus.CompletedSnapshotSHA256(completed)
+		if err != nil {
+			return nil, errors.New("perps research paper status is invalid")
+		}
 		var outcome *paperstatus.PerpsPlanOutcome
 		if summary.PerpsPlanOutcome != nil {
 			copy := *summary.PerpsPlanOutcome
@@ -147,7 +152,7 @@ func RenderPerpsResearch(paths map[string]string) ([]byte, error) {
 		}
 		result.Markets = append(result.Markets, perpsResearchMarket{
 			Market:                        market,
-			PaperStatusSHA256:             hex.EncodeToString(sourceDigest[:]),
+			CompletedSnapshotSHA256:       completedDigest,
 			DecisionSource:                summary.DecisionSource,
 			ProposalSource:                summary.ProposalSource,
 			RunStrategy:                   summary.Strategy,

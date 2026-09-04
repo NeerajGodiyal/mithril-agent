@@ -331,6 +331,9 @@ func prepareShadowPerpsRun(stateDir, archiveDir string, startedAt time.Time) err
 	if err := preserveCompletedShadowPerpsTapes(stateDir); err != nil {
 		return err
 	}
+	if err := recoverCompletedShadowPerpsStatuses(stateDir, publishedDir); err != nil {
+		return err
+	}
 	target := filepath.Join(archiveDir, startedAt.Format("20060102T150405.000000000Z"))
 	if err := securefile.RenameNoReplace(stateDir, target); err != nil {
 		return fmt.Errorf("archive previous perps paper run: %w", err)
@@ -365,10 +368,32 @@ func publishShadowPerpsStatuses(stateDir, publishedDir string, symbols []perpspa
 			return fmt.Errorf("read %s published paper status: %w", symbol, err)
 		}
 		var snapshot paperstatus.Snapshot
-		if err := strictjson.Decode(raw, &snapshot); err != nil || paperstatus.ValidateSnapshot(snapshot) != nil {
+		if err := strictjson.Decode(raw, &snapshot); err != nil || paperstatus.ValidateSnapshot(snapshot) != nil ||
+			!shadowPerpsSnapshotMatchesSymbol(snapshot, symbol) {
 			return fmt.Errorf("validate %s published paper status", symbol)
 		}
-		statuses[symbol] = raw
+		publishedPath := filepath.Join(publishedDir, name)
+		previousRaw, err := securefile.ReadPrivate(publishedPath, shadowPerpsMaxFileBytes)
+		if err == nil {
+			var previous paperstatus.Snapshot
+			if strictjson.Decode(previousRaw, &previous) != nil || paperstatus.ValidateSnapshot(previous) != nil ||
+				!shadowPerpsSnapshotMatchesSymbol(previous, symbol) {
+				// A self-contained terminal snapshot can safely replace a corrupt
+				// prior projection; a live snapshot cannot discard unknown evidence.
+				if _, complete := paperstatus.LatestCompletedSnapshot(snapshot); !complete {
+					return fmt.Errorf("preserve %s completed paper status", symbol)
+				}
+			} else if paperstatus.PreserveLatestCompleted(&snapshot, previous) != nil {
+				return fmt.Errorf("preserve %s completed paper status", symbol)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("read previous %s published paper status: %w", symbol, err)
+		}
+		encoded, err := paperstatus.EncodeSnapshot(snapshot)
+		if err != nil {
+			return fmt.Errorf("encode %s published paper status", symbol)
+		}
+		statuses[symbol] = encoded
 	}
 	for _, symbol := range symbols {
 		name := strings.ToLower(string(symbol)) + "-paper-status.json"
@@ -378,6 +403,97 @@ func publishShadowPerpsStatuses(stateDir, publishedDir string, symbols []perpspa
 		}
 	}
 	return nil
+}
+
+func shadowPerpsSnapshotMatchesSymbol(snapshot paperstatus.Snapshot, symbol perpspaper.Symbol) bool {
+	expectedMarket := string(symbol) + "-PERP"
+	if snapshot.Summary != nil && snapshot.Summary.Market != expectedMarket {
+		return false
+	}
+	completed, ok := paperstatus.LatestCompletedSnapshot(snapshot)
+	return !ok || completed.Summary.Market == expectedMarket
+}
+
+func recoverCompletedShadowPerpsStatuses(stateDir, publishedDir string) error {
+	symbols := make([]perpspaper.Symbol, 0, 3)
+	for _, symbol := range [...]perpspaper.Symbol{perpspaper.SOL, perpspaper.BTC, perpspaper.ETH} {
+		name := strings.ToLower(string(symbol)) + "-paper-status.json"
+		raw, err := securefile.ReadPrivate(filepath.Join(stateDir, name), shadowPerpsMaxFileBytes)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read previous %s completed paper status: %w", symbol, err)
+		}
+		var current paperstatus.Snapshot
+		if strictjson.Decode(raw, &current) != nil || paperstatus.ValidateSnapshot(current) != nil {
+			continue
+		}
+		if !shadowPerpsSnapshotMatchesSymbol(current, symbol) {
+			return fmt.Errorf("validate previous %s completed paper status", symbol)
+		}
+		completed, ok := recoverableCompletedShadowPerpsStatus(current)
+		if !ok {
+			continue
+		}
+
+		previousRaw, err := securefile.ReadPrivate(filepath.Join(publishedDir, name), shadowPerpsMaxFileBytes)
+		if errors.Is(err, os.ErrNotExist) {
+			symbols = append(symbols, symbol)
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read published %s completed paper status: %w", symbol, err)
+		}
+		var previous paperstatus.Snapshot
+		if strictjson.Decode(previousRaw, &previous) != nil || paperstatus.ValidateSnapshot(previous) != nil ||
+			!shadowPerpsSnapshotMatchesSymbol(previous, symbol) {
+			symbols = append(symbols, symbol)
+			continue
+		}
+		prior, ok := paperstatus.LatestCompletedSnapshot(previous)
+		if !ok || prior.ObservedAt.Before(completed.ObservedAt) {
+			symbols = append(symbols, symbol)
+			continue
+		}
+		if prior.ObservedAt.Equal(completed.ObservedAt) {
+			priorDigest, priorErr := paperstatus.CompletedSnapshotSHA256(prior)
+			completedDigest, completedErr := paperstatus.CompletedSnapshotSHA256(completed)
+			if priorErr != nil || completedErr != nil || priorDigest != completedDigest {
+				return fmt.Errorf("recover %s completed paper status: conflicting receipts", symbol)
+			}
+		}
+	}
+	if len(symbols) == 0 {
+		return nil
+	}
+	if err := publishShadowPerpsStatuses(stateDir, publishedDir, symbols); err != nil {
+		return fmt.Errorf("recover completed paper statuses: %w", err)
+	}
+	return nil
+}
+
+func recoverableCompletedShadowPerpsStatus(snapshot paperstatus.Snapshot) (paperstatus.CompletedSnapshot, bool) {
+	completed, ok := paperstatus.LatestCompletedSnapshot(snapshot)
+	if !ok || snapshot.Summary == nil || len(snapshot.Events) == 0 ||
+		!snapshot.ObservedAt.Equal(completed.ObservedAt) {
+		return paperstatus.CompletedSnapshot{}, false
+	}
+	event := snapshot.Events[len(snapshot.Events)-1]
+	if event.Kind != paperstatus.KindExperimentDone || event.ID != completed.EventID {
+		return paperstatus.CompletedSnapshot{}, false
+	}
+	candidate := paperstatus.CompletedSnapshot{
+		ObservedAt: snapshot.ObservedAt,
+		EventID:    event.ID,
+		Summary:    *snapshot.Summary,
+	}
+	candidateDigest, candidateErr := paperstatus.CompletedSnapshotSHA256(candidate)
+	completedDigest, completedErr := paperstatus.CompletedSnapshotSHA256(completed)
+	if candidateErr != nil || completedErr != nil || candidateDigest != completedDigest {
+		return paperstatus.CompletedSnapshot{}, false
+	}
+	return completed, true
 }
 
 func pruneShadowPerpsArchives(archiveDir string, keep int) error {

@@ -2,9 +2,7 @@ package paperdashboard
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -222,6 +220,26 @@ func TestRenderPerpsResearchIsDeterministicContentBoundAndMinimal(t *testing.T) 
 	if err != nil || !bytes.Equal(first, second) {
 		t.Fatalf("deterministic render = %q, %v", second, err)
 	}
+	for index, market := range []string{"SOL-PERP", "BTC-PERP", "ETH-PERP"} {
+		rewritePerpsResearchStatus(t, paths[market], func(snapshot *paperstatus.Snapshot) {
+			liveAt := now.Add(time.Duration(index+1) * time.Minute)
+			snapshot.ObservedAt = liveAt
+			snapshot.Current = "PAPER · Recording next run"
+			snapshot.Events = nil
+			snapshot.Summary = &paperstatus.CurrentSummary{
+				Market: market, Instrument: "perpetual", RiskProfile: "balanced",
+				PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+				ValueUnit: "USD", Day: liveAt.Format("2006-01-02"), TickSeconds: 15,
+				OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+				HoldBenchmarkMicros: 100_000_000, Checks: uint64(index + 1),
+				State: "watching", Strategy: "fixed",
+			}
+		})
+	}
+	third, err := RenderPerpsResearch(paths)
+	if err != nil || !bytes.Equal(first, third) {
+		t.Fatalf("live run changed completed research = %q, %v", third, err)
+	}
 	for _, forbidden := range []string{
 		"wallet-secret-marker", "policy-secret-marker", "human-event-marker",
 		`"events"`, `"current"`, `"equity_micros"`, `"realized_micros"`, `"history"`, `"path"`,
@@ -235,7 +253,7 @@ func TestRenderPerpsResearchIsDeterministicContentBoundAndMinimal(t *testing.T) 
 		t.Fatal(err)
 	}
 	wantDigest, err := perpsResearchFingerprint(summary)
-	if err != nil || summary.ContentSHA256 != wantDigest || summary.Version != 2 ||
+	if err != nil || summary.ContentSHA256 != wantDigest || summary.Version != 3 ||
 		!summary.PaperOnly || !summary.AdvisoryOnly || summary.Authorized || summary.Promotable ||
 		!summary.ObservedAt.Equal(now) || len(summary.Markets) != 3 {
 		t.Fatalf("summary = %+v, digest error = %v", summary, err)
@@ -246,8 +264,13 @@ func TestRenderPerpsResearchIsDeterministicContentBoundAndMinimal(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		sourceDigest := sha256.Sum256(raw)
-		if item.Market != market || item.PaperStatusSHA256 != fmt.Sprintf("%x", sourceDigest) ||
+		var snapshot paperstatus.Snapshot
+		if err := json.Unmarshal(raw, &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		completed, ok := paperstatus.LatestCompletedSnapshot(snapshot)
+		completedDigest, digestErr := paperstatus.CompletedSnapshotSHA256(completed)
+		if !ok || digestErr != nil || item.Market != market || item.CompletedSnapshotSHA256 != completedDigest ||
 			item.DecisionSource == "" || item.ProposalSource == "" || item.RunPlanSHA256 == "" ||
 			item.QualificationOutcome != "candidate_ready_for_more_paper_testing" ||
 			item.QualificationInputSHA256 == "" || item.QualificationTapes != 4 ||
@@ -283,7 +306,8 @@ func TestRenderPerpsResearchRejectsUnsafeOrMixedSnapshots(t *testing.T) {
 		paths := writePerpsResearchStatuses(t, now)
 		rewritePerpsResearchStatus(t, paths["ETH-PERP"], func(snapshot *paperstatus.Snapshot) {
 			snapshot.ObservedAt = snapshot.ObservedAt.Add(time.Second)
-			snapshot.Summary.Day = snapshot.ObservedAt.Format("2006-01-02")
+			snapshot.LatestCompleted.ObservedAt = snapshot.LatestCompleted.ObservedAt.Add(time.Second)
+			snapshot.LatestCompleted.Summary.Day = snapshot.LatestCompleted.ObservedAt.Format("2006-01-02")
 		})
 		if _, err := RenderPerpsResearch(paths); err == nil {
 			t.Fatal("mixed completion times were accepted")
@@ -292,7 +316,7 @@ func TestRenderPerpsResearchRejectsUnsafeOrMixedSnapshots(t *testing.T) {
 	t.Run("tampered status", func(t *testing.T) {
 		paths := writePerpsResearchStatuses(t, now)
 		rewritePerpsResearchStatus(t, paths["SOL-PERP"], func(snapshot *paperstatus.Snapshot) {
-			snapshot.Summary.QualificationSHA256 = "not-a-digest"
+			snapshot.LatestCompleted.Summary.QualificationSHA256 = "not-a-digest"
 		})
 		if _, err := RenderPerpsResearch(paths); err == nil {
 			t.Fatal("tampered qualification was accepted")
@@ -324,12 +348,7 @@ func TestRenderPerpsResearchRejectsUnsafeOrMixedSnapshots(t *testing.T) {
 	t.Run("wrong market", func(t *testing.T) {
 		paths := writePerpsResearchStatuses(t, now)
 		rewritePerpsResearchStatus(t, paths["SOL-PERP"], func(snapshot *paperstatus.Snapshot) {
-			snapshot.Summary.Market = "JUP/USDC"
-			snapshot.Summary.Instrument = "spot"
-			snapshot.Summary.RiskProfile = ""
-			snapshot.Summary.PositionDirection = ""
-			snapshot.Summary.LeverageBPS = 0
-			snapshot.Summary.FundingTracked = false
+			snapshot.LatestCompleted.Summary.Market = "JUP/USDC"
 		})
 		if _, err := RenderPerpsResearch(paths); err == nil {
 			t.Fatal("mislabeled spot status was accepted")
@@ -400,6 +419,10 @@ func writePerpsResearchStatuses(t *testing.T, observedAt time.Time) map[string]s
 			snapshot.Summary.PerpsPlanOutcome = &paperstatus.PerpsPlanOutcome{
 				TapeSHA256: strings.Repeat("f", 64), Result: "gain",
 			}
+		}
+		completedSummary := *snapshot.Summary
+		snapshot.LatestCompleted = &paperstatus.CompletedSnapshot{
+			ObservedAt: observedAt, EventID: snapshot.Events[0].ID, Summary: completedSummary,
 		}
 		if err := paperstatus.ValidateSnapshot(snapshot); err != nil {
 			t.Fatalf("fixture %s is invalid: %v", market, err)

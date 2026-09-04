@@ -285,21 +285,27 @@ func TestRenderPerpsResearchModeIsExclusiveAndDoesNotOpenAListener(t *testing.T)
 	var args []string
 	for index, market := range []string{"SOL-PERP", "BTC-PERP", "ETH-PERP"} {
 		path := filepath.Join(root, strings.ToLower(strings.TrimSuffix(market, "-PERP"))+".json")
+		completed := paperstatus.CurrentSummary{
+			Market: market, Instrument: "perpetual", RiskProfile: "balanced",
+			PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+			ValueUnit: "USD", Day: "2026-09-03", TickSeconds: 15,
+			OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+			HoldBenchmarkMicros: 100_000_000, AccountingTracked: true,
+			Checks: 421, State: "watching", Strategy: "fixed",
+			QualificationTracked: true, QualificationOutcome: "no_training_candidate",
+			QualificationSHA256: strings.Repeat(string(rune('a'+index)), 64),
+			QualificationTapes:  4, QualificationFrames: 421,
+			QualificationMinimumFrames: 96, QualificationTrainingFrames: 390,
+			QualificationHoldoutFrames: 31,
+		}
 		snapshot := paperstatus.Snapshot{
 			Version: paperstatus.Version, ObservedAt: now, Events: []paperstatus.Event{},
 			Current: "PAPER · checkpoint complete",
-			Summary: &paperstatus.CurrentSummary{
-				Market: market, Instrument: "perpetual", RiskProfile: "balanced",
-				PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
-				ValueUnit: "USD", Day: "2026-09-03", TickSeconds: 15,
-				OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
-				HoldBenchmarkMicros: 100_000_000, AccountingTracked: true,
-				Checks: 421, State: "watching", Strategy: "fixed",
-				QualificationTracked: true, QualificationOutcome: "no_training_candidate",
-				QualificationSHA256: strings.Repeat(string(rune('a'+index)), 64),
-				QualificationTapes:  4, QualificationFrames: 421,
-				QualificationMinimumFrames: 96, QualificationTrainingFrames: 390,
-				QualificationHoldoutFrames: 31,
+			Summary: &completed,
+			LatestCompleted: &paperstatus.CompletedSnapshot{
+				ObservedAt: now,
+				EventID:    strings.Repeat("f", 64),
+				Summary:    completed,
 			},
 		}
 		encoded, err := json.Marshal(snapshot)

@@ -1183,7 +1183,11 @@ func paperSummaryMatchesReader(source PaperStatusReader, summary paperstatus.Cur
 }
 
 func paperSnapshotMatchesReader(source PaperStatusReader, snapshot paperstatus.Snapshot) bool {
-	return snapshot.Summary == nil || paperSummaryMatchesReader(source, *snapshot.Summary)
+	if snapshot.Summary != nil && !paperSummaryMatchesReader(source, *snapshot.Summary) {
+		return false
+	}
+	completed, ok := paperstatus.LatestCompletedSnapshot(snapshot)
+	return !ok || paperSummaryMatchesReader(source, completed.Summary)
 }
 
 func paperPortfolioSummary(summaries []paperstatus.CurrentSummary, _ time.Time) string {

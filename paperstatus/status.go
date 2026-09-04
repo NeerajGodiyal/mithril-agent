@@ -19,23 +19,24 @@ import (
 )
 
 const (
-	legacyVersion        = 1
-	settingsVersion      = 2
-	accountingVersion    = 3
-	qualificationVersion = 4
-	multiTapeVersion     = 5
-	perpsPlanVersion     = 6
-	Version              = 7
-	MaxEvents            = 64
-	MaxHistoryPoints     = 144
-	MaxMessageBytes      = 3000
-	maxCurrentBytes      = 512
-	maxSnapshotBytes     = 256 << 10
-	historyInterval      = 10 * time.Minute
-	messagePrefix        = "PAPER ·"
-	legacyMessagePrefix  = "PAPER SIMULATION —"
-	legacyDisclaimer     = "No transaction was signed or submitted."
-	UnconfiguredCurrent  = "PAPER · NOT ENABLED"
+	legacyVersion         = 1
+	settingsVersion       = 2
+	accountingVersion     = 3
+	qualificationVersion  = 4
+	multiTapeVersion      = 5
+	perpsPlanVersion      = 6
+	decisionSourceVersion = 7
+	Version               = 8
+	MaxEvents             = 64
+	MaxHistoryPoints      = 144
+	MaxMessageBytes       = 3000
+	maxCurrentBytes       = 512
+	maxSnapshotBytes      = 256 << 10
+	historyInterval       = 10 * time.Minute
+	messagePrefix         = "PAPER ·"
+	legacyMessagePrefix   = "PAPER SIMULATION —"
+	legacyDisclaimer      = "No transaction was signed or submitted."
+	UnconfiguredCurrent   = "PAPER · NOT ENABLED"
 )
 
 const (
@@ -77,6 +78,18 @@ type Snapshot struct {
 	// History is a bounded, current-day performance projection for operator
 	// charts. It contains no journal records, provider details, or authority.
 	History []PerformancePoint `json:"history,omitempty"`
+	// LatestCompleted keeps the most recent terminal perps result visible while
+	// a new bounded recording is collecting. It is a compact receipt, not a
+	// recursive copy of the live snapshot or an execution authority.
+	LatestCompleted *CompletedSnapshot `json:"latest_completed,omitempty"`
+}
+
+// CompletedSnapshot binds one terminal event to the numeric perps summary it
+// finalized. It deliberately excludes current prose, history, and nested state.
+type CompletedSnapshot struct {
+	ObservedAt time.Time      `json:"observed_at"`
+	EventID    string         `json:"event_id"`
+	Summary    CurrentSummary `json:"summary"`
 }
 
 type CurrentSummary struct {
@@ -264,6 +277,7 @@ func (w *Writer) updateCurrentSummary(
 			}
 			return errors.New("paper current status is not chronological")
 		}
+		upgradeSnapshot(&snapshot)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.New("read paper alert status")
 	}
@@ -271,6 +285,11 @@ func (w *Writer) updateCurrentSummary(
 	snapshot.ObservedAt, snapshot.Current, snapshot.Summary = at, current, summary
 	if summary != nil {
 		snapshot.History = updateHistory(snapshot.History, at, *summary)
+	}
+	if completed, ok := inferredCompleted(snapshot); ok {
+		if err := setLatestCompleted(&snapshot, completed); err != nil {
+			return err
+		}
 	}
 	return w.write(snapshot)
 }
@@ -292,6 +311,7 @@ func (w *Writer) append(at time.Time, kind, key, message string, reconcile bool)
 		if ValidateSnapshot(snapshot) != nil {
 			return errors.New("existing paper alert status is invalid")
 		}
+		upgradeSnapshot(&snapshot)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.New("read paper alert status")
 	}
@@ -331,14 +351,26 @@ func (w *Writer) append(at time.Time, kind, key, message string, reconcile bool)
 }
 
 func (w *Writer) write(snapshot Snapshot) error {
-	encoded, err := json.Marshal(snapshot)
-	if err != nil || len(encoded) > maxSnapshotBytes {
-		return errors.New("encode paper alert status")
+	encoded, err := EncodeSnapshot(snapshot)
+	if err != nil {
+		return err
 	}
-	if err := securefile.ReplacePrivate(w.path, append(encoded, '\n'), maxSnapshotBytes); err != nil {
+	if err := securefile.ReplacePrivate(w.path, encoded, maxSnapshotBytes); err != nil {
 		return errors.New("write paper alert status")
 	}
 	return nil
+}
+
+// EncodeSnapshot validates and encodes one bounded private status projection.
+func EncodeSnapshot(snapshot Snapshot) ([]byte, error) {
+	if ValidateSnapshot(snapshot) != nil {
+		return nil, errors.New("encode paper alert status")
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil || len(encoded)+1 > maxSnapshotBytes {
+		return nil, errors.New("encode paper alert status")
+	}
+	return append(encoded, '\n'), nil
 }
 
 // TruncationEvent warns a consumer that the bounded projection no longer
@@ -363,6 +395,7 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		snapshot.Version != qualificationVersion &&
 		snapshot.Version != multiTapeVersion &&
 		snapshot.Version != perpsPlanVersion &&
+		snapshot.Version != decisionSourceVersion &&
 		snapshot.Version != Version ||
 		snapshot.ObservedAt.IsZero() ||
 		!snapshot.ObservedAt.Equal(snapshot.ObservedAt.UTC()) ||
@@ -373,13 +406,17 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		(snapshot.Current == "" && snapshot.Summary != nil) ||
 		(snapshot.Version < perpsPlanVersion && snapshot.Summary != nil &&
 			len(snapshot.Summary.QualificationAttempts) != 0) ||
-		(snapshot.Version < Version && snapshot.Summary != nil &&
+		(snapshot.Version < decisionSourceVersion && snapshot.Summary != nil &&
 			(validQualificationStrategy(snapshot.Summary.Strategy) ||
 				snapshot.Summary.DecisionSource != "" || snapshot.Summary.ProposalSource != "" ||
 				snapshot.Summary.RunPlanSHA256 != "" ||
 				snapshot.Summary.PerpsPlanOutcome != nil)) ||
+		(snapshot.Version < Version && snapshot.LatestCompleted != nil) ||
 		len(snapshot.History) > MaxHistoryPoints ||
-		validateCurrentSummary(snapshot.Summary) != nil {
+		validateCurrentSummary(snapshot.Summary) != nil ||
+		(snapshot.Summary != nil && snapshot.LatestCompleted != nil &&
+			snapshot.Summary.Market != snapshot.LatestCompleted.Summary.Market) ||
+		validateCompletedSnapshot(snapshot.LatestCompleted, snapshot.ObservedAt) != nil {
 		return errors.New("paper alert snapshot is invalid")
 	}
 	if snapshot.Summary != nil && !summaryDayMatchesObservation(*snapshot.Summary, snapshot.ObservedAt) {
@@ -416,11 +453,16 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		seen[event.ID] = struct{}{}
 		previous = event.At
 	}
+	if snapshot.Version == Version && snapshot.LatestCompleted == nil {
+		if _, terminal := inferredCompleted(snapshot); terminal {
+			return errors.New("paper alert snapshot is invalid")
+		}
+	}
 	return nil
 }
 
 func normalizeLegacySnapshot(snapshot *Snapshot) {
-	if snapshot == nil || snapshot.Version >= Version || snapshot.Summary == nil {
+	if snapshot == nil || snapshot.Version >= decisionSourceVersion || snapshot.Summary == nil {
 		return
 	}
 	summary := snapshot.Summary
@@ -442,6 +484,141 @@ func normalizeLegacySnapshot(snapshot *Snapshot) {
 	}
 	summary.QualificationHoldoutScored = summary.QualificationHoldoutMicros != 0
 	summary.QualificationStressScored = summary.QualificationStressMicros != 0
+}
+
+func upgradeSnapshot(snapshot *Snapshot) {
+	if snapshot == nil || snapshot.Version >= Version {
+		return
+	}
+	if snapshot.Version == decisionSourceVersion && snapshot.LatestCompleted == nil {
+		if completed, ok := inferredCompleted(*snapshot); ok {
+			snapshot.LatestCompleted = &completed
+		}
+	}
+	snapshot.Version = Version
+}
+
+func inferredCompleted(snapshot Snapshot) (CompletedSnapshot, bool) {
+	if snapshot.Summary == nil || !snapshot.Summary.QualificationTracked ||
+		snapshot.Summary.Instrument != "perpetual" || len(snapshot.Events) == 0 {
+		return CompletedSnapshot{}, false
+	}
+	event := snapshot.Events[len(snapshot.Events)-1]
+	if event.Kind != KindExperimentDone || event.At.After(snapshot.ObservedAt) {
+		return CompletedSnapshot{}, false
+	}
+	return CompletedSnapshot{
+		ObservedAt: snapshot.ObservedAt,
+		EventID:    event.ID,
+		Summary:    cloneCurrentSummary(*snapshot.Summary),
+	}, true
+}
+
+func cloneCurrentSummary(summary CurrentSummary) CurrentSummary {
+	cloned := summary
+	cloned.QualificationAttempts = append([]QualificationAttempt(nil), summary.QualificationAttempts...)
+	if summary.PerpsPlanOutcome != nil {
+		outcome := *summary.PerpsPlanOutcome
+		cloned.PerpsPlanOutcome = &outcome
+	}
+	return cloned
+}
+
+func validateCompletedSnapshot(completed *CompletedSnapshot, outerObservedAt time.Time) error {
+	if completed == nil {
+		return nil
+	}
+	if completed.ObservedAt.IsZero() || completed.ObservedAt.Location() != time.UTC ||
+		completed.ObservedAt.After(outerObservedAt) || completed.EventID == "" ||
+		validateCurrentSummary(&completed.Summary) != nil ||
+		!completed.Summary.QualificationTracked || completed.Summary.Instrument != "perpetual" ||
+		!summaryDayMatchesObservation(completed.Summary, completed.ObservedAt) {
+		return errors.New("paper completed snapshot is invalid")
+	}
+	decoded, err := hex.DecodeString(completed.EventID)
+	if err != nil || len(decoded) != sha256.Size || completed.EventID != strings.ToLower(completed.EventID) {
+		return errors.New("paper completed snapshot is invalid")
+	}
+	return nil
+}
+
+// LatestCompletedSnapshot returns a detached, validated terminal perps receipt.
+// Legacy version-seven terminal snapshots are projected during the transition.
+func LatestCompletedSnapshot(snapshot Snapshot) (CompletedSnapshot, bool) {
+	if ValidateSnapshot(snapshot) != nil {
+		return CompletedSnapshot{}, false
+	}
+	if snapshot.LatestCompleted != nil {
+		completed := *snapshot.LatestCompleted
+		completed.Summary = cloneCurrentSummary(completed.Summary)
+		return completed, true
+	}
+	if snapshot.Version != decisionSourceVersion {
+		return CompletedSnapshot{}, false
+	}
+	completed, ok := inferredCompleted(snapshot)
+	if !ok || validateCompletedSnapshot(&completed, snapshot.ObservedAt) != nil {
+		return CompletedSnapshot{}, false
+	}
+	return completed, true
+}
+
+func setLatestCompleted(snapshot *Snapshot, completed CompletedSnapshot) error {
+	if snapshot == nil || validateCompletedSnapshot(&completed, snapshot.ObservedAt) != nil {
+		return errors.New("paper completed snapshot is invalid")
+	}
+	if snapshot.LatestCompleted != nil {
+		active := *snapshot.LatestCompleted
+		if active.ObservedAt.After(completed.ObservedAt) {
+			return nil
+		}
+		if active.ObservedAt.Equal(completed.ObservedAt) {
+			activeDigest, activeErr := CompletedSnapshotSHA256(active)
+			completedDigest, completedErr := CompletedSnapshotSHA256(completed)
+			if activeErr != nil || completedErr != nil || activeDigest != completedDigest {
+				return errors.New("paper completed snapshot collision")
+			}
+			return nil
+		}
+	}
+	completed.Summary = cloneCurrentSummary(completed.Summary)
+	snapshot.LatestCompleted = &completed
+	return nil
+}
+
+// PreserveLatestCompleted carries the newest validated terminal receipt into a
+// current live projection without changing its live summary, events, or clock.
+func PreserveLatestCompleted(current *Snapshot, previous Snapshot) error {
+	if current == nil || current.Version != Version || ValidateSnapshot(*current) != nil ||
+		ValidateSnapshot(previous) != nil {
+		return errors.New("paper snapshot carry-forward input is invalid")
+	}
+	prior, ok := LatestCompletedSnapshot(previous)
+	if !ok {
+		return nil
+	}
+	next := *current
+	if err := setLatestCompleted(&next, prior); err != nil {
+		return err
+	}
+	if ValidateSnapshot(next) != nil {
+		return errors.New("paper completed snapshot does not match the live projection")
+	}
+	*current = next
+	return nil
+}
+
+// CompletedSnapshotSHA256 returns the canonical digest of one validated receipt.
+func CompletedSnapshotSHA256(completed CompletedSnapshot) (string, error) {
+	if validateCompletedSnapshot(&completed, completed.ObservedAt) != nil {
+		return "", errors.New("paper completed snapshot is invalid")
+	}
+	encoded, err := json.Marshal(completed)
+	if err != nil {
+		return "", errors.New("encode paper completed snapshot")
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func validateCurrentSummary(summary *CurrentSummary) error {

@@ -486,7 +486,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"https://www.coinbase.com/cbbtc", "https://www.circle.com/transparency",
 		"not all-in execution guarantees",
 		"host-produced completed perps summary",
-		"content hash and paper-status hashes as integrity bindings",
+		"content hash and completed-snapshot hashes as integrity bindings",
 		"not market sources",
 		"cannot open a holdout, change a policy, authorize execution",
 		"If the host marks it unavailable, do not infer any perps result.",

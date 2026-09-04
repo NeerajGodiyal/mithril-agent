@@ -114,6 +114,7 @@ type Market struct {
 	Name                          string             `json:"name"`
 	Optional                      bool               `json:"optional,omitempty"`
 	Completed                     bool               `json:"completed,omitempty"`
+	LatestCompleted               *Market            `json:"latest_completed,omitempty"`
 	Instrument                    string             `json:"instrument,omitempty"`
 	RiskProfile                   string             `json:"risk_profile,omitempty"`
 	PositionDirection             string             `json:"position_direction,omitempty"`
@@ -389,7 +390,17 @@ func (s *Server) readSnapshot(now time.Time) View {
 			view.Markets = append(view.Markets, Market{Name: label, Optional: optional})
 			continue
 		}
-		if snapshot.Summary == nil && snapshot.Current == paperstatus.UnconfiguredCurrent {
+		completed, hasCompleted := paperstatus.LatestCompletedSnapshot(snapshot)
+		if snapshot.Summary != nil && snapshot.Summary.Market != label ||
+			hasCompleted && completed.Summary.Market != label {
+			if !optional {
+				view.Complete = false
+				coverageReady = false
+			}
+			view.Markets = append(view.Markets, Market{Name: label, Optional: optional})
+			continue
+		}
+		if snapshot.Summary == nil && snapshot.Current == paperstatus.UnconfiguredCurrent && !hasCompleted {
 			view.Markets = append(view.Markets, Market{Name: label, Optional: optional})
 			continue
 		}
@@ -401,14 +412,6 @@ func (s *Server) readSnapshot(now time.Time) View {
 			market := marketView(label, snapshot, now)
 			market.Optional = optional
 			view.Markets = append(view.Markets, market)
-			continue
-		}
-		if snapshot.Summary != nil && snapshot.Summary.Market != label {
-			if !optional {
-				view.Complete = false
-				coverageReady = false
-			}
-			view.Markets = append(view.Markets, Market{Name: label, Optional: optional})
 			continue
 		}
 		market := marketView(label, snapshot, now)
@@ -507,11 +510,14 @@ func coalesceTerminalActivity(activity []Activity) []Activity {
 
 func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Market {
 	observedAt := snapshot.ObservedAt
+	completed, hasCompleted := paperstatus.LatestCompletedSnapshot(snapshot)
+	terminalEvent := len(snapshot.Events) != 0 &&
+		snapshot.Events[len(snapshot.Events)-1].Kind == paperstatus.KindExperimentDone
 	market := Market{
 		Name: label, ObservedAt: &observedAt, Available: true,
 		Current: snapshot.Current, History: make([]PerformancePoint, 0, len(snapshot.History)),
 	}
-	if len(snapshot.Events) != 0 && snapshot.Events[len(snapshot.Events)-1].Kind == paperstatus.KindExperimentDone {
+	if snapshot.Summary == nil && terminalEvent {
 		market.Completed = true
 	}
 	for _, point := range snapshot.History {
@@ -523,91 +529,108 @@ func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Mark
 		})
 	}
 	if summary := snapshot.Summary; summary != nil {
-		market.Completed = market.Completed || summary.State == "completed"
+		market.Completed = summary.State == "completed" || terminalEvent && hasCompleted &&
+			completed.ObservedAt.Equal(snapshot.ObservedAt) && summary.QualificationTracked &&
+			summary.QualificationSHA256 == completed.Summary.QualificationSHA256
 		market.Ready = summary.ValueUnit != ""
-		market.Instrument = summary.Instrument
-		market.RiskProfile = summary.RiskProfile
-		market.PositionDirection = summary.PositionDirection
-		market.LeverageBPS = summary.LeverageBPS
 		market.Fresh = market.Ready && summary.State != "waiting for data" && summary.State != "completed" &&
 			summary.Day == now.UTC().Format("2006-01-02") && fresh(snapshot, now)
-		market.Day = summary.Day
-		market.ValueUnit = summary.ValueUnit
-		market.InstructionSHA256 = summary.InstructionSHA256
-		market.TickSeconds = summary.TickSeconds
-		market.OpeningEquityMicros = summary.OpeningEquityMicros
-		market.EquityMicros = summary.EquityMicros
-		market.DeficitMicros = summary.DeficitMicros
-		market.HoldBenchmarkMicros = summary.HoldBenchmarkMicros
-		market.AccountingTracked = summary.AccountingTracked
-		market.RealizedMicros = summary.RealizedMicros
-		market.UnrealizedMicros = summary.UnrealizedMicros
-		market.FeesMicros = summary.FeesMicros
-		market.FundingTracked = summary.FundingTracked
-		market.FundingMicros = summary.FundingMicros
-		market.TurnoverMicros = summary.TurnoverMicros
-		market.DrawdownMicros = summary.DrawdownMicros
-		market.MaxDrawdownMicros = summary.MaxDrawdownMicros
-		market.PriceMicros = summary.PriceMicros
-		market.Checks = summary.Checks
-		market.Signals = summary.Signals
-		market.Trades = summary.Trades
-		market.CoverageBPS, market.CoverageReady = coverage(summary.Checks, summary.Unobservable)
-		market.State = summary.State
-		market.Strategy = summary.Strategy
-		market.DecisionSource = summary.DecisionSource
-		market.ProposalSource = summary.ProposalSource
-		if summary.PerpsPlanOutcome != nil {
-			market.PerpsPlanOutcome = summary.PerpsPlanOutcome.Result
+		applyMarketSummary(&market, *summary)
+	}
+	if hasCompleted {
+		completedAt := completed.ObservedAt
+		latest := Market{
+			Name: label, ObservedAt: &completedAt, Available: true,
+			Ready: completed.Summary.ValueUnit != "", Completed: true,
 		}
-		market.NextAction = summary.NextAction
-		market.DecisionReason = summary.DecisionReason
-		market.RiskHalted = summary.RiskHalted
-		market.InitialLotUnits = summary.InitialLotUnits
-		market.InitialLotDecimals = summary.InitialLotDecimals
-		market.InitialLotAsset = summary.InitialLotAsset
-		market.MinimumOrderValueMicros = summary.MinimumOrderValueMicros
-		market.MaximumOrderValueMicros = summary.MaximumOrderValueMicros
-		market.FeeReserveLamports = summary.FeeReserveLamports
-		market.FeeLamports = summary.FeeLamports
-		market.FeeBudgetTracked = summary.FeeBudgetTracked
-		market.RemainingFeeReserveLamports = summary.RemainingFeeReserveLamports
-		market.EstimatedFillsRemaining = summary.EstimatedFillsRemaining
-		market.SlippageBPS = summary.SlippageBPS
-		market.SettleSeconds = summary.SettleSeconds
-		market.FastWindow = summary.FastWindow
-		market.SlowWindow = summary.SlowWindow
-		market.MinimumSignalBPS = summary.MinimumSignalBPS
-		market.MaxVolatilityBPS = summary.MaxVolatilityBPS
-		market.MaxQuoteImpactBPS = summary.MaxQuoteImpactBPS
-		market.MaxDrawdownBPS = summary.MaxDrawdownBPS
-		market.CooldownSeconds = summary.CooldownSeconds
-		market.QualificationTracked = summary.QualificationTracked
-		market.QualificationOutcome = summary.QualificationOutcome
-		market.QualificationTapes = summary.QualificationTapes
-		market.QualificationFrames = summary.QualificationFrames
-		market.QualificationMinimumFrames = summary.QualificationMinimumFrames
-		market.QualificationTrainingFrames = summary.QualificationTrainingFrames
-		market.QualificationHoldoutFrames = summary.QualificationHoldoutFrames
-		market.QualificationStrategy = summary.QualificationStrategy
-		market.QualificationRiskProfile = summary.QualificationRiskProfile
-		market.QualificationHoldoutEvaluated = summary.QualificationHoldoutEvaluated
-		market.QualificationStressEvaluated = summary.QualificationStressEvaluated
-		market.QualificationHoldoutScored = summary.QualificationHoldoutScored
-		market.QualificationStressScored = summary.QualificationStressScored
-		market.QualificationHoldoutMicros = summary.QualificationHoldoutMicros
-		market.QualificationStressMicros = summary.QualificationStressMicros
-		for _, attempt := range summary.QualificationAttempts[:min(3, len(summary.QualificationAttempts))] {
-			market.QualificationAttempts = append(market.QualificationAttempts, TrainingAttempt{
-				RiskProfile: attempt.RiskProfile, Strategy: attempt.Strategy,
-				NetPnLMicros: attempt.NetPnLMicros, FeesMicros: attempt.FeesMicros,
-				FundingMicros: attempt.FundingMicros, MaxDrawdownMicros: attempt.MaxDrawdownMicros,
-				Liquidations: attempt.Liquidations, FilledOrders: attempt.FilledOrders,
-				ClosedPositions: attempt.ClosedPositions,
-			})
-		}
+		applyMarketSummary(&latest, completed.Summary)
+		latest.InstructionSHA256 = ""
+		latest.State = "completed"
+		market.LatestCompleted = &latest
 	}
 	return market
+}
+
+func applyMarketSummary(market *Market, summary paperstatus.CurrentSummary) {
+	market.Instrument = summary.Instrument
+	market.RiskProfile = summary.RiskProfile
+	market.PositionDirection = summary.PositionDirection
+	market.LeverageBPS = summary.LeverageBPS
+	market.Day = summary.Day
+	market.ValueUnit = summary.ValueUnit
+	market.InstructionSHA256 = summary.InstructionSHA256
+	market.TickSeconds = summary.TickSeconds
+	market.OpeningEquityMicros = summary.OpeningEquityMicros
+	market.EquityMicros = summary.EquityMicros
+	market.DeficitMicros = summary.DeficitMicros
+	market.HoldBenchmarkMicros = summary.HoldBenchmarkMicros
+	market.AccountingTracked = summary.AccountingTracked
+	market.RealizedMicros = summary.RealizedMicros
+	market.UnrealizedMicros = summary.UnrealizedMicros
+	market.FeesMicros = summary.FeesMicros
+	market.FundingTracked = summary.FundingTracked
+	market.FundingMicros = summary.FundingMicros
+	market.TurnoverMicros = summary.TurnoverMicros
+	market.DrawdownMicros = summary.DrawdownMicros
+	market.MaxDrawdownMicros = summary.MaxDrawdownMicros
+	market.PriceMicros = summary.PriceMicros
+	market.Checks = summary.Checks
+	market.Signals = summary.Signals
+	market.Trades = summary.Trades
+	market.CoverageBPS, market.CoverageReady = coverage(summary.Checks, summary.Unobservable)
+	market.State = summary.State
+	market.Strategy = summary.Strategy
+	market.DecisionSource = summary.DecisionSource
+	market.ProposalSource = summary.ProposalSource
+	if summary.PerpsPlanOutcome != nil {
+		market.PerpsPlanOutcome = summary.PerpsPlanOutcome.Result
+	}
+	market.NextAction = summary.NextAction
+	market.DecisionReason = summary.DecisionReason
+	market.RiskHalted = summary.RiskHalted
+	market.InitialLotUnits = summary.InitialLotUnits
+	market.InitialLotDecimals = summary.InitialLotDecimals
+	market.InitialLotAsset = summary.InitialLotAsset
+	market.MinimumOrderValueMicros = summary.MinimumOrderValueMicros
+	market.MaximumOrderValueMicros = summary.MaximumOrderValueMicros
+	market.FeeReserveLamports = summary.FeeReserveLamports
+	market.FeeLamports = summary.FeeLamports
+	market.FeeBudgetTracked = summary.FeeBudgetTracked
+	market.RemainingFeeReserveLamports = summary.RemainingFeeReserveLamports
+	market.EstimatedFillsRemaining = summary.EstimatedFillsRemaining
+	market.SlippageBPS = summary.SlippageBPS
+	market.SettleSeconds = summary.SettleSeconds
+	market.FastWindow = summary.FastWindow
+	market.SlowWindow = summary.SlowWindow
+	market.MinimumSignalBPS = summary.MinimumSignalBPS
+	market.MaxVolatilityBPS = summary.MaxVolatilityBPS
+	market.MaxQuoteImpactBPS = summary.MaxQuoteImpactBPS
+	market.MaxDrawdownBPS = summary.MaxDrawdownBPS
+	market.CooldownSeconds = summary.CooldownSeconds
+	market.QualificationTracked = summary.QualificationTracked
+	market.QualificationOutcome = summary.QualificationOutcome
+	market.QualificationTapes = summary.QualificationTapes
+	market.QualificationFrames = summary.QualificationFrames
+	market.QualificationMinimumFrames = summary.QualificationMinimumFrames
+	market.QualificationTrainingFrames = summary.QualificationTrainingFrames
+	market.QualificationHoldoutFrames = summary.QualificationHoldoutFrames
+	market.QualificationStrategy = summary.QualificationStrategy
+	market.QualificationRiskProfile = summary.QualificationRiskProfile
+	market.QualificationHoldoutEvaluated = summary.QualificationHoldoutEvaluated
+	market.QualificationStressEvaluated = summary.QualificationStressEvaluated
+	market.QualificationHoldoutScored = summary.QualificationHoldoutScored
+	market.QualificationStressScored = summary.QualificationStressScored
+	market.QualificationHoldoutMicros = summary.QualificationHoldoutMicros
+	market.QualificationStressMicros = summary.QualificationStressMicros
+	for _, attempt := range summary.QualificationAttempts[:min(3, len(summary.QualificationAttempts))] {
+		market.QualificationAttempts = append(market.QualificationAttempts, TrainingAttempt{
+			RiskProfile: attempt.RiskProfile, Strategy: attempt.Strategy,
+			NetPnLMicros: attempt.NetPnLMicros, FeesMicros: attempt.FeesMicros,
+			FundingMicros: attempt.FundingMicros, MaxDrawdownMicros: attempt.MaxDrawdownMicros,
+			Liquidations: attempt.Liquidations, FilledOrders: attempt.FilledOrders,
+			ClosedPositions: attempt.ClosedPositions,
+		})
+	}
 }
 
 func fresh(snapshot paperstatus.Snapshot, now time.Time) bool {

@@ -1,6 +1,7 @@
 package paperdashboard
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -43,7 +44,7 @@ func (s *sourceStub) readCount() int {
 func TestAutomationListsOnlyOptionalExperiments(t *testing.T) {
 	if !strings.Contains(appJS, "completedPerps=perpsMarkets.filter") ||
 		!strings.Contains(appJS, "additionalSpots=current.markets.filter(market=>market.optional&&!isPerps(market))") ||
-		!strings.Contains(appJS, "perps recordings are completed") {
+		!strings.Contains(appJS, "perps markets have a saved result") {
 		t.Fatal("paper engine status must separate optional spot observers from perps experiments")
 	}
 	if !strings.Contains(appJS, "retained in the final packet") || strings.Contains(appJS, "unique source'+(packet.sources_checked===1?'':'s')+' checked") {
@@ -83,6 +84,129 @@ func TestOptionalStoppedSpotIsCompletedRatherThanLiveOrPerps(t *testing.T) {
 		!view.Markets[1].Optional || !view.Markets[1].Completed ||
 		view.Markets[1].Ready || view.Markets[1].Fresh {
 		t.Fatalf("stopped optional spot views = %+v", view.Markets)
+	}
+}
+
+func TestPerpsViewKeepsLiveStateSeparateFromLatestCompletedEvidence(t *testing.T) {
+	now := time.Date(2026, 9, 4, 17, 0, 0, 0, time.UTC)
+	completedAt := now.Add(-time.Hour)
+	completed := paperstatus.CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "experimental",
+		PositionDirection: "flat", LeverageBPS: 30_000, FundingTracked: true,
+		ValueUnit: "USD", Day: completedAt.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 101_000_000,
+		HoldBenchmarkMicros: 100_000_000, AccountingTracked: true, RealizedMicros: 1_000_000,
+		Checks: 60, Signals: 2, Trades: 2, State: "watching", Strategy: "fixed",
+		DecisionSource: "legacy_fixed_policy", ProposalSource: "built_in",
+		RunPlanSHA256: strings.Repeat("b", 64), QualificationTracked: true,
+		QualificationOutcome: "candidate_ready_for_more_paper_testing",
+		QualificationSHA256:  strings.Repeat("c", 64), QualificationTapes: 1,
+		QualificationFrames: 60, QualificationMinimumFrames: 24,
+		QualificationTrainingFrames: 40, QualificationHoldoutFrames: 20,
+		QualificationStrategy: "momentum", QualificationRiskProfile: "balanced",
+		QualificationHoldoutEvaluated: true, QualificationStressEvaluated: true,
+		QualificationHoldoutScored: true, QualificationStressScored: true,
+		QualificationHoldoutMicros: 100_000, QualificationStressMicros: 50_000,
+		QualificationAttempts: []paperstatus.QualificationAttempt{{
+			RiskProfile: "balanced", Strategy: "momentum", NetPnLMicros: 90_000,
+			FeesMicros: 10_000, MaxDrawdownMicros: 25_000, FilledOrders: 2, ClosedPositions: 2,
+		}},
+	}
+	live := &paperstatus.CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "long", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 200_000_000, EquityMicros: 205_000_000,
+		HoldBenchmarkMicros: 201_000_000, Checks: 7, Signals: 1, Trades: 1,
+		State: "watching", Strategy: "fixed",
+	}
+	source := &sourceStub{label: "SOL-PERP", snapshot: paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now, Current: "PAPER · Recording", Summary: live,
+		Events: []paperstatus.Event{{
+			ID: strings.Repeat("a", 64), At: completedAt,
+			Kind: paperstatus.KindExperimentDone, Message: "PAPER · Completed",
+		}},
+		LatestCompleted: &paperstatus.CompletedSnapshot{
+			ObservedAt: completedAt, EventID: strings.Repeat("a", 64), Summary: completed,
+		},
+	}}
+	server, err := New([]Source{Optional(source)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return now }
+	view := server.snapshotWithRefresh(true)
+	if len(view.Markets) != 1 {
+		t.Fatalf("markets = %+v", view.Markets)
+	}
+	market := view.Markets[0]
+	if !market.Available || !market.Ready || !market.Fresh || market.Completed ||
+		market.EquityMicros != live.EquityMicros || market.Checks != live.Checks ||
+		market.QualificationTracked || market.LatestCompleted == nil {
+		t.Fatalf("live market projection = %+v", market)
+	}
+	latest := market.LatestCompleted
+	if latest.ObservedAt == nil || !latest.Completed || latest.Fresh || latest.State != "completed" ||
+		!latest.ObservedAt.Equal(completedAt) || latest.EquityMicros != completed.EquityMicros ||
+		!latest.QualificationTracked || latest.QualificationFrames != completed.QualificationFrames ||
+		latest.InstructionSHA256 != "" || latest.LatestCompleted != nil || len(latest.History) != 0 {
+		t.Fatalf("latest completed projection = %+v", latest)
+	}
+	encoded, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)} {
+		if bytes.Contains(encoded, []byte(forbidden)) {
+			t.Fatalf("dashboard exposed private receipt binding %q", forbidden)
+		}
+	}
+	if view.Overview.EquityMicros != 0 {
+		t.Fatalf("optional perps changed spot overview: %+v", view.Overview)
+	}
+
+	source.snapshot.ObservedAt = completedAt
+	source.snapshot.Current = "PAPER · Completed"
+	source.snapshot.Summary = &completed
+	view = server.snapshotWithRefresh(true)
+	if len(view.Markets) != 1 || !view.Markets[0].Completed {
+		t.Fatalf("terminal current result is not completed = %+v", view.Markets)
+	}
+}
+
+func TestPerpsViewRejectsMislabeledCompletedOnlyReceipt(t *testing.T) {
+	now := time.Date(2026, 9, 4, 17, 0, 0, 0, time.UTC)
+	completed := paperstatus.CurrentSummary{
+		Market: "BTC-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+		HoldBenchmarkMicros: 100_000_000, Checks: 10, State: "watching", Strategy: "fixed",
+		QualificationTracked: true, QualificationOutcome: "insufficient_evidence",
+		QualificationSHA256: strings.Repeat("d", 64), QualificationTapes: 1,
+		QualificationFrames: 10, QualificationMinimumFrames: 24,
+	}
+	source := &sourceStub{label: "SOL-PERP", snapshot: paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now, Current: paperstatus.UnconfiguredCurrent,
+		LatestCompleted: &paperstatus.CompletedSnapshot{
+			ObservedAt: now, EventID: strings.Repeat("e", 64), Summary: completed,
+		},
+	}}
+	server, err := New([]Source{Optional(source)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return now }
+	view := server.snapshotWithRefresh(true)
+	if len(view.Markets) != 1 || view.Markets[0].Available || view.Markets[0].LatestCompleted != nil {
+		t.Fatalf("mislabeled completed receipt was exposed: %+v", view.Markets)
+	}
+
+	completed.Market = "SOL-PERP"
+	source.snapshot.LatestCompleted.Summary = completed
+	view = server.snapshotWithRefresh(true)
+	if !view.Markets[0].Available || view.Markets[0].Ready || view.Markets[0].LatestCompleted == nil {
+		t.Fatalf("valid completed-only receipt disappeared: %+v", view.Markets)
 	}
 }
 

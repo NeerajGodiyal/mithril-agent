@@ -395,7 +395,7 @@ $('market-switcher').addEventListener('keydown',event=>{const buttons=[...event.
 const helpDialog=$('help-dialog');
 document.addEventListener('click',event=>{
   const planButton=event.target.closest('[data-plan-market],[data-research-market]');
-  if(planButton){const attribute=planButton.hasAttribute('data-research-market')?'data-research-market':'data-plan-market',name=planButton.getAttribute(attribute),market=current?.markets?.find(item=>item.name===name);if(market){helpReturn={attribute,value:market.name};openPlanDialog(market);}return;}
+  if(planButton){const research=planButton.hasAttribute('data-research-market'),attribute=research?'data-research-market':'data-plan-market',name=planButton.getAttribute(attribute),market=current?.markets?.find(item=>item.name===name),details=research?latestCompletedPerps(market):market;if(market&&details){helpReturn={attribute,value:market.name};openPlanDialog(details);}return;}
   const button=event.target.closest('[data-help-copy]');
   if(!button)return;
   helpReturn={attribute:'data-help-label',value:button.dataset.helpLabel};
@@ -482,6 +482,9 @@ function perpsLaterOutcome(m){
 function perpsRecordingInProgress(m){
   return isPerps(m)&&m.optional&&m.available&&m.ready&&m.fresh&&!m.completed&&!m.risk_halted&&!m.qualification_tracked;
 }
+function latestCompletedPerps(m){
+  return m&&isPerps(m)?m.latest_completed||(m.completed&&m.qualification_tracked?m:null):null;
+}
 function qualificationStrip(m){
   const view=qualificationView(m);
   if(!view)return '';
@@ -495,19 +498,19 @@ function perpsAttemptCard(attempt,m,maxMagnitude){
   return '<article class="attempt-card"><div class="attempt-head"><div><strong>'+safe(humanToken(attempt.strategy))+'</strong><small>'+safe(humanToken(attempt.risk_profile))+'</small></div><span class="badge neutral">Not selected</span></div><div class="attempt-result '+tone(result)+'"><span>Training result</span><strong>'+safe(signedAmount(result,m.value_unit))+'</strong></div><progress class="attempt-meter '+tone(result)+'" max="'+safe(String(maxMagnitude||1n))+'" value="'+safe(String(value))+'" aria-label="'+safe(humanToken(attempt.strategy))+' training result magnitude '+safe(signedAmount(result,m.value_unit))+'">'+safe(String(value))+'</progress><p>'+safe(String(attempt.filled_orders||0))+' fills · '+safe(String(attempt.closed_positions||0))+' closed · '+safe(paperValue(attempt.fees_micros,m.value_unit))+' trade fees · Funding: '+safe(fundingAdjustment(attempt.funding_micros,m.value_unit))+' · '+safe(paperValue(attempt.max_drawdown_micros,m.value_unit))+' largest drop'+safe(risk)+'</p></article>';
 }
 function perpsResearchCard(m){
-  const view=qualificationView(m),attempts=(m.qualification_attempts||[]).slice(0,3);
-  const maxMagnitude=attempts.reduce((largest,attempt)=>{const value=integer(attempt.net_pnl_micros),magnitude=value<0n?-value:value;return magnitude>largest?magnitude:largest;},1n);
-	  const completed=Boolean(m.completed)||(m.available&&m.ready&&Boolean(m.qualification_tracked)),recording=perpsRecordingInProgress(m);
-  const stateLabel=!m.available?'Unavailable':!m.ready?'Updating':completed?'Completed experiment':recording?'Recording in progress':'Needs attention';
-	const stateTone=!m.available?'red':recording?'blue':'amber';
-  const outcome=view?.label||(completed?'Recorded result':recording?'Collecting paper evidence':m.available&&m.ready?'Experiment incomplete':'No saved result');
-  const detail=view?.status||(completed&&m.observed_at?'Finished '+eventTime(m.observed_at):recording?(Number(m.checks||0)?String(m.checks)+' market checks saved':'Waiting for first market check'):'No completed recording');
+	const completed=latestCompletedPerps(m),view=qualificationView(completed||{}),attempts=(completed?.qualification_attempts||[]).slice(0,3);
+	const maxMagnitude=attempts.reduce((largest,attempt)=>{const value=integer(attempt.net_pnl_micros),magnitude=value<0n?-value:value;return magnitude>largest?magnitude:largest;},1n);
+	const recording=perpsRecordingInProgress(m),hasCompleted=Boolean(completed);
+	const stateLabel=!m.available?'Unavailable':recording?'Recording in progress':m.risk_halted?'Simulation paused':hasCompleted&&!m.ready?'Completed result saved':!m.ready?'Updating':!m.fresh?'Data delayed':hasCompleted?'Completed result saved':'Needs attention';
+	const stateTone=!m.available||m.risk_halted?'red':recording?'blue':hasCompleted&&m.fresh?'green':'amber';
+	const outcome=view?.label||(hasCompleted?'Recorded result':recording?'Collecting paper evidence':m.available&&m.ready?'Experiment incomplete':'No saved result');
+	const detail=!m.available?'Current status unavailable':recording?(Number(m.checks||0)?String(m.checks)+' current market checks saved':'Waiting for first current market check'):m.risk_halted?'Current simulation paused':hasCompleted&&!m.ready?'No current recording':!m.ready?'Waiting for current status':!m.fresh?'Current status is delayed':hasCompleted?'No recording active':'No completed recording';
   const leader=attempts.reduce((best,attempt)=>betterTrainingAttempt(attempt,best)?attempt:best,null),others=attempts.filter(attempt=>attempt!==leader);
   const terms=help('Perps test terms','Trade fees are simulated execution charges. A funding adjustment is the simulated carry charge or credit. Largest drop is the worst fall from a prior high. A forced close means the safety model closed a leveraged position.');
-  const body=leader?'<div class="attempt-grid" aria-label="Best completed training attempts"><div class="attempt-kicker"><span>Strongest completed attempt</span>'+terms+'</div>'+perpsAttemptCard(leader,m,maxMagnitude)+(others.length?'<details class="attempt-more"><summary>Compare '+others.length+' other risk level'+(others.length===1?'':'s')+'</summary><div class="attempt-grid">'+others.map(attempt=>perpsAttemptCard(attempt,m,maxMagnitude)).join('')+'</div></details>':'')+'</div>':'<p class="perps-empty">'+(recording?'The current recording is still collecting evidence. Completed attempts will appear here.':'No completed training attempts are available to compare.')+'</p>';
-  const button=m.available&&m.ready?'<button class="plan-trigger" type="button" data-research-market="'+safe(m.name)+'" aria-haspopup="dialog">View experiment details'+uiIcon('arrow')+'</button>':'';
-  const laterOutcome=perpsLaterOutcome(m);
-  return '<article class="perps-research-card"><header><div class="strategy-market-name"><span class="asset-orb" aria-hidden="true">'+safe(m.name.slice(0,1))+'</span><div><h3>'+safe(m.name)+'</h3><span>'+safe(detail)+'</span></div></div><span class="badge '+stateTone+'">'+safe(stateLabel)+'</span></header><div class="perps-outcome"><span>'+uiIcon('score')+'</span><div><small>'+(recording?'Current recording uses':'Completed run used')+'</small><strong>'+safe(perpsPlanSource(m))+'</strong>'+(laterOutcome?'<small>'+safe(laterOutcome)+'</small>':'')+'</div>'+button+'</div>'+body+'</article>';
+  const body=leader?'<div class="attempt-grid" aria-label="Best completed training attempts"><div class="attempt-kicker"><span>Strongest completed attempt</span>'+terms+'</div>'+perpsAttemptCard(leader,completed,maxMagnitude)+(others.length?'<details class="attempt-more"><summary>Compare '+others.length+' other risk level'+(others.length===1?'':'s')+'</summary><div class="attempt-grid">'+others.map(attempt=>perpsAttemptCard(attempt,completed,maxMagnitude)).join('')+'</div></details>':'')+'</div>':'<p class="perps-empty">'+(recording?'The current recording is still collecting evidence. Completed attempts will appear here.':'No completed training attempts are available to compare.')+'</p>';
+  const button=hasCompleted?'<button class="plan-trigger" type="button" data-research-market="'+safe(m.name)+'" aria-haspopup="dialog" aria-label="View '+safe(m.name)+' completed result">View completed result'+uiIcon('arrow')+'</button>':'';
+  const laterOutcome=hasCompleted?perpsLaterOutcome(completed):'';
+	return '<article class="perps-research-card" data-perps-research-market="'+safe(m.name)+'"><header><div class="strategy-market-name"><span class="asset-orb" aria-hidden="true">'+safe(m.name.slice(0,1))+'</span><div><h3>'+safe(m.name)+'</h3><span>'+safe(detail)+'</span></div></div><span class="badge '+stateTone+'">'+safe(stateLabel)+'</span></header><div class="perps-outcome"><span>'+uiIcon('score')+'</span><div><small>'+(hasCompleted?'Latest completed run · '+eventTime(completed.observed_at):'Current recording')+'</small><strong>'+safe(outcome)+'</strong>'+(hasCompleted?'<small>'+safe(perpsPlanSource(completed))+'</small>':'')+(laterOutcome?'<small>'+safe(laterOutcome)+'</small>':'')+'</div>'+button+'</div>'+body+'</article>';
 }
 function strategyGroup(title,description,markets){
   if(!markets.length)return '';
@@ -584,14 +587,15 @@ function openPerpsPlanDialog(m){
   const leverage=Number(m.leverage_bps||10000)/10000;
   const profile=String(m.risk_profile||'bounded').replace(/^./,character=>character.toUpperCase());
   const position=m.position_direction==='long'?'Price-up position':m.position_direction==='short'?'Price-down position':'No position';
-	  const qualification=qualificationView(m),qualificationResults=Boolean(m.qualification_holdout_scored),qualificationStress=Boolean(m.qualification_stress_scored),qualificationTapes=Math.max(1,Number(m.qualification_tapes||1));
-	  const positionTone=!m.fresh?'Last recorded state':m.position_direction==='flat'?'Waiting for a signal':'Open in this simulation';
+	const qualification=qualificationView(m),saved=Boolean(m.completed&&qualification),qualificationResults=Boolean(m.qualification_holdout_scored),qualificationStress=Boolean(m.qualification_stress_scored),qualificationTapes=Math.max(1,Number(m.qualification_tapes||1));
+	const positionTone=saved?'Final recorded state':!m.fresh?'Last recorded state':m.position_direction==='flat'?'Waiting for a signal':'Open in this simulation';
+	const accountingLabel=saved?'Completed accounting and boundaries':'Current accounting and boundaries',paperValueLabel=saved?'Final paper value':'Paper value now',resultLabel=saved?'Completed-run result':'Result this run',openResultLabel=saved?'Final open result':'Open result';
 	  $('help-dialog-kicker').textContent=qualification?'Latest paper checkpoint':m.fresh?'Live perps simulation':'Last perps experiment';
   $('help-dialog-title').textContent=m.name;
 	  $('help-dialog-copy').textContent=qualification?qualification.next:position+'. Public market data only; no wallet or real order is connected.';
-	  const stage=m.risk_halted?3:!m.fresh?0:m.position_direction==='flat'?1:3;
+	const stage=saved||m.risk_halted?3:!m.fresh?0:m.position_direction==='flat'?1:3;
   const steps=[['watch','Read','Closed 1m candle'],['score','Choose','Up · down · wait'],['decide','Simulate','Visible book fill'],['protect','Track','Mark · funding · risk']];
-  $('help-dialog-visual').innerHTML='<ol class="plan-loop" aria-label="Current perps stage">'+steps.map((step,index)=>'<li class="plan-node'+(index===stage?' active':'')+'">'+uiIcon(step[0])+'<span><strong>'+step[1]+'</strong><small>'+step[2]+'</small></span></li>').join('')+'</ol>';
+	$('help-dialog-visual').innerHTML='<ol class="plan-loop" aria-label="'+(saved?'Completed perps experiment flow':'Current perps stage')+'">'+steps.map((step,index)=>'<li class="plan-node'+(index===stage?' active':'')+'">'+uiIcon(step[0])+'<span><strong>'+step[1]+'</strong><small>'+step[2]+'</small></span></li>').join('')+'</ol>';
   const snapshot=qualification?'<div class="plan-snapshot">'+
 	    '<article>'+uiIcon('score')+'<span>Checkpoint</span><strong>'+safe(qualification.label)+'</strong><small>'+safe(qualification.status)+'</small></article>'+
 	    '<article>'+uiIcon('watch')+'<span>Market checks</span><strong>'+safe(String(m.qualification_frames||0))+' / '+safe(String(m.qualification_minimum_frames||0))+'</strong><small>'+(qualificationTapes>1?safe(String(qualificationTapes))+' separate recordings':'Saved price checks')+'</small></article>'+
@@ -603,15 +607,15 @@ function openPerpsPlanDialog(m){
 	    '<article>'+uiIcon('score')+'<span>Simulated leverage</span><strong>'+safe(leverage.toFixed(2).replace(/\.00$/,''))+'×</strong><small>No borrowed real funds</small></article>'+
 	    '<article>'+uiIcon('clock')+'<span>New decision</span><strong>Every minute</strong><small>Uses completed candles</small></article>';
   $('help-dialog-extra').innerHTML=snapshot+
-    '</div><details class="plan-more"><summary>Current accounting and boundaries</summary><dl class="limit-grid">'+
+	    '</div><details class="plan-more"><summary>'+accountingLabel+'</summary><dl class="limit-grid">'+
 	(qualification&&m.qualification_strategy?'<div><dt>Training candidate</dt><dd>'+safe(humanToken(m.qualification_strategy))+'</dd></div><div><dt>Candidate risk</dt><dd>'+safe(humanToken(m.qualification_risk_profile))+'</dd></div>':'')+
 	'<div><dt>Completed run used</dt><dd>'+safe(perpsPlanSource(m))+'</dd></div>'+
 	(perpsLaterOutcome(m)?'<div><dt>Later plan outcome</dt><dd>'+safe(perpsLaterOutcome(m))+'</dd></div>':'')+
     '<div><dt>Position</dt><dd>'+safe(position)+' · '+safe(positionTone)+'</dd></div>'+
-    '<div><dt>Paper value now</dt><dd>'+safe(paperValue(m.equity_micros,m.value_unit))+'</dd></div>'+
-	    '<div><dt>Result this run</dt><dd>'+safe(signedAmount(effectiveEquity(m)-integer(m.opening_equity_micros),m.value_unit))+'</dd></div>'+
+	    '<div><dt>'+paperValueLabel+'</dt><dd>'+safe(paperValue(m.equity_micros,m.value_unit))+'</dd></div>'+
+	    '<div><dt>'+resultLabel+'</dt><dd>'+safe(signedAmount(effectiveEquity(m)-integer(m.opening_equity_micros),m.value_unit))+'</dd></div>'+
 	    (integer(m.deficit_micros)?'<div><dt>Liquidation deficit</dt><dd>'+safe(paperValue(m.deficit_micros,m.value_unit))+'</dd></div>':'')+
-    '<div><dt>Open result</dt><dd>'+safe(signedAmount(m.unrealized_micros,m.value_unit))+'</dd></div>'+
+	    '<div><dt>'+openResultLabel+'</dt><dd>'+safe(signedAmount(m.unrealized_micros,m.value_unit))+'</dd></div>'+
     '<div><dt>Funding</dt><dd>'+safe(m.funding_tracked?signedAmount(m.funding_micros,m.value_unit):'Updating')+'</dd></div>'+
     '<div><dt>Modeled fees</dt><dd>'+safe(paperValue(m.fees_micros,m.value_unit))+'</dd></div>'+
 	    '<div><dt>Visible-book fills</dt><dd>'+safe(String(m.trades||0))+'</dd></div>'+
@@ -696,6 +700,8 @@ function mountMarketSparklines(markets){
 }
 function renderMarkets(){
   const openChartDetail=$('markets').querySelector('.chart-data[open]')?.dataset.detail;
+	const openAttemptMarkets=new Set([...document.querySelectorAll('#perps-research-list .attempt-more[open]')].map(detail=>detail.closest('[data-perps-research-market]')?.dataset.perpsResearchMarket).filter(Boolean));
+	const focusedAttemptMarket=document.activeElement?.matches('#perps-research-list .attempt-more summary')?document.activeElement.closest('[data-perps-research-market]')?.dataset.perpsResearchMarket:'';
   const focusedChartCanvas=Boolean(document.activeElement?.closest('[data-chart-canvas]'));
   const focusedChoice=document.activeElement?.closest('.market-choice')?.dataset.market;
   const focused=document.activeElement?.closest('.chart-toggle');
@@ -722,6 +728,8 @@ function renderMarkets(){
   if(focusMarket&&focusView){[...document.querySelectorAll('.market')].find(card=>card.dataset.market===focusMarket)?.querySelector('[data-chart-view="'+focusView+'"]')?.focus({preventScroll:true});}
   if(focusedChartCanvas)$('markets').querySelector('[data-chart-canvas]')?.focus({preventScroll:true});
 	$('perps-research-list').innerHTML=perpsMarkets.length?perpsMarkets.map(perpsResearchCard).join(''):'<p class="perps-empty">No perps research experiments are configured.</p>';
+	for(const market of openAttemptMarkets)$('perps-research-list').querySelector('[data-perps-research-market="'+CSS.escape(market)+'"] .attempt-more')?.setAttribute('open','');
+	if(focusedAttemptMarket)$('perps-research-list').querySelector('[data-perps-research-market="'+CSS.escape(focusedAttemptMarket)+'"] .attempt-more summary')?.focus({preventScroll:true});
 	$('strategy-markets').innerHTML=strategyGroup('Spot paper plans','Only core SOL and JUP are combined in the live paper account above.',spotMarkets)+strategyGroup('Perps research','Independent experiments; completed results are not live account positions.',perpsMarkets);
   renderInstruction();
 }
@@ -851,11 +859,11 @@ function renderMarketResearch(){
 function renderSystem(){
   const required=current.markets.filter(market=>!market.optional),healthy=required.filter(marketDataHealthy).length,total=required.length;
   const additionalSpots=current.markets.filter(market=>market.optional&&!isPerps(market)),healthyAdditionalSpots=additionalSpots.filter(marketDataHealthy).length,completedAdditionalSpots=additionalSpots.filter(market=>market.completed).length;
-	const perpsMarkets=current.markets.filter(isPerps),completedPerps=perpsMarkets.filter(market=>market.completed||market.available&&market.ready&&market.qualification_tracked).length,recordingPerps=perpsMarkets.filter(perpsRecordingInProgress).length;
+	const perpsMarkets=current.markets.filter(isPerps),completedPerps=perpsMarkets.filter(market=>latestCompletedPerps(market)).length,recordingPerps=perpsMarkets.filter(perpsRecordingInProgress).length;
 	const research=researchView();
   const mithril=mithrilEvidenceView();
   $('automation').innerHTML='<div class="automation-list-head" aria-hidden="true"><span>Service</span><span>Role and boundary</span><span>Status</span></div>'+
-    automationCard('engines','BOT','Paper engines',healthy===total&&total?'Running':'Needs attention',healthy===total&&total?'green':'amber',healthy+' of '+total+' core spot observers are current. '+healthyAdditionalSpots+' of '+additionalSpots.length+' additional spot observers are current; '+completedAdditionalSpots+' completed. '+completedPerps+' of '+perpsMarkets.length+' perps recordings are completed; '+recordingPerps+' recording now.')+
+    automationCard('engines','BOT','Paper engines',healthy===total&&total?'Running':'Needs attention',healthy===total&&total?'green':'amber',healthy+' of '+total+' core spot observers are current. '+healthyAdditionalSpots+' of '+additionalSpots.length+' additional spot observers are current; '+completedAdditionalSpots+' completed. '+completedPerps+' of '+perpsMarkets.length+' perps markets have a saved result; '+recordingPerps+' recording now.')+
     automationCard('hermes','H','Nous Hermes',research.label,research.tone,research.description)+
     automationCard('mithril','M','Mithril evidence',mithril.label,mithril.tone,mithril.description)+
     automationCard('strategy','AD','Versioned learning','Gate required','blue','Spot rules adapt to current prices. A perps challenger must beat the current paper plan on untouched normal-cost and doubled-fee replay before it can become the next bounded paper test. This never enables real execution.')+

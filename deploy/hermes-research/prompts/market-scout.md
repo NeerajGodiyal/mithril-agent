@@ -87,7 +87,7 @@ selection, promotion, execution instruction, or proof of future profit. An
 absent outcome-history block means that evidence is unavailable.
 Use the host-produced completed perps summary to compare the recorded SOL-PERP,
 BTC-PERP, and ETH-PERP training attempts, costs, fills, and drawdown when those
-fields are present. Treat its content hash and paper-status hashes as integrity bindings,
+fields are present. Treat its content hash and completed-snapshot hashes as integrity bindings,
 not market sources. It may support an advisory hypothesis or rejection
 condition, but it cannot open a holdout, change a policy, authorize execution,
 promote a plan, or prove future profit.

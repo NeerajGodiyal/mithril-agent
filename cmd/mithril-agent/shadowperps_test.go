@@ -450,6 +450,264 @@ func TestShadowPerpsPaperRunPersistsQualificationAndRotatesPreviousRun(t *testin
 	}
 }
 
+func TestPublishShadowPerpsCarriesTheLastCompletedReceiptIntoALiveRun(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDir, publishedDir := filepath.Join(base, "current"), filepath.Join(base, "published")
+	for _, directory := range []string{stateDir, publishedDir} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	completedAt := time.Date(2026, 9, 4, 18, 0, 0, 0, time.UTC)
+	completed := shadowPerpsTestSummary(completedAt, true)
+	previous := paperstatus.Snapshot{
+		Version: paperstatus.Version - 1, ObservedAt: completedAt,
+		Current: "PAPER · Completed", Summary: &completed,
+		Events: []paperstatus.Event{{
+			ID: strings.Repeat("a", 64), At: completedAt,
+			Kind: paperstatus.KindExperimentDone, Message: "PAPER · Completed",
+		}},
+	}
+	writeShadowPerpsTestSnapshot(t, filepath.Join(publishedDir, "sol-paper-status.json"), previous)
+
+	liveAt := completedAt.Add(time.Minute)
+	live := shadowPerpsTestSummary(liveAt, false)
+	live.Checks = 7
+	current := paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: liveAt,
+		Current: "PAPER · Recording", Summary: &live,
+	}
+	writeShadowPerpsTestSnapshot(t, filepath.Join(stateDir, "sol-paper-status.json"), current)
+	if err := publishShadowPerpsStatuses(stateDir, publishedDir, []perpspaper.Symbol{perpspaper.SOL}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(publishedDir, "sol-paper-status.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published paperstatus.Snapshot
+	if err := json.Unmarshal(raw, &published); err != nil || paperstatus.ValidateSnapshot(published) != nil {
+		t.Fatalf("published snapshot = %+v, %v", published, err)
+	}
+	receipt, ok := paperstatus.LatestCompletedSnapshot(published)
+	if !ok || published.Summary == nil || published.Summary.Checks != 7 ||
+		published.Summary.QualificationTracked || !receipt.ObservedAt.Equal(completedAt) ||
+		receipt.Summary.QualificationFrames != completed.QualificationFrames {
+		t.Fatalf("published live + completed state = %+v, %+v, %v", published, receipt, ok)
+	}
+	corrupt := []byte("corrupt previous status\n")
+	if err := os.WriteFile(filepath.Join(publishedDir, "sol-paper-status.json"), corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishShadowPerpsStatuses(stateDir, publishedDir, []perpspaper.Symbol{perpspaper.SOL}); err == nil {
+		t.Fatal("live publication replaced an invalid prior completion source")
+	}
+	after, err := os.ReadFile(filepath.Join(publishedDir, "sol-paper-status.json"))
+	if err != nil || !bytes.Equal(after, corrupt) {
+		t.Fatalf("failed carry-forward changed prior status: %q, %v", after, err)
+	}
+}
+
+func TestPrepareShadowPerpsRunPublishesACompletedReceiptBeforeArchiving(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stateDir, archiveDir := filepath.Join(base, "current"), filepath.Join(base, "runs")
+	publishedDir := shadowPerpsPublishedDir(stateDir)
+	for _, directory := range []string{stateDir, archiveDir, publishedDir} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	completedSnapshot := func(at time.Time, eventID string) paperstatus.Snapshot {
+		summary := shadowPerpsTestSummary(at, true)
+		return paperstatus.Snapshot{
+			Version: paperstatus.Version, ObservedAt: at,
+			Current: "PAPER · Completed", Summary: &summary,
+			Events: []paperstatus.Event{{
+				ID: eventID, At: at, Kind: paperstatus.KindExperimentDone,
+				Message: "PAPER · Completed",
+			}},
+			LatestCompleted: &paperstatus.CompletedSnapshot{
+				ObservedAt: at, EventID: eventID, Summary: summary,
+			},
+		}
+	}
+	previousAt := time.Date(2026, 9, 4, 18, 0, 0, 0, time.UTC)
+	completedAt := previousAt.Add(time.Hour)
+	writeShadowPerpsTestSnapshot(t, filepath.Join(publishedDir, "sol-paper-status.json"), completedSnapshot(previousAt, strings.Repeat("a", 64)))
+	writeShadowPerpsTestSnapshot(t, filepath.Join(stateDir, "sol-paper-status.json"), completedSnapshot(completedAt, strings.Repeat("c", 64)))
+
+	restartedAt := completedAt.Add(time.Minute)
+	if err := prepareShadowPerpsRun(stateDir, archiveDir, restartedAt); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(publishedDir, "sol-paper-status.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published paperstatus.Snapshot
+	if err := json.Unmarshal(raw, &published); err != nil || paperstatus.ValidateSnapshot(published) != nil {
+		t.Fatalf("recovered published snapshot = %+v, %v", published, err)
+	}
+	receipt, ok := paperstatus.LatestCompletedSnapshot(published)
+	if !ok || !receipt.ObservedAt.Equal(completedAt) || receipt.EventID != strings.Repeat("c", 64) {
+		t.Fatalf("recovered receipt = %+v, %v", receipt, ok)
+	}
+	archived := filepath.Join(archiveDir, restartedAt.Format("20060102T150405.000000000Z"))
+	if _, err := os.Stat(filepath.Join(archived, "sol-paper-status.json")); err != nil {
+		t.Fatalf("completed local status was not archived: %v", err)
+	}
+}
+
+func TestPrepareShadowPerpsRunRejectsAStatusStoredUnderTheWrongMarket(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stateDir, archiveDir := filepath.Join(base, "current"), filepath.Join(base, "runs")
+	publishedDir := shadowPerpsPublishedDir(stateDir)
+	for _, directory := range []string{stateDir, archiveDir, publishedDir} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	completedSnapshot := func(at time.Time, eventID, market string) paperstatus.Snapshot {
+		summary := shadowPerpsTestSummary(at, true)
+		summary.Market = market
+		return paperstatus.Snapshot{
+			Version: paperstatus.Version, ObservedAt: at,
+			Current: "PAPER · Completed", Summary: &summary,
+			Events: []paperstatus.Event{{
+				ID: eventID, At: at, Kind: paperstatus.KindExperimentDone,
+				Message: "PAPER · Completed",
+			}},
+			LatestCompleted: &paperstatus.CompletedSnapshot{
+				ObservedAt: at, EventID: eventID, Summary: summary,
+			},
+		}
+	}
+	previousAt := time.Date(2026, 9, 4, 18, 0, 0, 0, time.UTC)
+	previousPath := filepath.Join(publishedDir, "sol-paper-status.json")
+	writeShadowPerpsTestSnapshot(t, previousPath, completedSnapshot(previousAt, strings.Repeat("a", 64), "SOL-PERP"))
+	previousRaw, err := os.ReadFile(previousPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeShadowPerpsTestSnapshot(t, filepath.Join(stateDir, "sol-paper-status.json"),
+		completedSnapshot(previousAt.Add(-time.Hour), strings.Repeat("c", 64), "BTC-PERP"))
+
+	if err := prepareShadowPerpsRun(stateDir, archiveDir, previousAt.Add(2*time.Hour)); err == nil {
+		t.Fatal("wrong-market status was recovered under the SOL filename")
+	}
+	after, err := os.ReadFile(previousPath)
+	if err != nil || !bytes.Equal(after, previousRaw) {
+		t.Fatalf("wrong-market recovery changed the published SOL status: %q, %v", after, err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "sol-paper-status.json")); err != nil {
+		t.Fatalf("wrong-market current status was archived: %v", err)
+	}
+}
+
+func TestPrepareShadowPerpsRunReplacesAMislabeledPublishedStatus(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stateDir, archiveDir := filepath.Join(base, "current"), filepath.Join(base, "runs")
+	publishedDir := shadowPerpsPublishedDir(stateDir)
+	for _, directory := range []string{stateDir, archiveDir, publishedDir} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	completedSnapshot := func(at time.Time, eventID, market string) paperstatus.Snapshot {
+		summary := shadowPerpsTestSummary(at, true)
+		summary.Market = market
+		return paperstatus.Snapshot{
+			Version: paperstatus.Version, ObservedAt: at,
+			Current: "PAPER · Completed", Summary: &summary,
+			Events: []paperstatus.Event{{
+				ID: eventID, At: at, Kind: paperstatus.KindExperimentDone,
+				Message: "PAPER · Completed",
+			}},
+			LatestCompleted: &paperstatus.CompletedSnapshot{
+				ObservedAt: at, EventID: eventID, Summary: summary,
+			},
+		}
+	}
+	correctAt := time.Date(2026, 9, 4, 18, 0, 0, 0, time.UTC)
+	publishedPath := filepath.Join(publishedDir, "sol-paper-status.json")
+	writeShadowPerpsTestSnapshot(t, publishedPath,
+		completedSnapshot(correctAt.Add(time.Hour), strings.Repeat("a", 64), "BTC-PERP"))
+	writeShadowPerpsTestSnapshot(t, filepath.Join(stateDir, "sol-paper-status.json"),
+		completedSnapshot(correctAt, strings.Repeat("c", 64), "SOL-PERP"))
+
+	if err := prepareShadowPerpsRun(stateDir, archiveDir, correctAt.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(publishedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published paperstatus.Snapshot
+	if err := json.Unmarshal(raw, &published); err != nil || paperstatus.ValidateSnapshot(published) != nil {
+		t.Fatalf("replacement snapshot = %+v, %v", published, err)
+	}
+	receipt, ok := paperstatus.LatestCompletedSnapshot(published)
+	if !ok || receipt.Summary.Market != "SOL-PERP" || !receipt.ObservedAt.Equal(correctAt) {
+		t.Fatalf("replacement receipt = %+v, %v", receipt, ok)
+	}
+}
+
+func shadowPerpsTestSummary(at time.Time, completed bool) paperstatus.CurrentSummary {
+	summary := paperstatus.CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: at.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+		HoldBenchmarkMicros: 100_000_000, State: "watching", Strategy: "fixed",
+	}
+	if !completed {
+		return summary
+	}
+	summary.Checks = 10
+	summary.QualificationTracked = true
+	summary.QualificationOutcome = "insufficient_evidence"
+	summary.QualificationSHA256 = strings.Repeat("b", 64)
+	summary.QualificationTapes = 1
+	summary.QualificationFrames = 10
+	summary.QualificationMinimumFrames = 24
+	return summary
+}
+
+func writeShadowPerpsTestSnapshot(t *testing.T, path string, snapshot paperstatus.Snapshot) {
+	t.Helper()
+	if err := paperstatus.ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("invalid fixture: %v", err)
+	}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestShadowPerpsFailureDoesNotPublishCompletedQualification(t *testing.T) {
 	now := time.Date(2026, 9, 3, 13, 5, 30, 0, time.UTC)
 	base := t.TempDir()

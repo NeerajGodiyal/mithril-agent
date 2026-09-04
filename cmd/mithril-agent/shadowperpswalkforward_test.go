@@ -458,7 +458,7 @@ func TestFinalizePreservesTapesAndPublishesMultiTapeSummary(t *testing.T) {
 			t.Fatal(err)
 		}
 		if err := finalizeAndPublishShadowPerps(
-			stateDir, publishedDir, []perpspaper.Symbol{perpspaper.SOL}, time.UnixMilli(offset+10_000_000),
+			stateDir, publishedDir, []perpspaper.Symbol{perpspaper.SOL}, time.UnixMilli(offset+10_000_000).UTC(),
 		); err != nil {
 			t.Fatal(err)
 		}

@@ -126,6 +126,65 @@ func TestPaperAnnouncementsAreCompactPersistentAndReadOnly(t *testing.T) {
 	}
 }
 
+func TestLatestCompletedReceiptDoesNotCreateATelegramEvent(t *testing.T) {
+	now := time.Date(2026, time.September, 4, 18, 0, 0, 0, time.UTC)
+	completed := paperstatus.CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+		HoldBenchmarkMicros: 100_000_000, Checks: 1, State: "watching", Strategy: "fixed",
+		QualificationTracked: true, QualificationOutcome: "insufficient_evidence",
+		QualificationSHA256: strings.Repeat("a", 64), QualificationTapes: 1,
+		QualificationFrames: 1, QualificationMinimumFrames: 2,
+	}
+	live := &paperstatus.CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+		HoldBenchmarkMicros: 100_000_000, State: "watching", Strategy: "fixed",
+	}
+	reader := &paperStatusStub{label: "SOL-PERP", snapshot: paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now, Current: "PAPER · Recording", Summary: live,
+		LatestCompleted: &paperstatus.CompletedSnapshot{
+			ObservedAt: now, EventID: strings.Repeat("b", 64), Summary: completed,
+		},
+	}}
+	bot := &botStub{}
+	service, err := New(Config{
+		Bot: bot, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
+		PaperSources: []PaperStatusReader{reader}, AllowedChatIDs: []int64{123},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.announce(t.Context())
+	if len(bot.sent) != 0 {
+		t.Fatalf("saved receipt created a Telegram alert: %+v", bot.sent)
+	}
+	reader.snapshot.ObservedAt = now.Add(time.Second)
+	reader.snapshot.Events = []paperstatus.Event{{
+		ID: strings.Repeat("c", 64), At: now.Add(time.Second), Kind: paperstatus.KindOrderFilled,
+		Message: "PAPER · 🔵 SOLD\nSold 1 SOL\nReceived 100 USDC\nTotal paper account: $100",
+	}}
+	service.announce(t.Context())
+	if len(bot.sent) != 1 || !strings.Contains(bot.sent[0].Text, "SOLD") {
+		t.Fatalf("live event delivery = %+v", bot.sent)
+	}
+
+	mismatched := paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now, Current: paperstatus.UnconfiguredCurrent,
+		LatestCompleted: &paperstatus.CompletedSnapshot{
+			ObservedAt: now, EventID: strings.Repeat("d", 64), Summary: completed,
+		},
+	}
+	mismatched.LatestCompleted.Summary.Market = "BTC-PERP"
+	if paperSnapshotMatchesReader(reader, mismatched) {
+		t.Fatal("mislabeled saved receipt matched the SOL source")
+	}
+}
+
 func TestPaperAnnouncementRetriesOnlyWhenNobodyWasTold(t *testing.T) {
 	now := time.Date(2026, time.August, 30, 1, 2, 3, 0, time.UTC)
 	reader := &paperStatusStub{snapshot: paperstatus.Snapshot{
