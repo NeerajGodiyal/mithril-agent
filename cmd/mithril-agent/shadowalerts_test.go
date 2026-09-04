@@ -146,6 +146,26 @@ func TestPaperSettingsExposeOnlyBoundedUserFacingLimits(t *testing.T) {
 	}
 }
 
+func TestPaperBalanceProjectionUsesLedgerAssetRoles(t *testing.T) {
+	policy := validShadowPolicy()
+	policy.Cluster = shadow.Mainnet
+	policy.Market = shadow.MarketJUPUSDC
+	policy.Trigger.Direction = pricetrigger.BuyAtOrBelow
+	policy.InputDecimals, policy.OutputDecimals = 6, 6
+	summary := &paperstatus.CurrentSummary{}
+	addPaperBalances(summary, policy, shadow.Ledger{
+		BaseUnits: 320_000_000, QuoteUnits: 69_000_000,
+		FeeReserveLamports: 29_000_000, LockedRentLamports: 3_000_000,
+	})
+	if !summary.BalancesTracked || summary.BaseAsset != "JUP" ||
+		summary.BaseUnits != 320_000_000 || summary.BaseDecimals != 6 ||
+		summary.QuoteAsset != "USDC" || summary.QuoteUnits != 69_000_000 ||
+		summary.QuoteDecimals != 6 || summary.LiquidFeeReserveLamports != 29_000_000 ||
+		summary.LockedSetupRentLamports != 3_000_000 {
+		t.Fatalf("paper balance projection = %+v", summary)
+	}
+}
+
 func TestPaperFeeBudgetDoesNotCountLockedSetupRentTwice(t *testing.T) {
 	policy := validShadowPolicy()
 	policy.FeeLamports = 100_000
@@ -1117,6 +1137,8 @@ func TestProvisionalUTCReportEndsAsACompletedExperiment(t *testing.T) {
 		OpeningEquityMicros: 10_000_000, ClosingEquityMicros: 10_800_000,
 		RealizedMicros: 800_000, HoldBenchmarkMicros: 10_600_000,
 		ClosingPriceMicros: 220_000,
+		BaseUnits:          320_000_000, QuoteUnits: 69_000_000,
+		FeeReserveLamports: 29_000_000, LockedRentLamports: 3_000_000,
 	}
 	if err := run.alertReport(report); err != nil {
 		t.Fatal(err)
@@ -1129,6 +1151,10 @@ func TestProvisionalUTCReportEndsAsACompletedExperiment(t *testing.T) {
 	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 1 ||
 		snapshot.Events[0].Kind != paperstatus.KindExperimentDone || snapshot.Summary == nil ||
 		snapshot.Summary.State != "completed" || snapshot.Summary.Day != from.Format("2006-01-02") ||
+		!snapshot.Summary.BalancesTracked || snapshot.Summary.BaseUnits != report.BaseUnits ||
+		snapshot.Summary.QuoteUnits != report.QuoteUnits ||
+		snapshot.Summary.LiquidFeeReserveLamports != report.FeeReserveLamports ||
+		snapshot.Summary.LockedSetupRentLamports != report.LockedRentLamports ||
 		len(snapshot.History) != 1 || !snapshot.History[0].At.Equal(report.To.Add(-time.Nanosecond)) {
 		t.Fatalf("provisional terminal snapshot = %+v, %v", snapshot, err)
 	}

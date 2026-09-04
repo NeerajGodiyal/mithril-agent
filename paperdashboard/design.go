@@ -582,6 +582,24 @@ footer.shell {
 .badge.neutral { color: var(--muted); }
 
 .market-chart-stage { position: relative; min-width: 0; }
+.balance-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-small);
+  background: var(--line);
+}
+.balance-strip > span { display: grid; min-width: 0; gap: 4px; padding: 14px 16px; background: #0b0b0b; }
+.balance-strip small { color: var(--subtle); font-size: .6rem; }
+.balance-strip strong { color: var(--secondary); font-size: .73rem; font-weight: 570; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.balance-note { grid-column: 1 / -1; margin: 0; padding: 10px 16px; color: var(--muted); background: #0b0b0b; font-size: .65rem; }
+.balance-strip.unavailable { display: flex; align-items: center; gap: 12px; padding: 14px 16px; color: var(--muted); background: #0b0b0b; }
+.balance-strip.unavailable > span { display: grid; width: 34px; height: 34px; flex: 0 0 auto; padding: 0; place-items: center; border-radius: 50%; color: var(--subtle); background: var(--surface-hover); }
+.balance-strip.unavailable p { display: grid; gap: 3px; margin: 0; }
+.balance-strip.unavailable strong { color: var(--secondary); }
 .chart-switch {
   position: absolute;
   z-index: 3;
@@ -1218,6 +1236,7 @@ footer.shell {
 	.agent-now-grid { grid-template-columns: 1fr; }
   .metric:first-child { grid-column: 1 / -1; }
   .market { padding: 18px; }
+	.balance-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .market-head { min-height: 84px; }
   .market-status { align-items: flex-end; flex-direction: column-reverse; }
   .chart-switch { position: static; width: max-content; margin: 0 0 6px auto; }
@@ -1300,6 +1319,7 @@ footer.shell {
   .nav-icon { display: none; }
   main.shell { padding-right: 10px; padding-left: 10px; }
   .market { padding: 16px 13px; }
+	.balance-strip { grid-template-columns: 1fr; }
   .chart-switch { max-width: 100%; }
   .chart-toggle { padding: 0 9px; font-size: .61rem; }
   .chart-canvas, .chart-empty { height: 280px; }

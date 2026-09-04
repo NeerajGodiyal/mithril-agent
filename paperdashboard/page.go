@@ -117,9 +117,9 @@ const indexHTML = `<!doctype html>
           <fieldset class="instruction-group">
             <legend>Capital and order size</legend>
             <p>Paper money only. A validated allocation starts with the next paper plan; risk exits may close more than the order cap.</p>
-            <label>Total paper budget
+            <label>Paper capital ceiling
               <input id="instruction-capital" type="number" min="10" max="1000000" step="1" inputmode="decimal" aria-describedby="instruction-capital-help">
-              <small id="instruction-capital-help">Cash and simulated holdings across the configurable spot markets</small>
+              <small id="instruction-capital-help">A conservative safety limit valued at the configured SOL ceiling. The live account value uses observed prices and can start lower.</small>
             </label>
             <label>Smallest order
               <input id="instruction-minimum-order" type="number" min="1" max="1000000" step="1" inputmode="decimal">
@@ -208,7 +208,7 @@ const decimal=(value,min,max)=>{let amount=integer(value),sign='';if(amount<0n){
 const money=micros=>integer(micros)>0n&&integer(micros)<10000n?'<$0.01':'$'+decimal(micros,2,2);
 const price=micros=>{const amount=integer(micros),places=amount>=1000000n?2:amount>=10000n?4:6;return '$'+decimal(amount,2,places);};
 const paperValue=(micros,unit)=>unit==='USD'?money(micros):decimal(micros,2,6)+' '+(unit||'units');
-const assetAmount=(units,places,asset)=>{const amount=integer(units),digits=Math.max(0,Math.min(18,Number(places||0))),base=10n**BigInt(digits),whole=amount/base;let fraction=(amount%base).toString().padStart(digits,'0').replace(/0+$/,'');if(fraction.length>9)fraction=fraction.slice(0,9).replace(/0+$/,'');return whole.toLocaleString()+(fraction?'.'+fraction:'')+' '+safe(asset||'units');};
+const assetAmount=(units,places,asset)=>{const amount=integer(units),digits=Math.max(0,Math.min(18,Number(places||0))),base=10n**BigInt(digits),whole=amount/base;const fraction=(amount%base).toString().padStart(digits,'0').replace(/0+$/,'');return whole.toLocaleString()+(fraction?'.'+fraction:'')+' '+safe(asset||'units');};
 const unitsAsMicros=(units,places)=>{const digits=Math.max(0,Math.min(18,Number(places||0))),amount=integer(units);return digits>=6?amount/(10n**BigInt(digits-6)):amount*(10n**BigInt(6-digits));};
 const initialLotValue=m=>{const asset=String(m.initial_lot_asset||'').toUpperCase(),base=String(m.name||'').split('/')[0].toUpperCase();if(asset==='USD'||asset.endsWith('USDC'))return unitsAsMicros(m.initial_lot_units,m.initial_lot_decimals);if(asset===base&&integer(m.price_micros)>0n)return integer(m.initial_lot_units)*integer(m.price_micros)/(10n**BigInt(Number(m.initial_lot_decimals||0)));return 0n;};
 const exposure=(lot,capital)=>integer(capital)>0n?(Number(integer(lot)*10000n/integer(capital))/100).toFixed(1)+'%':'—';
@@ -473,7 +473,14 @@ function marketCard(m){
   const badge='<span class="badge '+status.tone+'">'+status.label+'</span>';
   const chartView=marketChartViews[m.name]==='performance'?'performance':'price';
   const chartSwitch='<div class="chart-switch" role="group" aria-label="'+safe(m.name)+' chart"><button class="chart-toggle '+(chartView==='price'?'active':'')+'" type="button" data-chart-view="price" aria-pressed="'+String(chartView==='price')+'">Market price</button><button class="chart-toggle '+(chartView==='performance'?'active':'')+'" type="button" data-chart-view="performance" aria-pressed="'+String(chartView==='performance')+'">Paper vs holding</button></div>';
-  return '<article class="market" data-market="'+safe(m.name)+'"><div class="market-head"><div class="performance-title"><h3>Performance</h3><span class="asset-chip"><span aria-hidden="true">'+safe(m.name.slice(0,1))+'</span>'+safe(m.name)+'</span>'+badge+'</div></div><div class="market-chart-stage">'+chartSwitch+marketPriceChart(m,chartView!=='price')+performanceChart(m,chartView!=='performance')+'</div>'+qualificationStrip(m)+'</article>';
+  return '<article class="market" data-market="'+safe(m.name)+'"><div class="market-head"><div class="performance-title"><h3>Performance</h3><span class="asset-chip"><span aria-hidden="true">'+safe(m.name.slice(0,1))+'</span>'+safe(m.name)+'</span>'+badge+'</div></div><div class="market-chart-stage">'+chartSwitch+marketPriceChart(m,chartView!=='price')+performanceChart(m,chartView!=='performance')+'</div>'+paperBalanceStrip(m)+qualificationStrip(m)+'</article>';
+}
+function paperBalanceStrip(m){
+  if(isPerps(m))return '';
+  if(!m.balances_tracked)return '<div class="balance-strip unavailable"><span>'+uiIcon('wallet')+'</span><p><strong>Balance breakdown unavailable</strong><small>This older paper status did not record cash and holdings. Nothing is being shown as zero.</small></p></div>';
+  const note=!m.fresh?'<p class="balance-note">Last recorded balances. Waiting for fresh status.</p>':Number(m.trades||0)===0?'<p class="balance-note">No fills this run. Held assets can still change the paper account value as market prices move.</p>':'';
+  const timing=m.fresh?'Current':'Last recorded';
+  return '<div class="balance-strip" aria-label="'+timing+' '+safe(m.name)+' paper balances"><span><small>Paper cash</small><strong>'+assetAmount(m.quote_units,m.quote_decimals,m.quote_asset)+'</strong></span><span><small>Trading holdings</small><strong>'+assetAmount(m.base_units,m.base_decimals,m.base_asset)+'</strong></span><span><small>Separate SOL for fees</small><strong>'+assetAmount(m.liquid_fee_reserve_lamports,9,'SOL')+'</strong></span><span><small>SOL in setup deposits</small><strong>'+assetAmount(m.locked_setup_rent_lamports,9,'SOL')+'</strong></span>'+note+'</div>';
 }
 function qualificationView(m){
   if(!m.qualification_tracked)return null;

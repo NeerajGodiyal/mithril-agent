@@ -271,6 +271,15 @@ func TestStatusCombinesMarketsWithoutExposingIDsOrHTML(t *testing.T) {
 		}}
 	}
 	sol := build("SOL/USDC", 100, 0, 100_000_000, 101_000_000, 100_500_000)
+	sol.snapshot.Summary.BalancesTracked = true
+	sol.snapshot.Summary.BaseUnits = 750_000_000
+	sol.snapshot.Summary.BaseDecimals = 9
+	sol.snapshot.Summary.BaseAsset = "SOL"
+	sol.snapshot.Summary.QuoteUnits = 20_000_000
+	sol.snapshot.Summary.QuoteDecimals = 6
+	sol.snapshot.Summary.QuoteAsset = "USDC"
+	sol.snapshot.Summary.LiquidFeeReserveLamports = 29_000_000
+	sol.snapshot.Summary.LockedSetupRentLamports = 3_000_000
 	sol.snapshot.DroppedEvents = 3
 	server, err := New([]Source{
 		sol, build("JUP/USDC", 10, 5, 50_000_000, 49_000_000, 48_000_000),
@@ -307,7 +316,12 @@ func TestStatusCombinesMarketsWithoutExposingIDsOrHTML(t *testing.T) {
 		!view.Markets[0].FeeBudgetTracked ||
 		view.Markets[0].RemainingFeeReserveLamports != 29_000_000 ||
 		view.Markets[0].EstimatedFillsRemaining != 290 ||
-		view.Markets[0].DecisionReason != "signal_below_cost_hurdle" {
+		view.Markets[0].DecisionReason != "signal_below_cost_hurdle" ||
+		!view.Markets[0].BalancesTracked || view.Markets[0].BaseUnits != 750_000_000 ||
+		view.Markets[0].QuoteUnits != 20_000_000 || view.Markets[0].BaseAsset != "SOL" ||
+		view.Markets[0].QuoteAsset != "USDC" ||
+		view.Markets[0].LiquidFeeReserveLamports != 29_000_000 ||
+		view.Markets[0].LockedSetupRentLamports != 3_000_000 {
 		t.Fatalf("paper limits = %+v", view.Markets[0])
 	}
 	if view.InstructionsEnabled {
@@ -811,13 +825,13 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for path, wants := range map[string][]string{
-		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "class=\"overview-workspace\"", "id=\"market-switcher\"", "aria-label=\"Live spot markets\"", "id=\"perps-research-title\"", "id=\"perps-research-list\"", "class=\"activity-table\"", "id=\"help-dialog\"", "Quick explanation", "strategy-brief", "/vendor/overclock.svg", "Automation setup", "Markets being checked", "id=\"market-research\"", "Reviewed scope", "WIF, JTO, and PYTH", "Recorded replay and doubled-fee checks run in minutes", "short live checkpoints", "None proves profitability", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Total paper budget", "Smallest order", "Largest order", "Paper loss stop", "saving never restarts Mithril", "About this paper account", "bot's UTC day", "/vendor/lightweight-charts-5.2.1.js", "TradingView Lightweight Charts™"},
+		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "class=\"overview-workspace\"", "id=\"market-switcher\"", "aria-label=\"Live spot markets\"", "id=\"perps-research-title\"", "id=\"perps-research-list\"", "class=\"activity-table\"", "id=\"help-dialog\"", "Quick explanation", "strategy-brief", "/vendor/overclock.svg", "Automation setup", "Markets being checked", "id=\"market-research\"", "Reviewed scope", "WIF, JTO, and PYTH", "Recorded replay and doubled-fee checks run in minutes", "short live checkpoints", "None proves profitability", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Paper capital ceiling", "Smallest order", "Largest order", "Paper loss stop", "saving never restarts Mithril", "About this paper account", "bot's UTC day", "/vendor/lightweight-charts-5.2.1.js", "TradingView Lightweight Charts™"},
 		"/app.css": {
 			"@font-face", "/vendor/space-grotesk-latin.woff2", "--canvas: #000", "--green: #86efac", "--line-strong: #353535", "--text: #e7e7e7", "--subtle: #7f7f7f",
 			".tabs {", "position: fixed", ".tab.active", ".brand-logo", ".panel:focus-visible",
 			".metrics {", ".metric:first-child .metric-value", ".help-dialog::backdrop", ".activity-table .activity-list-head", "scrollbar-gutter: stable", ".button.loading::before", "@keyframes spin",
 			"height: calc(100vh - 120px)", ".overview-workspace", "grid-template-columns: minmax(0, 3fr) minmax(330px, 2fr)", "grid-template-columns: minmax(110px, 1fr) 82px max-content", ".market-list-head", ".market-choice.active::before", ".market-chart-stage",
-			".chart-toggle.active", ".chart-canvas { width: 100%; height: 390px", ".chart-data table",
+			".chart-toggle.active", ".chart-canvas { width: 100%; height: 390px", ".chart-data table", ".balance-strip {",
 			".activity-list-head", ".strategy-market-row", ".automation-list-head", "@keyframes view-enter",
 			".market-research-grid", ".market-research-card", ".research-progress::-webkit-progress-value",
 			"@media (max-width: 1023px)", "@media (max-width: 767px)", "@media (max-width: 430px)", "prefers-reduced-motion",
@@ -834,6 +848,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"Order status", "Placed", "Filled", "Data status", "Delayed", "Restored",
 			"Plan tried to trade once",
 			"Performance", "marketStatus(m,feeBudgetUsed)",
+			"paperBalanceStrip", "Paper cash", "Trading holdings", "Separate SOL for fees", "SOL in setup deposits", "Balance breakdown unavailable", "No fills this run", "Last recorded balances. Waiting for fresh status.",
 			"integer(micros)>0n&&integer(micros)<10000n?'<$0.01'",
 			"amount>=1000000n?2:amount>=10000n?4:6",
 			"marketPriceChart", "LightweightCharts.createChart", "chartSegments", "View exact chart values", "data-chart-action=\"zoom-in\"", "activeChart.remove()", "Bot strategy", "If simply held", "Ahead by ", "Behind by ", "older events omitted", "Proposal ready", "Nous Hermes",
@@ -872,6 +887,9 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 	if strings.Contains(appJS, "chartPaths") || strings.Contains(appJS, "chartDots") ||
 		strings.Contains(appJS, "<polyline") || strings.Contains(appJS, "<svg viewBox=\"0 0 100 56\"") {
 		t.Fatal("custom chart SVG remains in /app.js")
+	}
+	if strings.Contains(appJS, "fraction.length>9") {
+		t.Fatal("asset balances are truncated to zero below nine decimal places")
 	}
 	css := dashboardCSS
 	for _, obsolete := range []string{".chart svg", ".chart-grid", ".chart-paper", ".chart-hold", ".chart-market", ".chart-hit", ".coverage-ring", ".has-visual"} {

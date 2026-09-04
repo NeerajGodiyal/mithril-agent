@@ -136,6 +136,15 @@ type Market struct {
 	RealizedMicros                int64              `json:"realized_micros,omitempty,string"`
 	UnrealizedMicros              int64              `json:"unrealized_micros,omitempty,string"`
 	FeesMicros                    int64              `json:"fees_micros,omitempty,string"`
+	BalancesTracked               bool               `json:"balances_tracked,omitempty"`
+	BaseUnits                     uint64             `json:"base_units,omitempty,string"`
+	BaseDecimals                  uint8              `json:"base_decimals,omitempty"`
+	BaseAsset                     string             `json:"base_asset,omitempty"`
+	QuoteUnits                    uint64             `json:"quote_units,omitempty,string"`
+	QuoteDecimals                 uint8              `json:"quote_decimals,omitempty"`
+	QuoteAsset                    string             `json:"quote_asset,omitempty"`
+	LiquidFeeReserveLamports      uint64             `json:"liquid_fee_reserve_lamports,omitempty,string"`
+	LockedSetupRentLamports       uint64             `json:"locked_setup_rent_lamports,omitempty,string"`
 	FundingTracked                bool               `json:"funding_tracked,omitempty"`
 	FundingMicros                 int64              `json:"funding_micros,omitempty,string"`
 	TurnoverMicros                uint64             `json:"turnover_micros,omitempty,string"`
@@ -572,6 +581,15 @@ func applyMarketSummary(market *Market, summary paperstatus.CurrentSummary) {
 	market.RealizedMicros = summary.RealizedMicros
 	market.UnrealizedMicros = summary.UnrealizedMicros
 	market.FeesMicros = summary.FeesMicros
+	market.BalancesTracked = summary.BalancesTracked
+	market.BaseUnits = summary.BaseUnits
+	market.BaseDecimals = summary.BaseDecimals
+	market.BaseAsset = summary.BaseAsset
+	market.QuoteUnits = summary.QuoteUnits
+	market.QuoteDecimals = summary.QuoteDecimals
+	market.QuoteAsset = summary.QuoteAsset
+	market.LiquidFeeReserveLamports = summary.LiquidFeeReserveLamports
+	market.LockedSetupRentLamports = summary.LockedSetupRentLamports
 	market.FundingTracked = summary.FundingTracked
 	market.FundingMicros = summary.FundingMicros
 	market.TurnoverMicros = summary.TurnoverMicros

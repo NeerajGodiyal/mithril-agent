@@ -28,7 +28,8 @@ const (
 	decisionSourceVersion   = 7
 	latestCompletedVersion  = 8
 	decisionEvidenceVersion = 9
-	Version                 = decisionEvidenceVersion
+	balanceEvidenceVersion  = 10
+	Version                 = balanceEvidenceVersion
 	MaxEvents               = 64
 	MaxHistoryPoints        = 144
 	MaxMessageBytes         = 3000
@@ -110,10 +111,23 @@ type CurrentSummary struct {
 	HoldBenchmarkMicros uint64 `json:"hold_benchmark_micros"`
 	// Realized is the result from inventory already sold, after modeled fees.
 	// Unrealized is the mark-to-market result still held in open inventory.
-	AccountingTracked     bool              `json:"accounting_tracked,omitempty"`
-	RealizedMicros        int64             `json:"realized_micros,omitempty"`
-	UnrealizedMicros      int64             `json:"unrealized_micros,omitempty"`
-	FeesMicros            int64             `json:"fees_micros,omitempty"`
+	AccountingTracked bool  `json:"accounting_tracked,omitempty"`
+	RealizedMicros    int64 `json:"realized_micros,omitempty"`
+	UnrealizedMicros  int64 `json:"unrealized_micros,omitempty"`
+	FeesMicros        int64 `json:"fees_micros,omitempty"`
+
+	// BalancesTracked distinguishes a known zero balance from an older status
+	// that did not project the ledger's current inventory.
+	BalancesTracked          bool   `json:"balances_tracked,omitempty"`
+	BaseUnits                uint64 `json:"base_units,omitempty"`
+	BaseDecimals             uint8  `json:"base_decimals,omitempty"`
+	BaseAsset                string `json:"base_asset,omitempty"`
+	QuoteUnits               uint64 `json:"quote_units,omitempty"`
+	QuoteDecimals            uint8  `json:"quote_decimals,omitempty"`
+	QuoteAsset               string `json:"quote_asset,omitempty"`
+	LiquidFeeReserveLamports uint64 `json:"liquid_fee_reserve_lamports,omitempty"`
+	LockedSetupRentLamports  uint64 `json:"locked_setup_rent_lamports,omitempty"`
+
 	FundingTracked        bool              `json:"funding_tracked,omitempty"`
 	FundingMicros         int64             `json:"funding_micros,omitempty"`
 	TurnoverMicros        uint64            `json:"turnover_micros,omitempty"`
@@ -403,6 +417,7 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		snapshot.Version != perpsPlanVersion &&
 		snapshot.Version != decisionSourceVersion &&
 		snapshot.Version != latestCompletedVersion &&
+		snapshot.Version != decisionEvidenceVersion &&
 		snapshot.Version != Version ||
 		snapshot.ObservedAt.IsZero() ||
 		!snapshot.ObservedAt.Equal(snapshot.ObservedAt.UTC()) ||
@@ -422,6 +437,9 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		(snapshot.Version < decisionEvidenceVersion &&
 			(hasDecisionEvidence(snapshot.Summary) ||
 				snapshot.LatestCompleted != nil && hasDecisionEvidence(&snapshot.LatestCompleted.Summary))) ||
+		(snapshot.Version < balanceEvidenceVersion &&
+			(hasBalanceEvidence(snapshot.Summary) ||
+				snapshot.LatestCompleted != nil && hasBalanceEvidence(&snapshot.LatestCompleted.Summary))) ||
 		len(snapshot.History) > MaxHistoryPoints ||
 		validateCurrentSummary(snapshot.Summary) != nil ||
 		(snapshot.Summary != nil && snapshot.LatestCompleted != nil &&
@@ -463,7 +481,7 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		seen[event.ID] = struct{}{}
 		previous = event.At
 	}
-	if snapshot.Version == Version && snapshot.LatestCompleted == nil {
+	if snapshot.Version >= decisionEvidenceVersion && snapshot.LatestCompleted == nil {
 		if _, terminal := inferredCompleted(snapshot); terminal {
 			return errors.New("paper alert snapshot is invalid")
 		}
@@ -646,6 +664,7 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 		!validValueUnit(summary.ValueUnit) ||
 		!validInstrument(*summary) ||
 		!validAccounting(*summary) ||
+		!validBalances(*summary) ||
 		!validCurrentState(summary.State) || !validCurrentStrategy(*summary) ||
 		!validPerpsPlanOutcome(*summary) ||
 		!validNextAction(summary.NextAction) || !validDecisionReason(summary.DecisionReason) ||
@@ -843,6 +862,27 @@ func validAccounting(summary CurrentSummary) bool {
 		return false
 	}
 	return summary.RealizedMicros+summary.UnrealizedMicros == result
+}
+
+func validBalances(summary CurrentSummary) bool {
+	if !summary.BalancesTracked {
+		return !hasBalanceEvidence(&summary)
+	}
+	return (summary.Instrument == "" || summary.Instrument == "spot") &&
+		summary.AccountingTracked && validAsset(summary.BaseAsset) &&
+		validAsset(summary.QuoteAsset) && summary.BaseAsset != summary.QuoteAsset &&
+		summary.BaseDecimals <= 18 && summary.QuoteDecimals <= 18 &&
+		summary.Market == summary.BaseAsset+"/"+summary.QuoteAsset
+}
+
+func hasBalanceEvidence(summary *CurrentSummary) bool {
+	if summary == nil {
+		return false
+	}
+	return summary.BalancesTracked || summary.BaseUnits != 0 || summary.BaseDecimals != 0 ||
+		summary.BaseAsset != "" || summary.QuoteUnits != 0 || summary.QuoteDecimals != 0 ||
+		summary.QuoteAsset != "" || summary.LiquidFeeReserveLamports != 0 ||
+		summary.LockedSetupRentLamports != 0
 }
 
 func currentResultMicros(summary CurrentSummary) (int64, bool) {

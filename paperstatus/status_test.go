@@ -326,6 +326,62 @@ func TestVersionNineBindsCurrentPerpsDecisionEvidence(t *testing.T) {
 	}
 }
 
+func TestVersionTenBalanceEvidenceIsSpotOnlyAndBackwardCompatible(t *testing.T) {
+	now := time.Date(2026, 9, 5, 11, 0, 0, 0, time.UTC)
+	summary := CurrentSummary{
+		Market: "SOL/USDC", Instrument: "spot", ValueUnit: "USD",
+		Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+		HoldBenchmarkMicros: 100_000_000, AccountingTracked: true,
+		Checks: 1, State: "watching", Strategy: "fixed",
+		BalancesTracked: true, BaseAsset: "SOL", BaseDecimals: 9,
+		QuoteAsset: "USDC", QuoteDecimals: 6,
+		LiquidFeeReserveLamports: 29_000_000, LockedSetupRentLamports: 3_000_000,
+	}
+	snapshot := Snapshot{
+		Version: Version, ObservedAt: now, Current: "PAPER · Watching", Summary: &summary,
+	}
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("valid zero spot balances: %v", err)
+	}
+	legacy := snapshot
+	legacy.Version = decisionEvidenceVersion
+	if err := ValidateSnapshot(legacy); err == nil {
+		t.Fatal("version nine snapshot accepted version ten balance evidence")
+	}
+	withoutBalances := summary
+	withoutBalances.BalancesTracked = false
+	withoutBalances.BaseAsset, withoutBalances.QuoteAsset = "", ""
+	withoutBalances.BaseDecimals, withoutBalances.QuoteDecimals = 0, 0
+	withoutBalances.LiquidFeeReserveLamports, withoutBalances.LockedSetupRentLamports = 0, 0
+	legacy.Summary = &withoutBalances
+	if err := ValidateSnapshot(legacy); err != nil {
+		t.Fatalf("version nine snapshot without balance evidence: %v", err)
+	}
+	upgradeSnapshot(&legacy)
+	if legacy.Version != Version || legacy.Summary.BalancesTracked || ValidateSnapshot(legacy) != nil {
+		t.Fatalf("upgraded version nine snapshot = %+v", legacy)
+	}
+	for name, mutate := range map[string]func(*CurrentSummary){
+		"untracked field": func(value *CurrentSummary) { value.BalancesTracked = false },
+		"perpetual": func(value *CurrentSummary) {
+			value.Instrument, value.RiskProfile = "perpetual", "balanced"
+			value.PositionDirection, value.LeverageBPS, value.FundingTracked = "flat", 20_000, true
+		},
+		"market mismatch": func(value *CurrentSummary) { value.BaseAsset = "JUP" },
+		"same asset":      func(value *CurrentSummary) { value.QuoteAsset = "SOL" },
+		"decimals":        func(value *CurrentSummary) { value.BaseDecimals = 19 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := summary
+			mutate(&candidate)
+			if err := validateCurrentSummary(&candidate); err == nil {
+				t.Fatal("invalid balance evidence was accepted")
+			}
+		})
+	}
+}
+
 func TestVersionEightLatestCompletedReceiptRemainsReadable(t *testing.T) {
 	now := time.Date(2026, 9, 5, 10, 30, 0, 0, time.UTC)
 	receipt := CompletedSnapshot{
