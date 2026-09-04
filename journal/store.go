@@ -577,6 +577,55 @@ func Verify(path string) (Verification, error) {
 	return result, err
 }
 
+// WithVerification validates a journal and keeps its active-file read lock
+// through action. A cooperating writer therefore cannot start between the
+// verified read and side effects that must describe that exact stopped state.
+func WithVerification(path string, action func(Verification) error) error {
+	if action == nil {
+		return errors.New("journal verification action is required")
+	}
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("journal path must be a clean absolute path")
+	}
+	if err := validateJournalDirectory(filepath.Dir(path)); err != nil {
+		return err
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect journal: %w", err)
+	}
+	if before.Mode()&os.ModeSymlink != 0 {
+		return errors.New("journal path must not be a symlink")
+	}
+	if err := validateJournalFile(before); err != nil {
+		return err
+	}
+	active, err := openReadFile(path)
+	if err != nil {
+		return fmt.Errorf("open journal read-only: %w", err)
+	}
+	defer active.Close()
+	if err := lockReadFile(active); err != nil {
+		return fmt.Errorf("lock journal for verification: %w", err)
+	}
+	opened, err := active.Stat()
+	if err != nil {
+		return fmt.Errorf("stat journal: %w", err)
+	}
+	if !os.SameFile(before, opened) {
+		return errors.New("journal changed while opening")
+	}
+	verified, err := Verify(path)
+	if err != nil {
+		return err
+	}
+	current, err := os.Lstat(path)
+	if err != nil || !os.SameFile(opened, current) {
+		return errors.New("journal path changed while verifying")
+	}
+	return action(verified)
+}
+
 // ReadRecords returns a verified snapshot of an existing journal without
 // creating, repairing, or otherwise changing it. It holds the same shared lock
 // as Verify for the complete read, so the records and verification describe
@@ -600,7 +649,11 @@ func readVerified(path string) ([]Record, Verification, error) {
 	if staged {
 		return nil, Verification{}, errors.New("journal has an incomplete rotation; open it once to complete recovery")
 	}
-	if segments {
+	_, lockErr := os.Lstat(path + lockSuffix)
+	if lockErr != nil && !errors.Is(lockErr, os.ErrNotExist) {
+		return nil, Verification{}, fmt.Errorf("inspect journal lock: %w", lockErr)
+	}
+	if segments || lockErr == nil {
 		return readVerifiedRotated(path)
 	}
 	before, err := os.Lstat(path)
@@ -681,6 +734,14 @@ func readVerifiedRotated(path string) ([]Record, Verification, error) {
 	defer lock.Close()
 	if err := lockReadFile(lock); err != nil {
 		return nil, Verification{}, fmt.Errorf("lock journal for verification: %w", err)
+	}
+	active, err := openReadFile(path)
+	if err != nil {
+		return nil, Verification{}, errors.New("active journal file is missing")
+	}
+	defer active.Close()
+	if err := lockReadFile(active); err != nil {
+		return nil, Verification{}, fmt.Errorf("lock active journal for verification: %w", err)
 	}
 	segments, err := discoverSegments(path)
 	if err != nil {

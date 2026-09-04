@@ -366,6 +366,15 @@ type Diagnostic struct {
 	FailureCounts            map[string]uint64 `json:"failure_counts"`
 }
 
+// ReadyForProvisionalPaperCheck applies the same availability and route-cost
+// gates as a six-hour provisional artifact. It grants no activation authority.
+func (diagnostic Diagnostic) ReadyForProvisionalPaperCheck() bool {
+	return len(provisionalMetricReasons(
+		diagnostic.AvailabilityBPS, diagnostic.AvailableBuckets,
+		diagnostic.MedianRouteCostBPS, diagnostic.P95RouteCostBPS, DefaultThresholds(),
+	)) == 0
+}
+
 // ProvisionalArtifact is a short, current paper-testing checkpoint. It is
 // deliberately a different type from Artifact: six hours can expose broken
 // sources, rate limits, and unusable routes, but it cannot establish long-run
@@ -400,13 +409,15 @@ type ProvisionalArtifact struct {
 // time their absence became known, so a caller cannot turn a missing or
 // rejected observation into a price or move it earlier in the replay.
 type ProvisionalReplayPoint struct {
-	Bucket          time.Time           `json:"bucket"`
-	At              time.Time           `json:"at"`
-	Available       bool                `json:"available"`
-	MarketPrimary   pricetrigger.Sample `json:"market_primary,omitzero"`
-	MarketSecondary pricetrigger.Sample `json:"market_secondary,omitzero"`
-	NativePrimary   pricetrigger.Sample `json:"native_primary,omitzero"`
-	NativeSecondary pricetrigger.Sample `json:"native_secondary,omitzero"`
+	Bucket                     time.Time           `json:"bucket"`
+	At                         time.Time           `json:"at"`
+	Available                  bool                `json:"available"`
+	MarketPrimaryPublishedAt   time.Time           `json:"market_primary_published_at,omitzero"`
+	MarketSecondaryPublishedAt time.Time           `json:"market_secondary_published_at,omitzero"`
+	MarketPrimary              pricetrigger.Sample `json:"market_primary,omitzero"`
+	MarketSecondary            pricetrigger.Sample `json:"market_secondary,omitzero"`
+	NativePrimary              pricetrigger.Sample `json:"native_primary,omitzero"`
+	NativeSecondary            pricetrigger.Sample `json:"native_secondary,omitzero"`
 }
 
 // EvaluateProvisionalJournal derives the most recent six complete hours from
@@ -491,17 +502,29 @@ func evaluateProvisional(
 }
 
 func provisionalReasons(artifact ProvisionalArtifact) []string {
+	return provisionalMetricReasons(
+		artifact.AvailabilityBPS, artifact.AvailableBuckets,
+		artifact.MedianRouteCostBPS, artifact.P95RouteCostBPS, artifact.Thresholds,
+	)
+}
+
+func provisionalMetricReasons(
+	availabilityBPS uint16,
+	availableBuckets uint64,
+	medianRouteCostBPS, p95RouteCostBPS uint16,
+	thresholds Thresholds,
+) []string {
 	var reasons []string
-	if artifact.AvailabilityBPS < ProvisionalMinimumAvailabilityBPS {
+	if availabilityBPS < ProvisionalMinimumAvailabilityBPS {
 		reasons = append(reasons, "six-hour bidirectional availability is below the paper-testing minimum")
 	}
-	if artifact.AvailableBuckets == 0 {
+	if availableBuckets == 0 {
 		reasons = append(reasons, "no complete bidirectional quote evidence is available")
 	} else {
-		if artifact.MedianRouteCostBPS > artifact.Thresholds.MedianRouteCostBPS {
+		if medianRouteCostBPS > thresholds.MedianRouteCostBPS {
 			reasons = append(reasons, "median round-trip route cost exceeds the limit")
 		}
-		if artifact.P95RouteCostBPS > artifact.Thresholds.P95RouteCostBPS {
+		if p95RouteCostBPS > thresholds.P95RouteCostBPS {
 			reasons = append(reasons, "p95 round-trip route cost exceeds the limit")
 		}
 	}
@@ -580,6 +603,8 @@ func (artifact ProvisionalArtifact) ReplayPoints(path string) ([]ProvisionalRepl
 		point := ProvisionalReplayPoint{Bucket: bucket, At: bucket.Add(cadence)}
 		if observation, ok := byBucket[bucket.Unix()]; ok {
 			point.At = observation.ObservedAt.UTC()
+			point.MarketPrimaryPublishedAt, point.MarketSecondaryPublishedAt =
+				replayMarketPublicationTimes(opening, observation)
 			if _, usable := usableObservation(opening, observation); usable {
 				point.Available = true
 				point.MarketPrimary = observation.MarketPrimary.Sample
@@ -591,6 +616,55 @@ func (artifact ProvisionalArtifact) ReplayPoints(path string) ([]ProvisionalRepl
 		points = append(points, point)
 	}
 	return points, nil
+}
+
+// replayMarketPublicationTimes mirrors the live adaptive runner's ordering:
+// quote-currency and market evidence are accepted before native-price and
+// route execution checks. Later failures still consume that source update, so
+// a following bucket cannot reuse the same publication as fresh evidence.
+func replayMarketPublicationTimes(opening Opening, observation Observation) (time.Time, time.Time) {
+	switch observation.Failure {
+	case FailureMintState, FailureMarketPrice, FailureQuotePeg, FailureNativePrice:
+		return time.Time{}, time.Time{}
+	}
+	thresholds := opening.Thresholds
+	usdcSpec := pricesource.PythPushUSDCSpec()
+	if !validPythObservation(
+		observation.USDCPrimary, usdcSpec, pricesource.PythPushUSDCIdentitySHA256(),
+	) {
+		return time.Time{}, time.Time{}
+	}
+	peg := pricetrigger.BandPolicy{
+		Version: pricetrigger.Version, Feed: pricetrigger.FeedUSDCUSD,
+		MinimumMicros:         pricetrigger.USDCBandMinimumMicros,
+		MaximumMicros:         pricetrigger.USDCBandMaximumMicros,
+		MaxAgeSeconds:         uint64(thresholds.MaximumSourceAgeSeconds),
+		MaxSourceSkewSeconds:  uint64(thresholds.MaximumSourceSkewSeconds),
+		MaxDeviationBPS:       thresholds.MaximumSourceDeviationBPS,
+		MaxConfidenceBPS:      thresholds.MaximumConfidenceBPS,
+		PrimarySourceSHA256:   pricesource.PythPushUSDCIdentitySHA256(),
+		SecondarySourceSHA256: pricesource.KrakenIdentitySHA256(),
+	}
+	pegEvidence, err := pricetrigger.EvaluateBand(
+		peg, observation.USDCPrimary.Sample, observation.USDCSecondary, observation.ObservedAt,
+	)
+	if err != nil || !pegEvidence.InBand {
+		return time.Time{}, time.Time{}
+	}
+	marketPrimary, err := opening.Candidate.Pyth.IdentitySHA256()
+	if err != nil || !validPythObservation(
+		observation.MarketPrimary, opening.Candidate.Pyth, marketPrimary,
+	) || pricetrigger.ValidateObservation(
+		observationPolicy(
+			opening.Candidate.Pyth.Feed, marketPrimary,
+			mustIdentity(opening.Candidate.Kraken.IdentitySHA256()), thresholds,
+		),
+		observation.MarketPrimary.Sample, observation.MarketSecondary, observation.ObservedAt,
+	) != nil {
+		return time.Time{}, time.Time{}
+	}
+	return observation.MarketPrimary.Sample.PublishedAt.UTC(),
+		observation.MarketSecondary.PublishedAt.UTC()
 }
 
 func (artifact ProvisionalArtifact) verifiedJournal(path string) (Opening, []Observation, error) {

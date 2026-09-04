@@ -17,8 +17,12 @@ func TestDashboardSeparatesLiveSpotAccountFromPerpsResearch(t *testing.T) {
 	}
 	for _, want := range []string{
 		`metric('Live spot account'`,
-		`filter(market=>!market.optional)`,
-		`filter(market=>market.optional)`,
+		`filter(market=>!isPerps(market)&&(!market.optional||market.available))`,
+		`filter(isPerps)`,
+		`market.optional&&!isPerps(market)`,
+		`!m.completed&&m.available&&m.ready&&m.fresh`,
+		`Completed paper run`,
+		`view.unavailable||!m.ready||m.completed`,
 		`Completed experiment`,
 		`Completed perps research is not included.`,
 	} {

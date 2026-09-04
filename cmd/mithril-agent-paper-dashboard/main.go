@@ -20,7 +20,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 )
 
-const usage = "Usage: mithril-agent-paper-dashboard --paper-status-socket MARKET=/absolute/path [--optional-paper-status-socket MARKET=/absolute/path] [--instruction-path /absolute/path] [--research-packet-path /absolute/path] [--mithril-evidence-status-path /absolute/path]\n       mithril-agent-paper-dashboard --render-perps-research MARKET=/absolute/path --render-perps-research MARKET=/absolute/path --render-perps-research MARKET=/absolute/path"
+const usage = "Usage: mithril-agent-paper-dashboard --paper-status-socket MARKET=/absolute/path [--optional-paper-status-socket MARKET=/absolute/path] [--instruction-path /absolute/path] [--research-packet-path /absolute/path] [--mithril-evidence-status-path /absolute/path] [--market-admission-status-path /absolute/path]\n       mithril-agent-paper-dashboard --render-perps-research MARKET=/absolute/path --render-perps-research MARKET=/absolute/path --render-perps-research MARKET=/absolute/path\n       mithril-agent-paper-dashboard --record-market-admission /absolute/path"
 
 var activatedListener = systemdUnixListener
 
@@ -44,13 +44,15 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("mithril-agent-paper-dashboard", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var sockets, optionalSockets, perpsResearchPaths socketPaths
-	var instructionPath, researchPath, mithrilEvidencePath, recordMithrilPath, mithrilStatus, renderInstructionPath, exportInstructionPath string
+	var instructionPath, researchPath, mithrilEvidencePath, marketAdmissionPath, recordMarketAdmissionPath, recordMithrilPath, mithrilStatus, renderInstructionPath, exportInstructionPath string
 	flags.Var(&sockets, "paper-status-socket", "MARKET=/absolute/path to a bounded paper status socket")
 	flags.Var(&optionalSockets, "optional-paper-status-socket", "MARKET=/absolute/path for a bounded experiment that may expire")
 	flags.Var(&perpsResearchPaths, "render-perps-research", "MARKET=/absolute/path to a completed perps paper status")
 	flags.StringVar(&instructionPath, "instruction-path", "", "private path for a bounded paper research preference")
 	flags.StringVar(&researchPath, "research-packet-path", "", "private path for the latest validated Hermes packet")
 	flags.StringVar(&mithrilEvidencePath, "mithril-evidence-status-path", "", "private status from the latest Hermes Mithril evidence check")
+	flags.StringVar(&marketAdmissionPath, "market-admission-status-path", "", "private WIF, JTO, and PYTH collection projection")
+	flags.StringVar(&recordMarketAdmissionPath, "record-market-admission", "", "atomically record the three fixed market collector credentials")
 	flags.StringVar(&recordMithrilPath, "record-mithril-evidence", "", "atomically record the latest Mithril evidence check")
 	flags.StringVar(&mithrilStatus, "mithril-evidence", "", "current or unavailable")
 	flags.StringVar(&renderInstructionPath, "render-instruction", "", "render a validated preference for the Hermes research prompt")
@@ -64,7 +66,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	}
 	if len(perpsResearchPaths) != 0 {
 		if flags.NArg() != 0 || len(sockets) != 0 || len(optionalSockets) != 0 ||
-			instructionPath != "" || researchPath != "" || mithrilEvidencePath != "" ||
+			instructionPath != "" || researchPath != "" || mithrilEvidencePath != "" || marketAdmissionPath != "" || recordMarketAdmissionPath != "" ||
 			recordMithrilPath != "" || mithrilStatus != "" || renderInstructionPath != "" ||
 			exportInstructionPath != "" {
 			return errors.New("--render-perps-research requires exactly three paper status paths and no other mode")
@@ -80,9 +82,20 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		_, err = output.Write(encoded)
 		return err
 	}
+	if recordMarketAdmissionPath != "" {
+		if flags.NArg() != 0 || len(sockets) != 0 || len(optionalSockets) != 0 || len(perpsResearchPaths) != 0 ||
+			instructionPath != "" || researchPath != "" || mithrilEvidencePath != "" || marketAdmissionPath != "" ||
+			recordMithrilPath != "" || mithrilStatus != "" || renderInstructionPath != "" || exportInstructionPath != "" ||
+			!cleanAbsolutePath(recordMarketAdmissionPath) {
+			return errors.New("--record-market-admission requires one clean absolute path and no other mode")
+		}
+		return paperdashboard.RecordMarketAdmission(
+			recordMarketAdmissionPath, os.Getenv("CREDENTIALS_DIRECTORY"), time.Now(),
+		)
+	}
 	if recordMithrilPath != "" {
 		if flags.NArg() != 0 || len(sockets) != 0 || len(optionalSockets) != 0 || instructionPath != "" || researchPath != "" ||
-			mithrilEvidencePath != "" || renderInstructionPath != "" || exportInstructionPath != "" ||
+			mithrilEvidencePath != "" || marketAdmissionPath != "" || renderInstructionPath != "" || exportInstructionPath != "" ||
 			!cleanAbsolutePath(recordMithrilPath) ||
 			(mithrilStatus != "current" && mithrilStatus != "unavailable") {
 			return errors.New("--record-mithril-evidence requires one path and current or unavailable")
@@ -92,7 +105,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		)
 	}
 	if renderInstructionPath != "" {
-		if flags.NArg() != 0 || len(sockets) != 0 || len(optionalSockets) != 0 || instructionPath != "" || researchPath != "" || mithrilEvidencePath != "" || mithrilStatus != "" ||
+		if flags.NArg() != 0 || len(sockets) != 0 || len(optionalSockets) != 0 || instructionPath != "" || researchPath != "" || mithrilEvidencePath != "" || marketAdmissionPath != "" || mithrilStatus != "" ||
 			exportInstructionPath != "" ||
 			!cleanAbsolutePath(renderInstructionPath) {
 			return errors.New("--render-instruction requires one clean absolute path and no server flags")
@@ -105,7 +118,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		return err
 	}
 	if exportInstructionPath != "" {
-		if flags.NArg() != 0 || len(sockets) != 0 || len(optionalSockets) != 0 || instructionPath != "" || researchPath != "" || mithrilEvidencePath != "" || mithrilStatus != "" ||
+		if flags.NArg() != 0 || len(sockets) != 0 || len(optionalSockets) != 0 || instructionPath != "" || researchPath != "" || mithrilEvidencePath != "" || marketAdmissionPath != "" || mithrilStatus != "" ||
 			!cleanAbsolutePath(exportInstructionPath) {
 			return errors.New("--export-instruction requires one clean absolute path and no server flags")
 		}
@@ -119,7 +132,8 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	if flags.NArg() != 0 || len(sockets) == 0 ||
 		(instructionPath != "" && !cleanAbsolutePath(instructionPath)) ||
 		(researchPath != "" && !cleanAbsolutePath(researchPath)) ||
-		(mithrilEvidencePath != "" && !cleanAbsolutePath(mithrilEvidencePath)) || mithrilStatus != "" {
+		(mithrilEvidencePath != "" && !cleanAbsolutePath(mithrilEvidencePath)) ||
+		(marketAdmissionPath != "" && !cleanAbsolutePath(marketAdmissionPath)) || mithrilStatus != "" {
 		return errors.New("at least one --paper-status-socket is required")
 	}
 	for _, optional := range optionalSockets {
@@ -160,6 +174,11 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	}
 	if mithrilEvidencePath != "" {
 		if err := handler.EnableMithrilEvidence(mithrilEvidencePath); err != nil {
+			return err
+		}
+	}
+	if marketAdmissionPath != "" {
+		if err := handler.EnableMarketAdmission(marketAdmissionPath); err != nil {
 			return err
 		}
 	}

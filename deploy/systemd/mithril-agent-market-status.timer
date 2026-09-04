@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Mithril market-admission dashboard status every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00 UTC
+Persistent=true
+AccuracySec=1s
+Unit=mithril-agent-market-status.service
+
+[Install]
+WantedBy=timers.target

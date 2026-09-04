@@ -58,6 +58,7 @@ type Server struct {
 	instructionPath     string
 	researchPath        string
 	mithrilEvidencePath string
+	marketAdmissionPath string
 	now                 func() time.Time
 	mu                  sync.Mutex
 	cached              View
@@ -83,6 +84,9 @@ type View struct {
 	MithrilEvidenceEnabled  bool             `json:"mithril_evidence_enabled"`
 	MithrilEvidence         *MithrilEvidence `json:"mithril_evidence,omitempty"`
 	MithrilEvidenceError    bool             `json:"mithril_evidence_error,omitempty"`
+	MarketResearchEnabled   bool             `json:"market_research_enabled"`
+	MarketResearch          []MarketResearch `json:"market_research,omitempty"`
+	MarketResearchError     bool             `json:"market_research_error,omitempty"`
 	ResearchMarkets         []string         `json:"research_markets"`
 	// ActivityOmitted counts older bounded status events plus events removed by
 	// the dashboard's own combined-list cap.
@@ -109,6 +113,7 @@ type Overview struct {
 type Market struct {
 	Name                          string             `json:"name"`
 	Optional                      bool               `json:"optional,omitempty"`
+	Completed                     bool               `json:"completed,omitempty"`
 	Instrument                    string             `json:"instrument,omitempty"`
 	RiskProfile                   string             `json:"risk_profile,omitempty"`
 	PositionDirection             string             `json:"position_direction,omitempty"`
@@ -329,6 +334,7 @@ func (s *Server) readSnapshot(now time.Time) View {
 		InstructionsEnabled:    s.instructionPath != "",
 		ResearchEnabled:        s.researchPath != "",
 		MithrilEvidenceEnabled: s.mithrilEvidencePath != "",
+		MarketResearchEnabled:  s.marketAdmissionPath != "",
 		ResearchMarkets:        marketadmission.Markets(),
 		Markets:                make([]Market, 0, len(s.sources)), Activity: make([]Activity, 0),
 	}
@@ -357,6 +363,14 @@ func (s *Server) readSnapshot(now time.Time) View {
 			view.MithrilEvidenceError = true
 		}
 	}
+	if s.marketAdmissionPath != "" {
+		markets, err := readMarketAdmission(s.marketAdmissionPath, now)
+		if err == nil {
+			view.MarketResearch = markets
+		} else if !errors.Is(err, os.ErrNotExist) {
+			view.MarketResearchError = true
+		}
+	}
 	minimumCoverage := uint64(10_000)
 	coverageReady := true
 	activeInstructions := make(map[string]struct{})
@@ -381,7 +395,9 @@ func (s *Server) readSnapshot(now time.Time) View {
 				view.Complete = false
 				coverageReady = false
 			}
-			view.Markets = append(view.Markets, Market{Name: label, Optional: optional, Available: true})
+			market := marketView(label, snapshot, now)
+			market.Optional = optional
+			view.Markets = append(view.Markets, market)
 			continue
 		}
 		if snapshot.Summary != nil && snapshot.Summary.Market != label {
@@ -470,6 +486,9 @@ func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Mark
 		Name: label, ObservedAt: &observedAt, Available: true,
 		Current: snapshot.Current, History: make([]PerformancePoint, 0, len(snapshot.History)),
 	}
+	if len(snapshot.Events) != 0 && snapshot.Events[len(snapshot.Events)-1].Kind == paperstatus.KindExperimentDone {
+		market.Completed = true
+	}
 	for _, point := range snapshot.History {
 		market.History = append(market.History, PerformancePoint{
 			At: point.At, PriceMicros: point.PriceMicros, EquityMicros: point.EquityMicros,
@@ -479,12 +498,13 @@ func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Mark
 		})
 	}
 	if summary := snapshot.Summary; summary != nil {
+		market.Completed = market.Completed || summary.State == "completed"
 		market.Ready = summary.ValueUnit != ""
 		market.Instrument = summary.Instrument
 		market.RiskProfile = summary.RiskProfile
 		market.PositionDirection = summary.PositionDirection
 		market.LeverageBPS = summary.LeverageBPS
-		market.Fresh = market.Ready && summary.State != "waiting for data" &&
+		market.Fresh = market.Ready && summary.State != "waiting for data" && summary.State != "completed" &&
 			summary.Day == now.UTC().Format("2006-01-02") && fresh(snapshot, now)
 		market.Day = summary.Day
 		market.ValueUnit = summary.ValueUnit

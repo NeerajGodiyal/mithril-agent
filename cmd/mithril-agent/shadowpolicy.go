@@ -572,15 +572,19 @@ func shadowRunHint(
 	path, admissionArtifact, admissionJournal, provisionalArtifact, provisionalJournal string,
 ) string {
 	if policy.Cluster == shadow.Mainnet {
+		if policy.Version == shadow.AdmittedVersion &&
+			policy.MarketEvidenceClass == shadow.MarketEvidenceDevelopmentProvisional {
+			return fmt.Sprintf("Check this base policy before running it:\n"+
+				"  mithril-agent shadow market paper-check --policy %s --provisional-artifact %s --journal %s --result-out PAPER_CHECK --candidate-policy-out CHECKED_POLICY\n\n"+
+				"Run only the checked policy with:\n"+
+				"  mithril-agent shadow run --policy CHECKED_POLICY --dir DIR --portfolio PORTFOLIO --portfolio-book BOOK --provisional-artifact %s --provisional-journal %s --paper-check-artifact PAPER_CHECK",
+				path, provisionalArtifact, provisionalJournal,
+				provisionalArtifact, provisionalJournal)
+		}
 		admission := ""
 		if policy.Version == shadow.AdmittedVersion {
-			if policy.MarketEvidenceClass == shadow.MarketEvidenceDevelopmentProvisional {
-				admission = fmt.Sprintf(" --provisional-artifact %s --provisional-journal %s",
-					provisionalArtifact, provisionalJournal)
-			} else {
-				admission = fmt.Sprintf(" --admission-artifact %s --admission-journal %s",
-					admissionArtifact, admissionJournal)
-			}
+			admission = fmt.Sprintf(" --admission-artifact %s --admission-journal %s",
+				admissionArtifact, admissionJournal)
 		}
 		portfolio := ""
 		if policy.Version == shadow.AdmittedVersion {

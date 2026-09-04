@@ -182,7 +182,7 @@ func TestLiveReadyProvisionalPolicyRunsAndResumes(t *testing.T) {
 		t.Skip("set MITHRIL_AGENT_LIVE_PRICE_TEST=1 and MITHRIL_AGENT_LIVE_SOLANA_RPC")
 	}
 	t.Setenv(shadowEndpointEnvironment, endpoint)
-	artifactPath, evidenceJournal, _ := writeReadyProvisionalEvidence(t)
+	artifactPath, evidenceJournal, _ := writePassingProvisionalEvidence(t)
 	candidate, _ := marketadmission.Lookup(marketadmission.MarketWIFUSDC)
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -204,23 +204,38 @@ func TestLiveReadyProvisionalPolicyRunsAndResumes(t *testing.T) {
 	}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
-	policy, err := loadActiveShadowPolicy(policyPath)
-	if err != nil || policy.MarketEvidenceClass != shadow.MarketEvidenceDevelopmentProvisional {
-		t.Fatalf("generated provisional policy = %+v, %v", policy, err)
+	basePolicy, err := loadActiveShadowPolicy(policyPath)
+	if err != nil || basePolicy.MarketEvidenceClass != shadow.MarketEvidenceDevelopmentProvisional {
+		t.Fatalf("generated provisional policy = %+v, %v", basePolicy, err)
+	}
+	checkedPolicyPath := filepath.Join(root, "wif-checked-policy.json")
+	paperCheckPath := filepath.Join(root, "wif-paper-check.json")
+	if err := runShadowMarketPaperCheck([]string{
+		"--policy", policyPath,
+		"--provisional-artifact", artifactPath,
+		"--journal", evidenceJournal,
+		"--result-out", paperCheckPath,
+		"--candidate-policy-out", checkedPolicyPath,
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadActiveShadowPolicy(checkedPolicyPath); err != nil {
+		t.Fatal(err)
 	}
 	portfolioPath := filepath.Join(root, "portfolio.json")
 	if err := runShadowPortfolio([]string{
 		"--out", portfolioPath, "--limit-usd", "1000", "--max-sol-usd", "1000",
-		"--book", "wif=" + policyPath,
+		"--book", "wif=" + checkedPolicyPath,
 	}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	runDir, statusPath := filepath.Join(root, "journal"), filepath.Join(root, "status.json")
 	args := []string{
-		"--policy", policyPath, "--dir", runDir,
+		"--policy", checkedPolicyPath, "--dir", runDir,
 		"--portfolio", portfolioPath, "--portfolio-book", "wif",
 		"--provisional-artifact", artifactPath,
 		"--provisional-journal", evidenceJournal,
+		"--paper-check-artifact", paperCheckPath,
 		"--alert-status", statusPath, "--once",
 	}
 	for invocation := range 2 {
@@ -350,6 +365,21 @@ func TestMarketEvidenceClassIsValidatedAndFingerprinted(t *testing.T) {
 }
 
 func writeReadyProvisionalEvidence(t *testing.T) (string, string, time.Time) {
+	return writeProvisionalEvidence(t, 18, nil)
+}
+
+func writePassingProvisionalEvidence(t *testing.T) (string, string, time.Time) {
+	prices := []uint64{200_000, 200_000, 196_000, 196_000, 204_000, 204_000, 200_000, 200_000}
+	return writeProvisionalEvidence(t, 0, func(index int) uint64 {
+		return prices[index%len(prices)]
+	})
+}
+
+func writeProvisionalEvidence(
+	t *testing.T,
+	missingMinutes int,
+	priceAt func(int) uint64,
+) (string, string, time.Time) {
 	t.Helper()
 	directory := t.TempDir()
 	journalPath := filepath.Join(directory, "provisional.jsonl")
@@ -371,8 +401,14 @@ func writeReadyProvisionalEvidence(t *testing.T) (string, string, time.Time) {
 	}
 	marketPrimary, _ := candidate.Pyth.IdentitySHA256()
 	marketSecondary, _ := candidate.Kraken.IdentitySHA256()
-	for bucket := through.Add(-6*time.Hour + 18*time.Minute); bucket.Before(through); bucket = bucket.Add(time.Minute) {
+	index := 0
+	for bucket := through.Add(-6*time.Hour + time.Duration(missingMinutes)*time.Minute); bucket.Before(through); bucket = bucket.Add(time.Minute) {
 		observed := bucket.Add(time.Second)
+		price := uint64(200_000)
+		if priceAt != nil {
+			price = priceAt(index)
+		}
+		index++
 		observation := marketadmission.Observation{
 			Version: marketadmission.Version, OpeningSHA256: opening.ContentSHA256,
 			Bucket: bucket, ObservedAt: observed,
@@ -381,9 +417,9 @@ func writeReadyProvisionalEvidence(t *testing.T) (string, string, time.Time) {
 				Decimals: candidate.BaseDecimals, ContextSlot: 100,
 				DataSHA256: strings.Repeat("d", 64),
 			},
-			MarketPrimary: provisionalPythSample(candidate.Pyth, marketPrimary, 200_000, observed),
+			MarketPrimary: provisionalPythSample(candidate.Pyth, marketPrimary, price, observed),
 			MarketSecondary: provisionalSample(
-				marketSecondary, candidate.Pyth.Feed, 200_000, observed,
+				marketSecondary, candidate.Pyth.Feed, price, observed,
 			),
 			USDCPrimary: provisionalPythSample(
 				pricesource.PythPushUSDCSpec(), pricesource.PythPushUSDCIdentitySHA256(),
@@ -430,7 +466,7 @@ func writeReadyProvisionalEvidence(t *testing.T) (string, string, time.Time) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !artifact.ProvisionalPaperReady || artifact.AvailableBuckets != 342 {
+	if !artifact.ProvisionalPaperReady || artifact.AvailableBuckets != uint64(360-missingMinutes) {
 		t.Fatalf("provisional artifact is not ready: %+v", artifact)
 	}
 	encoded, err := json.Marshal(artifact)
@@ -500,6 +536,178 @@ func TestMarketAdmissionJournalCannotChangeItsOpening(t *testing.T) {
 	if _, err := prepareMarketAdmissionJournal(store, otherOpening, time.Now()); err == nil ||
 		!strings.Contains(err.Error(), "another opening") {
 		t.Fatalf("expected market mismatch, got %v", err)
+	}
+}
+
+func TestMarketDashboardStatusPathMustBeTheJournalSibling(t *testing.T) {
+	directory := t.TempDir()
+	journalPath := filepath.Join(directory, "admission.jsonl")
+	want := filepath.Join(directory, "dashboard-status.json")
+	if err := validateMarketDashboardStatusPath("", journalPath); err != nil {
+		t.Fatalf("optional dashboard status was rejected: %v", err)
+	}
+	if err := validateMarketDashboardStatusPath(want, journalPath); err != nil {
+		t.Fatalf("dashboard status sibling was rejected: %v", err)
+	}
+	for _, path := range []string{
+		"dashboard-status.json",
+		filepath.Join(directory, "status.json"),
+		filepath.Join(directory, "nested", "dashboard-status.json"),
+		directory + "/nested/../dashboard-status.json",
+	} {
+		if err := validateMarketDashboardStatusPath(path, journalPath); err == nil {
+			t.Fatalf("non-sibling dashboard status was accepted: %q", path)
+		}
+	}
+	if err := validateMarketDashboardStatusPath(want, want); err == nil {
+		t.Fatal("dashboard status was allowed to replace its journal")
+	}
+}
+
+func TestMarketCollectWiresTheStrictDashboardStatusFlag(t *testing.T) {
+	directory := t.TempDir()
+	err := runShadowMarketCollect(t.Context(), []string{
+		"--market", marketadmission.MarketWIFUSDC,
+		"--observe", "11111111111111111111111111111111",
+		"--journal", filepath.Join(directory, "admission.jsonl"),
+		"--dashboard-status", filepath.Join(directory, "status.json"),
+		"--once",
+	}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "journal sibling dashboard-status.json") {
+		t.Fatalf("non-sibling collector dashboard status error = %v", err)
+	}
+}
+
+func TestMarketCollectorStatusStartsMissingAndUpdatesAfterAppend(t *testing.T) {
+	directory := t.TempDir()
+	journalPath := filepath.Join(directory, "admission.jsonl")
+	statusPath := filepath.Join(directory, "dashboard-status.json")
+	candidate, _ := marketadmission.Lookup(marketadmission.MarketWIFUSDC)
+	opening, err := marketadmission.NewOpening(
+		candidate, "11111111111111111111111111111111", marketadmission.DefaultThresholds(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.September, 4, 12, 34, 45, 0, time.UTC)
+	store, err := journal.OpenRotating(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := prepareMarketAdmissionJournal(store, opening, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	tracker, err := marketadmission.NewDiagnosticTracker(opening, store.Records(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarketDashboardStatus(statusPath, tracker, now); err != nil {
+		t.Fatal(err)
+	}
+	initialRaw, err := os.ReadFile(statusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := marketadmission.LoadDashboardStatus(initialRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initial.Diagnostic.ObservedBuckets != 0 ||
+		initial.Diagnostic.FailureCounts["missing_bucket"] != 360 {
+		t.Fatalf("initial dashboard status = %+v", initial)
+	}
+
+	bucket := now.Truncate(time.Minute).Add(-time.Minute)
+	observation := marketadmission.Observation{
+		Version: marketadmission.Version, OpeningSHA256: opening.ContentSHA256,
+		Bucket: bucket, ObservedAt: bucket.Add(time.Second),
+		Failure: marketadmission.FailureBuyQuote,
+	}
+	if err := observation.Validate(opening); err != nil {
+		t.Fatal(err)
+	}
+	updatedAt := now.Add(5 * time.Second)
+	if err := appendMarketAdmissionObservation(
+		store, observation, tracker, statusPath, updatedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	updatedRaw, err := os.ReadFile(statusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := marketadmission.LoadDashboardStatus(updatedRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.UpdatedAt != updatedAt || updated.Diagnostic.ObservedBuckets != 1 ||
+		updated.Diagnostic.AvailableBuckets != 0 ||
+		updated.Diagnostic.FailureCounts[marketadmission.FailureBuyQuote] != 1 ||
+		updated.Diagnostic.FailureCounts["missing_bucket"] != 359 ||
+		bytes.Equal(initialRaw, updatedRaw) {
+		t.Fatalf("updated dashboard status = %+v", updated)
+	}
+	info, err := os.Stat(statusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("dashboard status mode = %o", info.Mode().Perm())
+	}
+	withCheck, err := updated.WithPaperCheck(marketadmission.DashboardPaperCheck{
+		Market: updated.Market, CheckedAt: updated.Diagnostic.Through.Add(time.Minute),
+		Through:             updated.Diagnostic.Through,
+		Outcome:             marketadmission.DashboardPaperOutcomeInsufficientEvidence,
+		TrainingCoverageBPS: 9_000, HoldoutCoverageBPS: 10_000,
+		Reasons: []string{"training_coverage_below_95_percent"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withCheckRaw, err := json.Marshal(withCheck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statusPath, withCheckRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarketDashboardStatus(statusPath, tracker, updatedAt.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	preservedRaw, err := os.ReadFile(statusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preserved, err := marketadmission.LoadDashboardStatus(preservedRaw)
+	if err != nil || preserved.PaperCheck == nil ||
+		preserved.PaperCheck.Outcome != marketadmission.DashboardPaperOutcomeInsufficientEvidence {
+		t.Fatalf("preserved paper check = %+v, %v", preserved.PaperCheck, err)
+	}
+	preserved.PaperCheck.Market = marketadmission.MarketJTOUSDC
+	invalidRaw, err := json.Marshal(preserved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statusPath, invalidRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMarketDashboardStatus(statusPath, tracker, updatedAt.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	clearedRaw, err := os.ReadFile(statusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := marketadmission.LoadDashboardStatus(clearedRaw)
+	if err != nil || cleared.PaperCheck != nil {
+		t.Fatalf("invalid paper check was preserved: %+v, %v", cleared.PaperCheck, err)
+	}
+}
+
+func TestMarketCollectorWithoutDashboardStatusCreatesNothing(t *testing.T) {
+	if err := writeMarketDashboardStatus("", nil, time.Time{}); err != nil {
+		t.Fatalf("omitted dashboard status was not a no-op: %v", err)
 	}
 }
 

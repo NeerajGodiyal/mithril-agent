@@ -1,0 +1,18 @@
+[Unit]
+Description=Mithril bounded %I provisional market paper status socket
+After=mithril-agent-market-paper@%i.service
+
+[Socket]
+ListenStream=/run/mithril-agent-market-%i-paper-status.sock
+SocketUser=root
+SocketGroup=mithril-agent-status
+SocketMode=0660
+FileDescriptorName=paper-status
+Service=mithril-agent-market-paper-status-bridge@%i.service
+Accept=no
+Backlog=8
+FlushPending=no
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

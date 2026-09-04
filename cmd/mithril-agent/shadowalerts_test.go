@@ -410,7 +410,7 @@ func TestStrategyActivationReturnsAfterACleanSameDayStop(t *testing.T) {
 		t.Fatalf("activation snapshot=%+v err=%v", snapshot, err)
 	}
 	if snapshot.Events[0].Kind != paperstatus.KindStrategyActive ||
-		snapshot.Events[1].Kind != paperstatus.KindPeriodClosed ||
+		snapshot.Events[1].Kind != paperstatus.KindExperimentDone ||
 		snapshot.Events[2].Kind != paperstatus.KindStrategyActive {
 		t.Fatalf("same-day activation lifecycle = %+v", snapshot.Events)
 	}
@@ -970,13 +970,15 @@ func TestPartialAndCompletePeriodReportsHaveDistinctAlerts(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(snapshot.Events) != 2 ||
+		snapshot.Events[0].Kind != paperstatus.KindExperimentDone ||
+		snapshot.Events[1].Kind != paperstatus.KindPeriodClosed ||
 		snapshot.Events[0].Message != "PAPER · ⚠️ STOPPED\nPaper gain/loss: unchanged · same as holding · 0 filled paper orders\nNot enough price information · 0.00% available" ||
 		snapshot.Events[1].Message != "PAPER · ⚠️ DAY FINISHED\nPaper gain/loss: unchanged · same as holding · 0 filled paper orders\nNot enough price information · 0.00% available" {
 		t.Fatalf("period alerts = %+v", snapshot.Events)
 	}
 }
 
-func TestMainnetDayAlertShowsTrustworthyPnLAndCoverage(t *testing.T) {
+func TestStoppedPaperAlertShowsTrustworthyPnLAndCoverage(t *testing.T) {
 	directory, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -993,9 +995,11 @@ func TestMainnetDayAlertShowsTrustworthyPnLAndCoverage(t *testing.T) {
 	from := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
 	report := shadow.Report{
 		Cluster: shadow.Mainnet, EvaluationMode: shadow.EvaluationResetDaily,
-		From: from, To: from.Add(24 * time.Hour), Counts: shadow.Counts{Ticks: 100, Fills: 3, Filtered: 2, Missed: 1},
+		From: from, To: from.Add(6 * time.Hour), Counts: shadow.Counts{Ticks: 100, Signals: 4, Fills: 3, Filtered: 2, Missed: 1},
 		OpeningEquityMicros: 10_000_000, ClosingEquityMicros: 10_800_000,
-		VersusHoldMicros: 200_000, ExpectedTicks: 100, ObservableBPS: 10_000,
+		RealizedMicros: 800_000, HoldBenchmarkMicros: 10_600_000,
+		ClosingPriceMicros: 200_000_000,
+		VersusHoldMicros:   200_000, ExpectedTicks: 100, ObservableBPS: 10_000,
 		QuotePegMinimumMicros: pricetrigger.USDCBandMinimumMicros,
 		QuotePegMaximumMicros: pricetrigger.USDCBandMaximumMicros,
 	}
@@ -1010,10 +1014,136 @@ func TestMainnetDayAlertShowsTrustworthyPnLAndCoverage(t *testing.T) {
 	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 1 {
 		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
-	want := "PAPER · 📊 DAY FINISHED\nPaper gain/loss: up $0.8 · $0.2 better than holding · 3 filled paper orders\n" +
+	want := "PAPER · 📊 STOPPED\nPaper gain/loss: up $0.8 · $0.2 better than holding · 3 filled paper orders\n" +
 		"Price information available: 100.00%"
-	if snapshot.Events[0].Message != want {
+	if snapshot.Events[0].Kind != paperstatus.KindExperimentDone || snapshot.Events[0].Message != want {
 		t.Fatalf("day alert = %q, want %q", snapshot.Events[0].Message, want)
+	}
+	if snapshot.Summary == nil || snapshot.Summary.State != "completed" ||
+		snapshot.Summary.EquityMicros != report.ClosingEquityMicros ||
+		snapshot.Current != want {
+		t.Fatalf("terminal paper status = %+v", snapshot)
+	}
+}
+
+func TestCompleteUTCReportDoesNotSeedTheNextDayHistory(t *testing.T) {
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := paperstatus.OpenWriter(filepath.Join(directory, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := validShadowPolicy()
+	run := shadowRun{policy: policy, policySHA256: strings.Repeat("c", 64), alerts: writer}
+	from := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+	prior := &paperstatus.CurrentSummary{
+		Market: shadowMarketPair(policy), ValueUnit: paperValueUnit(policy),
+		Day: from.Format("2006-01-02"), TickSeconds: policy.TickSeconds,
+		OpeningEquityMicros: 10_000_000, EquityMicros: 10_700_000,
+		HoldBenchmarkMicros: 10_500_000, AccountingTracked: true,
+		RealizedMicros: 700_000, Checks: 99, Signals: 4, Trades: 3,
+		PriceMicros: 199_000_000, State: "watching", Strategy: "fixed",
+	}
+	if err := writer.UpdateCurrentSummary(from.Add(23*time.Hour), "PAPER · Watching market", prior); err != nil {
+		t.Fatal(err)
+	}
+	report := shadow.Report{
+		From: from, To: from.Add(24 * time.Hour),
+		Counts:              shadow.Counts{Ticks: 100, Signals: 4, Fills: 3},
+		OpeningEquityMicros: 10_000_000, ClosingEquityMicros: 10_800_000,
+		RealizedMicros: 800_000, HoldBenchmarkMicros: 10_600_000,
+		ClosingPriceMicros: 200_000_000,
+	}
+	if err := run.alertReport(report); err != nil {
+		t.Fatal(err)
+	}
+	var closed paperstatus.Snapshot
+	raw, err := os.ReadFile(filepath.Join(directory, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &closed); err != nil || closed.Summary != nil || len(closed.History) != 1 {
+		t.Fatalf("full-day terminal status = %+v, %v", closed, err)
+	}
+	nextAt := report.To.Add(time.Minute)
+	next := &paperstatus.CurrentSummary{
+		Market: shadowMarketPair(policy), ValueUnit: paperValueUnit(policy),
+		Day: report.To.Format("2006-01-02"), TickSeconds: policy.TickSeconds,
+		OpeningEquityMicros: 20_000_000, EquityMicros: 20_000_000,
+		HoldBenchmarkMicros: 20_000_000, AccountingTracked: true,
+		Checks: 1, PriceMicros: 200_000_000, State: "warming", Strategy: "fixed",
+	}
+	if err := writer.UpdateCurrentSummary(nextAt, "PAPER · Learning recent prices", next); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(filepath.Join(directory, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restarted paperstatus.Snapshot
+	if err := json.Unmarshal(raw, &restarted); err != nil || len(restarted.History) != 1 ||
+		!restarted.History[0].At.Equal(nextAt) || restarted.History[0].EquityMicros != next.EquityMicros {
+		t.Fatalf("next-day history = %+v, %v", restarted.History, err)
+	}
+}
+
+func TestProvisionalUTCReportEndsAsACompletedExperiment(t *testing.T) {
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := paperstatus.OpenWriter(filepath.Join(directory, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := validShadowPolicy()
+	policy.Version = shadow.AdmittedVersion
+	policy.Market = shadow.MarketWIFUSDC
+	policy.MarketEvidenceSHA256 = strings.Repeat("d", 64)
+	policy.MarketEvidenceClass = shadow.MarketEvidenceDevelopmentProvisional
+	run := shadowRun{policy: policy, policySHA256: strings.Repeat("c", 64), alerts: writer}
+	from := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+	report := shadow.Report{
+		From: from, To: from.Add(24 * time.Hour),
+		Counts:              shadow.Counts{Ticks: 100, Signals: 4, Fills: 3},
+		OpeningEquityMicros: 10_000_000, ClosingEquityMicros: 10_800_000,
+		RealizedMicros: 800_000, HoldBenchmarkMicros: 10_600_000,
+		ClosingPriceMicros: 220_000,
+	}
+	if err := run.alertReport(report); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(directory, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot paperstatus.Snapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 1 ||
+		snapshot.Events[0].Kind != paperstatus.KindExperimentDone || snapshot.Summary == nil ||
+		snapshot.Summary.State != "completed" || snapshot.Summary.Day != from.Format("2006-01-02") ||
+		len(snapshot.History) != 1 || !snapshot.History[0].At.Equal(report.To.Add(-time.Nanosecond)) {
+		t.Fatalf("provisional terminal snapshot = %+v, %v", snapshot, err)
+	}
+	unavailableFrom := from.Add(48 * time.Hour)
+	if err := run.alertUnavailableReport(unavailableFrom, unavailableFrom.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(filepath.Join(directory, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot = paperstatus.Snapshot{}
+	if err := json.Unmarshal(raw, &snapshot); err != nil ||
+		snapshot.Events[len(snapshot.Events)-1].Kind != paperstatus.KindExperimentDone {
+		t.Fatalf("unavailable provisional terminal event = %+v, %v", snapshot.Events, err)
 	}
 }
 

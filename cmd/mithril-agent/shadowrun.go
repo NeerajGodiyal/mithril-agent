@@ -52,6 +52,8 @@ signed and nothing is submitted; no wallet signing key is loaded at any point.
                         six-hour paper-only evidence for a candidate market
   --provisional-journal PATH
                         exact journal bound by that checkpoint
+  --paper-check-artifact PATH
+                        passing short paper-check required by provisional policy
   --alert-status PATH   private bounded paper-event snapshot for Telegram
   --quote-provider NAME optional compatibility check; must match the policy
   --node-command PATH   Node.js runtime for the read-only quote adapter
@@ -80,6 +82,8 @@ const (
 	mainnetUSDCMint           = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 )
 
+var errProvisionalPaperComplete = errors.New("provisional paper experiment completed")
+
 type shadowRunOptions struct {
 	policyPath          string
 	directory           string
@@ -90,6 +94,7 @@ type shadowRunOptions struct {
 	admissionJournal    string
 	provisionalArtifact string
 	provisionalJournal  string
+	paperCheckArtifact  string
 	alertStatus         string
 	quoteSource         string
 	nodeCommand         string
@@ -113,6 +118,7 @@ func runShadowRun(ctx context.Context, args []string, output io.Writer) error {
 	flags.StringVar(&options.admissionJournal, "admission-journal", "", "market evidence journal")
 	flags.StringVar(&options.provisionalArtifact, "provisional-artifact", "", "six-hour paper-only market evidence")
 	flags.StringVar(&options.provisionalJournal, "provisional-journal", "", "provisional market evidence journal")
+	flags.StringVar(&options.paperCheckArtifact, "paper-check-artifact", "", "passing short paper-check result")
 	flags.StringVar(&options.alertStatus, "alert-status", "", "private paper-event snapshot")
 	flags.StringVar(&options.quoteSource, "quote-provider", "", "must match policy when set")
 	flags.StringVar(&options.nodeCommand, "node-command", "", "Node.js runtime")
@@ -140,7 +146,31 @@ func runShadowRun(ctx context.Context, args []string, output io.Writer) error {
 		return err
 	}
 	defer func() { _ = run.roll.Close() }()
+	if err := notifyShadowRunReady(); err != nil {
+		return err
+	}
 	return run.drive(ctx, options.once, output)
+}
+
+func notifyShadowRunReady() error {
+	path := os.Getenv("NOTIFY_SOCKET")
+	if path == "" {
+		return nil
+	}
+	if path[0] == '@' {
+		path = "\x00" + path[1:]
+	}
+	connection, err := net.DialUnix(
+		"unixgram", nil, &net.UnixAddr{Name: path, Net: "unixgram"},
+	)
+	if err != nil {
+		return errors.New("connect to systemd notification socket")
+	}
+	defer connection.Close()
+	if _, err := connection.Write([]byte("READY=1")); err != nil {
+		return errors.New("notify systemd that paper runner is ready")
+	}
+	return nil
 }
 
 // loadShadowPolicy reads the policy strictly: an unknown field is a refusal,
@@ -278,6 +308,7 @@ func openShadowRun(ctx context.Context, policy shadow.Policy, options shadowRunO
 	var admissionThrough time.Time
 	qualifiedEvidence := options.admissionArtifact != "" || options.admissionJournal != ""
 	provisionalEvidence := options.provisionalArtifact != "" || options.provisionalJournal != ""
+	paperCheckEvidence := options.paperCheckArtifact != ""
 	if qualifiedEvidence && provisionalEvidence {
 		return nil, errors.New("choose qualified or provisional market evidence, not both")
 	}
@@ -295,9 +326,17 @@ func openShadowRun(ctx context.Context, policy shadow.Policy, options shadowRunO
 			if !provisionalPolicyMatchesArtifact(policy, artifact) {
 				return nil, errors.New("provisional market evidence does not match the active policy")
 			}
+			if !paperCheckEvidence {
+				return nil, errors.New("development paper policy requires a passing paper-check artifact")
+			}
+			if _, err := loadMarketPaperCheckResult(
+				options.paperCheckArtifact, policy, artifact, options.provisionalJournal, now,
+			); err != nil {
+				return nil, err
+			}
 			admissionCandidate, admissionThrough = &artifact.Candidate, artifact.Through
 		} else {
-			if provisionalEvidence {
+			if provisionalEvidence || paperCheckEvidence {
 				return nil, errors.New("qualified paper policy requires long-run market evidence")
 			}
 			artifact, err := loadQualifiedMarketAdmission(
@@ -311,7 +350,7 @@ func openShadowRun(ctx context.Context, policy shadow.Policy, options shadowRunO
 			}
 			admissionCandidate, admissionThrough = &artifact.Candidate, artifact.Through
 		}
-	} else if qualifiedEvidence || provisionalEvidence {
+	} else if qualifiedEvidence || provisionalEvidence || paperCheckEvidence {
 		return nil, errors.New("market admission flags require an admitted candidate-market policy")
 	}
 	endpoint := os.Getenv(shadowEndpointEnvironment)
@@ -788,6 +827,9 @@ func (s *shadowRun) rollDay(now time.Time, output io.Writer) (bool, error) {
 	if err := s.finishDayAt(output, periodEnd); err != nil {
 		return false, err
 	}
+	if s.policy.MarketEvidenceClass == shadow.MarketEvidenceDevelopmentProvisional {
+		return false, errProvisionalPaperComplete
+	}
 	if s.policy.Version == shadow.AdmittedVersion &&
 		!s.admissionThrough.Equal(now.UTC().Truncate(24*time.Hour)) {
 		return false, errors.New("market admission evidence must be refreshed before the next paper day")
@@ -828,12 +870,18 @@ func (s *shadowRun) drive(ctx context.Context, once bool, output io.Writer) erro
 	for {
 		now := time.Now().UTC()
 		if _, err := s.rollDay(now, output); err != nil {
+			if errors.Is(err, errProvisionalPaperComplete) {
+				return nil
+			}
 			return err
 		}
 		observation := s.runner.Observe(ctx)
 		now = time.Now().UTC()
 		rolled, err := s.rollDay(now, output)
 		if err != nil {
+			if errors.Is(err, errProvisionalPaperComplete) {
+				return nil
+			}
 			return err
 		}
 		if rolled {

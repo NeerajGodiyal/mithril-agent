@@ -438,7 +438,40 @@ func (s *shadowRun) alertReport(report shadow.Report) error {
 		shadowReportIcon(report), period, shadowPerformanceLine(report),
 		shadowReportTrades(report.Counts), shadowCoverageLine(report))
 	key := s.policySHA256 + "/" + report.From.Format("2006-01-02") + "/" + report.To.Format(time.RFC3339Nano)
-	return s.appendAlert(report.To, paperstatus.KindPeriodClosed, key, message)
+	kind := s.shadowReportEventKind(report.From, report.To)
+	if err := s.appendAlert(report.To, kind, key, message); err != nil {
+		return err
+	}
+	if kind == paperstatus.KindPeriodClosed {
+		return nil
+	}
+	if report.OpeningEquityMicros == 0 ||
+		report.HoldBenchmarkMicros == 0 || report.ClosingPriceMicros == 0 {
+		return nil
+	}
+	summary := &paperstatus.CurrentSummary{
+		Market: shadowMarketPair(s.policy), ValueUnit: paperValueUnit(s.policy),
+		Day: report.From.Format("2006-01-02"), TickSeconds: s.policy.TickSeconds,
+		InstructionSHA256:   s.portfolioInstructionSHA256,
+		OpeningEquityMicros: report.OpeningEquityMicros,
+		EquityMicros:        report.ClosingEquityMicros, HoldBenchmarkMicros: report.HoldBenchmarkMicros,
+		AccountingTracked: true, RealizedMicros: report.RealizedMicros,
+		UnrealizedMicros: report.UnrealizedMicros, FeesMicros: report.FeesMicros,
+		TurnoverMicros:    report.TurnoverMicros,
+		MaxDrawdownMicros: report.MaxDrawdownMicros,
+		Checks:            report.Counts.Ticks, Signals: report.Counts.Signals,
+		Trades: report.Counts.Fills, Unobservable: report.Counts.Unobservable,
+		Missed: report.Counts.Missed, PriceMicros: report.ClosingPriceMicros,
+		State: "completed", Strategy: paperStrategyName(s.policy), DecisionReason: "watching",
+	}
+	addPaperSettings(summary, s.policy)
+	if s.runner != nil {
+		addPaperFeeBudget(summary, s.policy, s.runner.Ledger())
+	}
+	if s.reconcilingAlerts {
+		return s.alerts.ReconcileCurrentSummary(report.To, message, summary)
+	}
+	return s.alerts.UpdateCurrentSummary(report.To, message, summary)
 }
 
 func (s *shadowRun) alertUnavailableReport(from, to time.Time) error {
@@ -448,7 +481,15 @@ func (s *shadowRun) alertUnavailableReport(from, to time.Time) error {
 	message := "PAPER · ⚠️ " + shadowPeriodTitle(from, to) +
 		"\nNo usable market price\nNo daily result"
 	key := s.policySHA256 + "/" + from.Format("2006-01-02") + "/" + to.Format(time.RFC3339Nano)
-	return s.appendAlert(to, paperstatus.KindPeriodClosed, key, message)
+	return s.appendAlert(to, s.shadowReportEventKind(from, to), key, message)
+}
+
+func (s *shadowRun) shadowReportEventKind(from, to time.Time) string {
+	if s.policy.MarketEvidenceClass != shadow.MarketEvidenceDevelopmentProvisional &&
+		to.Equal(from.Add(24*time.Hour)) {
+		return paperstatus.KindPeriodClosed
+	}
+	return paperstatus.KindExperimentDone
 }
 
 func shadowPeriodTitle(from, to time.Time) string {

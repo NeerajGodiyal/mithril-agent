@@ -65,17 +65,14 @@ func TestDashboardAndTelegramConsumeThreeLabeledPerpsSources(t *testing.T) {
 			"mithril-agent-perps-paper-status@sol.socket",
 			"mithril-agent-perps-paper-status@btc.socket",
 			"mithril-agent-perps-paper-status@eth.socket",
-			"SOL-PERP=/run/mithril-agent-perps-sol-paper-status.sock",
-			"BTC-PERP=/run/mithril-agent-perps-btc-paper-status.sock",
-			"ETH-PERP=/run/mithril-agent-perps-eth-paper-status.sock",
+			"--optional-paper-status-socket SOL-PERP=/run/mithril-agent-perps-sol-paper-status.sock",
+			"--optional-paper-status-socket BTC-PERP=/run/mithril-agent-perps-btc-paper-status.sock",
+			"--optional-paper-status-socket ETH-PERP=/run/mithril-agent-perps-eth-paper-status.sock",
 		} {
 			if !strings.Contains(unit, want) {
 				t.Errorf("%s unit is missing %q", name, want)
 			}
 		}
-	}
-	if strings.Count(dashboard, "--optional-paper-status-socket") != 3 {
-		t.Fatal("dashboard perps sources are not explicitly optional")
 	}
 	for name, unit := range map[string]string{"dashboard": dashboard, "Telegram": telegram} {
 		for _, line := range strings.Split(unit, "\n") {

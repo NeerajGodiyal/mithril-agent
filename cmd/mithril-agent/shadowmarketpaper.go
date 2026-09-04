@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"reflect"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
 	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/marketadmission"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
@@ -68,11 +70,13 @@ type marketPaperCheckResult struct {
 	CostModelRule             string                 `json:"cost_model_rule"`
 	StressRule                string                 `json:"stress_rule"`
 	CandidatesEvaluated       uint64                 `json:"candidates_evaluated"`
+	BasePolicy                shadow.Policy          `json:"base_policy"`
 	Candidate                 *shadowSearchCandidate `json:"candidate,omitempty"`
 	Training                  *marketPaperCheckScore `json:"training,omitempty"`
 	Holdout                   *marketPaperCheckScore `json:"holdout,omitempty"`
 	Stress                    *marketPaperCheckScore `json:"stress,omitempty"`
 	Reasons                   []string               `json:"reasons"`
+	ContentSHA256             string                 `json:"content_sha256"`
 }
 
 func runShadowMarketPaperCheck(args []string, output io.Writer) error {
@@ -81,6 +85,9 @@ func runShadowMarketPaperCheck(args []string, output io.Writer) error {
 	policyPath := flags.String("policy", "", "provisional candidate-market policy")
 	artifactPath := flags.String("provisional-artifact", "", "six-hour paper checkpoint")
 	journalPath := flags.String("journal", "", "checkpoint evidence journal")
+	dashboardStatusPath := flags.String("dashboard-status", "", "optional sibling dashboard-status.json")
+	candidatePolicyOut := flags.String("candidate-policy-out", "", "optional immutable checked paper policy")
+	resultOut := flags.String("result-out", "", "optional immutable paper-check result")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, shadowMarketUsage)
@@ -97,6 +104,22 @@ func runShadowMarketPaperCheck(args []string, output io.Writer) error {
 		if err := validateMarketAdmissionPath(item.path, item.name); err != nil {
 			return err
 		}
+	}
+	if err := validateMarketDashboardStatusPath(*dashboardStatusPath, *journalPath); err != nil {
+		return err
+	}
+	if *candidatePolicyOut != "" {
+		if err := validateMarketAdmissionPath(*candidatePolicyOut, "--candidate-policy-out"); err != nil {
+			return err
+		}
+	}
+	if *resultOut != "" {
+		if err := validateMarketAdmissionPath(*resultOut, "--result-out"); err != nil {
+			return err
+		}
+	}
+	if *candidatePolicyOut != "" && *resultOut == "" {
+		return errors.New("--candidate-policy-out requires --result-out")
 	}
 	artifact, err := loadProvisionalMarketAdmission(*artifactPath, *journalPath, time.Now())
 	if err != nil {
@@ -117,7 +140,203 @@ func runShadowMarketPaperCheck(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return writeShadowMarketJSON(output, result)
+	result.ContentSHA256, err = marketPaperCheckFingerprint(result)
+	if err != nil {
+		return err
+	}
+	writeOutputs := func(journal.Verification) error {
+		if *resultOut != "" {
+			if err := writeMarketPaperCheckResult(*resultOut, result); err != nil {
+				return err
+			}
+		}
+		if *candidatePolicyOut != "" && result.Outcome == marketadmission.DashboardPaperOutcomeCandidateReady {
+			if err := writeMarketPaperCandidatePolicy(*candidatePolicyOut, policy, result); err != nil {
+				return err
+			}
+		}
+		if *dashboardStatusPath != "" {
+			return updateMarketDashboardPaperCheck(
+				*dashboardStatusPath, result, time.Now().UTC(),
+			)
+		}
+		return nil
+	}
+	if *dashboardStatusPath != "" || *candidatePolicyOut != "" || *resultOut != "" {
+		if err := journal.WithVerification(*journalPath, writeOutputs); err != nil {
+			if errors.Is(err, journal.ErrLocked) {
+				return errors.New("stop the market collector before writing paper-check output")
+			}
+			return err
+		}
+	}
+	if err := writeShadowMarketJSON(output, result); err != nil {
+		return err
+	}
+	if result.Outcome != marketadmission.DashboardPaperOutcomeCandidateReady {
+		return errors.New("paper-check did not pass the paper-testing gate")
+	}
+	return nil
+}
+
+func writeMarketPaperCheckResult(path string, result marketPaperCheckResult) error {
+	encoded, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return err
+	}
+	return securefile.CreatePrivate(
+		path, append(encoded, '\n'), maxMarketAdmissionArtifactBytes,
+	)
+}
+
+func loadMarketPaperCheckResult(
+	path string,
+	policy shadow.Policy,
+	artifact marketadmission.ProvisionalArtifact,
+	journalPath string,
+	now time.Time,
+) (marketPaperCheckResult, error) {
+	if err := validateMarketAdmissionPath(path, "--paper-check-artifact"); err != nil {
+		return marketPaperCheckResult{}, err
+	}
+	var result marketPaperCheckResult
+	if err := readStrictJSON(path, &result); err != nil {
+		return marketPaperCheckResult{}, errors.New("paper-check artifact is invalid")
+	}
+	if !artifact.Current(now) || !provisionalPolicyMatchesArtifact(result.BasePolicy, artifact) {
+		return marketPaperCheckResult{}, errors.New(
+			"paper-check artifact is invalid or does not bind the active policy and evidence",
+		)
+	}
+	points, err := artifact.ReplayPoints(journalPath)
+	if err != nil {
+		return marketPaperCheckResult{}, errors.New("paper-check artifact journal is invalid")
+	}
+	want, err := checkProvisionalMarketPaper(result.BasePolicy, artifact, points)
+	if err != nil {
+		return marketPaperCheckResult{}, errors.New("paper-check artifact cannot be reproduced")
+	}
+	want.ContentSHA256, err = marketPaperCheckFingerprint(want)
+	if err != nil || !reflect.DeepEqual(want, result) ||
+		result.Outcome != marketadmission.DashboardPaperOutcomeCandidateReady ||
+		result.Candidate == nil {
+		return marketPaperCheckResult{}, errors.New(
+			"paper-check artifact is invalid or does not bind the active policy and evidence",
+		)
+	}
+	checked, err := shadowSearchCandidatePolicy(result.BasePolicy, *result.Candidate)
+	if err != nil {
+		return marketPaperCheckResult{}, errors.New("paper-check candidate cannot be reproduced")
+	}
+	checkedSHA256, checkedErr := checked.Fingerprint()
+	policySHA256, policyErr := policy.Fingerprint()
+	if checkedErr != nil || policyErr != nil || checkedSHA256 != result.CandidatePolicySHA256 ||
+		policySHA256 != result.CandidatePolicySHA256 {
+		return marketPaperCheckResult{}, errors.New(
+			"paper-check artifact does not select the active policy",
+		)
+	}
+	return result, nil
+}
+
+func writeMarketPaperCandidatePolicy(
+	path string,
+	base shadow.Policy,
+	result marketPaperCheckResult,
+) error {
+	if result.Outcome != marketadmission.DashboardPaperOutcomeCandidateReady ||
+		result.Candidate == nil || result.CandidatePolicySHA256 == "" {
+		return errors.New("paper-check did not produce a checked candidate policy")
+	}
+	policy, err := shadowSearchCandidatePolicy(base, *result.Candidate)
+	if err != nil {
+		return err
+	}
+	fingerprint, err := policy.Fingerprint()
+	if err != nil {
+		return err
+	}
+	if fingerprint != result.CandidatePolicySHA256 {
+		return errors.New("paper-check candidate policy fingerprint does not match its result")
+	}
+	encoded, err := json.MarshalIndent(policy, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := securefile.CreatePrivate(path, append(encoded, '\n'), maxInputBytes); err != nil {
+		return errors.New("could not write the immutable checked paper policy")
+	}
+	return nil
+}
+
+func updateMarketDashboardPaperCheck(
+	path string,
+	result marketPaperCheckResult,
+	checkedAt time.Time,
+) error {
+	raw, err := securefile.ReadPrivate(path, marketadmission.MaxDashboardStatusBytes)
+	if err != nil {
+		return fmt.Errorf("read market dashboard status: %w", err)
+	}
+	status, err := marketadmission.LoadDashboardStatus(raw)
+	if err != nil {
+		return errors.New("market dashboard status is invalid")
+	}
+	if status.Market != result.Market {
+		return errors.New("market dashboard status belongs to another market")
+	}
+	check, err := dashboardPaperCheckFromResult(result, checkedAt)
+	if err != nil {
+		return err
+	}
+	cadence := time.Duration(marketadmission.DefaultThresholds().CadenceSeconds) * time.Second
+	if !check.Current(checkedAt) || status.Diagnostic.Through.Before(result.Through) ||
+		status.Diagnostic.Through.Sub(result.Through) > 2*cadence {
+		return errors.New("market dashboard status does not match the current paper-check window")
+	}
+	status, err = status.WithPaperCheck(check)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		return err
+	}
+	return securefile.ReplacePrivate(
+		path, append(encoded, '\n'), marketadmission.MaxDashboardStatusBytes,
+	)
+}
+
+func dashboardPaperCheckFromResult(
+	result marketPaperCheckResult,
+	checkedAt time.Time,
+) (marketadmission.DashboardPaperCheck, error) {
+	check := marketadmission.DashboardPaperCheck{
+		Market: result.Market, CheckedAt: checkedAt.UTC(), Through: result.Through,
+		Outcome: result.Outcome, TrainingCoverageBPS: result.TrainingCoverageBPS,
+		HoldoutCoverageBPS: result.HoldoutCoverageBPS,
+		Reasons:            append([]string{}, result.Reasons...),
+	}
+	scored := result.Holdout != nil || result.Stress != nil
+	switch result.Outcome {
+	case marketadmission.DashboardPaperOutcomeInsufficientEvidence,
+		marketadmission.DashboardPaperOutcomeNoTrainingCandidate:
+		if scored {
+			return marketadmission.DashboardPaperCheck{}, errors.New("unscored paper-check outcome contains scores")
+		}
+	case marketadmission.DashboardPaperOutcomeCandidateRejected,
+		marketadmission.DashboardPaperOutcomeCandidateReady:
+		if result.Holdout == nil || result.Stress == nil {
+			return marketadmission.DashboardPaperCheck{}, errors.New("scored paper-check outcome has no scores")
+		}
+		check.HoldoutAfterCostNetReturnMicros = result.Holdout.NetReturnMicros
+		check.HoldoutAfterCostVersusHoldMicros = result.Holdout.VersusHoldMicros
+		check.StressAfterCostNetReturnMicros = result.Stress.NetReturnMicros
+		check.StressAfterCostVersusHoldMicros = result.Stress.VersusHoldMicros
+	default:
+		return marketadmission.DashboardPaperCheck{}, errors.New("paper-check outcome is invalid")
+	}
+	return check, nil
 }
 
 func checkProvisionalMarketPaper(
@@ -150,6 +369,7 @@ func checkProvisionalMarketPaper(
 		ModelledSpreadBPS: spreadBPS, StressModelledSpreadBPS: stress,
 		CostModelRule: marketPaperCheckCostModelRule,
 		StressRule:    marketPaperCheckStressRule, Reasons: []string{},
+		BasePolicy: policy,
 	}
 	result.InputSHA256, err = marketPaperCheckInputSHA256(result)
 	if err != nil {
@@ -157,11 +377,15 @@ func checkProvisionalMarketPaper(
 	}
 
 	trainingPoints, holdoutPoints := splitMarketPaperPoints(points, trainingThrough)
-	training, err := provisionalMarketTicks(policy, trainingPoints)
+	training, trainingPrimaryAt, trainingSecondaryAt, err := provisionalMarketTicksFrom(
+		policy, trainingPoints, time.Time{}, time.Time{},
+	)
 	if err != nil {
 		return marketPaperCheckResult{}, err
 	}
-	holdout, err := provisionalMarketTicks(policy, holdoutPoints)
+	holdout, _, _, err := provisionalMarketTicksFrom(
+		policy, holdoutPoints, trainingPrimaryAt, trainingSecondaryAt,
+	)
 	if err != nil {
 		return marketPaperCheckResult{}, err
 	}
@@ -292,13 +516,31 @@ func scoreMarketPaperCandidate(
 func provisionalMarketTicks(
 	policy shadow.Policy, points []marketadmission.ProvisionalReplayPoint,
 ) ([]shadow.Tick, error) {
+	ticks, _, _, err := provisionalMarketTicksFrom(
+		policy, points, time.Time{}, time.Time{},
+	)
+	return ticks, err
+}
+
+func provisionalMarketTicksFrom(
+	policy shadow.Policy,
+	points []marketadmission.ProvisionalReplayPoint,
+	previousPrimary, previousSecondary time.Time,
+) ([]shadow.Tick, time.Time, time.Time, error) {
 	ticks := make([]shadow.Tick, 0, len(points))
-	var previousPrimary, previousSecondary time.Time
 	for _, point := range points {
-		if !point.Available || !shadow.AdaptiveSampleAdvances(
+		primaryAt, secondaryAt := point.MarketPrimaryPublishedAt, point.MarketSecondaryPublishedAt
+		if point.Available {
+			primaryAt, secondaryAt = point.MarketPrimary.PublishedAt, point.MarketSecondary.PublishedAt
+		}
+		advanced := !primaryAt.IsZero() && !secondaryAt.IsZero() && shadow.AdaptiveSampleAdvances(
 			previousPrimary, previousSecondary,
-			point.MarketPrimary.PublishedAt.UTC(), point.MarketSecondary.PublishedAt.UTC(),
-		) {
+			primaryAt.UTC(), secondaryAt.UTC(),
+		)
+		if advanced {
+			previousPrimary, previousSecondary = primaryAt.UTC(), secondaryAt.UTC()
+		}
+		if !point.Available || !advanced {
 			ticks = append(ticks, shadow.Tick{At: point.At, Event: shadow.EventUnobservable})
 			continue
 		}
@@ -306,7 +548,7 @@ func provisionalMarketTicks(
 			*policy.NativeFeePrice, point.NativePrimary, point.NativeSecondary, point.At,
 		)
 		if err != nil {
-			return nil, errors.New("paper-check native fee-price evidence is invalid")
+			return nil, time.Time{}, time.Time{}, errors.New("paper-check native fee-price evidence is invalid")
 		}
 		primary, secondary := point.MarketPrimary, point.MarketSecondary
 		nativePrimary, nativeSecondary := point.NativePrimary, point.NativeSecondary
@@ -316,10 +558,8 @@ func provisionalMarketTicks(
 			NativeFeePriceMicros: nativeEvidence.ConservativePrice,
 			NativeFeePrimary:     &nativePrimary, NativeFeeSecondary: &nativeSecondary,
 		})
-		previousPrimary = point.MarketPrimary.PublishedAt.UTC()
-		previousSecondary = point.MarketSecondary.PublishedAt.UTC()
 	}
-	return ticks, nil
+	return ticks, previousPrimary, previousSecondary, nil
 }
 
 func splitMarketPaperPoints(
@@ -398,6 +638,16 @@ func marketPaperCheckInputSHA256(result marketPaperCheckResult) (string, error) 
 		ModelledSpreadBPS:       result.ModelledSpreadBPS,
 		StressModelledSpreadBPS: result.StressModelledSpreadBPS,
 	})
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func marketPaperCheckFingerprint(result marketPaperCheckResult) (string, error) {
+	result.ContentSHA256 = ""
+	encoded, err := json.Marshal(result)
 	if err != nil {
 		return "", err
 	}

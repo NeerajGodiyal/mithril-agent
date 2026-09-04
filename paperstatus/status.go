@@ -215,10 +215,25 @@ func (w *Writer) UpdateCurrent(at time.Time, current string) error {
 func (w *Writer) UpdateCurrentSummary(
 	at time.Time, current string, summary *CurrentSummary,
 ) error {
+	return w.updateCurrentSummary(at, current, summary, false)
+}
+
+// ReconcileCurrentSummary restores a terminal current view when no newer
+// observation exists. A newer live view wins, just as it does for reconciled
+// alert events.
+func (w *Writer) ReconcileCurrentSummary(
+	at time.Time, current string, summary *CurrentSummary,
+) error {
+	return w.updateCurrentSummary(at, current, summary, true)
+}
+
+func (w *Writer) updateCurrentSummary(
+	at time.Time, current string, summary *CurrentSummary, reconcile bool,
+) error {
 	if w == nil || !cleanPath(w.path) || at.IsZero() || !at.Equal(at.UTC()) ||
 		len(current) == 0 || len(current) > maxCurrentBytes || !validMessage(current) ||
 		validateCurrentSummary(summary) != nil ||
-		summary != nil && summary.Day != at.Format("2006-01-02") {
+		summary != nil && !summaryDayMatchesObservation(*summary, at) {
 		return errors.New("paper current status is invalid")
 	}
 	snapshot := Snapshot{Version: Version, ObservedAt: at, Events: []Event{}}
@@ -232,6 +247,9 @@ func (w *Writer) UpdateCurrentSummary(
 			return errors.New("existing paper alert status is invalid")
 		}
 		if at.Before(snapshot.ObservedAt) {
+			if reconcile {
+				return nil
+			}
 			return errors.New("paper current status is not chronological")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -346,7 +364,7 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		validateCurrentSummary(snapshot.Summary) != nil {
 		return errors.New("paper alert snapshot is invalid")
 	}
-	if snapshot.Summary != nil && snapshot.Summary.Day != snapshot.ObservedAt.Format("2006-01-02") {
+	if snapshot.Summary != nil && !summaryDayMatchesObservation(*snapshot.Summary, snapshot.ObservedAt) {
 		return errors.New("paper alert snapshot summary is not current")
 	}
 	var previousPoint time.Time
@@ -655,8 +673,12 @@ func validAsset(asset string) bool {
 }
 
 func updateHistory(history []PerformancePoint, at time.Time, summary CurrentSummary) []PerformancePoint {
+	pointAt := at
+	if summary.State == "completed" && summary.Day != at.Format("2006-01-02") {
+		pointAt = at.Add(-time.Nanosecond)
+	}
 	point := PerformancePoint{
-		At: at, PriceMicros: summary.PriceMicros, EquityMicros: summary.EquityMicros,
+		At: pointAt, PriceMicros: summary.PriceMicros, EquityMicros: summary.EquityMicros,
 		HoldBenchmarkMicros: summary.HoldBenchmarkMicros,
 		DrawdownMicros:      summary.DrawdownMicros, MaxDrawdownMicros: summary.MaxDrawdownMicros,
 		Unavailable: summary.State == "waiting for data",
@@ -664,7 +686,7 @@ func updateHistory(history []PerformancePoint, at time.Time, summary CurrentSumm
 	if len(history) > 0 && history[len(history)-1].At.Format("2006-01-02") != summary.Day {
 		history = nil
 	}
-	if len(history) > 0 && history[len(history)-1].At.Truncate(historyInterval) == at.Truncate(historyInterval) {
+	if len(history) > 0 && history[len(history)-1].At.Truncate(historyInterval) == pointAt.Truncate(historyInterval) {
 		point.Unavailable = point.Unavailable || history[len(history)-1].Unavailable
 		history[len(history)-1] = point
 		return history
@@ -674,6 +696,14 @@ func updateHistory(history []PerformancePoint, at time.Time, summary CurrentSumm
 		history = history[len(history)-MaxHistoryPoints:]
 	}
 	return history
+}
+
+func summaryDayMatchesObservation(summary CurrentSummary, at time.Time) bool {
+	if summary.Day == at.Format("2006-01-02") {
+		return true
+	}
+	return summary.State == "completed" && at.Equal(at.Truncate(24*time.Hour)) &&
+		summary.Day == at.Add(-time.Nanosecond).Format("2006-01-02")
 }
 
 func validValueUnit(unit string) bool {
@@ -691,7 +721,7 @@ func validNextAction(action string) bool {
 func validCurrentState(state string) bool {
 	switch state {
 	case "", "watching", "warming", "uptrend", "downtrend", "range", "volatile",
-		"order pending", "waiting for data", "paused":
+		"order pending", "waiting for data", "paused", "completed":
 		return true
 	default:
 		return false

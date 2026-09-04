@@ -328,6 +328,18 @@ func TestWriterUpdatesCurrentWithoutCreatingAnAlert(t *testing.T) {
 	if err := writer.UpdateCurrent(start, current); err == nil {
 		t.Fatal("accepted a current status timestamp regression")
 	}
+	if err := writer.ReconcileCurrentSummary(start, current, summary); err != nil {
+		t.Fatalf("newer current status must win reconciliation: %v", err)
+	}
+	data, err = securefile.ReadPrivate(path, maxSnapshotBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot = Snapshot{}
+	if err := strictjson.Decode(data, &snapshot); err != nil ||
+		!snapshot.ObservedAt.Equal(start.Add(3*time.Second)) || snapshot.Current != "" {
+		t.Fatalf("older reconciliation changed the current status: %+v err=%v", snapshot, err)
+	}
 	if err := writer.UpdateCurrent(start.Add(2*time.Second), "looks live"); err == nil {
 		t.Fatal("accepted ambiguous current status")
 	}

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/marketadmission"
 	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 )
 
@@ -105,6 +106,65 @@ func TestRecordMithrilEvidenceModeDoesNotOpenAListener(t *testing.T) {
 		"--record-mithril-evidence", path, "--mithril-evidence", "invented",
 	}, &bytes.Buffer{}); err == nil {
 		t.Fatal("unknown evidence status was accepted")
+	}
+}
+
+func TestRecordMarketAdmissionModeIsExclusiveAndDoesNotOpenAListener(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	credentials := filepath.Join(root, "credentials")
+	if err := os.Mkdir(credentials, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	through := now.Truncate(time.Minute)
+	for name, market := range map[string]string{
+		"market-wif-status":  marketadmission.MarketWIFUSDC,
+		"market-jto-status":  marketadmission.MarketJTOUSDC,
+		"market-pyth-status": marketadmission.MarketPYTHUSDC,
+	} {
+		status := marketadmission.DashboardStatus{
+			Version: marketadmission.Version, Kind: marketadmission.DashboardStatusKind,
+			Market: market, UpdatedAt: now, WindowHours: marketadmission.DashboardStatusWindowHours,
+			Diagnostic: marketadmission.Diagnostic{
+				Version: marketadmission.Version, Market: market,
+				From: through.Add(-6 * time.Hour), Through: through,
+				DiagnosticOnly: true, ExpectedBuckets: 360,
+				FailureCounts: map[string]uint64{"missing_bucket": 360},
+			},
+		}
+		raw, err := json.Marshal(status)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(credentials, name), append(raw, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("CREDENTIALS_DIRECTORY", credentials)
+	previous := activatedListener
+	activatedListener = func() (net.Listener, error) {
+		t.Fatal("record mode opened a listener")
+		return nil, errors.New("unexpected listener")
+	}
+	t.Cleanup(func() { activatedListener = previous })
+	path := filepath.Join(root, "market-admission.json")
+	if err := run(t.Context(), []string{"--record-market-admission", path}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("recorded market status info=%v err=%v", info, err)
+	}
+	if err := run(t.Context(), []string{
+		"--record-market-admission", path,
+		"--paper-status-socket", "SOL/USDC=/run/sol.sock",
+	}, io.Discard); err == nil {
+		t.Fatal("market record mode accepted server flags")
 	}
 }
 

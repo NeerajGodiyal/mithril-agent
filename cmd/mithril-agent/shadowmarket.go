@@ -19,11 +19,11 @@ import (
 )
 
 const shadowMarketUsage = `Usage:
-  mithril-agent shadow market collect --market NAME --observe ADDR --journal PATH [--once]
+  mithril-agent shadow market collect --market NAME --observe ADDR --journal PATH [--dashboard-status PATH] [--once]
   mithril-agent shadow market curve --market NAME --observe ADDR
   mithril-agent shadow market diagnose --journal PATH [--hours 6]
   mithril-agent shadow market provisional --journal PATH --out PATH
-  mithril-agent shadow market paper-check --policy PATH --provisional-artifact PATH --journal PATH
+  mithril-agent shadow market paper-check --policy PATH --provisional-artifact PATH --journal PATH [--dashboard-status PATH] [--result-out PATH] [--candidate-policy-out PATH]
   mithril-agent shadow market evaluate --journal PATH --out PATH
 
 Collect attempts one immutable, hash-chained observation per minute; missed
@@ -32,8 +32,9 @@ Collect attempts one immutable, hash-chained observation per minute; missed
 summary but cannot qualify a market or create an artifact. Provisional writes
 a paper-only six-hour checkpoint which expires quickly and cannot authorize a
 proposal. Paper-check selects only on the first four hours, then runs normal
-plus doubled-route-cost replays on the final two untouched hours. Its JSON is research-only and cannot
-activate or promote a market. Evaluate checks the latest 30 complete UTC days from that exact durable journal prefix
+plus doubled-modelled-spread replays on the final two untouched hours. Its JSON is research-only and cannot
+activate or promote a market. On a passing result, --candidate-policy-out can
+write the exact immutable policy for further paper testing. Evaluate checks the latest 30 complete UTC days from that exact durable journal prefix
 and writes a new artifact without replacing an existing file. Qualification
 covers market-data and route quality only; it does not start a paper strategy.
 
@@ -164,6 +165,7 @@ func runShadowMarketCollect(ctx context.Context, args []string, output io.Writer
 	market := flags.String("market", "", "allowlisted market")
 	observe := flags.String("observe", "", "watch-only quote address")
 	journalPath := flags.String("journal", "", "absolute evidence journal path")
+	dashboardStatusPath := flags.String("dashboard-status", "", "optional sibling dashboard-status.json")
 	once := flags.Bool("once", false, "collect one scheduled bucket")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -176,6 +178,9 @@ func runShadowMarketCollect(ctx context.Context, args []string, output io.Writer
 		return errors.New("shadow market collect requires --market, --observe, and --journal")
 	}
 	if err := validateMarketAdmissionPath(*journalPath, "--journal"); err != nil {
+		return err
+	}
+	if err := validateMarketDashboardStatusPath(*dashboardStatusPath, *journalPath); err != nil {
 		return err
 	}
 	candidate, ok := marketadmission.Lookup(*market)
@@ -201,6 +206,21 @@ func runShadowMarketCollect(ctx context.Context, args []string, output io.Writer
 	if err != nil {
 		return err
 	}
+	var dashboardTracker *marketadmission.DiagnosticTracker
+	if *dashboardStatusPath != "" {
+		now := time.Now().UTC()
+		dashboardTracker, err = marketadmission.NewDiagnosticTracker(
+			opening, store.Records(), now,
+		)
+		if err != nil {
+			return err
+		}
+		if err := writeMarketDashboardStatus(
+			*dashboardStatusPath, dashboardTracker, now,
+		); err != nil {
+			return err
+		}
+	}
 	if !*once {
 		if err := writeShadowMarketJSON(output, struct {
 			Market         string `json:"market"`
@@ -211,7 +231,8 @@ func runShadowMarketCollect(ctx context.Context, args []string, output io.Writer
 		}
 	}
 	return collectMarketAdmission(
-		ctx, output, store, collector, opening, lastBucket, *once,
+		ctx, output, store, collector, opening, lastBucket,
+		dashboardTracker, *dashboardStatusPath, *once,
 	)
 }
 
@@ -260,6 +281,8 @@ func collectMarketAdmission(
 	collector *marketadmission.Collector,
 	opening marketadmission.Opening,
 	lastBucket time.Time,
+	dashboardTracker *marketadmission.DiagnosticTracker,
+	dashboardStatusPath string,
 	once bool,
 ) error {
 	cadence := time.Duration(opening.Thresholds.CadenceSeconds) * time.Second
@@ -282,11 +305,8 @@ func collectMarketAdmission(
 		if err := observation.Validate(opening); err != nil {
 			return fmt.Errorf("market evidence observation is invalid: %w", err)
 		}
-		if _, err := store.Append(
-			observation.ObservedAt,
-			marketadmission.EventObserved,
-			bucket.Format(time.RFC3339),
-			observation,
+		if err := appendMarketAdmissionObservation(
+			store, observation, dashboardTracker, dashboardStatusPath, time.Now().UTC(),
 		); err != nil {
 			return err
 		}
@@ -295,6 +315,71 @@ func collectMarketAdmission(
 			return writeShadowMarketJSON(output, observation)
 		}
 	}
+}
+
+func appendMarketAdmissionObservation(
+	store *journal.Store,
+	observation marketadmission.Observation,
+	dashboardTracker *marketadmission.DiagnosticTracker,
+	dashboardStatusPath string,
+	now time.Time,
+) error {
+	if _, err := store.Append(
+		observation.ObservedAt,
+		marketadmission.EventObserved,
+		observation.Bucket.Format(time.RFC3339),
+		observation,
+	); err != nil {
+		return err
+	}
+	if dashboardStatusPath == "" {
+		return nil
+	}
+	if err := dashboardTracker.Add(observation); err != nil {
+		return err
+	}
+	return writeMarketDashboardStatus(dashboardStatusPath, dashboardTracker, now)
+}
+
+func writeMarketDashboardStatus(
+	path string,
+	tracker *marketadmission.DiagnosticTracker,
+	now time.Time,
+) error {
+	if path == "" {
+		return nil
+	}
+	status, err := tracker.Status(now)
+	if err != nil {
+		return err
+	}
+	status = preserveMarketDashboardPaperCheck(path, status)
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		return err
+	}
+	return securefile.ReplacePrivate(
+		path, append(encoded, '\n'), marketadmission.MaxDashboardStatusBytes,
+	)
+}
+
+func preserveMarketDashboardPaperCheck(
+	path string,
+	status marketadmission.DashboardStatus,
+) marketadmission.DashboardStatus {
+	raw, err := securefile.ReadPrivate(path, marketadmission.MaxDashboardStatusBytes)
+	if err != nil {
+		return status
+	}
+	previous, err := marketadmission.LoadDashboardStatus(raw)
+	if err != nil || previous.PaperCheck == nil {
+		return status
+	}
+	preserved, err := status.WithPaperCheck(*previous.PaperCheck)
+	if err != nil {
+		return status
+	}
+	return preserved
 }
 
 func marketAdmissionBucketExpired(now, bucket time.Time, cadence time.Duration) bool {
@@ -396,6 +481,20 @@ func runShadowMarketEvaluate(args []string, output io.Writer) error {
 func validateMarketAdmissionPath(path, flagName string) error {
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return errors.New(flagName + " must be a clean absolute path")
+	}
+	return nil
+}
+
+func validateMarketDashboardStatusPath(path, journalPath string) error {
+	if path == "" {
+		return nil
+	}
+	if err := validateMarketAdmissionPath(path, "--dashboard-status"); err != nil {
+		return err
+	}
+	want := filepath.Join(filepath.Dir(journalPath), "dashboard-status.json")
+	if path != want || path == journalPath {
+		return errors.New("--dashboard-status must be the journal sibling dashboard-status.json")
 	}
 	return nil
 }

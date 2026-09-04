@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,32 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
+
+func TestShadowRunSystemdReadinessNotification(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "mithril-shadow-notify-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	path := filepath.Join(directory, "notify.sock")
+	listener, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: path, Net: "unixgram"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	t.Setenv("NOTIFY_SOCKET", path)
+	if err := notifyShadowRunReady(); err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	message := make([]byte, 32)
+	count, _, err := listener.ReadFromUnix(message)
+	if err != nil || string(message[:count]) != "READY=1" {
+		t.Fatalf("notification = %q, %v", message[:count], err)
+	}
+}
 
 func writeShadowPolicy(t *testing.T, policy shadow.Policy) string {
 	t.Helper()
@@ -364,6 +391,69 @@ func TestRolloverDiscardsPreparedObservationBeforeRunnerMutation(t *testing.T) {
 	}
 }
 
+func TestDriveTreatsProvisionalRolloverAsSuccessfulCompletion(t *testing.T) {
+	artifactPath, journalPath, evidenceNow := writeReadyProvisionalEvidence(t)
+	artifact, err := loadProvisionalMarketAdmission(artifactPath, journalPath, evidenceNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := buildAdaptiveProvisionalPolicy(
+		artifact, artifact.Candidate.QuoteNotionalUSDC, 80_000_000, 3_000_000,
+		artifact.Candidate.QuoteSlippageBPS, 100_000, artifact.Observe, 60,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	roll, err := newDailyJournal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer roll.Close()
+	previousDay := time.Now().UTC().Truncate(24 * time.Hour).Add(-time.Hour)
+	if err := roll.openFor(previousDay); err != nil {
+		t.Fatal(err)
+	}
+	alerts, err := paperstatus.OpenWriter(filepath.Join(root, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := func(identity string) candidatePriceSource {
+		return candidatePriceSource{identity: identity, at: previousDay}
+	}
+	run := &shadowRun{
+		policy: policy, roll: roll, alerts: alerts,
+		primary:         reader(policy.Trigger.PrimarySourceSHA256),
+		secondary:       reader(policy.Trigger.SecondarySourceSHA256),
+		quotePrimary:    reader(policy.QuotePeg.PrimarySourceSHA256),
+		quoteSecondary:  reader(policy.QuotePeg.SecondarySourceSHA256),
+		nativePrimary:   reader(policy.NativeFeePrice.PrimarySourceSHA256),
+		nativeSecondary: reader(policy.NativeFeePrice.SecondarySourceSHA256),
+		quoter:          liveStubQuoter{estimated: 21_525},
+	}
+	if run.runner, err = run.newRunner(); err != nil {
+		t.Fatal(err)
+	}
+	if err := run.drive(t.Context(), false, io.Discard); err != nil {
+		t.Fatalf("completed provisional drive returned an error: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "alerts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot paperstatus.Snapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil || len(snapshot.Events) != 1 ||
+		snapshot.Events[0].Kind != paperstatus.KindExperimentDone {
+		t.Fatalf("provisional completion lifecycle = %+v, %v", snapshot, err)
+	}
+}
+
 // A relative or unclean directory must be refused: the journal is the evidence,
 // and it has to land where the operator thinks it does.
 func TestDailyJournalRefusesAnUnsafeDirectory(t *testing.T) {
@@ -583,6 +673,10 @@ func TestShadowReportIsAtomicallyReplacedAndUsesTheActualPartialPeriod(t *testin
 	if err := current.openFor(time.Date(2026, 3, 3, 1, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
+	newer := time.Date(2026, 3, 3, 0, 30, 0, 0, time.UTC)
+	if err := run.alerts.UpdateCurrent(newer, "PAPER · Watching current market"); err != nil {
+		t.Fatal(err)
+	}
 	if err := run.reconcileStoredShadowReports(); err != nil {
 		t.Fatal(err)
 	}
@@ -592,7 +686,8 @@ func TestShadowReportIsAtomicallyReplacedAndUsesTheActualPartialPeriod(t *testin
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal(alertRaw, &snapshot); err != nil || len(snapshot.Events) != 1 ||
-		snapshot.Events[0].Kind != paperstatus.KindPeriodClosed {
+		snapshot.Events[0].Kind != paperstatus.KindExperimentDone ||
+		!snapshot.ObservedAt.Equal(newer) || snapshot.Current != "PAPER · Watching current market" {
 		t.Fatalf("reconciled report alert = %+v, %v", snapshot, err)
 	}
 }

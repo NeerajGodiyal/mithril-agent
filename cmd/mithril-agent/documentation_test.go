@@ -582,6 +582,8 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"./deploy/systemd/mithril-agent-paper-dashboard.service",
 		"./deploy/systemd/mithril-agent-paper-dashboard.socket",
 		"./deploy/systemd/mithril-agent-market-candidate@.service",
+		"./deploy/systemd/mithril-agent-market-status.service",
+		"./deploy/systemd/mithril-agent-market-status.timer",
 		"./deploy/systemd/mithril-hermes-research-egress.service",
 		"./deploy/systemd/mithril-hermes-research.service",
 		"./deploy/systemd/mithril-hermes-research.timer",
@@ -667,6 +669,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"ConditionPathExists=/etc/mithril-agent/market-%i.env",
 		"--market ${MITHRIL_AGENT_MARKET} --observe ${MITHRIL_AGENT_OBSERVE}",
 		"--journal /var/lib/mithril-agent-research/market-admission-%i/evidence.jsonl",
+		"--dashboard-status /var/lib/mithril-agent-research/market-admission-%i/dashboard-status.json",
 		"ReadWritePaths=/var/lib/mithril-agent-research/market-admission-%i",
 		"ProtectSystem=strict", "UMask=0077",
 	} {
@@ -1174,16 +1177,21 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	for _, want := range []string{
 		"SOL/USDC=/run/mithril-agent-paper-status.sock",
 		"JUP/USDC=/run/mithril-agent-paper-jup-status.sock",
+		"--optional-paper-status-socket WIF/USDC=/run/mithril-agent-market-wif-paper-status.sock",
+		"--optional-paper-status-socket JTO/USDC=/run/mithril-agent-market-jto-paper-status.sock",
+		"--optional-paper-status-socket PYTH/USDC=/run/mithril-agent-market-pyth-paper-status.sock",
 	} {
 		if !strings.Contains(telegramPaper, want) {
 			t.Errorf("paper Telegram opt-in is missing %q", want)
 		}
 	}
 	wifUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-market-wif.service")
+	marketCandidateUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-market-candidate@.service")
 	for _, want := range []string{
 		"ConditionPathExists=/etc/mithril-agent/paper-wif.env",
 		"--market WIF/USDC --observe ${MITHRIL_AGENT_WIF_OBSERVE}",
 		"--journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl",
+		"--dashboard-status /var/lib/mithril-agent-research/market-admission-wif/dashboard-status.json",
 		"ReadWritePaths=/var/lib/mithril-agent-research/market-admission-wif",
 		"ProtectSystem=strict", "UMask=0077",
 	} {
@@ -1191,17 +1199,29 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 			t.Errorf("WIF admission collector is missing %q", want)
 		}
 	}
+	if !strings.Contains(marketCandidateUnit, "Conflicts=mithril-agent-market-%i.service") {
+		t.Error("templated market collector does not conflict with the legacy per-market unit")
+	}
 	dashboardUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-dashboard.service")
 	dashboardSocket := readDocumentation(t, "../../deploy/systemd/mithril-agent-paper-dashboard.socket")
 	dashboardSysusers := readDocumentation(t, "../../deploy/sysusers/mithril-agent-dashboard.conf")
+	marketStatusUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-market-status.service")
+	marketStatusTimer := readDocumentation(t, "../../deploy/systemd/mithril-agent-market-status.timer")
+	marketPaperUnit := readDocumentation(t, "../../deploy/systemd/mithril-agent-market-paper@.service")
+	marketPaperSocket := readDocumentation(t, "../../deploy/systemd/mithril-agent-market-paper-status@.socket")
+	marketPaperBridge := readDocumentation(t, "../../deploy/systemd/mithril-agent-market-paper-status-bridge@.service")
 	for _, want := range []string{
 		"User=mithril-agent-dashboard", "SupplementaryGroups=mithril-agent-status",
 		"PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
 		"InaccessiblePaths=/var/lib/mithril-agent",
 		"SOL/USDC=/run/mithril-agent-paper-status.sock",
 		"JUP/USDC=/run/mithril-agent-paper-jup-status.sock",
+		"--optional-paper-status-socket WIF/USDC=/run/mithril-agent-market-wif-paper-status.sock",
+		"--optional-paper-status-socket JTO/USDC=/run/mithril-agent-market-jto-paper-status.sock",
+		"--optional-paper-status-socket PYTH/USDC=/run/mithril-agent-market-pyth-paper-status.sock",
 		"--research-packet-path /var/lib/mithril-agent-dashboard/research.json",
 		"--mithril-evidence-status-path /var/lib/mithril-agent-dashboard/mithril-evidence.json",
+		"--market-admission-status-path /var/lib/mithril-agent-dashboard/market-admission.json",
 	} {
 		if !strings.Contains(dashboardUnit, want) {
 			t.Errorf("paper dashboard unit is missing %q", want)
@@ -1232,6 +1252,75 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		t.Error("paper dashboard identity has status access outside its hardened service")
 	}
 	for _, want := range []string{
+		"ConditionPathExists=/etc/mithril-agent/market-paper-%i.env",
+		"Type=notify", "NotifyAccess=main",
+		"StateDirectory=mithril-agent-market-paper-%i", "Restart=no", "RuntimeMaxSec=24h",
+		"shadow run --policy ${MITHRIL_AGENT_PAPER_POLICY}",
+		"--portfolio ${MITHRIL_AGENT_PAPER_PORTFOLIO} --portfolio-book %i",
+		"--provisional-artifact ${MITHRIL_AGENT_PAPER_ARTIFACT}",
+		"--provisional-journal /var/lib/mithril-agent-research/market-admission-%i/evidence.jsonl",
+		"--paper-check-artifact ${MITHRIL_AGENT_PAPER_CHECK}",
+		"--alert-status /var/lib/mithril-agent-market-paper-%i/alerts.json",
+		"ReadOnlyPaths=/var/lib/mithril-agent-research/market-admission-%i",
+		"ReadWritePaths=/var/lib/mithril-agent-market-paper-%i",
+		"NoNewPrivileges=yes", "CapabilityBoundingSet=", "ProtectSystem=strict",
+	} {
+		if !strings.Contains(marketPaperUnit, want) {
+			t.Errorf("provisional market paper runner is missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"candidate-pointer", "--signer", "--wallet", "--submit"} {
+		if strings.Contains(marketPaperUnit, forbidden) {
+			t.Errorf("provisional market paper runner contains unsafe capability %q", forbidden)
+		}
+	}
+	for _, want := range []string{
+		"ListenStream=/run/mithril-agent-market-%i-paper-status.sock",
+		"SocketGroup=mithril-agent-status", "SocketMode=0660",
+		"Service=mithril-agent-market-paper-status-bridge@%i.service", "Accept=no",
+	} {
+		if !strings.Contains(marketPaperSocket, want) {
+			t.Errorf("provisional market paper socket is missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"LoadCredential=paper-status:/var/lib/mithril-agent-market-paper-%i/alerts.json",
+		"mithril-agent-paper-status-bridge --credential paper-status",
+		"PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
+		"InaccessiblePaths=/var/lib/mithril-agent-research",
+	} {
+		if !strings.Contains(marketPaperBridge, want) {
+			t.Errorf("provisional market paper bridge is missing %q", want)
+		}
+	}
+	for _, want := range []string{
+		"User=mithril-agent-dashboard", "Group=mithril-agent-dashboard",
+		"StateDirectory=mithril-agent-dashboard", "StateDirectoryMode=0700",
+		"LoadCredential=market-wif-status:/var/lib/mithril-agent-research/market-admission-wif/dashboard-status.json",
+		"LoadCredential=market-jto-status:/var/lib/mithril-agent-research/market-admission-jto/dashboard-status.json",
+		"LoadCredential=market-pyth-status:/var/lib/mithril-agent-research/market-admission-pyth/dashboard-status.json",
+		"ExecStart=/usr/local/libexec/mithril-agent/mithril-agent-paper-dashboard --record-market-admission /var/lib/mithril-agent-dashboard/market-admission.json",
+		"InaccessiblePaths=-/var/lib/mithril-agent-research",
+		"PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX",
+	} {
+		if !strings.Contains(marketStatusUnit, want) {
+			t.Errorf("market status publisher is missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"EnvironmentFile=", "ReadWritePaths=", "AF_INET", "--listen"} {
+		if strings.Contains(marketStatusUnit, forbidden) {
+			t.Errorf("market status publisher contains unsafe capability %q", forbidden)
+		}
+	}
+	for _, want := range []string{
+		"OnCalendar=*-*-* *:*:00 UTC", "Persistent=true", "AccuracySec=1s",
+		"Unit=mithril-agent-market-status.service", "WantedBy=timers.target",
+	} {
+		if !strings.Contains(marketStatusTimer, want) {
+			t.Errorf("market status timer is missing %q", want)
+		}
+	}
+	for _, want := range []string{
 		"/var/lib/mithril-agent-research/index \\",
 		"/var/lib/mithril-agent-research/runs \\",
 		"/var/lib/mithril-agent-research/status \\",
@@ -1240,9 +1329,23 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"MITHRIL_AGENT_MARKET=JTO/USDC", "MITHRIL_AGENT_MARKET=PYTH/USDC",
 		"mithril-agent-market-candidate@jto.service",
 		"mithril-agent-market-candidate@pyth.service",
+		"mithril-agent-market-status.timer",
+		"systemctl restart mithril-agent-market-candidate@wif.service",
+		"mithril-agent-market-wif.service` must remain disabled",
+		"systemd credentials",
+		"cannot traverse",
 		"PUMP remains excluded", "Token-2022",
 		"shadow market paper-check", "first four hours",
-		"code-owned 25 bps", "50 bps stress", "cannot write a candidate",
+		"code-owned 25 bps", "50 bps stress", "--result-out", "--candidate-policy-out",
+		"MITHRIL_AGENT_PAPER_CHECK=$MARKET_DIR/paper-check-$STAMP.json",
+		"readiness notification",
+		"--dashboard-status \"$MARKET_DIR/dashboard-status.json\"",
+		"checked-policy-$STAMP.json", "writes no candidate policy",
+		"trap 'sudo systemctl start mithril-agent-market-candidate@wif.service' EXIT",
+		"deploy/systemd/mithril-agent-market-status.service",
+		"deploy/systemd/mithril-agent-market-status.timer",
+		"deploy/systemd/mithril-agent-telegram-paper.conf",
+		"Result=success", "ExecMainStatus=0", "valid but stale snapshot",
 		"id -g mithril-agent-research",
 		"Do not copy or hand-edit `events.jsonl`",
 		"/opt/mithril-hermes-research",
@@ -1262,6 +1365,29 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		if !strings.Contains(deployReadme, want) {
 			t.Errorf("Hermes deployment README is missing safe operation %q", want)
 		}
+	}
+	qualificationStart := strings.Index(deployReadme, "set -e\nSTAMP=")
+	if qualificationStart < 0 {
+		t.Fatal("Hermes deployment README omits the guarded short qualification workflow")
+	}
+	qualification := deployReadme[qualificationStart:]
+	checkAt := strings.Index(qualification, "shadow market paper-check")
+	restartAfterCheck := -1
+	if checkAt >= 0 {
+		restartAfterCheck = strings.Index(
+			qualification[checkAt:], "\nsudo systemctl start mithril-agent-market-candidate@wif.service",
+		)
+	}
+	earlyRestart := checkAt > 0 && strings.Contains(
+		qualification[:checkAt], "\nsudo systemctl start mithril-agent-market-candidate@wif.service",
+	)
+	if checkAt < 0 || restartAfterCheck < 0 || earlyRestart {
+		t.Fatal("short qualification restarts the collector before paper-check completes")
+	}
+	collectorProvision := strings.Index(deployReadme, "systemctl enable --now \\\n  mithril-agent-market-candidate@wif.service")
+	firstDiagnostic := strings.Index(deployReadme, "shadow market diagnose")
+	if collectorProvision < 0 || firstDiagnostic < 0 || collectorProvision > firstDiagnostic {
+		t.Fatal("market collectors are not provisioned before diagnostic and qualification commands")
 	}
 	if strings.Contains(deployReadme, "enabling Telegram or cron") {
 		t.Error("Hermes deployment README suggests enabling its disabled Telegram platform")

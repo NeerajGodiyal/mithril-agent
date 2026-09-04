@@ -206,6 +206,26 @@ func TestProvisionalArtifactIsSixHoursPaperOnlyAndExpiresQuickly(t *testing.T) {
 	}
 }
 
+func TestDiagnosticProvisionalReadinessUsesTheSharedCoverageAndCostGates(t *testing.T) {
+	diagnostic := Diagnostic{
+		AvailableBuckets: 342, AvailabilityBPS: ProvisionalMinimumAvailabilityBPS,
+		MedianRouteCostBPS: DefaultThresholds().MedianRouteCostBPS,
+		P95RouteCostBPS:    DefaultThresholds().P95RouteCostBPS,
+	}
+	if !diagnostic.ReadyForProvisionalPaperCheck() {
+		t.Fatal("the exact provisional thresholds were rejected")
+	}
+	diagnostic.P95RouteCostBPS++
+	if diagnostic.ReadyForProvisionalPaperCheck() {
+		t.Fatal("an over-cost diagnostic was presented as ready")
+	}
+	diagnostic.P95RouteCostBPS = DefaultThresholds().P95RouteCostBPS
+	diagnostic.AvailabilityBPS--
+	if diagnostic.ReadyForProvisionalPaperCheck() {
+		t.Fatal("an under-covered diagnostic was presented as ready")
+	}
+}
+
 func TestProvisionalReplayPointsBindTheExactPrefixAndPreserveGaps(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "provisional-replay.jsonl")
@@ -251,6 +271,8 @@ func TestProvisionalReplayPointsBindTheExactPrefixAndPreserveGaps(t *testing.T) 
 	if len(points) != 360 || !points[0].Available || points[1].Available ||
 		points[1].At != observations[1].ObservedAt.UTC() || points[2].Available ||
 		points[2].At != points[2].Bucket.Add(time.Minute) ||
+		points[1].MarketPrimaryPublishedAt != observations[1].MarketPrimary.Sample.PublishedAt.UTC() ||
+		points[1].MarketSecondaryPublishedAt != observations[1].MarketSecondary.PublishedAt.UTC() ||
 		!reflect.DeepEqual(points[1].MarketPrimary, pricetrigger.Sample{}) ||
 		!reflect.DeepEqual(points[1].NativePrimary, pricetrigger.Sample{}) ||
 		points[3].MarketPrimary.PriceMicros == 0 || points[3].NativePrimary.PriceMicros == 0 {

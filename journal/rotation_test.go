@@ -2,6 +2,7 @@ package journal
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -486,6 +487,64 @@ func TestRotatingStoreHoldsAStableLock(t *testing.T) {
 	forceRotate(t, store)
 	if _, err := OpenRotating(path); err == nil {
 		t.Fatal("a second rotating open must be refused while the first holds the lock")
+	}
+}
+
+func TestVerifyRejectsActiveRotatingWriterBeforeFirstRotation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "events.jsonl")
+	store := openRotatingForTest(t, path)
+	if _, err := store.Append(time.Now().UTC(), "test.event", "", struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(path); err == nil || !errors.Is(err, ErrLocked) {
+		t.Fatalf("active unrotated journal verification error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(path); err != nil {
+		t.Fatalf("stopped unrotated journal verification error = %v", err)
+	}
+}
+
+func TestWithVerificationKeepsWriterStoppedThroughAction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.jsonl")
+	store, err := OpenRotating(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(time.Now().UTC(), "test", "", map[string]bool{"ok": true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	if err := WithVerification(path, func(verification Verification) error {
+		called = true
+		if verification.Records != 1 {
+			t.Fatalf("records = %d, want 1", verification.Records)
+		}
+		writer, err := OpenRotating(path)
+		if writer != nil {
+			_ = writer.Close()
+		}
+		if !errors.Is(err, ErrLocked) {
+			t.Fatalf("writer during verification action = %v", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("verification action was not called")
+	}
+	writer, err := OpenRotating(path)
+	if err != nil {
+		t.Fatalf("writer after verification action = %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

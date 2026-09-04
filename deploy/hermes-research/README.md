@@ -230,6 +230,14 @@ sudo install -o root -g root -m 0644 \
   deploy/systemd/mithril-agent-paper-jup-status-handoff.service \
   deploy/systemd/mithril-agent-paper-jup-status.socket \
   deploy/systemd/mithril-agent-paper-jup-status-bridge.service \
+  deploy/systemd/mithril-agent-market-candidate@.service \
+  deploy/systemd/mithril-agent-market-paper@.service \
+  deploy/systemd/mithril-agent-market-paper-status@.socket \
+  deploy/systemd/mithril-agent-market-paper-status-bridge@.service \
+  deploy/systemd/mithril-agent-market-status.service \
+  deploy/systemd/mithril-agent-market-status.timer \
+  deploy/systemd/mithril-agent-paper-dashboard.service \
+  deploy/systemd/mithril-agent-telegram-paper.conf \
   deploy/systemd/mithril-hermes-research-egress.service \
   deploy/systemd/mithril-hermes-research.service \
   deploy/systemd/mithril-hermes-research.timer \
@@ -674,6 +682,40 @@ PYTH/USDC use the same gate with their own pinned mint, decimals, Pyth feed,
 Kraken pair, and Jupiter routes. They do not share evidence or become active
 paper markets merely because their collectors are running.
 
+Provision the collectors before running any diagnostic or qualification command.
+The environment files contain only the public watch-only quote address; it cannot
+sign or spend. The templated unit is the single WIF owner and conflicts with the
+legacy dedicated unit at the systemd layer.
+
+```sh
+printf '%s\n' 'MITHRIL_AGENT_MARKET=WIF/USDC' \
+  'MITHRIL_AGENT_OBSERVE=WATCH_ONLY_ADDRESS' | \
+  sudo install -o root -g root -m 0600 /dev/stdin /etc/mithril-agent/market-wif.env
+printf '%s\n' 'MITHRIL_AGENT_MARKET=JTO/USDC' \
+  'MITHRIL_AGENT_OBSERVE=WATCH_ONLY_ADDRESS' | \
+  sudo install -o root -g root -m 0600 /dev/stdin /etc/mithril-agent/market-jto.env
+printf '%s\n' 'MITHRIL_AGENT_MARKET=PYTH/USDC' \
+  'MITHRIL_AGENT_OBSERVE=WATCH_ONLY_ADDRESS' | \
+  sudo install -o root -g root -m 0600 /dev/stdin /etc/mithril-agent/market-pyth.env
+sudo install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
+  /var/lib/mithril-agent-research/market-admission-wif \
+  /var/lib/mithril-agent-research/market-admission-jto \
+  /var/lib/mithril-agent-research/market-admission-pyth
+sudo install -o root -g root -m 0644 \
+  systemd/mithril-agent-market-candidate@.service /etc/systemd/system/
+sudo systemd-analyze verify /etc/systemd/system/mithril-agent-market-candidate@.service
+sudo systemctl daemon-reload
+sudo systemctl disable --now mithril-agent-market-wif.service
+sudo systemctl enable --now \
+  mithril-agent-market-candidate@wif.service \
+  mithril-agent-market-candidate@jto.service \
+  mithril-agent-market-candidate@pyth.service
+```
+
+The older `mithril-agent-market-wif.service` must remain disabled. The systemd
+conflict prevents both WIF units from owning the same evidence journal if it is
+accidentally enabled again.
+
 For fast operational feedback, stop one collector briefly and run a diagnostic
 over 6 hours, 24 hours, or up to 168 hours. It reports missing and rejected
 buckets, bidirectional availability, route cost, and quote latency to stdout.
@@ -682,17 +724,17 @@ or start a market. This checks plumbing quickly while stronger admission
 evidence continues collecting in the background.
 
 ```sh
-sudo systemctl stop mithril-agent-market-wif.service
+sudo systemctl stop mithril-agent-market-candidate@wif.service
 sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
   shadow market diagnose \
   --journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl \
   --hours 6
-sudo systemctl start mithril-agent-market-wif.service
+sudo systemctl start mithril-agent-market-candidate@wif.service
 ```
 
 After at least six complete hours, development can create a short-lived,
 paper-only checkpoint instead of waiting 30 days before exercising the runner.
-The command refuses a live collector and refuses to replace an existing file.
+The checkpoint command refuses a live collector and refuses to replace an existing file.
 The resulting artifact is only the evidence checkpoint; it is not a strategy.
 Use it to generate a `development_provisional` policy and pass the same artifact
 and journal to the runner. The check below replays only validated market samples
@@ -701,90 +743,143 @@ Neither the artifact nor that policy can authorize a proposal or real-money
 execution.
 
 ```sh
-sudo systemctl stop mithril-agent-market-wif.service
+# Install the bounded runner and status bridge before stopping collection.
+sudo install -o root -g root -m 0644 \
+  systemd/mithril-agent-market-paper@.service \
+  systemd/mithril-agent-market-paper-status@.socket \
+  systemd/mithril-agent-market-paper-status-bridge@.service \
+  /etc/systemd/system/
+sudo systemd-analyze verify \
+  /etc/systemd/system/mithril-agent-market-paper@.service \
+  /etc/systemd/system/mithril-agent-market-paper-status@.socket \
+  /etc/systemd/system/mithril-agent-market-paper-status-bridge@.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now \
+  mithril-agent-market-paper-status@wif.socket \
+  mithril-agent-market-paper-status@jto.socket \
+  mithril-agent-market-paper-status@pyth.socket
+
+# Run the rest of this fenced block as one script so set -e and the EXIT trap
+# always restart collection when a qualification command refuses its input.
+set -e
+STAMP="$(date -u +%Y%m%dT%H%MZ)"
+MARKET_DIR=/var/lib/mithril-agent-research/market-admission-wif
+sudo systemctl stop mithril-agent-market-candidate@wif.service
+trap 'sudo systemctl start mithril-agent-market-candidate@wif.service' EXIT
 sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
   shadow market provisional \
-  --journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl \
-  --out /var/lib/mithril-agent-research/market-admission-wif/provisional.json
-sudo systemctl start mithril-agent-market-wif.service
+  --journal "$MARKET_DIR/evidence.jsonl" \
+  --out "$MARKET_DIR/provisional-$STAMP.json"
 
 # Use the exact watch-only address, quote notional, and slippage recorded in
-# provisional.json. The command refuses values that do not match the artifact.
+# the new checkpoint. The command refuses values that do not match the artifact.
 sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
   shadow policy --adaptive --market WIF/USDC \
   --observe WATCH_ONLY_ADDRESS --budget-usdc QUOTE_NOTIONAL \
   --slippage-bps RECORDED_SLIPPAGE_BPS --drawdown-stop-bps 500 \
-  --provisional-artifact /var/lib/mithril-agent-research/market-admission-wif/provisional.json \
-  --provisional-journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl \
-  --out /var/lib/mithril-agent-research/market-admission-wif/paper-policy.json
+  --provisional-artifact "$MARKET_DIR/provisional-$STAMP.json" \
+  --provisional-journal "$MARKET_DIR/evidence.jsonl" \
+  --out "$MARKET_DIR/base-policy-$STAMP.json"
 
 # This reads only the checkpoint's exact journal prefix. It selects on the
-# first four hours, checks the fixed candidate on the final two hours at an
+# first four hours, checks the fixed candidate on the final two hours at a
 # fixed, code-owned 25 bps symmetric spread and again at the 50 bps stress
 # spread, then prints JSON. Observed route-cost percentiles remain operational
 # evidence; held-out observations cannot lower or choose the model.
-# It cannot write a candidate, select a policy, or start a runner.
+# A passing result writes the exact checked policy. A rejected result exits
+# nonzero, writes no candidate policy, and the EXIT trap restarts the collector.
 sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
   shadow market paper-check \
-  --policy /var/lib/mithril-agent-research/market-admission-wif/paper-policy.json \
-  --provisional-artifact /var/lib/mithril-agent-research/market-admission-wif/provisional.json \
-  --journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl
+  --policy "$MARKET_DIR/base-policy-$STAMP.json" \
+  --provisional-artifact "$MARKET_DIR/provisional-$STAMP.json" \
+  --journal "$MARKET_DIR/evidence.jsonl" \
+  --dashboard-status "$MARKET_DIR/dashboard-status.json" \
+  --result-out "$MARKET_DIR/paper-check-$STAMP.json" \
+  --candidate-policy-out "$MARKET_DIR/checked-policy-$STAMP.json"
 
+# These commands are reached only after the check passes. They bind the paper
+# book and runner to checked-policy-$STAMP.json, never to the base policy that
+# the training search changed.
 sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
   shadow portfolio \
-  --out /var/lib/mithril-agent-research/market-admission-wif/paper-portfolio.json \
+  --out "$MARKET_DIR/paper-portfolio-$STAMP.json" \
   --limit-usd 270 --max-sol-usd 300 \
-  --book wif=/var/lib/mithril-agent-research/market-admission-wif/paper-policy.json
+  --book "wif=$MARKET_DIR/checked-policy-$STAMP.json"
 
-sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
-  shadow run \
-  --policy /var/lib/mithril-agent-research/market-admission-wif/paper-policy.json \
-  --dir /var/lib/mithril-agent-research/market-admission-wif/paper-run \
-  --portfolio /var/lib/mithril-agent-research/market-admission-wif/paper-portfolio.json \
-  --portfolio-book wif \
-  --provisional-artifact /var/lib/mithril-agent-research/market-admission-wif/provisional.json \
-  --provisional-journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl
+printf '%s\n' \
+  "MITHRIL_AGENT_PAPER_POLICY=$MARKET_DIR/checked-policy-$STAMP.json" \
+  "MITHRIL_AGENT_PAPER_ARTIFACT=$MARKET_DIR/provisional-$STAMP.json" \
+  "MITHRIL_AGENT_PAPER_CHECK=$MARKET_DIR/paper-check-$STAMP.json" \
+  "MITHRIL_AGENT_PAPER_PORTFOLIO=$MARKET_DIR/paper-portfolio-$STAMP.json" \
+  "MITHRIL_AGENT_PAPER_RUN_DIR=/var/lib/mithril-agent-market-paper-wif/run-$STAMP" | \
+  sudo install -o root -g root -m 0600 /dev/stdin \
+  /etc/mithril-agent/market-paper-wif.env
+sudo systemctl start mithril-agent-market-paper@wif.service
+sudo systemctl is-active mithril-agent-market-paper@wif.service
+sudo systemctl start mithril-agent-market-candidate@wif.service
+trap - EXIT
 ```
+
+`systemctl start` waits for the runner's readiness notification, which is sent
+only after the policy, passing paper check, evidence journal, portfolio, sources,
+paper journal, and alert output have opened successfully. Repeat the same guarded
+script for `jto` or `pyth`, substituting the allowlisted market name and instance.
+Each timestamped experiment keeps its own policy, paper-check result, portfolio,
+and run journal; alert status and its read-only socket are shared only by that
+market instance. A failed check leaves its runner stopped.
 
 This is a faster development gate, not evidence that a strategy is profitable.
 The 30-day artifact remains the stronger market-admission evidence and continues
 to be required before any later real-money review.
 
-Create a root-owned environment file containing only the public watch-only
-quote address, then install the collector. The address cannot sign or spend.
+Each collector also replaces a private, bounded `dashboard-status.json` in its
+own market directory. The dashboard never reads those research directories.
+Instead, a one-shot receives the exact WIF, JTO, and PYTH snapshots through
+systemd credentials, validates and combines them, and atomically replaces the
+dashboard-owned projection. Install its service and one-minute timer together
+with the updated dashboard service:
 
 ```sh
-printf '%s\n' 'MITHRIL_AGENT_WIF_OBSERVE=WATCH_ONLY_ADDRESS' | \
-  sudo install -o root -g root -m 0600 /dev/stdin /etc/mithril-agent/paper-wif.env
-sudo install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
-  /var/lib/mithril-agent-research/market-admission-wif
 sudo install -o root -g root -m 0644 \
-  systemd/mithril-agent-market-wif.service /etc/systemd/system/
-sudo systemd-analyze verify /etc/systemd/system/mithril-agent-market-wif.service
+  systemd/mithril-agent-market-status.service \
+  systemd/mithril-agent-market-status.timer \
+  systemd/mithril-agent-paper-dashboard.service \
+  /etc/systemd/system/
+sudo systemd-analyze verify \
+  /etc/systemd/system/mithril-agent-market-status.service \
+  /etc/systemd/system/mithril-agent-market-status.timer \
+  /etc/systemd/system/mithril-agent-paper-dashboard.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now mithril-agent-market-wif.service
+sudo systemctl restart mithril-agent-market-candidate@wif.service \
+  mithril-agent-market-candidate@jto.service \
+  mithril-agent-market-candidate@pyth.service
+sudo systemctl start mithril-agent-market-status.service
+sudo systemctl show mithril-agent-market-status.service \
+  -p Result -p ExecMainStatus -p ExecMainStartTimestamp
+sudo stat -Lc '%U:%G %a %s' \
+  /var/lib/mithril-agent-dashboard/market-admission.json
+sudo systemctl enable --now mithril-agent-market-status.timer
+sudo systemctl restart mithril-agent-paper-dashboard.service
 ```
 
-To observe the two additional reviewed candidates, create separate root-owned
-environment files. `MITHRIL_AGENT_OBSERVE` is the same public watch-only quote
-address; it cannot sign or spend.
+Before enabling the timer, the one-shot must report `Result=success` and
+`ExecMainStatus=0`. Its output must be a non-empty mode-`600` file owned by
+`mithril-agent-dashboard:mithril-agent-dashboard`.
+
+The publisher has no network access and cannot traverse
+`/var/lib/mithril-agent-research`; systemd copies only the three named status
+files into its private credential directory. A missing, malformed, or
+wrong-market snapshot makes that refresh fail without replacing the last valid
+projection. A valid but stale snapshot is published with `fresh=false`, so the
+dashboard clearly labels its data delayed. The projection reports paper-only
+collection readiness for a separate qualification check. It does not make a
+market tradable, select a policy, or authorize a transaction. Check both the
+last successful refresh and collector health:
 
 ```sh
-printf '%s\n' 'MITHRIL_AGENT_MARKET=JTO/USDC' \
-  'MITHRIL_AGENT_OBSERVE=WATCH_ONLY_ADDRESS' | \
-  sudo install -o root -g root -m 0600 /dev/stdin /etc/mithril-agent/market-jto.env
-printf '%s\n' 'MITHRIL_AGENT_MARKET=PYTH/USDC' \
-  'MITHRIL_AGENT_OBSERVE=WATCH_ONLY_ADDRESS' | \
-  sudo install -o root -g root -m 0600 /dev/stdin /etc/mithril-agent/market-pyth.env
-sudo install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
-  /var/lib/mithril-agent-research/market-admission-jto \
-  /var/lib/mithril-agent-research/market-admission-pyth
-sudo install -o root -g root -m 0644 \
-  systemd/mithril-agent-market-candidate@.service /etc/systemd/system/
-sudo systemd-analyze verify \
-  /etc/systemd/system/mithril-agent-market-candidate@.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now \
+sudo systemctl status mithril-agent-market-status.timer
+sudo journalctl -u mithril-agent-market-status.service
+sudo systemctl is-active mithril-agent-market-candidate@wif.service \
   mithril-agent-market-candidate@jto.service \
   mithril-agent-market-candidate@pyth.service
 ```
@@ -804,12 +899,12 @@ artifact and policy are supplied. Keep that handoff operator-reviewed; do not
 silently auto-promote a token because a timer ran.
 
 ```sh
-sudo systemctl stop mithril-agent-market-wif.service
+sudo systemctl stop mithril-agent-market-candidate@wif.service
 sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
   shadow market evaluate \
   --journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl \
   --out /var/lib/mithril-agent-research/market-admission-wif/wif-YYYY-MM-DD.json
-sudo systemctl start mithril-agent-market-wif.service
+sudo systemctl start mithril-agent-market-candidate@wif.service
 ```
 
 The initial deployment uses Hermes' keyless web ring for both search and

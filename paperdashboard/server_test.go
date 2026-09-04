@@ -41,12 +41,48 @@ func (s *sourceStub) readCount() int {
 }
 
 func TestAutomationListsOnlyOptionalExperiments(t *testing.T) {
-	if !strings.Contains(appJS, "completedExperiments=experiments.filter") ||
+	if !strings.Contains(appJS, "completedPerps=perpsMarkets.filter") ||
+		!strings.Contains(appJS, "additionalSpots=current.markets.filter(market=>market.optional&&!isPerps(market))") ||
 		!strings.Contains(appJS, "perps recordings are completed") {
-		t.Fatal("paper engine status must derive completed perps from optional experiments")
+		t.Fatal("paper engine status must separate optional spot observers from perps experiments")
 	}
 	if !strings.Contains(appJS, "retained in the final packet") || strings.Contains(appJS, "unique source'+(packet.sources_checked===1?'':'s')+' checked") {
 		t.Fatal("Hermes status must distinguish retrieved pages from sources retained in its final packet")
+	}
+}
+
+func TestOptionalStoppedSpotIsCompletedRatherThanLiveOrPerps(t *testing.T) {
+	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	completed := paperstatus.Event{
+		ID: strings.Repeat("a", 64), At: now,
+		Kind: paperstatus.KindExperimentDone, Message: "PAPER · STOPPED",
+	}
+	wif := &sourceStub{label: "WIF/USDC", snapshot: paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now, Events: []paperstatus.Event{completed},
+		Current: "PAPER · STOPPED",
+		Summary: &paperstatus.CurrentSummary{
+			Market: "WIF/USDC", ValueUnit: "USD", Day: "2026-09-03", TickSeconds: 60,
+			OpeningEquityMicros: 100_000_000, EquityMicros: 101_000_000,
+			HoldBenchmarkMicros: 100_500_000, AccountingTracked: true,
+			RealizedMicros: 1_000_000, Checks: 10, Signals: 1, Trades: 1,
+			PriceMicros: 220_000, State: "completed", Strategy: "adaptive",
+		},
+	}}
+	completed.ID = strings.Repeat("b", 64)
+	jto := &sourceStub{label: "JTO/USDC", snapshot: paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now, Events: []paperstatus.Event{completed},
+	}}
+	server, err := New([]Source{Optional(wif), Optional(jto)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return now }
+	view := server.readSnapshot(now)
+	if len(view.Markets) != 2 || !view.Markets[0].Optional || !view.Markets[0].Completed ||
+		!view.Markets[0].Ready || view.Markets[0].Fresh ||
+		!view.Markets[1].Optional || !view.Markets[1].Completed ||
+		view.Markets[1].Ready || view.Markets[1].Fresh {
+		t.Fatalf("stopped optional spot views = %+v", view.Markets)
 	}
 }
 
@@ -614,7 +650,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for path, wants := range map[string][]string{
-		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "class=\"overview-workspace\"", "id=\"market-switcher\"", "aria-label=\"Live spot markets\"", "id=\"perps-research-title\"", "id=\"perps-research-list\"", "class=\"activity-table\"", "id=\"help-dialog\"", "Quick explanation", "strategy-brief", "/vendor/overclock.svg", "Automation setup", "Reviewed scope", "WIF, JTO, and PYTH", "Recorded replay and doubled-fee checks run in minutes", "short live checkpoints", "None proves profitability", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Total paper budget", "Smallest order", "Largest order", "Paper loss stop", "saving never restarts Mithril", "About this paper account", "bot's UTC day", "/vendor/lightweight-charts-5.2.1.js", "TradingView Lightweight Charts™"},
+		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "class=\"overview-workspace\"", "id=\"market-switcher\"", "aria-label=\"Live spot markets\"", "id=\"perps-research-title\"", "id=\"perps-research-list\"", "class=\"activity-table\"", "id=\"help-dialog\"", "Quick explanation", "strategy-brief", "/vendor/overclock.svg", "Automation setup", "Markets being checked", "id=\"market-research\"", "Reviewed scope", "WIF, JTO, and PYTH", "Recorded replay and doubled-fee checks run in minutes", "short live checkpoints", "None proves profitability", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Total paper budget", "Smallest order", "Largest order", "Paper loss stop", "saving never restarts Mithril", "About this paper account", "bot's UTC day", "/vendor/lightweight-charts-5.2.1.js", "TradingView Lightweight Charts™"},
 		"/app.css": {
 			"@font-face", "/vendor/space-grotesk-latin.woff2", "--canvas: #000", "--green: #86efac", "--line-strong: #353535", "--text: #e7e7e7", "--subtle: #7f7f7f",
 			".tabs {", "position: fixed", ".tab.active", ".brand-logo", ".panel:focus-visible",
@@ -622,6 +658,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"height: calc(100vh - 120px)", ".overview-workspace", "grid-template-columns: minmax(0, 3fr) minmax(330px, 2fr)", "grid-template-columns: minmax(110px, 1fr) 82px max-content", ".market-list-head", ".market-choice.active::before", ".market-chart-stage",
 			".chart-toggle.active", ".chart-canvas { width: 100%; height: 390px", ".chart-data table",
 			".activity-list-head", ".strategy-market-row", ".automation-list-head", "@keyframes view-enter",
+			".market-research-grid", ".market-research-card", ".research-progress::-webkit-progress-value",
 			"@media (max-width: 1023px)", "@media (max-width: 767px)", "@media (max-width: 430px)", "prefers-reduced-motion",
 		},
 		"/app.js": {
@@ -656,6 +693,8 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"selectedMarketName", "market-choice", "aria-controls=\"markets\"", "spotMarkets.find(market=>market.name===selectedMarketName)",
 			"if(changed)window.scrollTo(0,0)",
 			"activity-more", "strategy-list-head", "automation-list-head",
+			"renderMarketResearch", "Ready for short check", "Usable in window", "Round-trip cost", "Round-trip time",
+			"Not enough data", "Plan did not pass", "Ready for paper test", "Untouched replay", "Higher-cost replay",
 		},
 	} {
 		request := httptest.NewRequest(http.MethodGet, "http://localhost"+path, nil)

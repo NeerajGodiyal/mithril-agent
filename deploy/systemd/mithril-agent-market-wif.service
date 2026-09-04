@@ -17,7 +17,7 @@ Environment=MITHRIL_AGENT_JUPITER_RATE_STATE=/run/mithril-agent-research/jupiter
 RuntimeDirectory=mithril-agent-research
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
-ExecStart=/usr/local/libexec/mithril-agent/mithril-agent shadow market collect --market WIF/USDC --observe ${MITHRIL_AGENT_WIF_OBSERVE} --journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl
+ExecStart=/usr/local/libexec/mithril-agent/mithril-agent shadow market collect --market WIF/USDC --observe ${MITHRIL_AGENT_WIF_OBSERVE} --journal /var/lib/mithril-agent-research/market-admission-wif/evidence.jsonl --dashboard-status /var/lib/mithril-agent-research/market-admission-wif/dashboard-status.json
 Restart=always
 RestartSec=15s
 TimeoutStopSec=30s

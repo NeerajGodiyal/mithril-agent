@@ -1,8 +1,8 @@
 [Unit]
 Description=Mithril paper trading dashboard
 Requires=mithril-agent-paper-dashboard.socket
-Wants=mithril-agent-paper-status.socket mithril-agent-paper-jup-status.socket
-After=mithril-agent-paper-dashboard.socket mithril-agent-paper-status.socket mithril-agent-paper-jup-status.socket mithril-agent-perps-paper.service mithril-agent-perps-paper-status@sol.socket mithril-agent-perps-paper-status@btc.socket mithril-agent-perps-paper-status@eth.socket
+Wants=mithril-agent-paper-status.socket mithril-agent-paper-jup-status.socket mithril-agent-market-paper-status@wif.socket mithril-agent-market-paper-status@jto.socket mithril-agent-market-paper-status@pyth.socket
+After=mithril-agent-paper-dashboard.socket mithril-agent-paper-status.socket mithril-agent-paper-jup-status.socket mithril-agent-perps-paper.service mithril-agent-perps-paper-status@sol.socket mithril-agent-perps-paper-status@btc.socket mithril-agent-perps-paper-status@eth.socket mithril-agent-market-paper-status@wif.socket mithril-agent-market-paper-status@jto.socket mithril-agent-market-paper-status@pyth.socket
 
 [Service]
 Type=simple
@@ -12,7 +12,7 @@ SupplementaryGroups=mithril-agent-status
 UMask=0077
 StateDirectory=mithril-agent-dashboard
 StateDirectoryMode=0700
-ExecStart=/usr/local/libexec/mithril-agent/mithril-agent-paper-dashboard --paper-status-socket SOL/USDC=/run/mithril-agent-paper-status.sock --paper-status-socket JUP/USDC=/run/mithril-agent-paper-jup-status.sock --optional-paper-status-socket SOL-PERP=/run/mithril-agent-perps-sol-paper-status.sock --optional-paper-status-socket BTC-PERP=/run/mithril-agent-perps-btc-paper-status.sock --optional-paper-status-socket ETH-PERP=/run/mithril-agent-perps-eth-paper-status.sock --instruction-path /var/lib/mithril-agent-dashboard/instruction.json --research-packet-path /var/lib/mithril-agent-dashboard/research.json --mithril-evidence-status-path /var/lib/mithril-agent-dashboard/mithril-evidence.json
+ExecStart=/usr/local/libexec/mithril-agent/mithril-agent-paper-dashboard --paper-status-socket SOL/USDC=/run/mithril-agent-paper-status.sock --paper-status-socket JUP/USDC=/run/mithril-agent-paper-jup-status.sock --optional-paper-status-socket SOL-PERP=/run/mithril-agent-perps-sol-paper-status.sock --optional-paper-status-socket BTC-PERP=/run/mithril-agent-perps-btc-paper-status.sock --optional-paper-status-socket ETH-PERP=/run/mithril-agent-perps-eth-paper-status.sock --optional-paper-status-socket WIF/USDC=/run/mithril-agent-market-wif-paper-status.sock --optional-paper-status-socket JTO/USDC=/run/mithril-agent-market-jto-paper-status.sock --optional-paper-status-socket PYTH/USDC=/run/mithril-agent-market-pyth-paper-status.sock --instruction-path /var/lib/mithril-agent-dashboard/instruction.json --research-packet-path /var/lib/mithril-agent-dashboard/research.json --mithril-evidence-status-path /var/lib/mithril-agent-dashboard/mithril-evidence.json --market-admission-status-path /var/lib/mithril-agent-dashboard/market-admission.json
 Restart=on-failure
 RestartSec=5s
 TimeoutStartSec=10s
