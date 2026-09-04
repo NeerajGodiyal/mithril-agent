@@ -34,7 +34,9 @@ func TestShadowPerpsPlanSelectsNextRunAndRestoresPrevious(t *testing.T) {
 	}
 	if receipt.Status != "qualified_paper_plan_selected" || !receipt.PointerUpdated ||
 		!receipt.RollbackUpdated || receipt.Effective != "next_bounded_invocation" ||
-		receipt.Authorized || receipt.ExecutionEnabled {
+		receipt.Authorized || receipt.ExecutionEnabled || receipt.TrainingTrials != 12 ||
+		receipt.HoldoutPlansCompared != 2 || receipt.FinalizationReceiptCount != 1 ||
+		receipt.StatisticalConfidence != perpspaper.QualificationConfidence {
 		t.Fatalf("selection receipt = %+v", receipt)
 	}
 	selected, selectedSHA, err := loadOrCreateShadowPerpsPlan(
@@ -56,7 +58,7 @@ func TestShadowPerpsPlanSelectsNextRunAndRestoresPrevious(t *testing.T) {
 		stateDir, perpspaper.Mainnet, selectedSHA, qualification, now.Add(3*time.Hour),
 	)
 	if err != nil || again.Status != "qualified_paper_plan_already_selected" ||
-		again.PointerUpdated || again.RollbackUpdated {
+		again.PointerUpdated || again.RollbackUpdated || again.FinalizationReceiptCount != 1 {
 		t.Fatalf("idempotent selection = %+v, %v", again, err)
 	}
 	restored, err := restoreShadowPerpsPlan(stateDir, perpspaper.SOL, now.Add(4*time.Hour))
@@ -82,6 +84,143 @@ func TestShadowPerpsPlanSelectsNextRunAndRestoresPrevious(t *testing.T) {
 	)
 	if err != nil || retired.Status != "qualified_paper_plan_retired" || retired.PointerUpdated {
 		t.Fatalf("retired selection = %+v, %v", retired, err)
+	}
+}
+
+func TestShadowPerpsPlanRequiresExactJournalReceipt(t *testing.T) {
+	stateDir, config, now := shadowPerpsPlanFixture(t)
+	_, baselineSHA, err := loadOrCreateShadowPerpsPlan(
+		stateDir, perpspaper.Mainnet, config, perpspaper.Balanced, now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := shadowPerpsActivePlanPath(stateDir, perpspaper.SOL)
+	before, err := os.ReadFile(active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	qualification := qualifiedShadowPerpsWalkForward(t, stateDir, config, 3)
+	if err := os.Remove(shadowPerpsFinalizationJournalPath(stateDir, perpspaper.SOL)); err != nil {
+		t.Fatal(err)
+	}
+	refused, err := selectQualifiedShadowPerpsPlan(
+		stateDir, perpspaper.Mainnet, baselineSHA, qualification, now.Add(time.Hour),
+	)
+	if err == nil || refused.PointerUpdated || !strings.Contains(err.Error(), "receipt is missing") {
+		t.Fatalf("unreceipted selection = %+v, %v", refused, err)
+	}
+	after, err := os.ReadFile(active)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("unreceipted result changed pointer: %v", err)
+	}
+
+	controlState, controlConfig, controlNow := shadowPerpsPlanFixture(t)
+	_, controlBaselineSHA, err := loadOrCreateShadowPerpsPlan(
+		controlState, perpspaper.Mainnet, controlConfig, perpspaper.Balanced, controlNow,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlQualification := qualifiedShadowPerpsWalkForward(t, controlState, controlConfig, 3)
+	tampered := controlQualification
+	tampered.InputSHA256 = strings.Repeat("f", 64)
+	selected, err := selectQualifiedShadowPerpsPlan(
+		controlState, perpspaper.Mainnet, controlBaselineSHA, tampered, controlNow.Add(2*time.Hour),
+	)
+	if err == nil || selected.PointerUpdated || !strings.Contains(err.Error(), "receipt") {
+		t.Fatalf("wrong-result selection = %+v, %v", selected, err)
+	}
+	control, err := selectQualifiedShadowPerpsPlan(
+		controlState, perpspaper.Mainnet, controlBaselineSHA, controlQualification, controlNow.Add(3*time.Hour),
+	)
+	if err != nil || !control.PointerUpdated {
+		t.Fatalf("control selection = %+v, %v", control, err)
+	}
+	if err := os.Remove(shadowPerpsFinalizationJournalPath(controlState, perpspaper.SOL)); err != nil {
+		t.Fatal(err)
+	}
+	refused, err = selectQualifiedShadowPerpsPlan(
+		controlState, perpspaper.Mainnet, control.PlanSHA256, controlQualification, controlNow.Add(4*time.Hour),
+	)
+	if err == nil || refused.PointerUpdated || !strings.Contains(err.Error(), "receipt is missing") {
+		t.Fatalf("idempotent selection without receipt = %+v, %v", refused, err)
+	}
+}
+
+func TestProductionFinalizationReceiptRejectsFabricatedNonWinningLeader(t *testing.T) {
+	stateDir, config, now := shadowPerpsPlanFixture(t)
+	_, baselineSHA256, err := loadOrCreateShadowPerpsPlan(
+		stateDir, perpspaper.Mainnet, config, perpspaper.Balanced, now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active := shadowPerpsActivePlanPath(stateDir, perpspaper.SOL)
+	pointerBefore, err := os.ReadFile(active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tapeConfig := shadowPerpsTapeConfig{
+		Environment: perpspaper.Mainnet, Symbol: perpspaper.SOL, RiskArm: perpspaper.Balanced,
+		StartingCollateralMicros: config.StartingCollateralMicros,
+		VenueMaxLeverage:         config.VenueMaxLeverage, VenueSzDecimals: config.VenueSzDecimals,
+		DecisionMode: shadowPerpsDecisionLegacy, PlanSHA256: baselineSHA256,
+	}
+	var finalTape shadowPerpsTape
+	var finalTapeSHA256 string
+	for index, offset := range []int64{0, 10_000_000, 20_000_000} {
+		tape := shadowPerpsTape{
+			Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
+			Config: tapeConfig, Frames: shadowPerpsPlanTestFrames(offset, shadowPerpsPlanWavePrices(4)),
+		}
+		path, err := sealShadowPerpsTape(stateDir, tape)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if index == 2 {
+			finalTape = tape
+			finalTapeSHA256 = strings.TrimSuffix(filepath.Base(path), ".json")
+		}
+	}
+	qualification, err := perpspaper.QualifyTournament(config, finalTape.Frames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := replayShadowPerpsTape(finalTape.Config, finalTape.Frames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, count, appended, err := evaluateAndRecordShadowPerpsFinalization(
+		stateDir, finalTape, finalTapeSHA256, replay, qualification, now.Add(time.Hour),
+	)
+	if err != nil || verified == nil || verified.TrainingLeader == nil || !appended || count != 1 {
+		t.Fatalf("verified finalization = %+v, %d, %t, %v", verified, count, appended, err)
+	}
+
+	fabricatedKey, fabricatedForward, fabricatedStress := bestShadowPerpsPlanCandidate(t, config, finalTape.Frames)
+	if fabricatedKey == *verified.TrainingLeader {
+		fabricatedKey, fabricatedForward, fabricatedStress = weakerShadowPerpsPlanCandidate(
+			t, config, finalTape.Frames, fabricatedKey, fabricatedForward, fabricatedStress,
+		)
+	}
+	forged := *verified
+	forged.Outcome = "candidate_ready_for_more_paper_testing"
+	forged.EligibleForPaperExperiment = true
+	forged.TrainingLeader, forged.Candidate = &fabricatedKey, &fabricatedKey
+	forged.Forward, forged.Stress = &fabricatedForward, &fabricatedStress
+	forged.HoldoutPlansCompared = 1
+	forged.HoldoutCompletedTrades = fabricatedForward.Score.ClosedPositions
+	forged.Reasons = []string{}
+	selection, err := selectQualifiedShadowPerpsPlan(
+		stateDir, perpspaper.Mainnet, baselineSHA256, forged, now.Add(2*time.Hour),
+	)
+	if err == nil || selection.PointerUpdated || !strings.Contains(err.Error(), "receipt does not match") {
+		t.Fatalf("fabricated leader selection = %+v, %v", selection, err)
+	}
+	pointerAfter, err := os.ReadFile(active)
+	if err != nil || !bytes.Equal(pointerAfter, pointerBefore) {
+		t.Fatalf("fabricated leader changed active pointer: %v", err)
 	}
 }
 
@@ -151,7 +290,7 @@ func TestShadowPerpsPlanKeepsTwoTapeResultResearchOnlyWithoutChangingPointer(t *
 	}
 }
 
-func TestShadowPerpsPlanRejectsWeakerChallengerWithoutChangingPointer(t *testing.T) {
+func TestShadowPerpsPlanRejectsReceiptFromWrongIncumbentWithoutChangingPointer(t *testing.T) {
 	stateDir, config, now := shadowPerpsPlanFixture(t)
 	_, baselineSHA, err := loadOrCreateShadowPerpsPlan(
 		stateDir, perpspaper.Mainnet, config, perpspaper.Balanced, now,
@@ -185,14 +324,58 @@ func TestShadowPerpsPlanRejectsWeakerChallengerWithoutChangingPointer(t *testing
 	receipt, err := selectQualifiedShadowPerpsPlan(
 		stateDir, perpspaper.Mainnet, selected.PlanSHA256, weaker, now.Add(2*time.Hour),
 	)
-	if err != nil || receipt.Status != "challenger_not_selected" || receipt.PointerUpdated ||
-		receipt.Comparison == nil || len(receipt.Reasons) == 0 ||
-		!strings.Contains(strings.Join(receipt.Reasons, ","), "underperformed_incumbent") {
-		t.Fatalf("weaker receipt = %+v, %v", receipt, err)
+	if err == nil || receipt.PointerUpdated || !strings.Contains(err.Error(), "finalization receipt") {
+		t.Fatalf("wrong-incumbent receipt = %+v, %v", receipt, err)
 	}
 	after, err := os.ReadFile(active)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatalf("weaker challenger changed pointer: %v", err)
+	}
+}
+
+func TestShadowPerpsPlanKeepsLegacyFinalTapeResearchOnly(t *testing.T) {
+	stateDir, config, now := shadowPerpsPlanFixture(t)
+	_, baselineSHA, err := loadOrCreateShadowPerpsPlan(
+		stateDir, perpspaper.Mainnet, config, perpspaper.Balanced, now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	qualification := qualifiedShadowPerpsWalkForward(t, stateDir, config, 3)
+	legacy := shadowPerpsTape{
+		Version: 3, PaperOnly: true, AccountingModel: shadowPerpsLegacyModel,
+		Config: shadowPerpsTapeConfig{
+			Environment: perpspaper.Mainnet, Symbol: config.Symbol, RiskArm: perpspaper.Balanced,
+			StartingCollateralMicros: config.StartingCollateralMicros,
+			VenueMaxLeverage:         config.VenueMaxLeverage, VenueSzDecimals: config.VenueSzDecimals,
+		},
+		Frames: shadowPerpsPlanTestFrames(1_000_000_000, shadowPerpsPlanWavePrices(3)),
+	}
+	path, err := sealShadowPerpsTape(stateDir, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := perpspaper.QualifyTournament(config, legacy.Frames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := &qualification.Tapes[len(qualification.Tapes)-1]
+	final.ContentSHA256 = strings.TrimSuffix(filepath.Base(path), ".json")
+	final.ReplayInputSHA256 = replayed.InputSHA256
+	active := shadowPerpsActivePlanPath(stateDir, perpspaper.SOL)
+	before, err := os.ReadFile(active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := selectQualifiedShadowPerpsPlan(
+		stateDir, perpspaper.Mainnet, baselineSHA, qualification, now.Add(time.Hour),
+	)
+	if err == nil || receipt.PointerUpdated || !strings.Contains(err.Error(), "finalization") {
+		t.Fatalf("legacy final-tape selection = %+v, %v", receipt, err)
+	}
+	after, err := os.ReadFile(active)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("legacy final tape changed pointer: %v", err)
 	}
 }
 
@@ -255,12 +438,20 @@ func shadowPerpsActivePlanPath(stateDir string, symbol perpspaper.Symbol) string
 func qualifiedShadowPerpsWalkForward(t *testing.T, stateDir string, config perpspaper.QualificationConfig, tapeCount int) perpspaper.WalkForwardQualification {
 	t.Helper()
 	frames := shadowPerpsPlanTestFrames(1_000_000_000, shadowPerpsPlanWavePrices(3))
+	current, currentSHA256, pointer, err := loadBoundShadowPerpsPlanPointer(
+		shadowPerpsActivePlanPath(stateDir, config.Symbol), perpspaper.Mainnet, config,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tape := shadowPerpsTape{
-		Version: 3, PaperOnly: true, AccountingModel: shadowPerpsLegacyModel,
+		Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
 		Config: shadowPerpsTapeConfig{
-			Environment: perpspaper.Mainnet, Symbol: config.Symbol, RiskArm: perpspaper.Balanced,
+			Environment: perpspaper.Mainnet, Symbol: config.Symbol, RiskArm: current.Key.RiskArm,
 			StartingCollateralMicros: config.StartingCollateralMicros,
 			VenueMaxLeverage:         config.VenueMaxLeverage, VenueSzDecimals: config.VenueSzDecimals,
+			DecisionMode: current.DecisionMode, Strategy: current.Key.Strategy,
+			PlanSHA256: currentSHA256, QualificationInputSHA256: current.QualificationInputSHA256,
 		},
 		Frames: frames,
 	}
@@ -287,14 +478,48 @@ func qualifiedShadowPerpsWalkForward(t *testing.T, stateDir string, config perps
 	final.ReplayInputSHA256 = replayed.InputSHA256
 	final.Frames = uint64(len(frames))
 	final.FirstTime, final.LastTime = frames[0].Book.Time, frames[len(frames)-1].Book.Time
-	return perpspaper.WalkForwardQualification{
+	result := perpspaper.WalkForwardQualification{
 		Version: perpspaper.WalkForwardVersion, Status: "research_only",
 		Outcome: "candidate_ready_for_more_paper_testing", PaperOnly: true,
 		EligibleForPaperExperiment: true, InputSHA256: strings.Repeat("a", 64),
 		Config: config, Tapes: tapes, TrainingLeader: &key, Candidate: &key,
-		Forward: &forward, Stress: &stress,
+		Training: shadowPerpsPlanTrainingTrials(), TrainingTrials: 12, HoldoutPlansCompared: 1,
+		HoldoutCompletedTrades: forward.Score.ClosedPositions,
+		StatisticalConfidence:  perpspaper.QualificationConfidence,
+		Forward:                &forward, Stress: &stress,
 		Reasons: []string{},
 	}
+	replay, err := replayShadowPerpsTape(tape.Config, tape.Frames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalization, err := newShadowPerpsFinalizationReceipt(
+		tape, final.ContentSHA256, replay, replayed, &result,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := appendShadowPerpsFinalizationReceipt(
+		stateDir, finalization, pointer.SelectedAt.Add(time.Second).UTC(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func shadowPerpsPlanTrainingTrials() []perpspaper.WalkForwardTrial {
+	var trials []perpspaper.WalkForwardTrial
+	for _, arm := range []perpspaper.RiskArm{perpspaper.Conservative, perpspaper.Balanced, perpspaper.Experimental} {
+		for _, strategy := range []perpspaper.Strategy{
+			perpspaper.StrategyMomentum, perpspaper.StrategyMeanReversion,
+			perpspaper.StrategyBreakout, perpspaper.StrategyRegime,
+		} {
+			trials = append(trials, perpspaper.WalkForwardTrial{
+				QualificationKey: perpspaper.QualificationKey{RiskArm: arm, Strategy: strategy},
+			})
+		}
+	}
+	return trials
 }
 
 func bestShadowPerpsPlanCandidate(t *testing.T, config perpspaper.QualificationConfig, frames []perpspaper.TapeFrame) (perpspaper.QualificationKey, perpspaper.QualificationEvidence, perpspaper.QualificationEvidence) {

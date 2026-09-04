@@ -42,6 +42,84 @@ type WalkForwardTrial struct {
 	Aggregate        *TournamentScore  `json:"aggregate,omitempty"`
 }
 
+// ExecutionDelayAdvisory is a standalone paper-only stress result. It is never
+// part of walk-forward qualification, candidate selection, or paper execution.
+type ExecutionDelayAdvisory struct {
+	Version                  uint32                `json:"version"`
+	Status                   string                `json:"status"`
+	PaperOnly                bool                  `json:"paper_only"`
+	Authorized               bool                  `json:"authorized"`
+	Promotable               bool                  `json:"promotable"`
+	Rule                     string                `json:"rule"`
+	InputSHA256              string                `json:"input_sha256"`
+	ResultSHA256             string                `json:"result_sha256"`
+	QualificationInputSHA256 string                `json:"qualification_input_sha256"`
+	FinalTapeSHA256          string                `json:"final_tape_sha256"`
+	Evidence                 QualificationEvidence `json:"evidence"`
+}
+
+// Validate proves the advisory is bound to this exact qualification context.
+func (advisory ExecutionDelayAdvisory) Validate(qualificationInputSHA256, finalTapeSHA256 string, leader QualificationKey) error {
+	digest, err := executionDelayInputSHA256(qualificationInputSHA256, finalTapeSHA256, leader)
+	resultDigest, resultErr := executionDelayResultSHA256(advisory.Evidence)
+	if err != nil || resultErr != nil || advisory.Version != 1 || advisory.Status != "advisory_only" ||
+		!advisory.PaperOnly || advisory.Authorized || advisory.Promotable ||
+		!validWalkForwardSHA256(qualificationInputSHA256) || !validWalkForwardSHA256(finalTapeSHA256) ||
+		!validExecutionDelayLeader(leader) ||
+		advisory.Rule != QualificationExecutionDelay || advisory.InputSHA256 != digest ||
+		advisory.ResultSHA256 != resultDigest ||
+		advisory.QualificationInputSHA256 != qualificationInputSHA256 ||
+		advisory.FinalTapeSHA256 != finalTapeSHA256 || advisory.Evidence.QualificationKey != leader ||
+		advisory.Evidence.StressRule != "" {
+		return errors.New("execution-delay advisory is invalid")
+	}
+	return nil
+}
+
+func validExecutionDelayLeader(leader QualificationKey) bool {
+	if _, _, _, err := armPolicy(leader.RiskArm); err != nil {
+		return false
+	}
+	switch leader.Strategy {
+	case StrategyMomentum, StrategyMeanReversion, StrategyBreakout, StrategyRegime:
+		return true
+	default:
+		return false
+	}
+}
+
+// EvaluateOneFrameExecutionDelay evaluates a frozen walk-forward leader with a
+// one-frame execution delay without changing the authoritative qualification.
+func EvaluateOneFrameExecutionDelay(
+	config QualificationConfig,
+	frames []TapeFrame,
+	qualificationInputSHA256, finalTapeSHA256 string,
+	leader QualificationKey,
+) (ExecutionDelayAdvisory, error) {
+	if !validWalkForwardSHA256(qualificationInputSHA256) || !validWalkForwardSHA256(finalTapeSHA256) {
+		return ExecutionDelayAdvisory{}, errors.New("execution-delay advisory lineage is invalid")
+	}
+	result, err := evaluateTournamentStrategyOneFrameDelay(config.replayConfig(leader.RiskArm), frames, leader.Strategy)
+	if err != nil {
+		return ExecutionDelayAdvisory{}, err
+	}
+	advisory := ExecutionDelayAdvisory{
+		Version: 1, Status: "advisory_only", PaperOnly: true,
+		Rule: QualificationExecutionDelay, QualificationInputSHA256: qualificationInputSHA256,
+		FinalTapeSHA256: finalTapeSHA256,
+		Evidence:        *qualificationEvidence(leader, "", result),
+	}
+	advisory.InputSHA256, err = executionDelayInputSHA256(qualificationInputSHA256, finalTapeSHA256, leader)
+	if err != nil {
+		return ExecutionDelayAdvisory{}, err
+	}
+	advisory.ResultSHA256, err = executionDelayResultSHA256(advisory.Evidence)
+	if err != nil {
+		return ExecutionDelayAdvisory{}, err
+	}
+	return advisory, advisory.Validate(qualificationInputSHA256, finalTapeSHA256, leader)
+}
+
 // WalkForwardQualification selects only on earlier tapes and then evaluates
 // the fixed leader on the final held-out tape. It is research evidence
 // and can only make a candidate eligible for another bounded paper experiment.
@@ -56,6 +134,10 @@ type WalkForwardQualification struct {
 	InputSHA256                string                    `json:"input_sha256"`
 	Config                     QualificationConfig       `json:"config"`
 	Tapes                      []WalkForwardTapeEvidence `json:"tapes"`
+	TrainingTrials             uint64                    `json:"training_trials"`
+	HoldoutPlansCompared       uint64                    `json:"holdout_plans_compared"`
+	HoldoutCompletedTrades     uint64                    `json:"holdout_completed_trades"`
+	StatisticalConfidence      string                    `json:"statistical_confidence"`
 	Training                   []WalkForwardTrial        `json:"training"`
 	TrainingLeader             *QualificationKey         `json:"training_leader,omitempty"`
 	Forward                    *QualificationEvidence    `json:"forward,omitempty"`
@@ -73,7 +155,8 @@ func QualifyWalkForward(config QualificationConfig, tapes []WalkForwardTape) (Wa
 	result := WalkForwardQualification{
 		Version: WalkForwardVersion, Status: "research_only", Outcome: "insufficient_evidence",
 		PaperOnly: true, Config: config, Tapes: []WalkForwardTapeEvidence{},
-		Training: []WalkForwardTrial{}, Reasons: []string{},
+		StatisticalConfidence: QualificationConfidence,
+		Training:              []WalkForwardTrial{}, Reasons: []string{},
 	}
 	seen := make(map[string]bool, len(tapes))
 	var previousLast int64
@@ -162,6 +245,7 @@ func QualifyWalkForward(config QualificationConfig, tapes []WalkForwardTape) (Wa
 			}
 		}
 	}
+	result.TrainingTrials = uint64(len(result.Training))
 	if leader.Score == nil {
 		result.Outcome = "no_training_candidate"
 		result.Reasons = append(result.Reasons, "no_profitable_completed_training_trade")
@@ -175,6 +259,10 @@ func QualifyWalkForward(config QualificationConfig, tapes []WalkForwardTape) (Wa
 		return WalkForwardQualification{}, fmt.Errorf("forward %s/%s: %w", leader.RiskArm, leader.Strategy, err)
 	}
 	result.Forward = qualificationEvidence(leaderKey, "", forwardResult)
+	result.HoldoutPlansCompared = 1
+	if result.Forward.Score != nil {
+		result.HoldoutCompletedTrades = result.Forward.Score.ClosedPositions
+	}
 	stressConfig := config.replayConfig(leader.RiskArm)
 	entryFee, _, _ := armAccounting(leader.RiskArm)
 	stressConfig.AdditionalFeeBPS = entryFee
@@ -193,6 +281,38 @@ func QualifyWalkForward(config QualificationConfig, tapes []WalkForwardTape) (Wa
 	result.EligibleForPaperExperiment = true
 	result.Candidate = &leaderKey
 	return result, nil
+}
+
+func executionDelayInputSHA256(qualificationInputSHA256, finalTapeSHA256 string, leader QualificationKey) (string, error) {
+	payload, err := json.Marshal(struct {
+		Version                  uint32           `json:"version"`
+		Rule                     string           `json:"rule"`
+		QualificationInputSHA256 string           `json:"qualification_input_sha256"`
+		FinalTapeSHA256          string           `json:"final_tape_sha256"`
+		Leader                   QualificationKey `json:"leader"`
+	}{1, QualificationExecutionDelay, qualificationInputSHA256, finalTapeSHA256, leader})
+	if err != nil {
+		return "", errors.New("encode execution-delay advisory input")
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func executionDelayResultSHA256(evidence QualificationEvidence) (string, error) {
+	payload, err := json.Marshal(evidence)
+	if err != nil {
+		return "", errors.New("encode execution-delay advisory result")
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func validWalkForwardSHA256(value string) bool {
+	if len(value) != 64 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 // BestCompletedTrainingAttempts returns the strongest completed aggregate

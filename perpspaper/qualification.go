@@ -11,6 +11,8 @@ import (
 const (
 	QualificationVersion        uint32 = 1
 	QualificationMinimumFrames         = 24
+	QualificationConfidence            = "not_estimated_insufficient_independent_episodes"
+	QualificationExecutionDelay        = "one_frame_execution_delay_v1"
 	qualificationMaxDrawdownBPS        = 2_000
 	qualificationStressRule            = "double_fees_v1"
 )
@@ -215,6 +217,18 @@ func evaluateTournamentStrategy(config ReplayConfig, frames []TapeFrame, strateg
 	return scoreTournamentStrategy(config, frames[len(frames)-1].Book, strategy, replay)
 }
 
+func evaluateTournamentStrategyOneFrameDelay(config ReplayConfig, frames []TapeFrame, strategy Strategy) (TournamentResult, error) {
+	causal, err := tournamentCausalFrames(config, frames)
+	if err != nil {
+		return TournamentResult{}, err
+	}
+	replay, err := replayTournamentStrategyOneFrameDelay(config, causal, 0, strategy)
+	if err != nil {
+		return TournamentResult{}, err
+	}
+	return scoreTournamentStrategy(config, frames[len(frames)-1].Book, strategy, replay)
+}
+
 func evaluateFixedPlan(config ReplayConfig, frames []TapeFrame, key QualificationKey) (TournamentResult, error) {
 	if config.RiskArm != key.RiskArm {
 		return TournamentResult{}, errors.New("fixed plan risk arm does not match replay configuration")
@@ -256,6 +270,35 @@ func replayTournamentStrategy(config ReplayConfig, causal []TapeFrame, flatPrefi
 			decision.Direction, decision.ChangeBPS = Flat, 0
 		}
 		return decision, err
+	})
+}
+
+// replayTournamentStrategyOneFrameDelay is advisory-only. The authoritative
+// replay remains unchanged: this freezes frame i's decision and lets
+// the existing replay apply funding and marking at frame i+1 before executing
+// that decision against frame i+1's visible book. The last queued decision is
+// intentionally ignored; scoreTournamentStrategy may still close an existing
+// position at the final book as an evaluator-only terminal close.
+func replayTournamentStrategyOneFrameDelay(config ReplayConfig, causal []TapeFrame, flatPrefix int, strategy Strategy) (TapeReplay, error) {
+	frame := 0
+	var pending Decision
+	return replayTape(config, causal, func(symbol Symbol, arm RiskArm, candles []Candle) (Decision, error) {
+		current := frame
+		frame++
+		decision, err := tournamentDecision(strategy, symbol, arm, candles)
+		if err != nil {
+			return Decision{}, err
+		}
+		if current < flatPrefix {
+			decision.Direction, decision.ChangeBPS = Flat, 0
+		}
+		execute := pending
+		pending = decision
+		if current == 0 {
+			execute = decision
+			execute.Direction, execute.ChangeBPS = Flat, 0
+		}
+		return execute, nil
 	})
 }
 

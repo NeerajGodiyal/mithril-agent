@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 	"github.com/Overclock-Validator/mithril-agent/perpspaper"
 )
@@ -35,6 +36,224 @@ func TestShadowPerpsWalkForwardReadsOnlySealedCompatibleTapes(t *testing.T) {
 	if err := runShadowPerpsWalkForward([]string{"--tape", second, "--tape", first}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "chronological") {
 		t.Fatalf("reversed tapes error = %v", err)
 	}
+}
+
+func TestShadowPerpsFinalizationReceiptIsContentBoundIdempotentAndPrivate(t *testing.T) {
+	stateDir, tape, tapeSHA256, replay, qualification, result, now := shadowPerpsFinalizationFixture(t)
+	receipt, err := newShadowPerpsFinalizationReceipt(tape, tapeSHA256, replay, qualification, &result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, appended, err := appendShadowPerpsFinalizationReceipt(stateDir, receipt, now)
+	if err != nil || !appended || count != 1 {
+		t.Fatalf("first receipt = %d, %t, %v", count, appended, err)
+	}
+	count, appended, err = appendShadowPerpsFinalizationReceipt(stateDir, receipt, now.Add(time.Second))
+	if err != nil || appended || count != 1 {
+		t.Fatalf("idempotent receipt = %d, %t, %v", count, appended, err)
+	}
+	raw, err := os.ReadFile(shadowPerpsFinalizationJournalPath(stateDir, tape.Config.Symbol))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{stateDir, `"reasons"`, `"ineligible_reason"`, `"score"`, `"frames"`, "execution_delay"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("finalization receipt exposed %q", forbidden)
+		}
+	}
+
+	collision := result
+	forward := *result.Forward
+	score := *forward.Score
+	score.NetPnLMicros++
+	forward.Score = &score
+	collision.Forward = &forward
+	collisionReceipt, err := newShadowPerpsFinalizationReceipt(tape, tapeSHA256, replay, qualification, &collision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, appended, err := appendShadowPerpsFinalizationReceipt(
+		stateDir, collisionReceipt, now.Add(2*time.Second),
+	); err == nil || appended || !strings.Contains(err.Error(), "collision") {
+		t.Fatalf("contradictory receipt = %t, %v", appended, err)
+	}
+}
+
+func TestShadowPerpsFinalizationReceiptPreservesOptionalWalkForwardAndRejectsMalformedHistory(t *testing.T) {
+	stateDir, tape, tapeSHA256, replay, qualification, result, now := shadowPerpsFinalizationFixture(t)
+	receipt, err := newShadowPerpsFinalizationReceipt(tape, tapeSHA256, replay, qualification, nil)
+	if err != nil || receipt.SingleQualificationSHA256 != qualification.InputSHA256 ||
+		receipt.WalkForwardInputSHA256 != "" || receipt.HoldoutEvaluated {
+		t.Fatalf("single-tape receipt = %+v, %v", receipt, err)
+	}
+
+	result.Outcome = "no_training_candidate"
+	result.EligibleForPaperExperiment = false
+	result.TrainingLeader, result.Candidate = nil, nil
+	result.Forward, result.Stress = nil, nil
+	result.HoldoutPlansCompared, result.HoldoutCompletedTrades = 0, 0
+	result.Reasons = []string{"no_profitable_completed_training_trade"}
+	receipt, err = newShadowPerpsFinalizationReceipt(tape, tapeSHA256, replay, qualification, &result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count, appended, err := appendShadowPerpsFinalizationReceipt(stateDir, receipt, now)
+	if err != nil || !appended || count != 1 {
+		t.Fatalf("no-leader receipt = %d, %t, %v", count, appended, err)
+	}
+	store, err := journal.OpenRotating(shadowPerpsFinalizationJournalPath(stateDir, tape.Config.Symbol))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(now.Add(time.Second), "perps.unexpected", tapeSHA256, map[string]bool{"paper_only": true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := appendShadowPerpsFinalizationReceipt(
+		stateDir, receipt, now.Add(2*time.Second),
+	); err == nil || !strings.Contains(err.Error(), "unexpected event") {
+		t.Fatalf("malformed receipt history error = %v", err)
+	}
+}
+
+func TestShadowPerpsExecutionDelayAdvisoryIsPrivateAndContentAddressed(t *testing.T) {
+	stateDir, tape, tapeSHA256, _, _, result, _ := shadowPerpsFinalizationFixture(t)
+	if result.TrainingLeader == nil {
+		t.Fatal("fixture has no training leader")
+	}
+	advisory, err := perpspaper.EvaluateOneFrameExecutionDelay(
+		result.Config, tape.Frames, result.InputSHA256, tapeSHA256, *result.TrainingLeader,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := writeShadowPerpsExecutionDelayAdvisory(stateDir, tape.Config.Symbol, *result.TrainingLeader, advisory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := writeShadowPerpsExecutionDelayAdvisory(stateDir, tape.Config.Symbol, *result.TrainingLeader, advisory)
+	if err != nil || again != path {
+		t.Fatalf("idempotent advisory = %q, %v", again, err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(raw)
+	wantName := hex.EncodeToString(digest[:]) + ".json"
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 ||
+		filepath.Base(path) != wantName || filepath.Dir(path) != filepath.Join(filepath.Dir(stateDir), "advisories", "sol") {
+		t.Fatalf("private content-addressed advisory = %q, %v, %v", path, info, err)
+	}
+	for _, forbidden := range []string{stateDir, `"reasons"`, `"path"`} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("advisory exposed %q", forbidden)
+		}
+	}
+}
+
+func TestShadowPerpsExecutionDelayAdvisoryFailureDoesNotBlockFinalization(t *testing.T) {
+	stateDir, tape, _, _, _, expected, now := shadowPerpsFinalizationFixture(t)
+	publishedDir := filepath.Join(filepath.Dir(stateDir), "published")
+	if err := os.Mkdir(publishedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	first := shadowPerpsTape{
+		Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
+		Config: tape.Config, Frames: shadowPerpsPlanTestFrames(0, shadowPerpsPlanWavePrices(4)),
+	}
+	if _, err := sealShadowPerpsTape(stateDir, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeShadowPerpsJSON(filepath.Join(stateDir, "sol-tape.json"), tape); err != nil {
+		t.Fatal(err)
+	}
+	advisoryRoot := filepath.Join(filepath.Dir(stateDir), "advisories")
+	if err := os.WriteFile(advisoryRoot, []byte("block optional advisory directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := finalizeAndPublishShadowPerps(
+		stateDir, publishedDir, []perpspaper.Symbol{perpspaper.SOL}, now,
+	); err != nil {
+		t.Fatalf("best-effort advisory blocked finalization: %v", err)
+	}
+	var walkForward perpspaper.WalkForwardQualification
+	if err := readStrictJSON(filepath.Join(stateDir, "sol-walk-forward.json"), &walkForward); err != nil ||
+		walkForward.InputSHA256 != expected.InputSHA256 || walkForward.TrainingLeader == nil {
+		t.Fatalf("authoritative walk-forward = %+v, %v", walkForward, err)
+	}
+	if _, err := os.Stat(filepath.Join(publishedDir, "sol-paper-status.json")); err != nil {
+		t.Fatalf("authoritative status was not published: %v", err)
+	}
+	store, err := journal.OpenRotating(shadowPerpsFinalizationJournalPath(stateDir, perpspaper.SOL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipts, foldErr := foldShadowPerpsFinalizationReceipts(store.Records())
+	closeErr := store.Close()
+	if foldErr != nil || closeErr != nil || len(receipts) != 1 ||
+		receipts[0].WalkForwardInputSHA256 != expected.InputSHA256 {
+		t.Fatalf("authoritative receipt = %+v, %v, %v", receipts, foldErr, closeErr)
+	}
+	info, err := os.Lstat(advisoryRoot)
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("best-effort advisory failure was not isolated: %v, %v", info, err)
+	}
+}
+
+func shadowPerpsFinalizationFixture(t *testing.T) (
+	string, shadowPerpsTape, string, perpspaper.TapeReplay,
+	perpspaper.Qualification, perpspaper.WalkForwardQualification, time.Time,
+) {
+	t.Helper()
+	stateDir, config, now := shadowPerpsPlanFixture(t)
+	_, planSHA256, err := loadOrCreateShadowPerpsPlan(
+		stateDir, perpspaper.Mainnet, config, perpspaper.Balanced, now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tapeConfig := shadowPerpsTapeConfig{
+		Environment: perpspaper.Mainnet, Symbol: config.Symbol, RiskArm: perpspaper.Balanced,
+		StartingCollateralMicros: config.StartingCollateralMicros,
+		VenueMaxLeverage:         config.VenueMaxLeverage, VenueSzDecimals: config.VenueSzDecimals,
+		DecisionMode: shadowPerpsDecisionLegacy, PlanSHA256: planSHA256,
+	}
+	first := shadowPerpsTape{
+		Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
+		Config: tapeConfig, Frames: shadowPerpsPlanTestFrames(0, shadowPerpsPlanWavePrices(4)),
+	}
+	second := shadowPerpsTape{
+		Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
+		Config: tapeConfig, Frames: shadowPerpsPlanTestFrames(10_000_000, shadowPerpsPlanWavePrices(3)),
+	}
+	_, firstSHA256, err := canonicalShadowPerpsTape(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, secondSHA256, err := canonicalShadowPerpsTape(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := perpspaper.QualifyWalkForward(config, []perpspaper.WalkForwardTape{
+		{ContentSHA256: firstSHA256, Frames: first.Frames},
+		{ContentSHA256: secondSHA256, Frames: second.Frames},
+	})
+	if err != nil || result.TrainingLeader == nil || result.Forward == nil || result.Forward.Score == nil {
+		t.Fatalf("walk-forward fixture = %+v, %v", result, err)
+	}
+	qualification, err := perpspaper.QualifyTournament(config, second.Frames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := replayShadowPerpsTape(second.Config, second.Frames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stateDir, second, secondSHA256, replay, qualification, result, now.Add(time.Hour)
 }
 
 func TestSettledCaptureKeepsVerifiedV3ReplayTapesReadable(t *testing.T) {
@@ -160,7 +379,7 @@ func TestShadowPerpsWalkForwardMessageUsesPlainPaperLanguage(t *testing.T) {
 		Tapes:   []perpspaper.WalkForwardTapeEvidence{{}, {}},
 	}
 	message := shadowPerpsWalkForwardMessage(result)
-	for _, want := range []string{"PAPER · 🧪 STRATEGY CHECK", "Recordings checked: 2 separate", "Final untouched recording: kept closed", "No real order was sent."} {
+	for _, want := range []string{"PAPER · 🧪 STRATEGY CHECK", "Recordings checked: 2 separate", "Final held-out recording: kept closed", "No real order was sent."} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("plain paper message = %q", message)
 		}
@@ -211,24 +430,36 @@ func TestWalkForwardSummaryShowsCompletedAttemptsWithoutSelectingThem(t *testing
 
 func TestFinalizePreservesTapesAndPublishesMultiTapeSummary(t *testing.T) {
 	base := t.TempDir()
-	stateDir := filepath.Join(base, "current")
-	if err := os.Mkdir(stateDir, 0o700); err != nil {
-		t.Fatal(err)
+	stateDir, publishedDir := filepath.Join(base, "current"), filepath.Join(base, "published")
+	for _, directory := range []string{stateDir, publishedDir} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	config := shadowPerpsTapeConfig{
 		Environment: perpspaper.Mainnet, Symbol: perpspaper.SOL, RiskArm: perpspaper.Balanced,
 		StartingCollateralMicros: 100_000_000, VenueMaxLeverage: 20, VenueSzDecimals: 2,
 	}
+	_, planSHA256, err := loadOrCreateShadowPerpsPlan(
+		stateDir, perpspaper.Mainnet, config.qualificationConfig(), perpspaper.Balanced,
+		time.Date(2026, 9, 3, 7, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.DecisionMode, config.PlanSHA256 = shadowPerpsDecisionLegacy, planSHA256
 	write := func(offset int64) {
 		t.Helper()
 		tape := shadowPerpsTape{
-			Version: 3, PaperOnly: true, AccountingModel: shadowPerpsLegacyModel,
+			Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
 			Config: config, Frames: flatShadowPerpsTestFrames(offset, perpspaper.QualificationMinimumFrames),
 		}
 		if err := writeShadowPerpsJSON(filepath.Join(stateDir, "sol-tape.json"), tape); err != nil {
 			t.Fatal(err)
 		}
-		if err := finalizeShadowPerpsRun(stateDir, []perpspaper.Symbol{perpspaper.SOL}, time.UnixMilli(offset+10_000_000)); err != nil {
+		if err := finalizeAndPublishShadowPerps(
+			stateDir, publishedDir, []perpspaper.Symbol{perpspaper.SOL}, time.UnixMilli(offset+10_000_000),
+		); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -260,8 +491,23 @@ func TestFinalizePreservesTapesAndPublishesMultiTapeSummary(t *testing.T) {
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("immutable tapes = %v, %v", entries, err)
 	}
-	if _, err := os.Stat(filepath.Join(stateDir, "sol-walk-forward.json")); err != nil {
+	walkForwardPath := filepath.Join(stateDir, "sol-walk-forward.json")
+	walkForwardRaw, err := os.ReadFile(walkForwardPath)
+	if err != nil {
 		t.Fatalf("walk-forward result: %v", err)
+	}
+	var walkForward perpspaper.WalkForwardQualification
+	if err := json.Unmarshal(walkForwardRaw, &walkForward); err != nil {
+		t.Fatalf("receipted walk-forward result = %+v, %v", walkForward, err)
+	}
+	store, err := journal.OpenRotating(shadowPerpsFinalizationJournalPath(stateDir, perpspaper.SOL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipts, foldErr := foldShadowPerpsFinalizationReceipts(store.Records())
+	closeErr := store.Close()
+	if foldErr != nil || closeErr != nil || len(receipts) != 2 {
+		t.Fatalf("finalization receipts = %+v, %v, %v", receipts, foldErr, closeErr)
 	}
 	raw, err := os.ReadFile(filepath.Join(stateDir, "sol-paper-status.json"))
 	if err != nil {
@@ -276,6 +522,214 @@ func TestFinalizePreservesTapesAndPublishesMultiTapeSummary(t *testing.T) {
 		summary.QualificationHoldoutEvaluated || summary.QualificationStressEvaluated ||
 		summary.QualificationFrames != 2*perpspaper.QualificationMinimumFrames {
 		t.Fatalf("multi-tape summary = %+v", summary)
+	}
+	preservedPaths := []string{
+		walkForwardPath,
+		filepath.Join(stateDir, "sol-qualification.json"),
+		filepath.Join(stateDir, "sol-status.json"),
+		filepath.Join(stateDir, "sol-paper-status.json"),
+		filepath.Join(publishedDir, "sol-paper-status.json"),
+		filepath.Join(stateDir, "sol-plan-selection.json"),
+		shadowPerpsActivePlanPath(stateDir, perpspaper.SOL),
+	}
+	preserved := make(map[string][]byte, len(preservedPaths))
+	for _, path := range preservedPaths {
+		before, err := os.ReadFile(path)
+		if err == nil {
+			preserved[path] = before
+			continue
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		preserved[path] = nil
+	}
+
+	store, err = journal.OpenRotating(shadowPerpsFinalizationJournalPath(stateDir, perpspaper.SOL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(time.UnixMilli(20_000_000), "perps.unexpected", strings.Repeat("f", 64), map[string]bool{"paper_only": true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	third := shadowPerpsTape{
+		Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
+		Config: config, Frames: flatShadowPerpsTestFrames(20_000_000, perpspaper.QualificationMinimumFrames),
+	}
+	if err := writeShadowPerpsJSON(filepath.Join(stateDir, "sol-tape.json"), third); err != nil {
+		t.Fatal(err)
+	}
+	if err := finalizeAndPublishShadowPerps(
+		stateDir, publishedDir, []perpspaper.Symbol{perpspaper.SOL}, time.UnixMilli(30_000_000),
+	); err == nil ||
+		!strings.Contains(err.Error(), "unexpected event") {
+		t.Fatalf("malformed receipt history error = %v", err)
+	}
+	for path, before := range preserved {
+		after, err := os.ReadFile(path)
+		if before == nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("failed receipt created %s: %v", path, err)
+			}
+			continue
+		}
+		if err != nil || !bytes.Equal(after, before) {
+			t.Fatalf("failed receipt changed %s: %v", path, err)
+		}
+	}
+}
+
+func TestCurrentFinalizationFailurePreservesPublishedStateAndCanRetry(t *testing.T) {
+	base := t.TempDir()
+	stateDir, publishedDir := filepath.Join(base, "current"), filepath.Join(base, "published")
+	for _, directory := range []string{stateDir, publishedDir} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := shadowPerpsTapeConfig{
+		Environment: perpspaper.Mainnet, Symbol: perpspaper.SOL, RiskArm: perpspaper.Balanced,
+		StartingCollateralMicros: 100_000_000, VenueMaxLeverage: 20, VenueSzDecimals: 2,
+	}
+	_, planSHA256, err := loadOrCreateShadowPerpsPlan(
+		stateDir, perpspaper.Mainnet, config.qualificationConfig(), perpspaper.Balanced,
+		time.Date(2026, 9, 4, 8, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.DecisionMode, config.PlanSHA256 = shadowPerpsDecisionLegacy, planSHA256
+	first := shadowPerpsTape{
+		Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
+		Config: config, Frames: flatShadowPerpsTestFrames(0, perpspaper.QualificationMinimumFrames),
+	}
+	if _, err := sealShadowPerpsTape(stateDir, first); err != nil {
+		t.Fatal(err)
+	}
+	second := shadowPerpsTape{
+		Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
+		Config: config, Frames: flatShadowPerpsTestFrames(10_000_000, perpspaper.QualificationMinimumFrames),
+	}
+	if err := writeShadowPerpsJSON(filepath.Join(stateDir, "sol-tape.json"), second); err != nil {
+		t.Fatal(err)
+	}
+	walkForwardPath := filepath.Join(stateDir, "sol-walk-forward.json")
+	publishedPath := filepath.Join(publishedDir, "sol-paper-status.json")
+	previousWalkForward, previousPublished := []byte("previous walk-forward\n"), []byte("previous published\n")
+	if err := os.WriteFile(walkForwardPath, previousWalkForward, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(publishedPath, previousPublished, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	activePath := shadowPerpsActivePlanPath(stateDir, perpspaper.SOL)
+	previousPointer, err := os.ReadFile(activePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unexpected := filepath.Join(shadowPerpsCorpusDir(stateDir, perpspaper.SOL), "unexpected")
+	if err := os.WriteFile(unexpected, []byte("invalid corpus entry"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	endedAt := time.Date(2026, 9, 4, 9, 0, 0, 0, time.UTC)
+	if err := finalizeAndPublishShadowPerps(stateDir, publishedDir, []perpspaper.Symbol{perpspaper.SOL}, endedAt); err == nil ||
+		!strings.Contains(err.Error(), "unexpected entry") {
+		t.Fatalf("invalid corpus finalization error = %v", err)
+	}
+	for path, want := range map[string][]byte{
+		walkForwardPath: previousWalkForward,
+		publishedPath:   previousPublished,
+		activePath:      previousPointer,
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("failed finalization changed %s: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(shadowPerpsFinalizationJournalPath(stateDir, perpspaper.SOL)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed evaluation wrote a finalization receipt: %v", err)
+	}
+	if err := os.Remove(unexpected); err != nil {
+		t.Fatal(err)
+	}
+	if err := finalizeAndPublishShadowPerps(stateDir, publishedDir, []perpspaper.Symbol{perpspaper.SOL}, endedAt); err != nil {
+		t.Fatalf("repaired corpus retry: %v", err)
+	}
+	store, err := journal.OpenRotating(shadowPerpsFinalizationJournalPath(stateDir, perpspaper.SOL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipts, foldErr := foldShadowPerpsFinalizationReceipts(store.Records())
+	closeErr := store.Close()
+	if foldErr != nil || closeErr != nil || len(receipts) != 1 || receipts[0].WalkForwardInputSHA256 == "" {
+		t.Fatalf("repaired finalization receipt = %+v, %v, %v", receipts, foldErr, closeErr)
+	}
+	if raw, err := os.ReadFile(publishedPath); err != nil || bytes.Equal(raw, previousPublished) {
+		t.Fatalf("repaired finalization did not publish: %v", err)
+	}
+}
+
+func TestCurrentShortFinalizationIsReceiptedButDoesNotEnterWalkForwardCorpus(t *testing.T) {
+	base := t.TempDir()
+	stateDir, publishedDir := filepath.Join(base, "current"), filepath.Join(base, "published")
+	for _, directory := range []string{stateDir, publishedDir} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := shadowPerpsTapeConfig{
+		Environment: perpspaper.Mainnet, Symbol: perpspaper.SOL, RiskArm: perpspaper.Balanced,
+		StartingCollateralMicros: 100_000_000, VenueMaxLeverage: 20, VenueSzDecimals: 2,
+	}
+	_, planSHA256, err := loadOrCreateShadowPerpsPlan(
+		stateDir, perpspaper.Mainnet, config.qualificationConfig(), perpspaper.Balanced,
+		time.Date(2026, 9, 4, 9, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.DecisionMode, config.PlanSHA256 = shadowPerpsDecisionLegacy, planSHA256
+	write := func(offset int64, frames int, endedAt time.Time) {
+		t.Helper()
+		tape := shadowPerpsTape{
+			Version: shadowPerpsTapeVersion, PaperOnly: true, AccountingModel: shadowPerpsModel,
+			Config: config, Frames: flatShadowPerpsTestFrames(offset, frames),
+		}
+		if err := writeShadowPerpsJSON(filepath.Join(stateDir, "sol-tape.json"), tape); err != nil {
+			t.Fatal(err)
+		}
+		if err := finalizeAndPublishShadowPerps(
+			stateDir, publishedDir, []perpspaper.Symbol{perpspaper.SOL}, endedAt,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(0, 1, time.Date(2026, 9, 4, 9, 1, 0, 0, time.UTC))
+	if entries, err := os.ReadDir(shadowPerpsCorpusDir(stateDir, perpspaper.SOL)); !errors.Is(err, os.ErrNotExist) || len(entries) != 0 {
+		t.Fatalf("short tape entered walk-forward corpus: %v, %v", entries, err)
+	}
+	write(10_000_000, perpspaper.QualificationMinimumFrames, time.Date(2026, 9, 4, 9, 2, 0, 0, time.UTC))
+	write(20_000_000, perpspaper.QualificationMinimumFrames, time.Date(2026, 9, 4, 9, 3, 0, 0, time.UTC))
+	entries, err := os.ReadDir(shadowPerpsCorpusDir(stateDir, perpspaper.SOL))
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("complete walk-forward corpus = %v, %v", entries, err)
+	}
+	var walkForward perpspaper.WalkForwardQualification
+	if err := readStrictJSON(filepath.Join(stateDir, "sol-walk-forward.json"), &walkForward); err != nil ||
+		len(walkForward.Tapes) != 2 || walkForward.Outcome == "insufficient_evidence" {
+		t.Fatalf("walk-forward after short run = %+v, %v", walkForward, err)
+	}
+	store, err := journal.OpenRotating(shadowPerpsFinalizationJournalPath(stateDir, perpspaper.SOL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipts, foldErr := foldShadowPerpsFinalizationReceipts(store.Records())
+	closeErr := store.Close()
+	if foldErr != nil || closeErr != nil || len(receipts) != 3 || receipts[0].WalkForwardInputSHA256 != "" {
+		t.Fatalf("short and complete finalization receipts = %+v, %v, %v", receipts, foldErr, closeErr)
 	}
 }
 

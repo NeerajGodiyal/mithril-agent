@@ -87,6 +87,11 @@ type shadowPerpsPlanReceipt struct {
 	PlanSHA256               string                     `json:"plan_sha256,omitempty"`
 	QualificationInputSHA256 string                     `json:"qualification_input_sha256,omitempty"`
 	TapesChecked             uint64                     `json:"tapes_checked"`
+	TrainingTrials           uint64                     `json:"training_trials"`
+	HoldoutPlansCompared     uint64                     `json:"holdout_plans_compared"`
+	FinalizationReceiptCount uint64                     `json:"finalization_receipt_count"`
+	HoldoutCompletedTrades   uint64                     `json:"holdout_completed_trades"`
+	StatisticalConfidence    string                     `json:"statistical_confidence,omitempty"`
 	PointerUpdated           bool                       `json:"pointer_updated"`
 	RollbackUpdated          bool                       `json:"rollback_updated"`
 	Effective                string                     `json:"effective,omitempty"`
@@ -325,7 +330,10 @@ func selectQualifiedShadowPerpsPlan(
 	result := shadowPerpsPlanReceipt{
 		Status: "qualification_not_selected", PaperOnly: true,
 		Symbol: qualification.Config.Symbol, QualificationInputSHA256: qualification.InputSHA256,
-		TapesChecked: uint64(len(qualification.Tapes)),
+		TapesChecked: uint64(len(qualification.Tapes)), TrainingTrials: qualification.TrainingTrials,
+		HoldoutPlansCompared:   qualification.HoldoutPlansCompared,
+		HoldoutCompletedTrades: qualification.HoldoutCompletedTrades,
+		StatisticalConfidence:  qualification.StatisticalConfidence,
 	}
 	if err := validateShadowPerpsWalkForwardCandidate(qualification); err != nil {
 		result.Reasons = []string{err.Error()}
@@ -359,17 +367,31 @@ func selectQualifiedShadowPerpsPlan(
 		if err != nil || currentDigest != currentPlanSHA256 {
 			return errors.New("perps paper plan changed during the bounded experiment")
 		}
+		receiptCount, err := requireShadowPerpsFinalizationReceipt(
+			stateDir, finalTape, finalTapeSHA256, finalTape.Config.PlanSHA256, qualification,
+		)
+		if err != nil {
+			return fmt.Errorf("verify perps finalization receipt: %w", err)
+		}
+		result.FinalizationReceiptCount = receiptCount
 		if current.Key == key && current.QualificationInputSHA256 == qualification.InputSHA256 {
 			result.Status = "qualified_paper_plan_already_selected"
 			result.PlanSHA256 = currentDigest
 			result.Effective = "current_or_next_bounded_invocation"
 			return nil
 		}
+		if currentDigest != finalTape.Config.PlanSHA256 {
+			return errors.New("perps paper plan changed since the final tape was recorded")
+		}
 		incumbentForward, incumbentStress, err := perpspaper.EvaluateFixedPlan(
 			qualification.Config, current.Key, finalTape.Frames,
 		)
 		if err != nil {
 			return fmt.Errorf("replay incumbent on final held-out tape: %w", err)
+		}
+		result.HoldoutPlansCompared = 2
+		if incumbentForward.Score != nil {
+			result.HoldoutCompletedTrades += incumbentForward.Score.ClosedPositions
 		}
 		comparison := shadowPerpsPlanComparison{
 			Version: shadowPerpsComparisonVersion, Status: "challenger_not_selected", PaperOnly: true,
@@ -454,7 +476,9 @@ func validateShadowPerpsWalkForwardCandidate(result perpspaper.WalkForwardQualif
 		result.TrainingLeader == nil || *result.Candidate != *result.TrainingLeader ||
 		!validShadowPerpsRiskArm(result.Candidate.RiskArm) ||
 		!validShadowPerpsStrategy(result.Candidate.Strategy) ||
-		result.Forward == nil || result.Stress == nil || len(result.Tapes) < 2 || len(result.Reasons) != 0 {
+		result.Forward == nil || result.Stress == nil || len(result.Tapes) < 2 || len(result.Reasons) != 0 ||
+		result.TrainingTrials != 12 || result.HoldoutPlansCompared != 1 ||
+		result.StatisticalConfidence != perpspaper.QualificationConfidence {
 		return errors.New("walk-forward result is not qualified for another paper experiment")
 	}
 	seen := make(map[string]bool, len(result.Tapes))
@@ -476,6 +500,9 @@ func validateShadowPerpsWalkForwardCandidate(result perpspaper.WalkForwardQualif
 			evidence.Score.MaxDrawdownMicros > result.Config.StartingCollateralMicros/5 {
 			return errors.New("walk-forward result lacks passing forward evidence")
 		}
+	}
+	if result.HoldoutCompletedTrades != result.Forward.Score.ClosedPositions {
+		return errors.New("walk-forward result has inconsistent completed trade metadata")
 	}
 	return nil
 }

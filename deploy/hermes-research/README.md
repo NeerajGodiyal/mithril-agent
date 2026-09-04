@@ -455,6 +455,27 @@ not start a legacy spot journal. Complete
 the optional JUP portfolio setup below, save the dashboard instruction, and use
 the atomic activation procedure before expecting paper observers to run.
 
+Each current-format perps final tape and its evaluation are recorded first in
+the symbol's hash-chained, segmented finalization journal. The journal keeps
+every prior receipt, treats an exact repeat as idempotent, and rejects
+conflicting lineage before replacing the displayed result or selecting a paper
+plan. Receipts bind the evaluator, final tape, qualification result, optional
+walk-forward input and result, leader, incumbent, and incumbent replay by
+digest without storing file paths or prose. A walk-forward result reports the
+actual 12 training trials when that search ran, one held-out plan, completed
+trades, and confidence as
+`not_estimated_insufficient_independent_episodes`; it does not claim PBO or DSR.
+When selection is attempted, its receipt reports two compared held-out plans
+after the selector replays the incumbent and the verified finalization-receipt
+count. The separate `one_frame_execution_delay_v1` artifact is a standalone,
+best-effort paper research result, not qualification evidence or network
+latency. It applies the frozen prior-frame decision after the next frame's
+funding and mark, ignores the final queued signal, and cannot change
+qualification, selection, promotion, or live/paper decisions.
+Verified legacy v3 tapes remain readable for offline research, but only a
+current-format final tape can receive the exact finalization receipt required
+to select a new paper plan.
+
 The hourly bootstrap remains a no-op until the prior two UTC journals are both
 complete and replayable. It then searches those exact chronological days and
 writes one immutable initial candidate. `shadow select --initial` rereads the

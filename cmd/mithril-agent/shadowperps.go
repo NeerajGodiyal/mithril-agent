@@ -435,34 +435,71 @@ func finalizeShadowPerpsRun(stateDir string, symbols []perpspaper.Symbol, endedA
 		var walkForward *perpspaper.WalkForwardQualification
 		var selection *shadowPerpsPlanReceipt
 		var outcomeTapeSHA256 string
+		var finalTapeSHA256 string
+		if tape.Version == shadowPerpsTapeVersion {
+			_, finalTapeSHA256, err = canonicalShadowPerpsTape(tape)
+			if err != nil {
+				result = errors.Join(result, fmt.Errorf("hash %s final paper tape: %w", symbol, err))
+				continue
+			}
+		}
 		if qualification.Frames >= qualification.MinimumFrames {
 			sealedPath, sealErr := sealShadowPerpsTape(stateDir, tape)
 			if sealErr != nil {
-				researchResult = errors.Join(researchResult, fmt.Errorf("preserve %s paper tape: %w", symbol, sealErr))
+				preserveErr := fmt.Errorf("preserve %s paper tape: %w", symbol, sealErr)
+				if tape.Version == shadowPerpsTapeVersion {
+					result = errors.Join(result, preserveErr)
+					continue
+				}
+				researchResult = errors.Join(researchResult, preserveErr)
 			} else {
-				walkForward, err = qualifyShadowPerpsCorpus(stateDir, tape.Config)
-				if err != nil {
-					researchResult = errors.Join(researchResult, fmt.Errorf("multi-tape qualify %s paper corpus: %w", symbol, err))
-					walkForward = nil
-				} else if walkForward != nil {
-					outcomeTapeSHA256 = shadowPerpsOutcomeTapeSHA256(
-						tape.Config, strings.TrimSuffix(filepath.Base(sealedPath), ".json"), walkForward,
+				finalTapeSHA256 = strings.TrimSuffix(filepath.Base(sealedPath), ".json")
+			}
+		}
+		if tape.Version == shadowPerpsTapeVersion {
+			walkForward, _, _, err = evaluateAndRecordShadowPerpsFinalization(
+				stateDir, tape, finalTapeSHA256, replay, qualification, endedAt.UTC(),
+			)
+			if err != nil {
+				result = errors.Join(result, fmt.Errorf("evaluate and record %s finalization: %w", symbol, err))
+				continue
+			}
+		} else if qualification.Frames >= qualification.MinimumFrames && finalTapeSHA256 != "" {
+			walkForward, err = qualifyShadowPerpsCorpus(stateDir, tape.Config)
+			if err != nil {
+				qualifyErr := fmt.Errorf("multi-tape qualify %s paper corpus: %w", symbol, err)
+				researchResult = errors.Join(researchResult, qualifyErr)
+				walkForward = nil
+			}
+		}
+		if walkForward != nil {
+			outcomeTapeSHA256 = shadowPerpsOutcomeTapeSHA256(tape.Config, finalTapeSHA256, walkForward)
+			if err := writeShadowPerpsJSON(filepath.Join(stateDir, name+"-walk-forward.json"), walkForward); err != nil {
+				researchResult = errors.Join(researchResult, err)
+				walkForward = nil
+			} else {
+				if walkForward.EligibleForPaperExperiment && walkForward.Candidate != nil {
+					receipt, selectErr := selectQualifiedShadowPerpsPlan(
+						stateDir, tape.Config.Environment, tape.Config.PlanSHA256, *walkForward, endedAt,
 					)
-					if err := writeShadowPerpsJSON(filepath.Join(stateDir, name+"-walk-forward.json"), walkForward); err != nil {
-						researchResult = errors.Join(researchResult, err)
-						walkForward = nil
-					} else if walkForward.EligibleForPaperExperiment && walkForward.Candidate != nil {
-						receipt, selectErr := selectQualifiedShadowPerpsPlan(
-							stateDir, tape.Config.Environment, tape.Config.PlanSHA256, *walkForward, endedAt,
-						)
-						if selectErr != nil {
-							researchResult = errors.Join(researchResult, fmt.Errorf("select %s next paper plan: %w", symbol, selectErr))
-						} else {
-							selection = &receipt
-							if err := writeShadowPerpsJSON(filepath.Join(stateDir, name+"-plan-selection.json"), receipt); err != nil {
-								researchResult = errors.Join(researchResult, err)
-							}
+					if selectErr != nil {
+						researchResult = errors.Join(researchResult, fmt.Errorf("select %s next paper plan: %w", symbol, selectErr))
+					} else {
+						selection = &receipt
+						if err := writeShadowPerpsJSON(filepath.Join(stateDir, name+"-plan-selection.json"), receipt); err != nil {
+							researchResult = errors.Join(researchResult, err)
 						}
+					}
+				}
+				if walkForward.TrainingLeader != nil {
+					advisory, advisoryErr := perpspaper.EvaluateOneFrameExecutionDelay(
+						walkForward.Config, tape.Frames, walkForward.InputSHA256,
+						finalTapeSHA256, *walkForward.TrainingLeader,
+					)
+					if advisoryErr == nil {
+						_, _ = writeShadowPerpsExecutionDelayAdvisory(
+							stateDir, symbol, *walkForward.TrainingLeader, advisory,
+						)
 					}
 				}
 			}

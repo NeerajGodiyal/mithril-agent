@@ -686,7 +686,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 		"/app.js": {
 			"Live spot account", "Spot account start", "Spot result", "Spot versus holding", "Spot executions",
 			"Completed experiment", "Not selected", "Best completed training attempts", "Training candidate",
-			"Final untouched recording", "separate recordings",
+			"Final held-out recording", "separate recordings",
 			"<button class=\"help\"", "data-help-copy=", "helpDialog.showModal()", "Waiting for fresh prices",
 			"?fresh=1", "Refreshing…", "Updated ✓",
 			"Checked ✓", "Data delayed", "requestSequence",
