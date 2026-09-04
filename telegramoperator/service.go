@@ -490,6 +490,7 @@ func (s *Service) announcePaperSource(
 			}
 			if event.Kind == paperstatus.KindOrderFilled {
 				if portfolio != "" {
+					message = omitPaperLine(message, "Market total:")
 					message = omitPaperLine(message, "Market value:")
 					message = omitPaperLine(message, "Paper cash + current value of paper holdings")
 				}
@@ -559,6 +560,7 @@ func compactSpotFill(message, asset string) string {
 	}
 	compact := []string{lines[0]}
 	var estimate, fill, tradeResult string
+	var balances []string
 	for _, line := range lines[1:] {
 		switch {
 		case strings.HasPrefix(line, "Bought: "):
@@ -567,6 +569,10 @@ func compactSpotFill(message, asset string) string {
 			compact[0] += " " + strings.TrimPrefix(line, "Sold: ")
 		case strings.HasPrefix(line, "Paid: "), strings.HasPrefix(line, "Received: "):
 			compact = append(compact, line)
+		case strings.HasPrefix(line, "Market cash: "),
+			strings.HasPrefix(line, "Market holdings: "),
+			strings.HasPrefix(line, "Market total: "):
+			balances = append(balances, line)
 		case strings.HasPrefix(line, "Estimated price for 1 "),
 			strings.HasPrefix(line, "Estimate when opened for 1 "):
 			_, estimate, _ = strings.Cut(line, ": ")
@@ -575,7 +581,8 @@ func compactSpotFill(message, asset string) string {
 			_, fill, _ = strings.Cut(line, ": ")
 		case strings.HasPrefix(line, "This completed trade: "),
 			strings.HasPrefix(line, "This completed trade cycle: "),
-			strings.HasPrefix(line, "This completed buy + sell: "):
+			strings.HasPrefix(line, "This completed buy + sell: "),
+			strings.HasPrefix(line, "Trade result: "):
 			_, tradeResult, _ = strings.Cut(line, ": ")
 		}
 	}
@@ -594,7 +601,15 @@ func compactSpotFill(message, asset string) string {
 	} else if estimate != "" {
 		compact = append(compact, "Estimated price: "+estimate)
 	}
+	compact = append(compact, balances...)
 	if tradeResult != "" {
+		if tradeResult == "waiting for the next matching order" {
+			if strings.Contains(compact[0], "BOUGHT") {
+				tradeResult = "waiting for a matching sell"
+			} else if strings.Contains(compact[0], "SOLD") {
+				tradeResult = "waiting for a matching buy"
+			}
+		}
 		compact = append(compact, "Trade result: "+tradeResult)
 	}
 	return strings.Join(compact, "\n")
@@ -653,6 +668,14 @@ func readablePaperMessage(message string) string {
 	lines[0] = strings.ReplaceAll(lines[0], "BUY filled", "BOUGHT")
 	experiment := strings.Contains(lines[0], "STRATEGY CHECK")
 	for index := 1; index < len(lines); index++ {
+		lines[index] = strings.ReplaceAll(lines[index], "Paper cash left:", "Market cash:")
+		lines[index] = strings.ReplaceAll(lines[index], "Available paper cash:", "Market cash:")
+		lines[index] = strings.ReplaceAll(lines[index], "Trading position:", "Market holdings:")
+		lines[index] = strings.ReplaceAll(lines[index], "Paper holdings:", "Market holdings:")
+		lines[index] = strings.ReplaceAll(lines[index], "Market value:", "Market total:")
+		if _, holdings, found := strings.Cut(lines[index], " held now:"); found {
+			lines[index] = "Market holdings:" + holdings
+		}
 		lines[index] = strings.ReplaceAll(lines[index], "Practice account:", "Total paper value now:")
 		lines[index] = strings.ReplaceAll(lines[index], "Total paper account:", "Total paper value now:")
 		lines[index] = strings.ReplaceAll(lines[index], "Paper account:", "Total paper value now:")
@@ -1312,8 +1335,8 @@ func paperPortfolioAlertSummary(summaries []paperstatus.CurrentSummary) string {
 		equity += summary.EquityMicros
 		deficit += summary.DeficitMicros
 	}
-	report := "\n\nAccount value: " + paperPortfolioValue(equity, deficit, valueUnit) +
-		"\nTotal result: " +
+	report := "\n\nSpot account value: " + paperPortfolioValue(equity, deficit, valueUnit) +
+		"\nSpot result this run: " +
 		paperResultDisplay(paperResultChangeWithDeficit(opening, equity, deficit, valueUnit))
 	if deficit != 0 {
 		report += "\nLiquidation deficit: " + paperAbsoluteValue(deficit, valueUnit)
@@ -1495,7 +1518,7 @@ func labelPaperMessage(message, label string) string {
 }
 
 func paperMarketMessage(message string) string {
-	message = strings.Replace(message, "\nTotal paper value now:", "\nMarket value:", 1)
+	message = strings.Replace(message, "\nTotal paper value now:", "\nMarket total:", 1)
 	message = omitPaperLine(message, "Result since this plan started:")
 	message = omitPaperLine(message, "Today's paper result:")
 	return omitPaperLine(message, "Paper result this run:")
