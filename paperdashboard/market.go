@@ -41,10 +41,13 @@ type MarketResearch struct {
 	AvailabilityBPS          uint16            `json:"availability_bps"`
 	MedianRouteCostBPS       uint16            `json:"median_route_cost_bps,omitempty"`
 	P95RouteCostBPS          uint16            `json:"p95_route_cost_bps,omitempty"`
+	MedianRouteCostLimitBPS  uint16            `json:"median_route_cost_limit_bps"`
+	P95RouteCostLimitBPS     uint16            `json:"p95_route_cost_limit_bps"`
 	MedianQuoteLatencyMillis uint32            `json:"median_quote_latency_millis,omitempty"`
 	P95QuoteLatencyMillis    uint32            `json:"p95_quote_latency_millis,omitempty"`
 	FailureCounts            map[string]uint64 `json:"failure_counts"`
 	ReadyForPaperCheck       bool              `json:"ready_for_paper_check"`
+	PaperCheckGateReasons    []string          `json:"paper_check_gate_reasons,omitempty"`
 	PaperCheck               *MarketPaperCheck `json:"paper_check,omitempty"`
 	PaperCheckCurrent        bool              `json:"paper_check_current,omitempty"`
 }
@@ -142,8 +145,10 @@ func readMarketAdmission(path string, now time.Time) ([]MarketResearch, error) {
 		return nil, errors.New("market admission projection is invalid")
 	}
 	result := make([]MarketResearch, 0, len(projection.Markets))
+	thresholds := marketadmission.DefaultThresholds()
 	for _, status := range projection.Markets {
 		diagnostic := status.Diagnostic
+		gateReasons := diagnostic.ProvisionalPaperCheckReasons()
 		fresh := !status.UpdatedAt.After(now.UTC().Add(2*time.Minute)) &&
 			!status.UpdatedAt.Before(now.UTC().Add(-marketAdmissionFreshness))
 		failures := make(map[string]uint64, len(diagnostic.FailureCounts))
@@ -173,10 +178,13 @@ func readMarketAdmission(path string, now time.Time) ([]MarketResearch, error) {
 			ExpectedBuckets: diagnostic.ExpectedBuckets, ObservedBuckets: diagnostic.ObservedBuckets,
 			AvailableBuckets: diagnostic.AvailableBuckets, AvailabilityBPS: diagnostic.AvailabilityBPS,
 			MedianRouteCostBPS: diagnostic.MedianRouteCostBPS, P95RouteCostBPS: diagnostic.P95RouteCostBPS,
+			MedianRouteCostLimitBPS:  thresholds.MedianRouteCostBPS,
+			P95RouteCostLimitBPS:     thresholds.P95RouteCostBPS,
 			MedianQuoteLatencyMillis: diagnostic.MedianQuoteLatencyMillis,
 			P95QuoteLatencyMillis:    diagnostic.P95QuoteLatencyMillis,
 			FailureCounts:            failures,
-			ReadyForPaperCheck:       fresh && diagnostic.ReadyForProvisionalPaperCheck(),
+			ReadyForPaperCheck:       fresh && len(gateReasons) == 0,
+			PaperCheckGateReasons:    append([]string(nil), gateReasons...),
 			PaperCheck:               check,
 			PaperCheckCurrent:        status.PaperCheck != nil && status.PaperCheck.Current(now),
 		})

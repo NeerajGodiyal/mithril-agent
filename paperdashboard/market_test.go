@@ -152,6 +152,42 @@ func TestMarketAdmissionFreshnessIsPerCollectorAndDoesNotAffectHealth(t *testing
 	}
 }
 
+func TestMarketAdmissionExplainsACompleteWindowThatDidNotPass(t *testing.T) {
+	root := protectedTestDirectory(t)
+	credentials := filepath.Join(root, "credentials")
+	output := filepath.Join(root, "market-admission.json")
+	if err := os.MkdirAll(credentials, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 4, 8, 0, 30, 0, time.UTC)
+	for _, item := range marketAdmissionCredentials {
+		status := dashboardStatus(item.market, now)
+		if item.market == marketadmission.MarketJTOUSDC {
+			status.Diagnostic.ObservedBuckets = status.Diagnostic.ExpectedBuckets
+			status.Diagnostic.AvailableBuckets = status.Diagnostic.ExpectedBuckets
+			status.Diagnostic.AvailabilityBPS = 10_000
+			status.Diagnostic.MedianRouteCostBPS = marketadmission.DefaultThresholds().MedianRouteCostBPS + 7
+			status.Diagnostic.P95RouteCostBPS = marketadmission.DefaultThresholds().P95RouteCostBPS
+			status.Diagnostic.FailureCounts = map[string]uint64{}
+		}
+		writeMarketCredential(t, credentials, item.credential, status)
+	}
+	if err := RecordMarketAdmission(output, credentials, now); err != nil {
+		t.Fatal(err)
+	}
+	markets, err := readMarketAdmission(output, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jto := markets[1]
+	if jto.ReadyForPaperCheck || len(jto.PaperCheckGateReasons) != 1 ||
+		jto.PaperCheckGateReasons[0] != "median round-trip route cost exceeds the limit" ||
+		jto.MedianRouteCostLimitBPS != marketadmission.DefaultThresholds().MedianRouteCostBPS ||
+		jto.P95RouteCostLimitBPS != marketadmission.DefaultThresholds().P95RouteCostBPS {
+		t.Fatalf("JTO research = %+v", jto)
+	}
+}
+
 func protectedTestDirectory(t *testing.T) string {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())

@@ -369,10 +369,16 @@ type Diagnostic struct {
 // ReadyForProvisionalPaperCheck applies the same availability and route-cost
 // gates as a two-hour provisional artifact. It grants no activation authority.
 func (diagnostic Diagnostic) ReadyForProvisionalPaperCheck() bool {
-	return len(provisionalMetricReasons(
+	return len(diagnostic.ProvisionalPaperCheckReasons()) == 0
+}
+
+// ProvisionalPaperCheckReasons explains which shared two-hour gates did not
+// pass. It grants no activation authority.
+func (diagnostic Diagnostic) ProvisionalPaperCheckReasons() []string {
+	return provisionalMetricReasons(
 		diagnostic.AvailabilityBPS, diagnostic.AvailableBuckets,
 		diagnostic.MedianRouteCostBPS, diagnostic.P95RouteCostBPS, DefaultThresholds(),
-	)) == 0
+	)
 }
 
 // ProvisionalArtifact is a short, current paper-testing checkpoint. It is

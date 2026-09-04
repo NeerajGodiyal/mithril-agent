@@ -198,6 +198,27 @@ func TestDashboardExplainsCurrentPerpsDecisionWithoutImplyingAnOrder(t *testing.
 	}
 }
 
+func TestDashboardExplainsCompletedMarketResearchThatDidNotPass(t *testing.T) {
+	for _, want := range []string{
+		`const complete=expected>0&&observed>=expected`,
+		`Array.isArray(m.paper_check_gate_reasons)`,
+		`complete?{label:'Not ready',tone:'amber'}`,
+		`complete&&gateReasons.length?gateReasons.map(paperCheckGateReason).join(' ')`,
+		`Typical buy-and-sell cost is above the paper-testing limit.`,
+		`percent(m.median_route_cost_limit_bps)`,
+		`percent(m.p95_route_cost_limit_bps)`,
+		`const recorded=m.fresh?'':'Last recorded '`,
+		`safe(recorded+'Buy-and-sell cost')`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Errorf("market research UI omits %q", want)
+		}
+	}
+	if strings.Contains(appJS, `median_route_cost_bps>20`) {
+		t.Fatal("market research UI duplicates the code-owned route-cost threshold")
+	}
+}
+
 func TestActivityKeepsProducerFactsExactAndDerivesOnlyEventStatus(t *testing.T) {
 	for _, want := range []string{
 		`const lines=String(item.message||'').split('\n')`,

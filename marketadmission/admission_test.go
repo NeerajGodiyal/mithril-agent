@@ -241,14 +241,19 @@ func TestDiagnosticProvisionalReadinessUsesTheSharedCoverageAndCostGates(t *test
 	if !diagnostic.ReadyForProvisionalPaperCheck() {
 		t.Fatal("the exact provisional thresholds were rejected")
 	}
+	if reasons := diagnostic.ProvisionalPaperCheckReasons(); len(reasons) != 0 {
+		t.Fatalf("exact provisional thresholds have reasons %q", reasons)
+	}
 	diagnostic.P95RouteCostBPS++
-	if diagnostic.ReadyForProvisionalPaperCheck() {
-		t.Fatal("an over-cost diagnostic was presented as ready")
+	if reasons := diagnostic.ProvisionalPaperCheckReasons(); diagnostic.ReadyForProvisionalPaperCheck() ||
+		len(reasons) != 1 || reasons[0] != "p95 round-trip route cost exceeds the limit" {
+		t.Fatalf("over-cost diagnostic reasons = %q", reasons)
 	}
 	diagnostic.P95RouteCostBPS = DefaultThresholds().P95RouteCostBPS
 	diagnostic.AvailabilityBPS--
-	if diagnostic.ReadyForProvisionalPaperCheck() {
-		t.Fatal("an under-covered diagnostic was presented as ready")
+	if reasons := diagnostic.ProvisionalPaperCheckReasons(); diagnostic.ReadyForProvisionalPaperCheck() ||
+		len(reasons) != 1 || reasons[0] != "two-hour bidirectional availability is below the paper-testing minimum" {
+		t.Fatalf("under-covered diagnostic reasons = %q", reasons)
 	}
 }
 

@@ -860,6 +860,15 @@ function paperCheckView(m){
   view.note=check.outcome==='no_training_candidate'&&tested&&ranked.length?'Tested '+tested+' paper plans. Most often, '+ranked[0][0]+' '+ranked[0][1]+'. A plan can fail more than one check.':check.reasons?.length?paperCheckReason(check.reasons[0]):'It stayed ahead after costs in both the untouched and higher-cost replays. This is only a short paper check, not proof of future profit.';
   return view;
 }
+function paperCheckGateReason(reason){
+  const labels={
+    'two-hour bidirectional availability is below the paper-testing minimum':'Too few scheduled checks produced both a buy and sell quote.',
+    'no complete bidirectional quote evidence is available':'No scheduled check produced both a buy and sell quote.',
+    'median round-trip route cost exceeds the limit':'Typical buy-and-sell cost is above the paper-testing limit.',
+    'p95 round-trip route cost exceeds the limit':'Higher-cost buy-and-sell checks are above the paper-testing limit.'
+  };
+  return labels[reason]||reason;
+}
 function researchMarketCard(m){
   const expected=Number(m.expected_buckets||0),observed=Number(m.observed_buckets||0),usable=Number(m.available_buckets||0);
   const progress=expected?Math.max(0,Math.min(100,observed*100/expected)):0;
@@ -867,17 +876,22 @@ function researchMarketCard(m){
 	const windowHours=Math.max(1,Number(m.window_hours||0)),windowLabel=windowHours===1?'One-hour window':windowHours+'-hour window';
   const usableRate=Math.max(0,Math.min(100,Number(m.availability_bps||0)/100));
   const issue=researchFailure(m.failure_counts);
+  const complete=expected>0&&observed>=expected;
+  const gateReasons=Array.isArray(m.paper_check_gate_reasons)?m.paper_check_gate_reasons:[];
+  const recorded=m.fresh?'':'Last recorded ';
   const ready=m.fresh&&Boolean(m.ready_for_paper_check);
   const check=paperCheckView(m);
   const checkCurrent=Boolean(m.paper_check_current);
-  const status=!m.fresh?{label:'Data delayed',tone:'red'}:check&&checkCurrent?check:ready?{label:'Ready for short check',tone:'green'}:{label:'Collecting',tone:'amber'};
-  const route=usable>0?percent(m.p95_route_cost_bps):'—';
+  const status=!m.fresh?{label:'Data delayed',tone:'red'}:check&&checkCurrent?check:ready?{label:'Ready for short check',tone:'green'}:complete?{label:'Not ready',tone:'amber'}:{label:'Collecting',tone:'amber'};
+  const typicalRoute=usable>0?percent(m.median_route_cost_bps):'—';
+  const highRoute=usable>0?percent(m.p95_route_cost_bps):'—';
+  const typicalRouteLimit=percent(m.median_route_cost_limit_bps),highRouteLimit=percent(m.p95_route_cost_limit_bps);
   const latency=usable>0?(Number(m.p95_quote_latency_millis||0)/1000).toFixed(2).replace(/\.00$/,'')+' sec':'—';
   const priorNote=check?'Last result: '+check.label+'. '+check.note+' '+age(m.paper_check.checked_at)+'.':'';
-	const note=!m.fresh?'The latest collector update is older than expected.':check&&checkCurrent?check.note:issue||(!ready?Math.max(0,expected-observed)+' scheduled checks remain in this '+windowLabel.toLowerCase()+'.':'Enough current data is available for the separate paper strategy check.');
+	const note=!m.fresh?'The latest collector update is older than expected.':check&&checkCurrent?check.note:complete&&gateReasons.length?gateReasons.map(paperCheckGateReason).join(' '):issue||(!ready?Math.max(0,expected-observed)+' scheduled checks remain in this '+windowLabel.toLowerCase()+'.':'Enough current data is available for the separate paper strategy check.');
   const history=check&&!checkCurrent?'<p class="research-history">'+safe(priorNote)+'</p>':'';
   const replay=m.paper_check&&['candidate_rejected','candidate_ready_for_more_paper_testing'].includes(m.paper_check.outcome)?'<div class="research-check" aria-label="Latest short paper replay"><span><small>Untouched replay</small><strong class="'+tone(integer(m.paper_check.holdout_after_cost_net_return_micros))+'">'+safe(signedAmount(m.paper_check.holdout_after_cost_net_return_micros,'USD'))+'</strong></span><span><small>Versus holding</small><strong class="'+tone(integer(m.paper_check.holdout_after_cost_versus_hold_micros))+'">'+safe(signedAmount(m.paper_check.holdout_after_cost_versus_hold_micros,'USD'))+'</strong></span><span><small>Higher-cost replay</small><strong class="'+tone(integer(m.paper_check.stress_after_cost_net_return_micros))+'">'+safe(signedAmount(m.paper_check.stress_after_cost_net_return_micros,'USD'))+'</strong></span></div>':'';
-	return '<article class="market-research-card"><div class="research-market-head"><div class="research-market-name"><span aria-hidden="true">'+safe(m.market.split('/')[0].slice(0,2))+'</span><div><h3>'+safe(m.market)+'</h3><small>'+safe(age(m.updated_at))+'</small></div></div><span class="badge '+status.tone+'">'+safe(status.label)+'</span></div><div class="research-progress-head"><span>'+safe(windowLabel)+'</span><strong>'+progressLabel+'%</strong></div><progress class="research-progress" aria-label="'+safe(m.market)+' '+safe(windowLabel.toLowerCase())+' collection progress" max="100" value="'+progress.toFixed(2)+'"></progress><div class="research-stats"><span><small>Usable in window</small><strong>'+usable+' / '+expected+'</strong><em>'+usableRate.toFixed(1).replace(/\.0$/,'')+'% of scheduled checks</em></span><span><small>Round-trip cost</small><strong>'+route+'</strong><em>95% were at or below this cost</em></span><span><small>Round-trip time</small><strong>'+latency+'</strong><em>95% finished within this time</em></span></div>'+replay+'<p>'+safe(note)+'</p>'+history+'</article>';
+	return '<article class="market-research-card"><div class="research-market-head"><div class="research-market-name"><span aria-hidden="true">'+safe(m.market.split('/')[0].slice(0,2))+'</span><div><h3>'+safe(m.market)+'</h3><small>'+safe(age(m.updated_at))+'</small></div></div><span class="badge '+status.tone+'">'+safe(status.label)+'</span></div><div class="research-progress-head"><span>'+safe(windowLabel)+'</span><strong>'+progressLabel+'%</strong></div><progress class="research-progress" aria-label="'+safe(m.market)+' '+safe(windowLabel.toLowerCase())+' collection progress" max="100" value="'+progress.toFixed(2)+'"></progress><div class="research-stats"><span><small>'+safe(recorded+'Usable in window')+'</small><strong>'+usable+' / '+expected+'</strong><em>'+usableRate.toFixed(1).replace(/\.0$/,'')+'% of scheduled checks</em></span><span><small>'+safe(recorded+'Buy-and-sell cost')+'</small><strong>'+typicalRoute+' typical</strong><em>'+typicalRouteLimit+' typical limit · '+highRoute+' higher-cost / '+highRouteLimit+' limit</em></span><span><small>'+safe(recorded+'Round-trip time')+'</small><strong>'+latency+'</strong><em>95% finished within this time</em></span></div>'+replay+'<p>'+safe(note)+'</p>'+history+'</article>';
 }
 function renderMarketResearch(){
   const target=$('market-research');

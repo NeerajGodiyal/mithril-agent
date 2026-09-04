@@ -853,7 +853,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"selectedMarketName", "market-choice", "aria-controls=\"markets\"", "spotMarkets.find(market=>market.name===selectedMarketName)",
 			"if(changed)window.scrollTo(0,0)",
 			"activity-more", "strategy-list-head", "automation-list-head",
-			"renderMarketResearch", "Ready for short check", "Usable in window", "Round-trip cost", "Round-trip time",
+			"renderMarketResearch", "Ready for short check", "Usable in window", "Buy-and-sell cost", "Round-trip time",
 			"Not enough data", "Plan did not pass", "Ready for paper test", "Untouched replay", "Higher-cost replay",
 		},
 	} {

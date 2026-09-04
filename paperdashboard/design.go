@@ -1087,9 +1087,9 @@ footer.shell {
   font-weight: 700;
 }
 .research-market-name h3 { margin: 0; font-size: .86rem; font-weight: 620; }
-.research-market-name small { display: block; margin-top: 2px; color: var(--subtle); font-size: .61rem; }
-.research-progress-head { margin-top: 22px; color: var(--muted); font-size: .66rem; }
-.research-progress-head strong { color: var(--secondary); font-size: .72rem; font-variant-numeric: tabular-nums; }
+.research-market-name small { display: block; margin-top: 2px; color: var(--subtle); font-size: .7rem; }
+.research-progress-head { margin-top: 22px; color: var(--muted); font-size: .72rem; }
+.research-progress-head strong { color: var(--secondary); font-size: .76rem; font-variant-numeric: tabular-nums; }
 .research-progress { display: block; width: 100%; height: 6px; margin-top: 9px; overflow: hidden; border: 0; border-radius: 999px; appearance: none; background: #222; }
 .research-progress::-webkit-progress-bar { border-radius: inherit; background: #222; }
 .research-progress::-webkit-progress-value { border-radius: inherit; background: linear-gradient(90deg, #2d8d61, var(--green)); transition: width 400ms var(--ease-out); }
@@ -1099,9 +1099,9 @@ footer.shell {
 .research-stats small,
 .research-stats strong,
 .research-stats em { display: block; }
-.research-stats small { color: var(--subtle); font-size: .63rem; line-height: 1.35; }
-.research-stats strong { margin-top: 5px; color: var(--text); font-size: .78rem; font-variant-numeric: tabular-nums; }
-.research-stats em { margin-top: 3px; color: var(--muted); font-size: .61rem; font-style: normal; line-height: 1.35; }
+.research-stats small { color: var(--subtle); font-size: .7rem; line-height: 1.35; }
+.research-stats strong { margin-top: 5px; color: var(--text); font-size: .82rem; font-variant-numeric: tabular-nums; }
+.research-stats em { margin-top: 3px; color: var(--muted); font-size: .7rem; font-style: normal; line-height: 1.35; }
 .research-check {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1115,11 +1115,11 @@ footer.shell {
 .research-check > span { min-width: 0; padding: 10px; background: var(--surface-raised); }
 .research-check small,
 .research-check strong { display: block; }
-.research-check small { color: var(--subtle); font-size: .62rem; line-height: 1.35; }
-.research-check strong { margin-top: 5px; color: var(--text); font-size: .7rem; font-variant-numeric: tabular-nums; }
+.research-check small { color: var(--subtle); font-size: .7rem; line-height: 1.35; }
+.research-check strong { margin-top: 5px; color: var(--text); font-size: .78rem; font-variant-numeric: tabular-nums; }
 .research-check strong.positive { color: var(--green); }
 .research-check strong.negative { color: var(--red); }
-.market-research-card > p { min-height: 2.8em; margin: 16px 0 0; color: var(--muted); font-size: .66rem; line-height: 1.45; }
+.market-research-card > p { min-height: 2.8em; margin: 16px 0 0; color: var(--muted); font-size: .72rem; line-height: 1.45; }
 .market-research-card > p.research-history { min-height: 0; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--subtle); }
 .market-research-empty { grid-column: 1 / -1; padding: 24px; border-radius: var(--radius); color: var(--muted); background: var(--surface); font-size: .74rem; }
 .market-research-empty.error { color: var(--red); }
