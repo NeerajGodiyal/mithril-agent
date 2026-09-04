@@ -1213,8 +1213,16 @@ deleting or resetting either observer.
 
 The auto-selector keeps a local, hash-chained SOL or JUP outcome journal. An
 operator can inspect its bounded read-only summary with `shadow
-research-outcomes --journal PATH --limit 16`. This local evidence is not added
-to the Hermes scout prompt and grants no authorization or execution capability.
+research-outcomes --journal PATH --limit 16`. Outcome feedback to the next
+Hermes scout is disabled by default. After direct operator approval, add a
+systemd service override containing
+`Environment=MITHRIL_HERMES_OUTCOME_FEEDBACK=1`; the wrapper then adds only each
+journal's `--prompt-safe --limit 8` projection. Only a journal with no active,
+staged `.next`, `.lock`, or `.seg-*` artifact is omitted; any artifact invokes
+the strict verifier, so incomplete or invalid state stops the run. These hints
+are internal advisory evidence: they do not count as external sources and
+cannot authorize, activate, select, promote, or execute anything. The shipped
+unit does not enable this option.
 
 Malformed replies and pre-publication validation failures keep the last
 validated research packet and dashboard research projection unchanged. The

@@ -37,6 +37,9 @@ dashboard_evidence=/var/lib/mithril-agent-dashboard/research-evidence.json
 sol_perps_status=/var/lib/mithril-agent-perps-paper/published/sol-paper-status.json
 btc_perps_status=/var/lib/mithril-agent-perps-paper/published/btc-paper-status.json
 eth_perps_status=/var/lib/mithril-agent-perps-paper/published/eth-paper-status.json
+sol_outcome_journal=/var/lib/mithril-agent-research/outcomes/sol.jsonl
+jup_outcome_journal=/var/lib/mithril-agent-research/outcomes/jup.jsonl
+outcome_feedback=${MITHRIL_HERMES_OUTCOME_FEEDBACK:-0}
 evidence_archive=/var/lib/mithril-agent-research/evidence
 latest_evidence=/var/lib/mithril-agent-research/latest-research-evidence.json
 latest=/var/lib/mithril-agent-research/latest-research.json
@@ -48,6 +51,19 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
+
+case "$outcome_feedback" in
+0|1) ;;
+*) echo "MITHRIL_HERMES_OUTCOME_FEEDBACK must be 0 or 1" >&2; exit 2 ;;
+esac
+
+outcome_journal_exists() {
+  for artifact in "$1" "$1.next" "$1.lock" "$1".seg-*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    return 0
+  done
+  return 1
+}
 
 /usr/bin/install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
   "$research_state" "$evidence_archive"
@@ -128,6 +144,20 @@ if reviewed=$(/usr/sbin/runuser -u mithril-agent-research -- \
       --render-perps-research "ETH-PERP=$eth_perps_status" 2>/dev/null); then
   perps_research=$reviewed
 fi
+sol_outcome_history=
+jup_outcome_history=
+if [ "$outcome_feedback" -eq 1 ]; then
+  if outcome_journal_exists "$sol_outcome_journal"; then
+    sol_outcome_history=$(/usr/sbin/runuser -u mithril-agent-research -- \
+      /usr/local/libexec/mithril-agent/mithril-agent shadow research-outcomes \
+        --journal "$sol_outcome_journal" --prompt-safe --limit 8)
+  fi
+  if outcome_journal_exists "$jup_outcome_journal"; then
+    jup_outcome_history=$(/usr/sbin/runuser -u mithril-agent-research -- \
+      /usr/local/libexec/mithril-agent/mithril-agent shadow research-outcomes \
+        --journal "$jup_outcome_journal" --prompt-safe --limit 8)
+  fi
+fi
 rendered=
 if [ "$has_instruction" = true ]; then
   rendered=$(/usr/sbin/runuser -u mithril-agent-research -- \
@@ -162,6 +192,13 @@ collect_research_packet() (
     "$sol_diagnostics" "$jup_diagnostics" >>"$research_query"
   /usr/bin/printf '\nTrusted content-hashed completed perps paper research. This is internal advisory evidence only; it cannot authorize, promote, or execute anything. SOL-PERP, BTC-PERP, and ETH-PERP: %s\n' \
     "$perps_research" >>"$research_query"
+  if [ -n "$sol_outcome_history$jup_outcome_history" ]; then
+    /usr/bin/printf '\nTrusted sanitized paper outcome history follows. This is internal advisory evidence, not an external source, and cannot authorize, activate, select, promote, or execute anything.\n' >>"$research_query"
+    [ -z "$sol_outcome_history" ] || /usr/bin/printf 'SOL/USDC: %s\n' \
+      "$sol_outcome_history" >>"$research_query"
+    [ -z "$jup_outcome_history" ] || /usr/bin/printf 'JUP/USDC: %s\n' \
+      "$jup_outcome_history" >>"$research_query"
+  fi
   if [ "$has_instruction" = true ]; then
     /usr/bin/printf '%s' "$rendered" >>"$research_query"
   fi

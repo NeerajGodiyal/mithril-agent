@@ -2,6 +2,8 @@ package main
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -1001,6 +1003,62 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		strings.Count(perpsBlock, "perps_research=$reviewed") != 1 {
 		t.Fatal("Hermes wrapper does not fail the completed perps summary closed as one unit")
 	}
+	for _, want := range []string{
+		"outcome_feedback=${MITHRIL_HERMES_OUTCOME_FEEDBACK:-0}",
+		`case "$outcome_feedback" in`, "0|1) ;;",
+		"MITHRIL_HERMES_OUTCOME_FEEDBACK must be 0 or 1",
+		"sol_outcome_journal=/var/lib/mithril-agent-research/outcomes/sol.jsonl",
+		"jup_outcome_journal=/var/lib/mithril-agent-research/outcomes/jup.jsonl",
+		`[ "$outcome_feedback" -eq 1 ]`,
+		`outcome_journal_exists() {`,
+		`for artifact in "$1" "$1.next" "$1.lock" "$1".seg-*; do`,
+		`[ -e "$artifact" ] || [ -L "$artifact" ] || continue`,
+		`outcome_journal_exists "$sol_outcome_journal"`,
+		`outcome_journal_exists "$jup_outcome_journal"`,
+		`--journal "$sol_outcome_journal" --prompt-safe --limit 8`,
+		`--journal "$jup_outcome_journal" --prompt-safe --limit 8`,
+		`[ -n "$sol_outcome_history$jup_outcome_history" ]`,
+		"internal advisory evidence, not an external source",
+		"cannot authorize, activate, select, promote, or execute anything",
+	} {
+		if !strings.Contains(researchRunner, want) {
+			t.Errorf("Hermes outcome feedback is missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{
+		`if sol_outcome_history=$(`, `if jup_outcome_history=$(`,
+		`/usr/bin/cat "$sol_outcome_journal"`, `/usr/bin/cat "$jup_outcome_journal"`,
+		`"$sol_outcome_journal" >>"$research_query"`,
+		`"$jup_outcome_journal" >>"$research_query"`,
+	} {
+		if strings.Contains(researchRunner, forbidden) {
+			t.Errorf("Hermes outcome feedback exposes raw journal input %q", forbidden)
+		}
+	}
+	if strings.Contains(hermesUnit, "MITHRIL_HERMES_OUTCOME_FEEDBACK") {
+		t.Fatal("shipped Hermes service enables optional outcome feedback")
+	}
+	for _, want := range []string{
+		"Outcome feedback to the next\nHermes scout is disabled by default",
+		"After direct operator approval",
+		"Environment=MITHRIL_HERMES_OUTCOME_FEEDBACK=1",
+		"staged `.next`, `.lock`, or `.seg-*` artifact is omitted",
+		"incomplete or invalid state stops the run",
+	} {
+		if !strings.Contains(deployReadme, want) {
+			t.Errorf("Hermes deployment README is missing outcome operation rule %q", want)
+		}
+	}
+	marketPrompt := readDocumentation(t, "../../deploy/hermes-research/prompts/market-scout.md")
+	for _, want := range []string{
+		"sanitized paper outcome history", "never an external source",
+		"Do not infer omitted measurements or identifiers",
+		"absent outcome-history block means that evidence is unavailable",
+	} {
+		if !strings.Contains(marketPrompt, want) {
+			t.Errorf("Hermes market prompt is missing outcome safety rule %q", want)
+		}
+	}
 	dashboardRecord := strings.Index(researchRunner, `--in "$dashboard_packet" --latest "$projection"`)
 	dashboardEvidence := strings.Index(researchRunner, `--sessions "$dashboard_sessions" --packet "$projection"`)
 	if dashboardRecord < 0 || dashboardEvidence < 0 || dashboardRecord > dashboardEvidence {
@@ -1403,6 +1461,38 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	for _, forbidden := range []string{"hermes cron create", "supervised gateway", "restore the gateway"} {
 		if strings.Contains(deployReadme, forbidden) {
 			t.Errorf("Hermes deployment README contains obsolete schedule guidance %q", forbidden)
+		}
+	}
+}
+
+func TestHermesOutcomeFeedbackRecognizesInterruptedRotation(t *testing.T) {
+	runner := readDocumentation(t, "../../deploy/hermes-research/run-market-scout.sh")
+	start := strings.Index(runner, "outcome_journal_exists() {")
+	if start < 0 {
+		t.Fatal("Hermes outcome journal existence gate is missing")
+	}
+	end := strings.Index(runner[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("Hermes outcome journal existence gate is missing")
+	}
+	helper := runner[start : start+end+2]
+	directory := t.TempDir()
+	journal := filepath.Join(directory, "sol.jsonl")
+	run := func() error {
+		return exec.Command("/bin/sh", "-c", helper+"\noutcome_journal_exists \"$1\"", "test", journal).Run()
+	}
+	if err := run(); err == nil {
+		t.Fatal("a truly absent logical journal was reported present")
+	}
+	for _, suffix := range []string{".next", ".lock", ".seg-000001"} {
+		if err := os.WriteFile(journal+suffix, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := run(); err != nil {
+			t.Errorf("logical journal artifact %s was omitted: %v", suffix, err)
+		}
+		if err := os.Remove(journal + suffix); err != nil {
+			t.Fatal(err)
 		}
 	}
 }
