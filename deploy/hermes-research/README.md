@@ -1217,12 +1217,16 @@ research-outcomes --journal PATH --limit 16`. Outcome feedback to the next
 Hermes scout is disabled by default. After direct operator approval, add a
 systemd service override containing
 `Environment=MITHRIL_HERMES_OUTCOME_FEEDBACK=1`; the wrapper then adds only each
-journal's `--prompt-safe --limit 8` projection. Only a journal with no active,
-staged `.next`, `.lock`, or `.seg-*` artifact is omitted; any artifact invokes
-the strict verifier, so incomplete or invalid state stops the run. These hints
-are internal advisory evidence: they do not count as external sources and
-cannot authorize, activate, select, promote, or execute anything. The shipped
-unit does not enable this option.
+journal's `--prompt-safe --limit 8 --policy CURRENT --max-age 168h` projection.
+The command strictly loads and fingerprints the current market policy, verifies
+and folds the complete journal, filters out other policy fingerprints, markets,
+and older outcomes, and only then applies the limit. Only a journal with no
+active, staged `.next`, `.lock`, or `.seg-*` artifact is omitted; any artifact
+invokes the strict verifier, so incomplete, invalid, or future-dated state stops
+the run. These hints are internal advisory evidence: they do not count as
+external sources and cannot authorize, activate, select, promote, or execute
+anything. The shipped unit does not enable this option, and JUP outcomes are
+ignored when the current allocation has no JUP policy.
 
 Malformed replies and pre-publication validation failures keep the last
 validated research packet and dashboard research projection unchanged. The

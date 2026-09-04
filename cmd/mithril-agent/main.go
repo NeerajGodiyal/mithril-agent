@@ -111,7 +111,7 @@ Other supported tools:
   mithril-agent shadow select --policy PATH --candidate PATH --pointer PATH --lifecycle-lock PATH
   mithril-agent shadow challenge --policy PATH --champion-pointer PATH --challenger PATH --champion-dir PATH --challenger-dir PATH --days N
   mithril-agent shadow auto-select --policy PATH --champion-pointer PATH --challenger-pointer PATH --champion-dir PATH --challenger-dir PATH --days N --rollback-pointer PATH --lifecycle-lock PATH [--outcome-journal PATH]
-  mithril-agent shadow research-outcomes --journal PATH [--limit 16] [--prompt-safe]
+  mithril-agent shadow research-outcomes --journal PATH [--limit 16] [--prompt-safe --policy PATH --max-age DURATION]
   mithril-agent shadow restore --policy PATH --champion-pointer PATH --rollback-pointer PATH --challenger-pointer PATH --challenger-candidate-dir PATH --lifecycle-lock PATH
   mithril-agent shadow research-mcp --policy PATH --journal-dir PATH ...
   mithril-agent research packet-record --in PATH --latest PATH [--archive-dir DIR]
@@ -1877,7 +1877,7 @@ func runShadow(args []string, output io.Writer) error {
                                    --lifecycle-lock PATH
                                        select only a forward-qualified paper
                                        challenger and preserve rollback
-  mithril-agent shadow research-outcomes --journal PATH [--limit 16] [--prompt-safe]
+  mithril-agent shadow research-outcomes --journal PATH [--limit 16] [--prompt-safe --policy PATH --max-age DURATION]
                                        read bounded advisory outcomes from
                                        Hermes-backed paper candidates
   mithril-agent shadow restore --policy PATH --champion-pointer PATH

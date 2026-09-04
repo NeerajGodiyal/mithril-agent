@@ -22,13 +22,14 @@ const (
 	shadowResearchOutcomeVersion  = uint32(1)
 	shadowResearchOutcomeLimit    = uint32(16)
 	shadowResearchOutcomeMaxLimit = uint32(64)
+	shadowResearchOutcomeMaxAge   = 7 * 24 * time.Hour
 
 	shadowResearchForwardEvaluated     = "research.forward_evaluated"
 	shadowResearchSelectionConfirmed   = "research.paper_selection_confirmed"
 	shadowResearchOutcomeSummaryStatus = "research_outcome_summary"
 )
 
-const shadowResearchOutcomeSummaryUsage = `Usage: mithril-agent shadow research-outcomes --journal PATH [--limit 16] [--prompt-safe]
+const shadowResearchOutcomeSummaryUsage = `Usage: mithril-agent shadow research-outcomes --journal PATH [--limit 16] [--prompt-safe --policy PATH --max-age DURATION]
 
 Reads and verifies the append-only paper research outcome journal, then emits a
 compact advisory summary. It cannot authorize, select, sign, submit, or trade.`
@@ -517,13 +518,26 @@ func foldShadowResearchOutcomes(records []journal.Record) (shadowResearchOutcome
 
 func promptSafeShadowResearchOutcomeSummary(
 	summary shadowResearchOutcomeSummary,
-) shadowResearchOutcomePromptSummary {
+	policySHA256 string,
+	market string,
+	now time.Time,
+	maxAge time.Duration,
+	limit uint32,
+) (shadowResearchOutcomePromptSummary, error) {
 	prompt := shadowResearchOutcomePromptSummary{
 		Version: shadowResearchOutcomeVersion, Status: "research_outcome_learning_hints",
 		PaperOnly: true, AdvisoryOnly: true,
 		Hints: make([]shadowResearchOutcomeHint, 0, len(summary.Outcomes)),
 	}
+	cutoff := now.Add(-maxAge)
 	for _, outcome := range summary.Outcomes {
+		if outcome.EvaluatedAt.After(now) || outcome.SelectedAt != nil && outcome.SelectedAt.After(now) {
+			return shadowResearchOutcomePromptSummary{}, errors.New("research outcome journal contains a future event")
+		}
+		if outcome.Receipt.BasePolicySHA256 != policySHA256 || outcome.Receipt.Market != market ||
+			outcome.EvaluatedAt.Before(cutoff) {
+			continue
+		}
 		state := "rejected"
 		if outcome.Receipt.ForwardStatus == "challenger_qualified_for_paper_selection" {
 			state = "accepted"
@@ -540,15 +554,28 @@ func promptSafeShadowResearchOutcomeSummary(
 			Reasons: append([]string(nil), outcome.Receipt.Reasons...),
 		})
 	}
-	return prompt
+	if uint32(len(prompt.Hints)) > limit {
+		prompt.Hints = append([]shadowResearchOutcomeHint(nil), prompt.Hints[len(prompt.Hints)-int(limit):]...)
+	}
+	return prompt, nil
 }
 
 func runShadowResearchOutcomeSummary(args []string, output io.Writer) error {
+	return runShadowResearchOutcomeSummaryWith(args, output, time.Now)
+}
+
+func runShadowResearchOutcomeSummaryWith(
+	args []string,
+	output io.Writer,
+	now func() time.Time,
+) error {
 	flags := flag.NewFlagSet("shadow research-outcomes", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	path := flags.String("journal", "", "append-only paper research outcome journal")
 	limit := flags.Uint("limit", uint(shadowResearchOutcomeLimit), "latest candidate outcomes, 1..64")
 	promptSafe := flags.Bool("prompt-safe", false, "omit identifiers, metrics, counts, and timestamps")
+	policyPath := flags.String("policy", "", "exact current base paper policy for prompt-safe filtering")
+	maxAge := flags.Duration("max-age", 0, "maximum prompt-safe outcome age, greater than 0 and at most 168h")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, shadowResearchOutcomeSummaryUsage)
@@ -560,12 +587,37 @@ func runShadowResearchOutcomeSummary(args []string, output io.Writer) error {
 		*limit == 0 || *limit > uint(shadowResearchOutcomeMaxLimit) {
 		return errors.New("shadow research-outcomes requires one clean absolute --journal path and --limit from 1 to 64")
 	}
-	summary, err := readShadowResearchOutcomeSummaryLimit(*path, uint32(*limit))
+	if !*promptSafe && (*policyPath != "" || *maxAge != 0) {
+		return errors.New("shadow research-outcomes --policy and --max-age require --prompt-safe")
+	}
+	if *promptSafe && (*policyPath == "" || *maxAge <= 0 ||
+		*maxAge > shadowResearchOutcomeMaxAge) {
+		return errors.New("shadow research-outcomes --prompt-safe requires --policy PATH and --max-age greater than 0 and at most 168h")
+	}
+	readLimit := uint32(*limit)
+	if *promptSafe {
+		readLimit = 0
+	}
+	summary, err := readShadowResearchOutcomeSummaryLimit(*path, readLimit)
 	if err != nil {
 		return err
 	}
 	if *promptSafe {
-		return json.NewEncoder(output).Encode(promptSafeShadowResearchOutcomeSummary(summary))
+		policy, err := loadActiveShadowPolicy(*policyPath)
+		if err != nil {
+			return err
+		}
+		fingerprint, err := policy.Fingerprint()
+		if err != nil {
+			return err
+		}
+		prompt, err := promptSafeShadowResearchOutcomeSummary(
+			summary, fingerprint, shadowMarketPair(policy), now().UTC(), *maxAge, uint32(*limit),
+		)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(output).Encode(prompt)
 	}
 	return json.NewEncoder(output).Encode(summary)
 }

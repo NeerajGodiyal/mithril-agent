@@ -88,9 +88,11 @@ func TestShadowResearchOutcomeJournalIsIdempotentAndFoldsSelection(t *testing.T)
 		t.Fatalf("summary output = %s", output.Bytes())
 	}
 	output.Reset()
-	if err := run([]string{
-		"shadow", "research-outcomes", "--journal", path, "--prompt-safe",
-	}, &output); err != nil {
+	promptPolicyPath := writeShadowPolicy(t, base)
+	if err := runShadowResearchOutcomeSummaryWith([]string{
+		"--journal", path, "--prompt-safe", "--policy", promptPolicyPath,
+		"--max-age", "168h",
+	}, &output, func() time.Time { return evaluatedAt.Add(time.Hour) }); err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
@@ -105,11 +107,119 @@ func TestShadowResearchOutcomeJournalIsIdempotentAndFoldsSelection(t *testing.T)
 	for _, forbidden := range []string{
 		"sha256", "hypothesis_id", "evaluated_at", "selected_at", "complete_days",
 		"round_trips", "daily_wins", "advantage", "records", "candidates_evaluated",
-		"selections_confirmed", candidateSHA256, candidate.ResearchPacket.ContentSHA256,
+		"selections_confirmed", "hint_count", "current_context", promptPolicyPath,
+		candidateSHA256, candidate.ResearchPacket.ContentSHA256, receipt.BasePolicySHA256,
 	} {
 		if bytes.Contains(output.Bytes(), []byte(forbidden)) {
 			t.Errorf("prompt-safe summary leaked %q: %s", forbidden, output.Bytes())
 		}
+	}
+}
+
+func TestPromptSafeResearchOutcomesUseOnlyFreshCurrentPolicyHints(t *testing.T) {
+	policy := adaptiveShadowSearchPolicy()
+	policyPath := writeShadowPolicy(t, policy)
+	policySHA256, err := policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 4, 18, 0, 0, 0, time.UTC)
+	path := filepath.Join(privateTestDirectory(t), "context-filtered.jsonl")
+	receipts := []shadowResearchOutcomeReceipt{
+		shadowResearchOutcomeReceiptFixture(),
+		shadowResearchOutcomeReceiptFixture(),
+		shadowResearchOutcomeReceiptFixture(),
+		shadowResearchOutcomeReceiptFixture(),
+	}
+	candidateDigits := []string{"1", "2", "3", "4"}
+	policyDigits := []string{"5", "6", "7", "8"}
+	for index := range receipts {
+		receipts[index].CandidateSHA256 = strings.Repeat(candidateDigits[index], 64)
+		receipts[index].CandidatePolicySHA256 = strings.Repeat(policyDigits[index], 64)
+		receipts[index].BasePolicySHA256 = policySHA256
+		receipts[index].ParameterChanges[0].Proposed = uint64(300 + index*100)
+	}
+	receipts[2].BasePolicySHA256 = strings.Repeat("e", 64)
+	receipts[3].Market = "JUP/USDC"
+	for index, at := range []time.Time{
+		now.Add(-8 * 24 * time.Hour), now.Add(-3 * time.Hour),
+		now.Add(-2 * time.Hour), now.Add(-time.Hour),
+	} {
+		if appended, appendErr := appendShadowResearchOutcome(
+			path, at, shadowResearchForwardEvaluated, receipts[index],
+		); appendErr != nil || !appended {
+			t.Fatalf("append context outcome %d = %t, %v", index, appended, appendErr)
+		}
+	}
+	var output bytes.Buffer
+	args := []string{
+		"--journal", path, "--prompt-safe", "--policy", policyPath,
+		"--max-age", "168h", "--limit", "1",
+	}
+	if err := runShadowResearchOutcomeSummaryWith(
+		args, &output, func() time.Time { return now },
+	); err != nil {
+		t.Fatal(err)
+	}
+	var summary shadowResearchOutcomePromptSummary
+	if err := json.Unmarshal(output.Bytes(), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if len(summary.Hints) != 1 || summary.Hints[0].Market != "SOL/USDC" ||
+		len(summary.Hints[0].ParameterChanges) != 1 ||
+		summary.Hints[0].ParameterChanges[0].Proposed != 400 {
+		t.Fatalf("context-filtered prompt summary = %+v", summary)
+	}
+	for _, invalid := range [][]string{
+		{"--journal", path, "--prompt-safe", "--max-age", "168h"},
+		{"--journal", path, "--prompt-safe", "--policy", policyPath, "--max-age", "0s"},
+		{"--journal", path, "--prompt-safe", "--policy", policyPath, "--max-age", "169h"},
+	} {
+		if err := runShadowResearchOutcomeSummaryWith(
+			invalid, io.Discard, func() time.Time { return now },
+		); err == nil {
+			t.Fatalf("unsafe prompt context was accepted: %v", invalid)
+		}
+	}
+	future := shadowResearchOutcomeReceiptFixture()
+	future.BasePolicySHA256 = policySHA256
+	future.CandidateSHA256 = strings.Repeat("a", 64)
+	future.CandidatePolicySHA256 = strings.Repeat("b", 64)
+	if appended, appendErr := appendShadowResearchOutcome(
+		path, now.Add(time.Minute), shadowResearchForwardEvaluated, future,
+	); appendErr != nil || !appended {
+		t.Fatalf("append future outcome = %t, %v", appended, appendErr)
+	}
+	if err := runShadowResearchOutcomeSummaryWith(
+		args, io.Discard, func() time.Time { return now },
+	); err == nil || !strings.Contains(err.Error(), "future event") {
+		t.Fatalf("future outcome error = %v", err)
+	}
+	selectedFuturePath := filepath.Join(privateTestDirectory(t), "future-selection.jsonl")
+	if appended, appendErr := appendShadowResearchOutcome(
+		selectedFuturePath, now.Add(-time.Hour), shadowResearchForwardEvaluated, future,
+	); appendErr != nil || !appended {
+		t.Fatalf("append selected outcome = %t, %v", appended, appendErr)
+	}
+	if appended, appendErr := appendShadowResearchOutcome(
+		selectedFuturePath, now.Add(time.Minute), shadowResearchSelectionConfirmed, future,
+	); appendErr != nil || !appended {
+		t.Fatalf("append future selection = %t, %v", appended, appendErr)
+	}
+	selectedFutureArgs := append([]string(nil), args...)
+	selectedFutureArgs[1] = selectedFuturePath
+	if err := runShadowResearchOutcomeSummaryWith(
+		selectedFutureArgs, io.Discard, func() time.Time { return now },
+	); err == nil || !strings.Contains(err.Error(), "future event") {
+		t.Fatalf("future selection error = %v", err)
+	}
+	if err := os.WriteFile(path+".next", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runShadowResearchOutcomeSummaryWith(
+		args, io.Discard, func() time.Time { return now },
+	); err == nil || !strings.Contains(err.Error(), "incomplete rotation") {
+		t.Fatalf("incomplete outcome rotation error = %v", err)
 	}
 }
 
@@ -198,8 +308,15 @@ func TestShadowResearchOutcomeRequiresPacketAndStrictJournalEvents(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	valid := shadowResearchOutcomeReceiptFixture()
 	if _, err := store.Append(
 		time.Date(2026, 9, 4, 11, 0, 0, 0, time.UTC),
+		shadowResearchForwardEvaluated, valid.CandidateSHA256, valid,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(
+		time.Date(2026, 9, 4, 11, 0, 1, 0, time.UTC),
 		"research.unexpected", candidateSHA256, map[string]bool{"paper_only": true},
 	); err != nil {
 		t.Fatal(err)
@@ -210,6 +327,15 @@ func TestShadowResearchOutcomeRequiresPacketAndStrictJournalEvents(t *testing.T)
 	if _, err := readShadowResearchOutcomeSummary(path); err == nil ||
 		!strings.Contains(err.Error(), "unexpected event") {
 		t.Fatalf("unexpected event error = %v", err)
+	}
+	if err := runShadowResearchOutcomeSummaryWith([]string{
+		"--journal", path, "--prompt-safe",
+		"--policy", writeShadowPolicy(t, adaptiveShadowSearchPolicy()),
+		"--max-age", "168h",
+	}, io.Discard, func() time.Time {
+		return time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	}); err == nil || !strings.Contains(err.Error(), "unexpected event") {
+		t.Fatalf("prompt-safe malformed event error = %v", err)
 	}
 }
 

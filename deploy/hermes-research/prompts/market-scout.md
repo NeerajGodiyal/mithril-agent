@@ -78,8 +78,9 @@ Use the host-produced prior-day diagnostics to explain whether the current
 paper policy was observable, active, costly, or inconclusive. Internal paper
 results may falsify or prioritize a hypothesis; they never count as an external
 source and never prove future profit.
-When the host includes sanitized paper outcome history, use it only to avoid
-repeating rejected parameter changes or to prioritize new external research.
+When the host includes sanitized current-policy paper outcome history, use it
+only to avoid repeating rejected parameter changes or to prioritize new
+external research.
 Do not infer omitted measurements or identifiers. The history is internal
 advisory evidence, never an external source, authorization, activation,
 selection, promotion, execution instruction, or proof of future profit. An

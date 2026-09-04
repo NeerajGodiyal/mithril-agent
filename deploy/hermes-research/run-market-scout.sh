@@ -150,12 +150,14 @@ if [ "$outcome_feedback" -eq 1 ]; then
   if outcome_journal_exists "$sol_outcome_journal"; then
     sol_outcome_history=$(/usr/sbin/runuser -u mithril-agent-research -- \
       /usr/local/libexec/mithril-agent/mithril-agent shadow research-outcomes \
-        --journal "$sol_outcome_journal" --prompt-safe --limit 8)
+        --journal "$sol_outcome_journal" --prompt-safe --limit 8 \
+        --policy "$sol_policy" --max-age 168h)
   fi
-  if outcome_journal_exists "$jup_outcome_journal"; then
+  if [ -f "$jup_policy" ] && outcome_journal_exists "$jup_outcome_journal"; then
     jup_outcome_history=$(/usr/sbin/runuser -u mithril-agent-research -- \
       /usr/local/libexec/mithril-agent/mithril-agent shadow research-outcomes \
-        --journal "$jup_outcome_journal" --prompt-safe --limit 8)
+        --journal "$jup_outcome_journal" --prompt-safe --limit 8 \
+        --policy "$jup_policy" --max-age 168h)
   fi
 fi
 rendered=
@@ -193,7 +195,7 @@ collect_research_packet() (
   /usr/bin/printf '\nTrusted content-hashed completed perps paper research. This is internal advisory evidence only; it cannot authorize, promote, or execute anything. SOL-PERP, BTC-PERP, and ETH-PERP: %s\n' \
     "$perps_research" >>"$research_query"
   if [ -n "$sol_outcome_history$jup_outcome_history" ]; then
-    /usr/bin/printf '\nTrusted sanitized paper outcome history follows. This is internal advisory evidence, not an external source, and cannot authorize, activate, select, promote, or execute anything.\n' >>"$research_query"
+    /usr/bin/printf '\nTrusted sanitized current-policy paper outcome history from the previous seven days follows. This is internal advisory evidence, not an external source, and cannot authorize, activate, select, promote, or execute anything.\n' >>"$research_query"
     [ -z "$sol_outcome_history" ] || /usr/bin/printf 'SOL/USDC: %s\n' \
       "$sol_outcome_history" >>"$research_query"
     [ -z "$jup_outcome_history" ] || /usr/bin/printf 'JUP/USDC: %s\n' \

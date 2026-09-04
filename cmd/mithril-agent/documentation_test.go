@@ -1017,6 +1017,9 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		`outcome_journal_exists "$jup_outcome_journal"`,
 		`--journal "$sol_outcome_journal" --prompt-safe --limit 8`,
 		`--journal "$jup_outcome_journal" --prompt-safe --limit 8`,
+		`--policy "$sol_policy" --max-age 168h`,
+		`--policy "$jup_policy" --max-age 168h`,
+		`[ -f "$jup_policy" ] && outcome_journal_exists "$jup_outcome_journal"`,
 		`[ -n "$sol_outcome_history$jup_outcome_history" ]`,
 		"internal advisory evidence, not an external source",
 		"cannot authorize, activate, select, promote, or execute anything",
@@ -1043,7 +1046,10 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"After direct operator approval",
 		"Environment=MITHRIL_HERMES_OUTCOME_FEEDBACK=1",
 		"staged `.next`, `.lock`, or `.seg-*` artifact is omitted",
-		"incomplete or invalid state stops the run",
+		"verifies\nand folds the complete journal",
+		"only then applies the limit",
+		"incomplete, invalid, or future-dated state stops",
+		"JUP outcomes are\nignored when the current allocation has no JUP policy",
 	} {
 		if !strings.Contains(deployReadme, want) {
 			t.Errorf("Hermes deployment README is missing outcome operation rule %q", want)
@@ -1051,7 +1057,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	}
 	marketPrompt := readDocumentation(t, "../../deploy/hermes-research/prompts/market-scout.md")
 	for _, want := range []string{
-		"sanitized paper outcome history", "never an external source",
+		"sanitized current-policy paper outcome history", "never an external source",
 		"Do not infer omitted measurements or identifiers",
 		"absent outcome-history block means that evidence is unavailable",
 	} {
