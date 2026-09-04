@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -43,6 +44,64 @@ report its paired evidence status. Adaptive policies require an operator-fixed
 experiment requirement. They may
 read the paper champion but atomically update only the paper challenger pointer.
 They cannot change a champion pointer, authorize, sign, submit, or load a wallet.`
+
+const shadowResearchContextUsage = `Usage: mithril-agent shadow research-context --policy PATH
+
+Prints the exact current adaptive paper-strategy values that a research packet
+must repeat. The JSON projection contains no route, address, mint, wallet,
+signer, file path, or mutation capability.`
+
+type shadowResearchPolicyContext struct {
+	Version      uint32                         `json:"version"`
+	Status       string                         `json:"status"`
+	PaperOnly    bool                           `json:"paper_only"`
+	Market       string                         `json:"market"`
+	PolicySHA256 string                         `json:"policy_sha256"`
+	Current      shadowResearchPolicyParameters `json:"current"`
+}
+
+type shadowResearchPolicyParameters struct {
+	FastWindow       uint16 `json:"fast_window"`
+	SlowWindow       uint16 `json:"slow_window"`
+	MinimumSignalBPS uint16 `json:"minimum_signal_bps"`
+	CooldownSeconds  uint64 `json:"cooldown_seconds"`
+}
+
+func runShadowResearchContext(args []string, output io.Writer) error {
+	flags := flag.NewFlagSet("shadow research-context", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	policyPath := flags.String("policy", "", "exact current adaptive paper policy")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			_, writeErr := fmt.Fprintln(output, shadowResearchContextUsage)
+			return writeErr
+		}
+		return err
+	}
+	if flags.NArg() != 0 || strings.TrimSpace(*policyPath) != *policyPath || !absoluteClean(*policyPath) {
+		return errors.New("shadow research-context requires one clean absolute --policy path")
+	}
+	policy, err := loadActiveShadowPolicy(*policyPath)
+	if err != nil {
+		return err
+	}
+	if policy.Cluster != shadow.Mainnet || policy.Adaptive == nil {
+		return errors.New("shadow research-context requires an adaptive Mainnet paper policy")
+	}
+	fingerprint, err := policy.Fingerprint()
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(shadowResearchPolicyContext{
+		Version: 1, Status: "current_paper_policy_parameters", PaperOnly: true,
+		Market: shadowMarketPair(policy), PolicySHA256: fingerprint,
+		Current: shadowResearchPolicyParameters{
+			FastWindow: policy.Adaptive.FastWindow, SlowWindow: policy.Adaptive.SlowWindow,
+			MinimumSignalBPS: policy.Adaptive.MinimumSignalBPS,
+			CooldownSeconds:  policy.Adaptive.CooldownSeconds,
+		},
+	})
+}
 
 // shadowPaperHypothesis is untrusted advisory research attached to one
 // immutable paper candidate. The safety markers are explicit and validated;

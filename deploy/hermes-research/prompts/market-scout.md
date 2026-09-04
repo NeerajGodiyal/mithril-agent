@@ -74,6 +74,11 @@ none of the retrieved pages supports a material bounded fact; never invent a
 citation just to avoid that result.
 This research may propose experiments; it cannot change the market allowlist,
 policy, risk limits, paper balances, or execution path.
+The trusted current paper-strategy settings appended by the host are the only
+authoritative values for the `current` side of `candidate_parameter_diff`.
+Copy the matching market's value exactly. They are internal context, not an
+external source or permission to change a policy. If that market is marked
+unavailable, do not infer its values and do not propose a candidate for it.
 Use the host-produced prior-day diagnostics to explain whether the current
 paper policy was observable, active, costly, or inconclusive. Internal paper
 results may falsify or prioritize a hypothesis; they never count as an external

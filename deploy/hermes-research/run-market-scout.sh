@@ -136,6 +136,17 @@ if [ -f "$jup_policy" ] &&
       --dir "$jup_journals" --days 1 --json 2>/dev/null); then
   jup_diagnostics=$reviewed
 fi
+sol_policy_context=$(/usr/sbin/runuser -u mithril-agent-research -- \
+  /usr/local/libexec/mithril-agent/mithril-agent shadow research-context \
+    --policy "$sol_policy")
+jup_policy_context='{"status":"current_paper_policy_unavailable","paper_only":true,"market":"JUP/USDC"}'
+if [ -f "$jup_policy" ]; then
+  if reviewed=$(/usr/sbin/runuser -u mithril-agent-research -- \
+      /usr/local/libexec/mithril-agent/mithril-agent shadow research-context \
+        --policy "$jup_policy" 2>/dev/null); then
+    jup_policy_context=$reviewed
+  fi
+fi
 perps_research='{"status":"completed_perps_research_unavailable"}'
 if reviewed=$(/usr/sbin/runuser -u mithril-agent-research -- \
     /usr/local/libexec/mithril-agent/mithril-agent-paper-dashboard \
@@ -192,6 +203,8 @@ collect_research_packet() (
   fi
   /usr/bin/printf '\nTrusted sanitized prior-complete-day paper diagnostics. These local replay results may reject or prioritize a hypothesis, but cannot replace external evidence or prove future profit. SOL/USDC: %s\nJUP/USDC: %s\n' \
     "$sol_diagnostics" "$jup_diagnostics" >>"$research_query"
+  /usr/bin/printf '\nTrusted current paper-strategy settings. For a candidate, copy the matching market values exactly into the `current` side of `candidate_parameter_diff`; never infer a missing market. These values are not external evidence and cannot authorize, activate, select, promote, or execute anything. SOL/USDC: %s\nJUP/USDC: %s\n' \
+    "$sol_policy_context" "$jup_policy_context" >>"$research_query"
   /usr/bin/printf '\nTrusted content-hashed completed perps paper research. This is internal advisory evidence only; it cannot authorize, promote, or execute anything. SOL-PERP, BTC-PERP, and ETH-PERP: %s\n' \
     "$perps_research" >>"$research_query"
   if [ -n "$sol_outcome_history$jup_outcome_history" ]; then
@@ -274,6 +287,8 @@ if [ -n "$finalizer_toolsets" ]; then
   finalizer_valid_until=$(/usr/bin/date -u -d '6 hours' +%Y-%m-%dT%H:%M:%SZ)
   /usr/bin/printf '\n\nTrusted run-time anchors: `created_at` is %s and `valid_until` is %s.\n' \
     "$finalizer_created_at" "$finalizer_valid_until" >>"$finalizer_query"
+  /usr/bin/printf '\nTrusted current paper-strategy settings. These are the authoritative current values for the matching market and cannot authorize or change a policy. SOL/USDC: %s\nJUP/USDC: %s\n' \
+    "$sol_policy_context" "$jup_policy_context" >>"$finalizer_query"
   if [ "$has_instruction" = true ]; then
     /usr/bin/printf '%s' "$rendered" >>"$finalizer_query"
   fi

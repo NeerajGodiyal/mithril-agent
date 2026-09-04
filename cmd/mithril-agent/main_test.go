@@ -152,6 +152,7 @@ func TestRootHelpPrioritizesSupportedCommands(t *testing.T) {
 		"shadow portfolio --out PATH",
 		"shadow allocation --portfolio PATH",
 		"shadow research-mcp --policy PATH --journal-dir PATH",
+		"shadow research-context --policy PATH",
 		"proposal check --taker ADDR --input-mint ADDR --output-mint ADDR --amount N",
 		"proposal review --request ABSOLUTE_PATH --signer-policy PATH",
 		"proposal approval-create --request ABSOLUTE_PATH --authority-policy PATH --out PATH",
@@ -232,6 +233,9 @@ func TestShadowHelpListsResearchAndPerpsPaper(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "shadow research-mcp --policy PATH --journal-dir PATH") {
 		t.Fatalf("shadow help omits research-mcp: %q", output.String())
+	}
+	if !strings.Contains(output.String(), "shadow research-context --policy PATH") {
+		t.Fatalf("shadow help omits research context: %q", output.String())
 	}
 	if !strings.Contains(output.String(), "shadow perps-paper-run --state-dir PATH") {
 		t.Fatalf("shadow help omits perps paper runner: %q", output.String())

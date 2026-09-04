@@ -827,7 +827,9 @@ function paperCheckView(m){
     candidate_ready_for_more_paper_testing:{label:'Ready for paper test',tone:'green'}
   };
   const view=views[check.outcome]||{label:'Check unavailable',tone:'red'};
-  view.note=check.reasons?.length?paperCheckReason(check.reasons[0]):'It stayed ahead after costs in both the untouched and higher-cost replays. This is only a short paper check, not proof of future profit.';
+  const failures=check.training_rejections||{},tested=Number(check.candidates_evaluated||0);
+  const ranked=[[Number(failures.no_round_trip||0),'did not complete a full buy-and-sell cycle'],[Number(failures.net_return_not_positive||0),'did not finish ahead after costs'],[Number(failures.did_not_beat_holding||0),'did not beat simply holding'],[Number(failures.failed_execution||0),'had a simulated execution failure'],[Number(failures.unmatched_filled_leg||0),'ended with an unmatched paper order'],[Number(failures.pending_decision||0),'ended with a decision still pending'],[Number(failures.drawdown_above_limit||0),'fell past the loss limit']].filter(item=>item[0]>0).sort((left,right)=>right[0]-left[0]);
+  view.note=check.outcome==='no_training_candidate'&&tested&&ranked.length?'Tested '+tested+' paper plans. Most often, '+ranked[0][0]+' '+ranked[0][1]+'. A plan can fail more than one check.':check.reasons?.length?paperCheckReason(check.reasons[0]):'It stayed ahead after costs in both the untouched and higher-cost replays. This is only a short paper check, not proof of future profit.';
   return view;
 }
 function researchMarketCard(m){

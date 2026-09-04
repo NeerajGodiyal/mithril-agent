@@ -288,6 +288,92 @@ func TestShadowResearchMCPWritesOnlyAnImmutablePaperChallenger(t *testing.T) {
 	}
 }
 
+func TestShadowResearchContextPrintsOnlyExactCurrentTunables(t *testing.T) {
+	policy := adaptiveShadowSearchPolicy()
+	policy.Adaptive.FastWindow = 7
+	policy.Adaptive.SlowWindow = 31
+	policy.Adaptive.MinimumSignalBPS = 222
+	policy.Adaptive.CooldownSeconds = 45
+	policyPath := writeShadowPolicy(t, policy)
+
+	var output bytes.Buffer
+	if err := run([]string{"shadow", "research-context", "--policy", policyPath}, &output); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint, err := policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var context shadowResearchPolicyContext
+	if err := json.Unmarshal(output.Bytes(), &context); err != nil {
+		t.Fatal(err)
+	}
+	var surface map[string]json.RawMessage
+	if err := json.Unmarshal(output.Bytes(), &surface); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"version", "status", "paper_only", "market", "policy_sha256", "current"} {
+		delete(surface, key)
+	}
+	if len(surface) != 0 {
+		t.Fatalf("research context has unexpected top-level keys: %v", surface)
+	}
+	var currentSurface map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(output.String()), &struct {
+		Current *map[string]json.RawMessage `json:"current"`
+	}{Current: &currentSurface}); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"fast_window", "slow_window", "minimum_signal_bps", "cooldown_seconds"} {
+		delete(currentSurface, key)
+	}
+	if len(currentSurface) != 0 {
+		t.Fatalf("research context has unexpected current keys: %v", currentSurface)
+	}
+	if context.Version != 1 || context.Status != "current_paper_policy_parameters" ||
+		!context.PaperOnly || context.Market != shadowMarketPair(policy) ||
+		context.PolicySHA256 != fingerprint || context.Current.FastWindow != 7 ||
+		context.Current.SlowWindow != 31 || context.Current.MinimumSignalBPS != 222 ||
+		context.Current.CooldownSeconds != 45 {
+		t.Fatalf("research context = %+v", context)
+	}
+	var repeated bytes.Buffer
+	if err := run([]string{"shadow", "research-context", "--policy", policyPath}, &repeated); err != nil ||
+		!bytes.Equal(output.Bytes(), repeated.Bytes()) {
+		t.Fatalf("research context is not repeatable: %v, %q", err, repeated.Bytes())
+	}
+	for _, forbidden := range []string{
+		`"observe"`, `"trigger"`, `"quote_route"`, `"input_mint"`,
+		`"output_mint"`, `"wallet"`, `"signer"`, `"path"`,
+	} {
+		if bytes.Contains(bytes.ToLower(output.Bytes()), []byte(forbidden)) {
+			t.Fatalf("research context exposes %s: %s", forbidden, output.Bytes())
+		}
+	}
+
+	fixed := policy
+	fixed.Adaptive = nil
+	fixedPath := writeShadowPolicy(t, fixed)
+	if err := run([]string{"shadow", "research-context", "--policy", fixedPath}, io.Discard); err == nil {
+		t.Fatal("research context accepted a fixed policy")
+	}
+	jup, err := buildAdaptiveJUPPolicy(
+		250_000_000, 80_000_000, 3_000_000, 100, 100_000,
+		"So11111111111111111111111111111111111111112", 60,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jupOutput bytes.Buffer
+	if err := run([]string{"shadow", "research-context", "--policy", writeShadowPolicy(t, jup)}, &jupOutput); err != nil {
+		t.Fatal(err)
+	}
+	var jupContext shadowResearchPolicyContext
+	if err := json.Unmarshal(jupOutput.Bytes(), &jupContext); err != nil || jupContext.Market != shadow.MarketJUPUSDC {
+		t.Fatalf("JUP research context = %+v, %v", jupContext, err)
+	}
+}
+
 func TestShadowResearchPacketBindingRejectsMismatchedLineage(t *testing.T) {
 	policy := adaptiveShadowSearchPolicy()
 	now := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)

@@ -51,16 +51,19 @@ type MarketResearch struct {
 
 // MarketPaperCheck is the public, precision-safe view of one short replay.
 type MarketPaperCheck struct {
-	CheckedAt                        time.Time `json:"checked_at"`
-	Through                          time.Time `json:"through"`
-	Outcome                          string    `json:"outcome"`
-	TrainingCoverageBPS              uint16    `json:"training_coverage_bps"`
-	HoldoutCoverageBPS               uint16    `json:"holdout_coverage_bps"`
-	HoldoutAfterCostNetReturnMicros  int64     `json:"holdout_after_cost_net_return_micros,string"`
-	HoldoutAfterCostVersusHoldMicros int64     `json:"holdout_after_cost_versus_hold_micros,string"`
-	StressAfterCostNetReturnMicros   int64     `json:"stress_after_cost_net_return_micros,string"`
-	StressAfterCostVersusHoldMicros  int64     `json:"stress_after_cost_versus_hold_micros,string"`
-	Reasons                          []string  `json:"reasons"`
+	Version                          uint32                                           `json:"version,omitempty"`
+	CheckedAt                        time.Time                                        `json:"checked_at"`
+	Through                          time.Time                                        `json:"through"`
+	Outcome                          string                                           `json:"outcome"`
+	TrainingCoverageBPS              uint16                                           `json:"training_coverage_bps"`
+	HoldoutCoverageBPS               uint16                                           `json:"holdout_coverage_bps"`
+	HoldoutAfterCostNetReturnMicros  int64                                            `json:"holdout_after_cost_net_return_micros,string"`
+	HoldoutAfterCostVersusHoldMicros int64                                            `json:"holdout_after_cost_versus_hold_micros,string"`
+	StressAfterCostNetReturnMicros   int64                                            `json:"stress_after_cost_net_return_micros,string"`
+	StressAfterCostVersusHoldMicros  int64                                            `json:"stress_after_cost_versus_hold_micros,string"`
+	CandidatesEvaluated              uint64                                           `json:"candidates_evaluated,omitempty"`
+	TrainingRejections               marketadmission.DashboardPaperTrainingRejections `json:"training_rejections,omitzero"`
+	Reasons                          []string                                         `json:"reasons"`
 }
 
 type marketAdmissionProjection struct {
@@ -150,6 +153,7 @@ func readMarketAdmission(path string, now time.Time) ([]MarketResearch, error) {
 		var check *MarketPaperCheck
 		if status.PaperCheck != nil {
 			check = &MarketPaperCheck{
+				Version:   status.PaperCheck.Version,
 				CheckedAt: status.PaperCheck.CheckedAt, Through: status.PaperCheck.Through,
 				Outcome:                          status.PaperCheck.Outcome,
 				TrainingCoverageBPS:              status.PaperCheck.TrainingCoverageBPS,
@@ -158,6 +162,8 @@ func readMarketAdmission(path string, now time.Time) ([]MarketResearch, error) {
 				HoldoutAfterCostVersusHoldMicros: status.PaperCheck.HoldoutAfterCostVersusHoldMicros,
 				StressAfterCostNetReturnMicros:   status.PaperCheck.StressAfterCostNetReturnMicros,
 				StressAfterCostVersusHoldMicros:  status.PaperCheck.StressAfterCostVersusHoldMicros,
+				CandidatesEvaluated:              status.PaperCheck.CandidatesEvaluated,
+				TrainingRejections:               status.PaperCheck.TrainingRejections,
 				Reasons:                          append([]string(nil), status.PaperCheck.Reasons...),
 			}
 		}

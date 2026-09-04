@@ -28,14 +28,19 @@ func TestMarketAdmissionProjectionIsFixedMinimalAndAtomic(t *testing.T) {
 		if item.market == marketadmission.MarketWIFUSDC {
 			var err error
 			status, err = status.WithPaperCheck(marketadmission.DashboardPaperCheck{
-				Market: item.market, CheckedAt: now, Through: status.Diagnostic.Through,
+				Version: marketadmission.DashboardPaperCheckVersion,
+				Market:  item.market, CheckedAt: now, Through: status.Diagnostic.Through,
 				Outcome:             marketadmission.DashboardPaperOutcomeCandidateRejected,
 				TrainingCoverageBPS: 9_800, HoldoutCoverageBPS: 9_700,
 				HoldoutAfterCostNetReturnMicros:  -25_000,
 				HoldoutAfterCostVersusHoldMicros: -10_000,
 				StressAfterCostNetReturnMicros:   -40_000,
 				StressAfterCostVersusHoldMicros:  -30_000,
-				Reasons:                          []string{"holdout_net_return_not_positive"},
+				CandidatesEvaluated:              12,
+				TrainingRejections: marketadmission.DashboardPaperTrainingRejections{
+					RejectedCandidates: 11, NoRoundTrip: 7, DidNotBeatHolding: 5,
+				},
+				Reasons: []string{"holdout_net_return_not_positive"},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -54,7 +59,10 @@ func TestMarketAdmissionProjectionIsFixedMinimalAndAtomic(t *testing.T) {
 		!markets[0].Fresh || markets[0].AvailableBuckets != 9 || markets[0].ObservedBuckets != 10 ||
 		markets[0].PaperCheck == nil ||
 		markets[0].PaperCheck.Outcome != marketadmission.DashboardPaperOutcomeCandidateRejected ||
-		markets[0].PaperCheck.HoldoutAfterCostNetReturnMicros != -25_000 {
+		markets[0].PaperCheck.HoldoutAfterCostNetReturnMicros != -25_000 ||
+		markets[0].PaperCheck.CandidatesEvaluated != 12 ||
+		markets[0].PaperCheck.TrainingRejections.RejectedCandidates != 11 ||
+		markets[0].PaperCheck.TrainingRejections.NoRoundTrip != 7 {
 		t.Fatalf("market projection = %+v", markets)
 	}
 	raw, err := os.ReadFile(output)

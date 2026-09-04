@@ -926,6 +926,13 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"mithril-agent shadow review", "--days 1 --json",
 		"Trusted sanitized prior-complete-day paper diagnostics.",
 		"SOL/USDC: %s\\nJUP/USDC: %s",
+		"shadow research-context",
+		"sol_policy_context=",
+		"jup_policy_context=",
+		"Trusted current paper-strategy settings.",
+		"copy the matching market values exactly",
+		"current_paper_policy_unavailable",
+		"if reviewed=$(/usr/sbin/runuser -u mithril-agent-research --",
 		"sol_perps_status=/var/lib/mithril-agent-perps-paper/published/sol-paper-status.json",
 		"btc_perps_status=/var/lib/mithril-agent-perps-paper/published/btc-paper-status.json",
 		"eth_perps_status=/var/lib/mithril-agent-perps-paper/published/eth-paper-status.json",
@@ -1060,6 +1067,8 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"sanitized current-policy paper outcome history", "never an external source",
 		"Do not infer omitted measurements or identifiers",
 		"absent outcome-history block means that evidence is unavailable",
+		"only\nauthoritative values for the `current` side",
+		"do not infer its values and do not propose a candidate",
 	} {
 		if !strings.Contains(marketPrompt, want) {
 			t.Errorf("Hermes market prompt is missing outcome safety rule %q", want)
@@ -1500,6 +1509,29 @@ func TestHermesOutcomeFeedbackRecognizesInterruptedRotation(t *testing.T) {
 		if err := os.Remove(journal + suffix); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestHermesJUPResearchContextFailureKeepsTheMarketUnavailable(t *testing.T) {
+	runner := readDocumentation(t, "../../deploy/hermes-research/run-market-scout.sh")
+	start := strings.Index(runner, `jup_policy_context='{"status":"current_paper_policy_unavailable"`)
+	end := strings.Index(runner, "perps_research=")
+	if start < 0 || end <= start {
+		t.Fatal("Hermes wrapper is missing the bounded JUP context block")
+	}
+	block := runner[start:end]
+	for _, want := range []string{
+		`if [ -f "$jup_policy" ]; then`,
+		`if reviewed=$(/usr/sbin/runuser -u mithril-agent-research --`,
+		`--policy "$jup_policy" 2>/dev/null); then`,
+		`jup_policy_context=$reviewed`,
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("JUP context fallback is missing %q", want)
+		}
+	}
+	if strings.Contains(block, `jup_policy_context=$(/usr/sbin/runuser`) {
+		t.Fatal("JUP context extraction can still abort the whole research run")
 	}
 }
 

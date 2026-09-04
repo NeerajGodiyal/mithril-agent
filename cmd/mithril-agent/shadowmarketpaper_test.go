@@ -270,9 +270,10 @@ func TestMarketPaperCheckDashboardUpdateRefusesMissingOrMismatchedStatus(t *test
 		Market: marketadmission.MarketWIFUSDC, Through: through,
 		Outcome:             marketadmission.DashboardPaperOutcomeCandidateRejected,
 		TrainingCoverageBPS: 10_000, HoldoutCoverageBPS: 10_000,
-		Holdout: &marketPaperCheckScore{NetReturnMicros: -1, VersusHoldMicros: -2},
-		Stress:  &marketPaperCheckScore{NetReturnMicros: -3, VersusHoldMicros: -4},
-		Reasons: []string{"holdout_net_return_not_positive"},
+		CandidatesEvaluated: 1,
+		Holdout:             &marketPaperCheckScore{NetReturnMicros: -1, VersusHoldMicros: -2},
+		Stress:              &marketPaperCheckScore{NetReturnMicros: -3, VersusHoldMicros: -4},
+		Reasons:             []string{"holdout_net_return_not_positive"},
 	}
 	if err := updateMarketDashboardPaperCheck(path, result, through.Add(time.Minute)); err == nil {
 		t.Fatal("missing market dashboard status was accepted")
@@ -568,6 +569,88 @@ func TestProvisionalMarketPaperCheckSelectsThenPassesUntouchedHoldoutAndStress(t
 		changed.Outcome != "candidate_rejected" ||
 		!strings.Contains(strings.Join(changed.Reasons, ","), "holdout_") {
 		t.Fatalf("held-out prices changed training selection: before=%+v after=%+v", result, changed)
+	}
+}
+
+func TestProvisionalMarketPaperCheckExplainsEveryRejectedTrainingCandidate(t *testing.T) {
+	artifactPath, journalPath, now := writeReadyProvisionalEvidence(t)
+	artifact, err := loadProvisionalMarketAdmission(artifactPath, journalPath, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := buildAdaptiveProvisionalPolicy(
+		artifact, artifact.Candidate.QuoteNotionalUSDC,
+		defaultTokenFeeReserveLamports, defaultTokenSetupRentLamports,
+		artifact.Candidate.QuoteSlippageBPS, defaultPaperFeeLamports,
+		artifact.Observe, uint64(artifact.Thresholds.CadenceSeconds),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	points, err := artifact.ReplayPoints(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sample marketadmission.ProvisionalReplayPoint
+	for _, point := range points {
+		if point.Available {
+			sample = point
+			break
+		}
+	}
+	for index := range points {
+		at := points[index].Bucket.Add(time.Second)
+		points[index].At, points[index].Available = at, true
+		points[index].MarketPrimary = sample.MarketPrimary
+		points[index].MarketSecondary = sample.MarketSecondary
+		points[index].NativePrimary = sample.NativePrimary
+		points[index].NativeSecondary = sample.NativeSecondary
+		points[index].MarketPrimary.PriceMicros = 200_000
+		points[index].MarketSecondary.PriceMicros = 200_000
+		points[index].MarketPrimary.PublishedAt = at.Add(-time.Second)
+		points[index].MarketSecondary.PublishedAt = at.Add(-time.Second)
+		points[index].NativePrimary.PublishedAt = at.Add(-time.Second)
+		points[index].NativeSecondary.PublishedAt = at.Add(-time.Second)
+	}
+	result, err := checkProvisionalMarketPaper(policy, artifact, points)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != marketadmission.DashboardPaperOutcomeNoTrainingCandidate ||
+		result.CandidatesEvaluated != uint64(len(adaptiveSearchPolicies(policy))) ||
+		result.TrainingRejections.RejectedCandidates != result.CandidatesEvaluated ||
+		result.TrainingRejections.NoRoundTrip != result.CandidatesEvaluated ||
+		result.TrainingRejections.NetReturnNotPositive != result.CandidatesEvaluated ||
+		result.TrainingRejections.DidNotBeatHolding != result.CandidatesEvaluated ||
+		result.Candidate != nil || result.CandidatePolicySHA256 != "" ||
+		result.Training != nil || result.Holdout != nil || result.Stress != nil ||
+		result.Authorized || result.Promotable || !result.PaperOnly {
+		t.Fatalf("no-candidate diagnostics = %+v", result)
+	}
+	check, err := dashboardPaperCheckFromResult(result, result.Through.Add(time.Minute))
+	if err != nil || check.CandidatesEvaluated != result.CandidatesEvaluated ||
+		check.TrainingRejections.NoRoundTrip != result.CandidatesEvaluated {
+		t.Fatalf("projected no-candidate diagnostics = %+v, %v", check, err)
+	}
+}
+
+func TestMarketPaperTrainingRejectionCountersCoverEveryGate(t *testing.T) {
+	var counts marketPaperTrainingRejections
+	addMarketPaperTrainingRejections(&counts, []string{
+		"training_completed_fewer_than_1_round_trips",
+		"training_has_unmatched_filled_leg",
+		"training_has_pending_decision",
+		"training_has_failed_execution",
+		"training_net_return_not_positive",
+		"training_did_not_beat_holding",
+		"training_drawdown_above_policy_limit",
+	})
+	if counts != (marketPaperTrainingRejections{
+		RejectedCandidates: 1, NoRoundTrip: 1, UnmatchedFilledLeg: 1, PendingDecision: 1,
+		FailedExecution: 1, NetReturnNotPositive: 1, DidNotBeatHolding: 1,
+		DrawdownAboveLimit: 1,
+	}) {
+		t.Fatalf("training rejection counters = %+v", counts)
 	}
 }
 

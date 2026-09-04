@@ -73,6 +73,18 @@ func TestDashboardDoesNotPresentHermesAsTradingAuthority(t *testing.T) {
 	}
 }
 
+func TestDashboardExplainsWhyCandidateMarketTrainingFoundNoPlan(t *testing.T) {
+	for _, want := range []string{
+		`check.training_rejections||{}`,
+		`Tested '+tested+' paper plans. Most often,`,
+		`A plan can fail more than one check.`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Errorf("candidate-market training explanation omits %q", want)
+		}
+	}
+}
+
 func TestDashboardExplainsAutomaticPerpsPlanSelectionTruthfully(t *testing.T) {
 	for _, want := range []string{
 		`must beat the current paper plan`,

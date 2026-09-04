@@ -106,9 +106,14 @@ func TestDashboardPaperCheckAcceptsEveryBoundedOutcome(t *testing.T) {
 			Reasons: []string{"training_coverage_below_95_percent"},
 		},
 		{
-			Market: status.Market, CheckedAt: through.Add(time.Minute), Through: through,
+			Version: DashboardPaperCheckVersion,
+			Market:  status.Market, CheckedAt: through.Add(time.Minute), Through: through,
 			Outcome:             DashboardPaperOutcomeNoTrainingCandidate,
 			TrainingCoverageBPS: 10_000, HoldoutCoverageBPS: 10_000,
+			CandidatesEvaluated: 12,
+			TrainingRejections: DashboardPaperTrainingRejections{
+				RejectedCandidates: 12, NoRoundTrip: 12,
+			},
 			Reasons: []string{"no_qualified_training_candidate"},
 		},
 		{
@@ -176,6 +181,11 @@ func TestDashboardPaperCheckRejectsMismatchAndUnknownReasons(t *testing.T) {
 		"duplicate reason": func(check *DashboardPaperCheck) {
 			check.Reasons = []string{"holdout_has_failed_execution", "holdout_has_failed_execution"}
 		},
+		"rejections exceed candidates": func(check *DashboardPaperCheck) {
+			check.Version = DashboardPaperCheckVersion
+			check.CandidatesEvaluated = 1
+			check.TrainingRejections.RejectedCandidates = 2
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			check := valid
@@ -191,6 +201,38 @@ func TestDashboardPaperCheckRejectsMismatchAndUnknownReasons(t *testing.T) {
 	invalidInsufficient.Reasons = []string{}
 	if _, err := status.WithPaperCheck(invalidInsufficient); err == nil {
 		t.Fatal("insufficient-evidence outcome with complete coverage was accepted")
+	}
+	missingDiagnostics := DashboardPaperCheck{
+		Version: DashboardPaperCheckVersion,
+		Market:  status.Market, CheckedAt: status.Diagnostic.Through.Add(time.Minute),
+		Through: status.Diagnostic.Through, Outcome: DashboardPaperOutcomeNoTrainingCandidate,
+		TrainingCoverageBPS: 10_000, HoldoutCoverageBPS: 10_000,
+		Reasons: []string{"no_qualified_training_candidate"},
+	}
+	if _, err := status.WithPaperCheck(missingDiagnostics); err == nil {
+		t.Fatal("current no-candidate check omitted candidate diagnostics")
+	}
+	underexplained := missingDiagnostics
+	underexplained.CandidatesEvaluated = 12
+	underexplained.TrainingRejections.RejectedCandidates = 11
+	underexplained.TrainingRejections.NoRoundTrip = 11
+	if _, err := status.WithPaperCheck(underexplained); err == nil {
+		t.Fatal("current no-candidate check omitted one rejected candidate")
+	}
+	tooMany := valid
+	tooMany.Version = DashboardPaperCheckVersion
+	tooMany.CandidatesEvaluated = DashboardPaperCandidateLimit + 1
+	if _, err := status.WithPaperCheck(tooMany); err == nil {
+		t.Fatal("paper check accepted an unbounded public candidate count")
+	}
+	nonePassed := valid
+	nonePassed.Version = DashboardPaperCheckVersion
+	nonePassed.CandidatesEvaluated = 1
+	nonePassed.TrainingRejections = DashboardPaperTrainingRejections{
+		RejectedCandidates: 1, NoRoundTrip: 1,
+	}
+	if _, err := status.WithPaperCheck(nonePassed); err == nil {
+		t.Fatal("selected-candidate outcome accepted an all-rejected training set")
 	}
 }
 

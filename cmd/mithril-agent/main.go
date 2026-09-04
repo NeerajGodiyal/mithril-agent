@@ -112,6 +112,7 @@ Other supported tools:
   mithril-agent shadow challenge --policy PATH --champion-pointer PATH --challenger PATH --champion-dir PATH --challenger-dir PATH --days N
   mithril-agent shadow auto-select --policy PATH --champion-pointer PATH --challenger-pointer PATH --champion-dir PATH --challenger-dir PATH --days N --rollback-pointer PATH --lifecycle-lock PATH [--outcome-journal PATH]
   mithril-agent shadow research-outcomes --journal PATH [--limit 16] [--prompt-safe --policy PATH --max-age DURATION]
+  mithril-agent shadow research-context --policy PATH
   mithril-agent shadow restore --policy PATH --champion-pointer PATH --rollback-pointer PATH --challenger-pointer PATH --challenger-candidate-dir PATH --lifecycle-lock PATH
   mithril-agent shadow research-mcp --policy PATH --journal-dir PATH ...
   mithril-agent research packet-record --in PATH --latest PATH [--archive-dir DIR]
@@ -381,6 +382,9 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		}
 		if len(args) > 1 && args[1] == "research-outcomes" {
 			return runShadowResearchOutcomeSummary(args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "research-context" {
+			return runShadowResearchContext(args[2:], output)
 		}
 		if len(args) > 1 && args[1] == "restore" {
 			return runShadowRestore(args[2:], output)
@@ -1880,6 +1884,9 @@ func runShadow(args []string, output io.Writer) error {
   mithril-agent shadow research-outcomes --journal PATH [--limit 16] [--prompt-safe --policy PATH --max-age DURATION]
                                        read bounded advisory outcomes from
                                        Hermes-backed paper candidates
+  mithril-agent shadow research-context --policy PATH
+                                       print only the exact current adaptive
+                                       values needed by paper research
   mithril-agent shadow restore --policy PATH --champion-pointer PATH
                                --rollback-pointer PATH --challenger-pointer PATH
                                --challenger-candidate-dir PATH --lifecycle-lock PATH
