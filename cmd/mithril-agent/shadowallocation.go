@@ -18,12 +18,6 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
 
-const (
-	legacyKrakenUSDCIdentity = "7855a0286ed3a5165a64d30e0fa8c8528180f8be6207511787ac36bf7f45e4bd"
-	legacyKrakenSOLIdentity  = "c4038b13f76a1706be5e26d366cad9ef14d80ab1443e58a4f3189c83dcafd315"
-	legacyKrakenJUPIdentity  = "69f412f8b21e69b24abfcaf0b834f9772f14fa30d79db374a86cd2fff04d5741"
-)
-
 const shadowAllocationUsage = `Usage: mithril-agent shadow allocation --portfolio PATH
        --instruction PATH --out-dir PATH
 
@@ -85,9 +79,9 @@ func runShadowAllocation(args []string, output io.Writer) error {
 			return errors.New("shadow allocation is not representable")
 		}
 		remaining -= target
-		policy, err := refreshPaperPolicySources(policies[book.ID])
-		if err != nil {
-			return fmt.Errorf("refresh paper book %s sources: %w", book.ID, err)
+		policy := policies[book.ID]
+		if err := validatePaperPolicySources(policy); err != nil {
+			return fmt.Errorf("validate paper book %s sources: %w", book.ID, err)
 		}
 		policy, err = resizePaperPolicy(policy, target, *instruction, current.MaxSOLUSDMicros)
 		if err != nil {
@@ -142,76 +136,49 @@ func runShadowAllocation(args []string, output io.Writer) error {
 	})
 }
 
-func refreshPaperPolicySources(policy shadow.Policy) (shadow.Policy, error) {
+func validatePaperPolicySources(policy shadow.Policy) error {
 	if err := policy.Validate(); err != nil {
-		return shadow.Policy{}, err
+		return err
 	}
-	legacyMarket, legacyQuote, legacyNative := "", "", ""
 	marketPrimary, marketSecondary := "", ""
 	switch policy.Market {
 	case shadow.MarketSOLUSDC:
 		marketPrimary = pricesource.PythPushIdentitySHA256()
 		marketSecondary = pricesource.KrakenSOLIdentitySHA256()
-		legacyMarket = legacyKrakenSOLIdentity
-		legacyQuote = legacyKrakenUSDCIdentity
-		legacyNative = legacyKrakenSOLIdentity
 	case shadow.MarketJUPUSDC:
 		marketPrimary = pricesource.PythPushJUPIdentitySHA256()
 		marketSecondary = pricesource.KrakenJUPIdentitySHA256()
-		legacyMarket = legacyKrakenJUPIdentity
-		legacyQuote = legacyKrakenUSDCIdentity
-		legacyNative = legacyKrakenSOLIdentity
 	default:
 		candidate, ok := marketadmission.Lookup(policy.Market)
 		if !ok || policy.Version != shadow.AdmittedVersion {
-			return shadow.Policy{}, errors.New("paper policy market sources are unsupported")
+			return errors.New("paper policy market sources are unsupported")
 		}
 		var err error
 		marketPrimary, err = candidate.Pyth.IdentitySHA256()
 		if err != nil {
-			return shadow.Policy{}, err
+			return err
 		}
 		marketSecondary, err = candidate.Kraken.IdentitySHA256()
 		if err != nil {
-			return shadow.Policy{}, err
+			return err
 		}
 	}
 	if policy.Trigger.PrimarySourceSHA256 != marketPrimary ||
-		!currentOrLegacySource(policy.Trigger.SecondarySourceSHA256, marketSecondary, legacyMarket) {
-		return shadow.Policy{}, errors.New("paper policy market sources are not the pinned pair")
-	}
-	policy.Trigger.SecondarySourceSHA256 = marketSecondary
-	if policy.ReturnTrigger != nil {
-		policy.ReturnTrigger.PrimarySourceSHA256 = marketPrimary
-		policy.ReturnTrigger.SecondarySourceSHA256 = marketSecondary
+		policy.Trigger.SecondarySourceSHA256 != marketSecondary {
+		return errors.New("paper policy market sources are not the pinned pair")
 	}
 	if policy.QuotePeg == nil ||
 		policy.QuotePeg.PrimarySourceSHA256 != pricesource.PythPushUSDCIdentitySHA256() ||
-		!currentOrLegacySource(
-			policy.QuotePeg.SecondarySourceSHA256,
-			pricesource.KrakenIdentitySHA256(), legacyQuote,
-		) {
-		return shadow.Policy{}, errors.New("paper policy quote sources are not the pinned pair")
+		policy.QuotePeg.SecondarySourceSHA256 != pricesource.KrakenIdentitySHA256() {
+		return errors.New("paper policy quote sources are not the pinned pair")
 	}
-	policy.QuotePeg.SecondarySourceSHA256 = pricesource.KrakenIdentitySHA256()
 	if policy.NativeFeePrice != nil {
 		if policy.NativeFeePrice.PrimarySourceSHA256 != pricesource.PythPushIdentitySHA256() ||
-			!currentOrLegacySource(
-				policy.NativeFeePrice.SecondarySourceSHA256,
-				pricesource.KrakenSOLIdentitySHA256(), legacyNative,
-			) {
-			return shadow.Policy{}, errors.New("paper policy native fee sources are not the pinned pair")
+			policy.NativeFeePrice.SecondarySourceSHA256 != pricesource.KrakenSOLIdentitySHA256() {
+			return errors.New("paper policy native fee sources are not the pinned pair")
 		}
-		policy.NativeFeePrice.SecondarySourceSHA256 = pricesource.KrakenSOLIdentitySHA256()
 	}
-	if err := policy.Validate(); err != nil {
-		return shadow.Policy{}, err
-	}
-	return policy, nil
-}
-
-func currentOrLegacySource(actual, current, legacy string) bool {
-	return actual == current || legacy != "" && actual == legacy
+	return nil
 }
 
 func prepareShadowAllocationDirectory(path string) error {

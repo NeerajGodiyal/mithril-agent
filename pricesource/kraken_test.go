@@ -15,7 +15,7 @@ type testKrakenGate struct{}
 
 func (testKrakenGate) Wait(context.Context) error { return nil }
 
-func TestKrakenUsesOldestTopLevelPublicationTime(t *testing.T) {
+func TestKrakenUsesFreshSnapshotWithPersistentBidAsk(t *testing.T) {
 	snapshotAt := time.Now().UTC().Truncate(time.Second)
 	bidAt := snapshotAt.Add(-10 * time.Minute)
 	askAt := snapshotAt.Add(-5 * time.Minute)
@@ -36,8 +36,23 @@ func TestKrakenUsesOldestTopLevelPublicationTime(t *testing.T) {
 	}
 	if sample.SourceSHA256 != KrakenIdentitySHA256() || sample.Feed != pricetrigger.FeedUSDCUSD ||
 		sample.PriceMicros != 1_000_000 || sample.ConfidenceMicros != 90 ||
-		!sample.PublishedAt.Equal(bidAt) {
+		!sample.PublishedAt.Equal(snapshotAt) {
 		t.Fatalf("sample = %+v", sample)
+	}
+}
+
+func TestKrakenRejectsTopLevelNewerThanSnapshot(t *testing.T) {
+	snapshotAt := time.Now().UTC().Truncate(time.Second)
+	levelAt := snapshotAt.Add(2 * time.Second)
+	client := fixtureClient(t, func(*http.Request) string {
+		return `{"result":{"symbol":"USDC/USD","bids":[{"side":"BUY","price":"0.9999","publication_ts":"` +
+			levelAt.Format(time.RFC3339Nano) + `"}],"asks":[{"side":"SELL","price":"1.0001","publication_ts":"` +
+			levelAt.Format(time.RFC3339Nano) + `"}]},"error":[]}`
+	}, http.Header{"Date": []string{snapshotAt.Format(http.TimeFormat)}})
+	source := NewKraken(client)
+	source.gate = testKrakenGate{}
+	if _, err := source.Latest(t.Context(), pricetrigger.FeedUSDCUSD); err == nil {
+		t.Fatal("top level newer than the snapshot was accepted")
 	}
 }
 

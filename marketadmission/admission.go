@@ -22,9 +22,9 @@ import (
 )
 
 const (
-	// Version 2 prevents journals collected before Kraken level publication
-	// timestamps became authoritative from being resumed or mixed with new evidence.
-	Version = uint32(2)
+	// Version 3 prevents evidence collected under earlier source and diagnostic
+	// contracts from being resumed or mixed with current evidence.
+	Version = uint32(3)
 
 	ProvisionalStatus                 = "development_provisional"
 	ProvisionalWindowHours            = uint16(6)

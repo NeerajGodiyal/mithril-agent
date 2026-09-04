@@ -37,13 +37,33 @@ func TestCatalogPinsCanonicalCandidateMetadata(t *testing.T) {
 
 func TestPreviousEvidenceVersionCannotResume(t *testing.T) {
 	candidate, _ := Lookup(MarketWIFUSDC)
-	opening, err := NewOpening(candidate, testObserve, DefaultThresholds())
+	current, err := NewOpening(candidate, testObserve, DefaultThresholds())
 	if err != nil {
 		t.Fatal(err)
 	}
-	opening.Version--
-	if opening.Validate() == nil {
+	previous := current
+	previous.Version--
+	previous.Candidate.Version--
+	previous.Thresholds.Version--
+	previous.CandidateSHA256, err = digest(previous.Candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous.ContentSHA256, err = openingFingerprint(previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if previous.Validate() == nil {
 		t.Fatal("previous market evidence version was accepted")
+	}
+	if _, err := ValidateResume([]journal.Record{{
+		Type: EventOpened, ActionID: previous.ContentSHA256, Payload: payload,
+	}}, current); err == nil {
+		t.Fatal("previous market evidence journal resumed")
 	}
 }
 

@@ -85,15 +85,8 @@ func TestShadowAllocationBuildsAnInactiveExactPaperGeneration(t *testing.T) {
 	}
 }
 
-func TestShadowAllocationRefreshesOnlyPinnedLegacyKrakenSources(t *testing.T) {
+func TestShadowAllocationAcceptsOnlyPinnedSources(t *testing.T) {
 	sol, jup, _, _ := shadowPortfolioTestPolicies(t)
-	sol.Trigger.SecondarySourceSHA256 = legacyKrakenSOLIdentity
-	sol.ReturnTrigger.SecondarySourceSHA256 = legacyKrakenSOLIdentity
-	sol.QuotePeg.SecondarySourceSHA256 = legacyKrakenUSDCIdentity
-	jup.Trigger.SecondarySourceSHA256 = legacyKrakenJUPIdentity
-	jup.ReturnTrigger.SecondarySourceSHA256 = legacyKrakenJUPIdentity
-	jup.QuotePeg.SecondarySourceSHA256 = legacyKrakenUSDCIdentity
-	jup.NativeFeePrice.SecondarySourceSHA256 = legacyKrakenSOLIdentity
 	tests := []struct {
 		name         string
 		policy       shadow.Policy
@@ -104,28 +97,27 @@ func TestShadowAllocationRefreshesOnlyPinnedLegacyKrakenSources(t *testing.T) {
 		{"jup", jup, pricesource.KrakenJUPIdentitySHA256(), pricesource.KrakenSOLIdentitySHA256()},
 	}
 	for _, test := range tests {
-		refreshed, err := refreshPaperPolicySources(test.policy)
-		if err != nil {
-			t.Fatalf("refresh %s: %v", test.name, err)
+		if err := validatePaperPolicySources(test.policy); err != nil {
+			t.Fatalf("validate %s: %v", test.name, err)
 		}
-		if refreshed.Trigger.SecondarySourceSHA256 != test.marketSource ||
-			refreshed.ReturnTrigger == nil ||
-			refreshed.ReturnTrigger.SecondarySourceSHA256 != test.marketSource ||
-			refreshed.QuotePeg.SecondarySourceSHA256 != pricesource.KrakenIdentitySHA256() ||
-			(test.nativeSource == "") != (refreshed.NativeFeePrice == nil) ||
-			refreshed.NativeFeePrice != nil &&
-				refreshed.NativeFeePrice.SecondarySourceSHA256 != test.nativeSource {
-			t.Fatalf("%s sources were not refreshed: %+v", test.name, refreshed)
+		if test.policy.Trigger.SecondarySourceSHA256 != test.marketSource ||
+			test.policy.ReturnTrigger == nil ||
+			test.policy.ReturnTrigger.SecondarySourceSHA256 != test.marketSource ||
+			test.policy.QuotePeg.SecondarySourceSHA256 != pricesource.KrakenIdentitySHA256() ||
+			(test.nativeSource == "") != (test.policy.NativeFeePrice == nil) ||
+			test.policy.NativeFeePrice != nil &&
+				test.policy.NativeFeePrice.SecondarySourceSHA256 != test.nativeSource {
+			t.Fatalf("%s fixture sources are wrong: %+v", test.name, test.policy)
 		}
 	}
 	sol.Trigger.SecondarySourceSHA256 = strings.Repeat("f", 64)
 	sol.ReturnTrigger.SecondarySourceSHA256 = strings.Repeat("f", 64)
-	if _, err := refreshPaperPolicySources(sol); err == nil {
-		t.Fatal("unrecognized market source was refreshed")
+	if err := validatePaperPolicySources(sol); err == nil {
+		t.Fatal("unrecognized market source was accepted")
 	}
 }
 
-func TestShadowAllocationDoesNotMigrateAdmittedMarketSources(t *testing.T) {
+func TestShadowAllocationValidatesAdmittedMarketSources(t *testing.T) {
 	artifactPath, journalPath, now := writeReadyProvisionalEvidence(t)
 	artifact, err := loadProvisionalMarketAdmission(artifactPath, journalPath, now)
 	if err != nil {
@@ -138,15 +130,15 @@ func TestShadowAllocationDoesNotMigrateAdmittedMarketSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := refreshPaperPolicySources(policy); err != nil {
+	if err := validatePaperPolicySources(policy); err != nil {
 		t.Fatalf("current admitted policy was rejected: %v", err)
 	}
 	for name, mutate := range map[string]func(*shadow.Policy){
 		"quote": func(value *shadow.Policy) {
-			value.QuotePeg.SecondarySourceSHA256 = legacyKrakenUSDCIdentity
+			value.QuotePeg.SecondarySourceSHA256 = strings.Repeat("f", 64)
 		},
 		"native fee": func(value *shadow.Policy) {
-			value.NativeFeePrice.SecondarySourceSHA256 = legacyKrakenSOLIdentity
+			value.NativeFeePrice.SecondarySourceSHA256 = strings.Repeat("f", 64)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -154,8 +146,8 @@ func TestShadowAllocationDoesNotMigrateAdmittedMarketSources(t *testing.T) {
 			quote, native := *policy.QuotePeg, *policy.NativeFeePrice
 			tampered.QuotePeg, tampered.NativeFeePrice = &quote, &native
 			mutate(&tampered)
-			if _, err := refreshPaperPolicySources(tampered); err == nil {
-				t.Fatal("legacy admitted source was migrated")
+			if err := validatePaperPolicySources(tampered); err == nil {
+				t.Fatal("unpinned admitted source was accepted")
 			}
 		})
 	}
@@ -278,8 +270,7 @@ func TestShadowAllocationKeepsAnAdmittedMarketAtItsEvidenceNotional(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	policy, err = refreshPaperPolicySources(policy)
-	if err != nil {
+	if err := validatePaperPolicySources(policy); err != nil {
 		t.Fatal(err)
 	}
 	instruction := paperdashboard.Instruction{
