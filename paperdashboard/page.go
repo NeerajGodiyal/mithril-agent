@@ -479,6 +479,9 @@ function perpsLaterOutcome(m){
   if(m.perps_plan_outcome==='flat')return 'Later verified paper run: Flat';
   return '';
 }
+function perpsRecordingInProgress(m){
+  return isPerps(m)&&m.optional&&m.available&&m.ready&&m.fresh&&!m.completed&&!m.risk_halted&&!m.qualification_tracked;
+}
 function qualificationStrip(m){
   const view=qualificationView(m);
   if(!view)return '';
@@ -494,17 +497,17 @@ function perpsAttemptCard(attempt,m,maxMagnitude){
 function perpsResearchCard(m){
   const view=qualificationView(m),attempts=(m.qualification_attempts||[]).slice(0,3);
   const maxMagnitude=attempts.reduce((largest,attempt)=>{const value=integer(attempt.net_pnl_micros),magnitude=value<0n?-value:value;return magnitude>largest?magnitude:largest;},1n);
-	  const completed=Boolean(m.completed)||(m.available&&m.ready&&Boolean(m.qualification_tracked));
-  const stateLabel=!m.available?'Unavailable':!m.ready?'Updating':completed?'Completed experiment':'Needs attention';
-	const stateTone=!m.available?'red':'amber';
-  const outcome=view?.label||(completed?'Recorded result':m.available&&m.ready?'Experiment incomplete':'No saved result');
-  const detail=view?.status||(completed&&m.observed_at?'Finished '+eventTime(m.observed_at):'No completed recording');
+	  const completed=Boolean(m.completed)||(m.available&&m.ready&&Boolean(m.qualification_tracked)),recording=perpsRecordingInProgress(m);
+  const stateLabel=!m.available?'Unavailable':!m.ready?'Updating':completed?'Completed experiment':recording?'Recording in progress':'Needs attention';
+	const stateTone=!m.available?'red':recording?'blue':'amber';
+  const outcome=view?.label||(completed?'Recorded result':recording?'Collecting paper evidence':m.available&&m.ready?'Experiment incomplete':'No saved result');
+  const detail=view?.status||(completed&&m.observed_at?'Finished '+eventTime(m.observed_at):recording?(Number(m.checks||0)?String(m.checks)+' market checks saved':'Waiting for first market check'):'No completed recording');
   const leader=attempts.reduce((best,attempt)=>betterTrainingAttempt(attempt,best)?attempt:best,null),others=attempts.filter(attempt=>attempt!==leader);
   const terms=help('Perps test terms','Trade fees are simulated execution charges. A funding adjustment is the simulated carry charge or credit. Largest drop is the worst fall from a prior high. A forced close means the safety model closed a leveraged position.');
-  const body=leader?'<div class="attempt-grid" aria-label="Best completed training attempts"><div class="attempt-kicker"><span>Strongest completed attempt</span>'+terms+'</div>'+perpsAttemptCard(leader,m,maxMagnitude)+(others.length?'<details class="attempt-more"><summary>Compare '+others.length+' other risk level'+(others.length===1?'':'s')+'</summary><div class="attempt-grid">'+others.map(attempt=>perpsAttemptCard(attempt,m,maxMagnitude)).join('')+'</div></details>':'')+'</div>':'<p class="perps-empty">No completed training attempts are available to compare.</p>';
+  const body=leader?'<div class="attempt-grid" aria-label="Best completed training attempts"><div class="attempt-kicker"><span>Strongest completed attempt</span>'+terms+'</div>'+perpsAttemptCard(leader,m,maxMagnitude)+(others.length?'<details class="attempt-more"><summary>Compare '+others.length+' other risk level'+(others.length===1?'':'s')+'</summary><div class="attempt-grid">'+others.map(attempt=>perpsAttemptCard(attempt,m,maxMagnitude)).join('')+'</div></details>':'')+'</div>':'<p class="perps-empty">'+(recording?'The current recording is still collecting evidence. Completed attempts will appear here.':'No completed training attempts are available to compare.')+'</p>';
   const button=m.available&&m.ready?'<button class="plan-trigger" type="button" data-research-market="'+safe(m.name)+'" aria-haspopup="dialog">View experiment details'+uiIcon('arrow')+'</button>':'';
   const laterOutcome=perpsLaterOutcome(m);
-  return '<article class="perps-research-card"><header><div class="strategy-market-name"><span class="asset-orb" aria-hidden="true">'+safe(m.name.slice(0,1))+'</span><div><h3>'+safe(m.name)+'</h3><span>'+safe(detail)+'</span></div></div><span class="badge '+stateTone+'">'+safe(stateLabel)+'</span></header><div class="perps-outcome"><span>'+uiIcon('score')+'</span><div><small>Completed run used</small><strong>'+safe(perpsPlanSource(m))+'</strong>'+(laterOutcome?'<small>'+safe(laterOutcome)+'</small>':'')+'</div>'+button+'</div>'+body+'</article>';
+  return '<article class="perps-research-card"><header><div class="strategy-market-name"><span class="asset-orb" aria-hidden="true">'+safe(m.name.slice(0,1))+'</span><div><h3>'+safe(m.name)+'</h3><span>'+safe(detail)+'</span></div></div><span class="badge '+stateTone+'">'+safe(stateLabel)+'</span></header><div class="perps-outcome"><span>'+uiIcon('score')+'</span><div><small>'+(recording?'Current recording uses':'Completed run used')+'</small><strong>'+safe(perpsPlanSource(m))+'</strong>'+(laterOutcome?'<small>'+safe(laterOutcome)+'</small>':'')+'</div>'+button+'</div>'+body+'</article>';
 }
 function strategyGroup(title,description,markets){
   if(!markets.length)return '';
@@ -848,11 +851,11 @@ function renderMarketResearch(){
 function renderSystem(){
   const required=current.markets.filter(market=>!market.optional),healthy=required.filter(marketDataHealthy).length,total=required.length;
   const additionalSpots=current.markets.filter(market=>market.optional&&!isPerps(market)),healthyAdditionalSpots=additionalSpots.filter(marketDataHealthy).length,completedAdditionalSpots=additionalSpots.filter(market=>market.completed).length;
-  const perpsMarkets=current.markets.filter(isPerps),completedPerps=perpsMarkets.filter(market=>market.completed||market.available&&market.ready&&market.qualification_tracked).length;
+	const perpsMarkets=current.markets.filter(isPerps),completedPerps=perpsMarkets.filter(market=>market.completed||market.available&&market.ready&&market.qualification_tracked).length,recordingPerps=perpsMarkets.filter(perpsRecordingInProgress).length;
 	const research=researchView();
   const mithril=mithrilEvidenceView();
   $('automation').innerHTML='<div class="automation-list-head" aria-hidden="true"><span>Service</span><span>Role and boundary</span><span>Status</span></div>'+
-    automationCard('engines','BOT','Paper engines',healthy===total&&total?'Running':'Needs attention',healthy===total&&total?'green':'amber',healthy+' of '+total+' core spot observers are current. '+healthyAdditionalSpots+' of '+additionalSpots.length+' additional spot observers are current; '+completedAdditionalSpots+' completed. '+completedPerps+' of '+perpsMarkets.length+' perps recordings are completed.')+
+    automationCard('engines','BOT','Paper engines',healthy===total&&total?'Running':'Needs attention',healthy===total&&total?'green':'amber',healthy+' of '+total+' core spot observers are current. '+healthyAdditionalSpots+' of '+additionalSpots.length+' additional spot observers are current; '+completedAdditionalSpots+' completed. '+completedPerps+' of '+perpsMarkets.length+' perps recordings are completed; '+recordingPerps+' recording now.')+
     automationCard('hermes','H','Nous Hermes',research.label,research.tone,research.description)+
     automationCard('mithril','M','Mithril evidence',mithril.label,mithril.tone,mithril.description)+
     automationCard('strategy','AD','Versioned learning','Gate required','blue','Spot rules adapt to current prices. A perps challenger must beat the current paper plan on untouched normal-cost and doubled-fee replay before it can become the next bounded paper test. This never enables real execution.')+

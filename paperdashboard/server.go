@@ -468,6 +468,7 @@ func (s *Server) readSnapshot(now time.Time) View {
 	sort.SliceStable(view.Activity, func(i, j int) bool {
 		return view.Activity[i].At.After(view.Activity[j].At)
 	})
+	view.Activity = coalesceTerminalActivity(view.Activity)
 	if len(view.Activity) > maxActivity {
 		omitted := uint64(len(view.Activity) - maxActivity)
 		if view.ActivityOmitted > math.MaxUint64-omitted {
@@ -481,6 +482,27 @@ func (s *Server) readSnapshot(now time.Time) View {
 		view.Overview = Overview{}
 	}
 	return view
+}
+
+func coalesceTerminalActivity(activity []Activity) []Activity {
+	type terminalKey struct {
+		market  string
+		at      time.Time
+		message string
+	}
+	seen := make(map[terminalKey]string)
+	result := activity[:0]
+	for _, item := range activity {
+		if item.Kind == paperstatus.KindPeriodClosed || item.Kind == paperstatus.KindExperimentDone {
+			key := terminalKey{market: item.Market, at: item.At, message: item.Message}
+			if kind, ok := seen[key]; ok && kind != item.Kind {
+				continue
+			}
+			seen[key] = item.Kind
+		}
+		result = append(result, item)
+	}
+	return result
 }
 
 func marketView(label string, snapshot paperstatus.Snapshot, now time.Time) Market {

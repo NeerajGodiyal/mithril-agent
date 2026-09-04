@@ -236,6 +236,19 @@ func TestStatusReadsEachSourceOnlyOncePerRefreshInterval(t *testing.T) {
 	}
 }
 
+func TestStatusCoalescesOnlyTheDuplicateTerminalProjection(t *testing.T) {
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	message := "PAPER · 📊 STOPPED\nPaper gain/loss: down $1"
+	activity := coalesceTerminalActivity([]Activity{
+		{Market: "SOL/USDC", At: now, Kind: paperstatus.KindPeriodClosed, Message: message},
+		{Market: "SOL/USDC", At: now, Kind: paperstatus.KindExperimentDone, Message: message},
+		{Market: "SOL/USDC", At: now, Kind: paperstatus.KindExperimentDone, Message: message + " changed"},
+	})
+	if len(activity) != 2 || activity[0].Kind != paperstatus.KindPeriodClosed || activity[1].Message == message {
+		t.Fatalf("coalesced activity = %+v", activity)
+	}
+}
+
 func TestStatusRejectsIncompleteStaleOrMismatchedSummaries(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	for name, source := range map[string]*sourceStub{

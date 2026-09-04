@@ -798,10 +798,10 @@ func writeShadowPerpsCycle(
 			message = fmt.Sprintf("PAPER · 🟣 PERPS POSITION OPENED\nDirection: %s\nPaper size: %s\nFilled near: %s\nNo real order was sent.", direction, formatPerpsFillNotional(config.Symbol, last.Fill), formatPerpsFillPrice(last.Fill))
 		case "closed":
 			kind = paperstatus.KindOrderFilled
-			message = fmt.Sprintf("PAPER · 🔵 PERPS POSITION CLOSED\nPaper size: %s\nFilled near: %s\nNo real order was sent.", formatPerpsFillNotional(config.Symbol, last.Fill), formatPerpsFillPrice(last.Fill))
+			message = fmt.Sprintf("PAPER · 🔵 PERPS POSITION CLOSED\n%s\nPaper size: %s\nFilled near: %s\nNo real order was sent.", shadowPerpsCompletedTradeLine(replay.Records), formatPerpsFillNotional(config.Symbol, last.Fill), formatPerpsFillPrice(last.Fill))
 		case "liquidated":
 			kind = paperstatus.KindRiskHalted
-			message = "PAPER · 🔴 PAPER POSITION LIQUIDATED\nThe simulated maintenance-margin rule closed the position.\nNo real order was sent."
+			message = "PAPER · 🔴 PAPER POSITION LIQUIDATED\n" + shadowPerpsCompletedTradeLine(replay.Records) + "\nThe simulated maintenance-margin rule closed the position.\nNo real order was sent."
 		}
 		if kind != "" {
 			key := fmt.Sprintf("perps/%s/%s/%d", config.Symbol, last.Action, len(replay.Results))
@@ -815,6 +815,25 @@ func writeShadowPerpsCycle(
 		return err
 	}
 	return writer.UpdateCurrentSummary(now, current, &summary)
+}
+
+func shadowPerpsCompletedTradeLine(records []perpspaper.Record) string {
+	entry := -1
+	for index := len(records) - 1; index > 0; index-- {
+		if records[index].Command.Type == perpspaper.OrderFilled && records[index-1].Command.Type == perpspaper.OrderPlaced {
+			entry = index - 1
+			break
+		}
+	}
+	if entry < 1 {
+		return "This completed trade: result unavailable"
+	}
+	before, beforeErr := perpspaper.Replay(records[:entry])
+	after, afterErr := perpspaper.Replay(records)
+	if beforeErr != nil || afterErr != nil || after.State().Position != nil {
+		return "This completed trade: result unavailable"
+	}
+	return "This completed trade: " + formatPaperSignedChange(after.State().BalanceMicros-before.State().BalanceMicros, "USD")
 }
 
 func shadowPerpsCurrent(
