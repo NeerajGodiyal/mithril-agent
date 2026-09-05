@@ -33,6 +33,8 @@ validated_research=$research_state/validated.json
 session_export=$research_state/sessions.jsonl
 research_evidence=$research_state/evidence.json
 run_bounds=/run/mithril-hermes-research/research-run.bounds
+packet_error=$(/usr/bin/mktemp /run/mithril-hermes-research/packet-error.XXXXXX)
+packet_retry_hint=
 dashboard_state=/run/mithril-hermes-research/dashboard-state
 dashboard_sessions=$dashboard_state/sessions.jsonl
 dashboard_evidence=/var/lib/mithril-agent-dashboard/research-evidence.json
@@ -49,10 +51,31 @@ projection=/var/lib/mithril-agent-dashboard/research.json
 mithril_projection=/var/lib/mithril-agent-dashboard/mithril-evidence.json
 cleanup() {
 	/usr/bin/rm -f "$finalizer_raw" "$packet" \
-		"$dashboard_packet" "$bound_packet" "$runtime_instruction" "$run_bounds"
+		"$dashboard_packet" "$bound_packet" "$runtime_instruction" "$run_bounds" "$packet_error"
 }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
+
+# Only fixed validator codes may cross into a fresh attempt. The root-owned
+# transient stderr file is never mounted into Hermes or copied to an archive.
+packet_envelope_hint() {
+  /usr/bin/python3 - "$packet_error" <<'PY'
+import sys
+with open(sys.argv[1], "rb") as stream:
+    diagnostic = stream.read(257)
+fields = (
+    "version", "hypothesis_id", "created_at", "valid_until", "market",
+    "verified_facts", "candidate_parameter_diff", "rejection_conditions",
+    "bull_case", "bear_case", "no_trade_case", "execution_cost_case",
+    "out_of_sample_test", "risk_veto_reason",
+)
+for field in fields:
+    expected = f"mithril-agent: research packet envelope is invalid: {field}\n".encode()
+    if diagnostic == expected:
+        print(f"Host schema correction: previous attempt failed envelope field {field}. Follow the bounded schema limits and copy this attempt's new time anchors; do not reuse the previous packet or weaken evidence requirements.")
+        break
+PY
+}
 
 case "$outcome_feedback" in
 0|1) ;;
@@ -187,6 +210,7 @@ fi
 # Retry only this pre-publication phase, with a fresh Hermes home and trace.
 collect_research_packet() (
   set -eu
+  : >"$packet_error"
   /usr/bin/find "$research_state" -mindepth 1 -xdev -depth -delete
   /usr/bin/install -o mithril-agent-research -g mithril-agent-research -m 0600 \
     /dev/null "$research_state/.no-bundled-skills"
@@ -194,6 +218,9 @@ collect_research_packet() (
 
   run_started=$(/usr/bin/date -u +%s)
   /usr/bin/cp "$base_query" "$research_query"
+  if [ -n "$packet_retry_hint" ]; then
+    /usr/bin/printf '\n%s\n' "$packet_retry_hint" >>"$research_query"
+  fi
   created_at=$(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ)
   valid_until=$(/usr/bin/date -u -d '6 hours' +%Y-%m-%dT%H:%M:%SZ)
   /usr/bin/printf '\n\nTrusted run-time anchors: `created_at` is %s and `valid_until` is %s. Copy both exact values; do not invent, round, reuse an older value, or calculate either timestamp.\n' \
@@ -277,11 +304,18 @@ collect_research_packet() (
       --sessions "$session_export" --packet "$packet" \
       --bind-output "$bound_packet" --run-started "$run_started" \
       --run-finished "$run_finished"
-  /usr/sbin/runuser -u mithril-agent-research -- \
+  # Pre-publication packet validation must fail before any persistent output.
+  if /usr/sbin/runuser -u mithril-agent-research -- \
     /usr/local/libexec/mithril-agent/mithril-agent research packet-record \
       --sol-policy "$sol_policy" --sol-journal-dir "$sol_journals" \
       --jup-policy "$jup_policy" --jup-journal-dir "$jup_journals" \
-      --in "$bound_packet" --latest "$validated_research" >/dev/null
+      --in "$bound_packet" --latest "$validated_research" >/dev/null 2>"$packet_error"
+  then
+    :
+  else
+    packet_result=$?
+    exit "$packet_result"
+  fi
   /usr/sbin/runuser -u mithril-agent-research -- \
     /usr/bin/python3 /opt/mithril-hermes-research/build-research-evidence.py \
       --sessions "$session_export" --packet "$validated_research" \
@@ -297,7 +331,13 @@ while :; do
   result=$?
   set -e
   [ "$result" -eq 0 ] && break
-  [ "$attempt" -lt 2 ] || exit "$result"
+  packet_retry_hint=$(packet_envelope_hint)
+  /usr/bin/rm -f "$packet_error"
+  [ -z "$packet_retry_hint" ] || /usr/bin/printf '%s\n' "$packet_retry_hint" >&2
+  if [ "$attempt" -ge 2 ]; then
+    echo "Hermes pre-publication validation failed after two fresh attempts" >&2
+    exit "$result"
+  fi
   echo "Hermes pre-publication validation failed; retrying once with fresh state" >&2
   attempt=$((attempt + 1))
 done

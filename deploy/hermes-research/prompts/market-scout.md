@@ -208,6 +208,18 @@ and returned URL and omit `retrieved_at`; the host inserts the exact successful
 `web_extract` result time from the redacted session trace before validating this
 response. Do not invent a retrieval time.
 
+Keep the complete JSON within 65,536 bytes. `hypothesis_id` and each fact `id`
+must be 3–64 characters using only lowercase ASCII letters, digits, `-` and `_`.
+Use at most 12 `verified_facts`, at most 8 `candidate_parameter_diff` entries,
+and 1–12 `rejection_conditions`. Each rejection condition must be nonempty and
+at most 600 UTF-8 bytes; each fact claim must be nonempty and at most 800 bytes. `bull_case`, `bear_case`,
+`no_trade_case`, `execution_cost_case` and `out_of_sample_test` must each be
+nonempty and at most 2,000 UTF-8 bytes; `risk_veto.reason` must be nonempty and
+at most 1,000 bytes. These text fields must have no leading or trailing
+whitespace and no control characters except internal newline or tab. Byte
+limits are not character limits. A host schema-correction hint identifies only
+a rejected field, not evidence that the rest of the packet passed validation.
+
 {
   "version": 1,
   "hypothesis_id": "lowercase-id",

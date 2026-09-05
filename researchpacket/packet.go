@@ -181,21 +181,46 @@ func (packet Packet) StatusAt(now time.Time) Status {
 }
 
 func (packet Packet) validate(now time.Time, fresh bool) error {
-	if (packet.Version != Version && packet.Version != RecordedVersion) || !safeID(packet.HypothesisID) ||
-		packet.CreatedAt.IsZero() || packet.ValidUntil.IsZero() ||
-		!packet.CreatedAt.Equal(packet.CreatedAt.UTC()) ||
-		!packet.ValidUntil.Equal(packet.ValidUntil.UTC()) ||
-		!packet.ValidUntil.After(packet.CreatedAt) ||
-		packet.ValidUntil.Sub(packet.CreatedAt) > 12*time.Hour ||
-		!validMarket(packet.Market) || len(packet.VerifiedFacts) > 12 ||
-		len(packet.CandidateParameterDiff) > 8 ||
-		len(packet.RejectionConditions) == 0 || len(packet.RejectionConditions) > 12 ||
-		!boundedText(packet.BullCase, 2_000) || !boundedText(packet.BearCase, 2_000) ||
-		!boundedText(packet.NoTradeCase, 2_000) ||
-		!boundedText(packet.ExecutionCostCase, 2_000) ||
-		!boundedText(packet.OutOfSampleTest, 2_000) ||
-		!boundedText(packet.RiskVeto.Reason, 1_000) {
-		return errors.New("research packet envelope is invalid")
+	// Only static field codes leave this boundary; never include packet prose.
+	field := ""
+	switch {
+	case packet.Version != Version && packet.Version != RecordedVersion:
+		field = "version"
+	case !safeID(packet.HypothesisID):
+		field = "hypothesis_id"
+	case packet.CreatedAt.IsZero():
+		field = "created_at"
+	case packet.ValidUntil.IsZero():
+		field = "valid_until"
+	case !packet.CreatedAt.Equal(packet.CreatedAt.UTC()):
+		field = "created_at"
+	case !packet.ValidUntil.Equal(packet.ValidUntil.UTC()):
+		field = "valid_until"
+	case !packet.ValidUntil.After(packet.CreatedAt) || packet.ValidUntil.Sub(packet.CreatedAt) > 12*time.Hour:
+		field = "valid_until"
+	case !validMarket(packet.Market):
+		field = "market"
+	case len(packet.VerifiedFacts) > 12:
+		field = "verified_facts"
+	case len(packet.CandidateParameterDiff) > 8:
+		field = "candidate_parameter_diff"
+	case len(packet.RejectionConditions) == 0 || len(packet.RejectionConditions) > 12:
+		field = "rejection_conditions"
+	case !boundedText(packet.BullCase, 2_000):
+		field = "bull_case"
+	case !boundedText(packet.BearCase, 2_000):
+		field = "bear_case"
+	case !boundedText(packet.NoTradeCase, 2_000):
+		field = "no_trade_case"
+	case !boundedText(packet.ExecutionCostCase, 2_000):
+		field = "execution_cost_case"
+	case !boundedText(packet.OutOfSampleTest, 2_000):
+		field = "out_of_sample_test"
+	case !boundedText(packet.RiskVeto.Reason, 1_000):
+		field = "risk_veto_reason"
+	}
+	if field != "" {
+		return errors.New("research packet envelope is invalid: " + field)
 	}
 	if fresh && (packet.CreatedAt.Before(now.Add(-20*time.Minute)) ||
 		packet.CreatedAt.After(now.Add(2*time.Minute)) || !now.Before(packet.ValidUntil)) {

@@ -1,11 +1,94 @@
 package researchpacket
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestEnvelopeErrorsNameOnlyStaticFields(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	const secret = "PRIVATE-PACKET-PROSE-DO-NOT-LOG"
+	for _, test := range []struct {
+		field  string
+		mutate func(*Packet)
+	}{
+		{"version", func(p *Packet) { p.Version = 99 }},
+		{"hypothesis_id", func(p *Packet) { p.HypothesisID = secret }},
+		{"created_at", func(p *Packet) { p.CreatedAt = time.Time{} }},
+		{"valid_until", func(p *Packet) { p.ValidUntil = time.Time{} }},
+		{"valid_until", func(p *Packet) { p.ValidUntil = p.CreatedAt }},
+		{"valid_until", func(p *Packet) { p.ValidUntil = p.CreatedAt.Add(12*time.Hour + time.Nanosecond) }},
+		{"market", func(p *Packet) { p.Market = secret }},
+		{"verified_facts", func(p *Packet) { p.VerifiedFacts = make([]Fact, 13) }},
+		{"candidate_parameter_diff", func(p *Packet) { p.CandidateParameterDiff = make([]ParameterChange, 9) }},
+		{"rejection_conditions", func(p *Packet) { p.RejectionConditions = nil }},
+		{"rejection_conditions", func(p *Packet) { p.RejectionConditions = make([]string, 13) }},
+		{"bull_case", func(p *Packet) { p.BullCase = " " + secret }},
+		{"bear_case", func(p *Packet) { p.BearCase = secret + " " }},
+		{"no_trade_case", func(p *Packet) { p.NoTradeCase = secret + "\x00" }},
+		{"execution_cost_case", func(p *Packet) { p.ExecutionCostCase = strings.Repeat(secret, 100) }},
+		{"out_of_sample_test", func(p *Packet) { p.OutOfSampleTest = "" }},
+		{"risk_veto_reason", func(p *Packet) { p.RiskVeto.Reason = strings.Repeat(secret, 40) }},
+	} {
+		t.Run(test.field, func(t *testing.T) {
+			p := candidatePacket(now)
+			test.mutate(&p)
+			raw, err := json.Marshal(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = Parse(raw, now)
+			if err == nil || err.Error() != "research packet envelope is invalid: "+test.field || strings.Contains(err.Error(), secret) {
+				t.Fatalf("unexpected envelope error: %v", err)
+			}
+		})
+	}
+	// Preserve first-failure ordering, including failures in different fields.
+	p := candidatePacket(now)
+	p.Version, p.HypothesisID, p.BullCase = 99, secret, ""
+	if err := p.validate(now, true); err == nil || err.Error() != "research packet envelope is invalid: version" {
+		t.Fatalf("envelope precedence changed: %v", err)
+	}
+	// Invalid UTF-8 is tested directly because encoding/json replaces it.
+	p = candidatePacket(now)
+	p.BullCase = secret + string([]byte{0xff})
+	if err := p.validate(now, true); err == nil || err.Error() != "research packet envelope is invalid: bull_case" {
+		t.Fatalf("invalid UTF-8 leaked or passed: %v", err)
+	}
+}
+
+func TestEnvelopeDiagnosticsPreserveValidEncoding(t *testing.T) {
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	p := candidatePacket(now)
+	p.ValidUntil = p.CreatedAt.Add(12 * time.Hour)
+	p.BullCase = strings.Repeat("x", 2000)
+	p.RiskVeto.Reason = strings.Repeat("x", 1000)
+	// Preserve existing instant-based UTC checks rather than adding a new rule.
+	p.ValidUntil = p.ValidUntil.In(time.FixedZone("offset", 3600))
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := Parse(raw, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.ContentSHA256, err = p.fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := json.Marshal(parsed)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("valid packet encoding changed: %v", err)
+	}
+}
 
 func TestParseBindsCurrentTwoSourceCandidate(t *testing.T) {
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
