@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -31,6 +32,7 @@ type paperRequestFixture struct {
 	primary, secondary jupiterSlot
 	start              int64
 	now                time.Time
+	maxDecisionAge     time.Duration
 	path               string
 }
 
@@ -96,14 +98,14 @@ func newPaperRequestFixture(t *testing.T) paperRequestFixture {
 	return paperRequestFixture{policy: policy, paper: p, ticks: ticks, candidate: candidate,
 		bounds: proposalcheck.PaperIntentBounds{PolicySHA256: fingerprint, EvidenceSHA256: digest,
 			MaxInputAmount: 10, NativeBudgetLamports: 10_000_000, ReserveLamports: 1_000_000},
-		evidence: evidence, primary: primary, secondary: secondary, start: start, now: now,
+		evidence: evidence, primary: primary, secondary: secondary, start: start, now: now, maxDecisionAge: 2 * time.Hour,
 		path: filepath.Join(t.TempDir(), "paper-claim.jsonl")}
 }
 
 func (f paperRequestFixture) claim(t *testing.T) (signer.Request, error) {
 	t.Helper()
 	return ClaimPaperRequest(t.Context(), f.path, f.policy, f.paper, f.ticks, f.bounds,
-		f.candidate, f.start, f.now, f.evidence, f.primary, f.secondary)
+		f.candidate, f.start, f.now, f.maxDecisionAge, f.evidence, f.primary, f.secondary)
 }
 
 func TestPaperRequestClaimIsDurableUnsignedAndIdempotent(t *testing.T) {
@@ -144,7 +146,7 @@ func (expiredPaperEvidence) NodeBlockHeight(context.Context, uint64) (uint64, er
 }
 
 func TestPaperRequestClaimRejectsChangedOrStaleInputs(t *testing.T) {
-	for _, name := range []string{"window", "request", "decision", "policy", "input bound", "native budget", "reserve", "expired blockhash", "expired schedule", "provider", "paper provenance"} {
+	for _, name := range []string{"window", "request", "decision", "policy", "input bound", "native budget", "reserve", "max decision age", "expired blockhash", "expired schedule", "provider", "paper provenance"} {
 		t.Run(name, func(t *testing.T) {
 			f := newPaperRequestFixture(t)
 			if _, err := f.claim(t); err != nil {
@@ -161,6 +163,7 @@ func TestPaperRequestClaimRejectsChangedOrStaleInputs(t *testing.T) {
 			case "request":
 				f.candidate.LastValidBlockHeight++
 			case "decision":
+				f.now = f.now.Add(time.Second)
 				f.ticks[0].At = f.ticks[0].At.Add(time.Second)
 				f.ticks[0].DecisionQuote.ReceivedAt = f.ticks[0].At
 				f.bounds.EvidenceSHA256, err = proposalcheck.PaperEvidenceSHA256(f.ticks)
@@ -172,6 +175,8 @@ func TestPaperRequestClaimRejectsChangedOrStaleInputs(t *testing.T) {
 				f.bounds.NativeBudgetLamports++
 			case "reserve":
 				f.bounds.ReserveLamports++
+			case "max decision age":
+				f.maxDecisionAge++
 			case "expired blockhash":
 				f.evidence = expiredPaperEvidence{f.evidence}
 			case "expired schedule":
@@ -185,7 +190,7 @@ func TestPaperRequestClaimRejectsChangedOrStaleInputs(t *testing.T) {
 				t.Fatal(err)
 			}
 			if name == "window" || name == "request" || name == "decision" || name == "policy" ||
-				name == "input bound" || name == "native budget" || name == "reserve" {
+				name == "input bound" || name == "native budget" || name == "reserve" || name == "max decision age" {
 				// These must fail at the durable binding, not an unrelated
 				// fixture/policy error in either existing validator.
 				if _, err := proposalcheck.CheckPaperIntent(f.paper, f.ticks,
@@ -247,10 +252,142 @@ func TestPaperRequestClaimRequiresSuccessfulAppend(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimPaperRequest(store, f.policy, intent, request, f.now); err == nil {
+	if err := claimPaperRequest(store, f.policy, intent, request, f.now, f.maxDecisionAge); err == nil {
 		t.Fatal("failed append was accepted")
 	}
 	if records := store.Records(); len(records) != 0 {
 		t.Fatalf("failed append created records: %+v", records)
+	}
+}
+
+type unexpectedPaperPreparation struct{ proposalcheck.Evidence }
+
+func (unexpectedPaperPreparation) EvidenceProviderIdentities() (string, string) {
+	panic("rejected recency reached preparation")
+}
+
+func TestPaperRequestRecencyRejectsBeforeJournalOrPreparation(t *testing.T) {
+	for _, name := range []string{"zero limit", "negative limit", "zero now", "empty history", "missing quote", "zero decision", "future decision", "expired decision", "zero receipt", "future receipt", "expired receipt"} {
+		t.Run(name, func(t *testing.T) {
+			f := newPaperRequestFixture(t)
+			f.maxDecisionAge = time.Minute
+			f.now = f.now.Add(time.Minute)
+			switch name {
+			case "zero limit":
+				f.maxDecisionAge = 0
+			case "negative limit":
+				f.maxDecisionAge = -1
+			case "zero now":
+				f.now = time.Time{}
+			case "empty history":
+				f.ticks = nil
+			case "missing quote":
+				f.ticks[0].DecisionQuote = nil
+			case "zero decision":
+				f.ticks[0].At = time.Time{}
+			case "future decision":
+				f.ticks[0].At = f.now.Add(time.Nanosecond)
+			case "expired decision":
+				f.ticks[0].At = f.ticks[0].At.Add(-time.Nanosecond)
+			case "zero receipt":
+				f.ticks[0].DecisionQuote.ReceivedAt = time.Time{}
+			case "future receipt":
+				f.ticks[0].DecisionQuote.ReceivedAt = f.now.Add(time.Nanosecond)
+			case "expired receipt":
+				f.ticks[0].DecisionQuote.ReceivedAt = f.ticks[0].At.Add(-time.Nanosecond)
+			}
+			var err error
+			f.bounds.EvidenceSHA256, err = proposalcheck.PaperEvidenceSHA256(f.ticks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.evidence = unexpectedPaperPreparation{f.evidence}
+			request, err := f.claim(t)
+			if err == nil || !strings.Contains(err.Error(), "recency") || !reflect.DeepEqual(request, signer.Request{}) {
+				t.Fatalf("invalid recency returned request or wrong error: %v", err)
+			}
+			if _, err := os.Stat(f.path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("invalid recency created a journal: %v", err)
+			}
+		})
+	}
+}
+
+func TestPaperRequestRecencyBoundaryAndExpiredRestart(t *testing.T) {
+	f := newPaperRequestFixture(t)
+	f.maxDecisionAge = time.Minute
+	f.now = f.now.Add(f.maxDecisionAge)
+	if _, err := f.claim(t); err != nil {
+		t.Fatalf("exact recency boundary rejected: %v", err)
+	}
+	before, err := os.ReadFile(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.now = f.now.Add(time.Nanosecond)
+	// The historical receipt and exact unsigned request remain valid. Only
+	// current recency must reject this repeat after the journal was closed.
+	if _, err := proposalcheck.CheckPaperIntent(f.paper, f.ticks, f.candidate.Policy, f.candidate, f.bounds); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PrepareJupiterRequest(t.Context(), f.policy, f.candidate, f.start, f.now, f.evidence, f.primary, f.secondary); err != nil {
+		t.Fatal(err)
+	}
+	f.evidence = unexpectedPaperPreparation{f.evidence}
+	request, err := f.claim(t)
+	if err == nil || !strings.Contains(err.Error(), "recency") || !reflect.DeepEqual(request, signer.Request{}) {
+		t.Fatalf("expired restart returned request or wrong error: %v", err)
+	}
+	after, err := os.ReadFile(f.path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("expired restart changed journal: %v", err)
+	}
+}
+
+func TestPaperRequestRejectsLegacyClaimWithoutUpgrade(t *testing.T) {
+	f := newPaperRequestFixture(t)
+	if _, err := f.claim(t); err != nil {
+		t.Fatal(err)
+	}
+	store, err := journal.Open(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := store.Records()[0]
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Seed the exact old three-field payload through the durable journal API,
+	// retaining every identity from an otherwise valid current claim.
+	var legacyPayload struct {
+		PaperIntentSHA256 string `json:"paper_intent_sha256"`
+		PolicySHA256      string `json:"policy_sha256"`
+		RequestSHA256     string `json:"request_sha256"`
+	}
+	if err := json.Unmarshal(record.Payload, &legacyPayload); err != nil {
+		t.Fatal(err)
+	}
+	f.path = filepath.Join(t.TempDir(), "legacy-claim.jsonl")
+	store, err = journal.Open(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(f.now, record.Type, record.ActionID, legacyPayload); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := f.claim(t)
+	if err == nil || !strings.Contains(err.Error(), "different or pending claim") || !reflect.DeepEqual(request, signer.Request{}) {
+		t.Fatalf("legacy claim was accepted or failed outside durable binding: %v", err)
+	}
+	after, err := os.ReadFile(f.path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("legacy claim was upgraded or rewritten: %v", err)
 	}
 }
