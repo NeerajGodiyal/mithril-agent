@@ -48,7 +48,7 @@ uses.
   --json            emit the report as JSON
 
   --cost-experiment observed-native-cost-v1
-                    offline v2 non-SOL adaptive comparison using verified
+                    offline v2/v3 non-SOL adaptive comparison using verified
                     journaled SOL/USD for the fee hurdle; cannot combine with
                     --risk-lanes. Retains fees, reserves, loss/source/slippage
                     limits and extra selectivity above the original cost floor.

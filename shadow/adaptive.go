@@ -11,8 +11,11 @@ import (
 // policy. Version 1 remains replayable because its signal hurdle treated the
 // maximum executable slippage as a certain cost. Version 2 keeps that bound as
 // a fill refusal and prices expected movement through observed volatility.
+// Version 3 values each quoted leg using that leg's asset decimals. Earlier
+// versions retain their historical quote math for reproducible journal reads.
 const (
-	AdaptiveVersion       = uint32(2)
+	AdaptiveVersion       = uint32(3)
+	adaptiveVersionTwo    = uint32(2)
 	adaptiveLegacyVersion = uint32(1)
 )
 
@@ -109,7 +112,7 @@ func DefaultAdaptiveQuotePolicy(
 // Validate rejects adaptive settings that cannot produce bounded, cost-aware
 // and replayable paper decisions.
 func (p AdaptivePolicy) Validate() error {
-	if p.Version != adaptiveLegacyVersion && p.Version != AdaptiveVersion {
+	if p.Version != adaptiveLegacyVersion && p.Version != adaptiveVersionTwo && p.Version != AdaptiveVersion {
 		return errors.New("adaptive policy version is not supported")
 	}
 	if p.FastWindow < 2 || p.SlowWindow <= p.FastWindow || p.SlowWindow > 1_440 {
@@ -350,7 +353,7 @@ func adaptiveSignalCostFloorBPS(
 	if version == adaptiveLegacyVersion {
 		return adaptiveValueCostFloorBPS(slippageBPS, feeUnits, inputUnits)
 	}
-	if version != AdaptiveVersion {
+	if version != adaptiveVersionTwo && version != AdaptiveVersion {
 		return 0, errors.New("adaptive policy version is not supported")
 	}
 	return adaptiveValueCostFloorBPS(0, feeUnits, inputUnits)
@@ -466,7 +469,7 @@ func adaptiveQuoteRejection(
 // extra selectivity above its ceiling-derived opening cost floor. This is used
 // only by the explicit offline experiment, never policy validation or runners.
 func observedNativeCostHurdle(policy Policy, nativePrice, marketPrice, amount uint64, sell bool) (uint32, error) {
-	if policy.Adaptive == nil || policy.Adaptive.Version != AdaptiveVersion || policy.NativeFeePrice == nil ||
+	if policy.Adaptive == nil || (policy.Adaptive.Version != adaptiveVersionTwo && policy.Adaptive.Version != AdaptiveVersion) || policy.NativeFeePrice == nil ||
 		nativePrice == 0 || nativePrice > policy.NativeFeePriceCeilingMicros || amount == 0 {
 		return 0, errors.New("observed native cost needs bounded native price and input")
 	}
@@ -523,11 +526,18 @@ func adaptiveTradeCostFloorBPS(
 	if err != nil {
 		return 0, err
 	}
+	decimals := policy.InputDecimals
+	if policy.Adaptive.Version == AdaptiveVersion {
+		decimals = quoteDecimalsFor(policy)
+		if sell {
+			decimals = baseDecimalsFor(policy)
+		}
+	}
 	var inputMicros uint64
 	if sell {
-		inputMicros, err = valueAt(quote.InputAmount, marketPrice, policy.InputDecimals)
+		inputMicros, err = valueAt(quote.InputAmount, marketPrice, decimals)
 	} else {
-		inputMicros, err = scaleToMicros(quote.InputAmount, policy.InputDecimals)
+		inputMicros, err = scaleToMicros(quote.InputAmount, decimals)
 	}
 	if err != nil || inputMicros == 0 {
 		return 0, errors.New("adaptive trade value is outside the supported range")

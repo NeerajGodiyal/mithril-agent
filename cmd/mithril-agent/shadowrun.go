@@ -208,6 +208,9 @@ func loadActiveShadowPolicy(path string) (shadow.Policy, error) {
 }
 
 func validateActiveShadowPolicy(policy shadow.Policy) error {
+	if err := policy.ValidateForRun(); err != nil {
+		return err
+	}
 	if policy.Trigger.SecondarySourceSHA256 == pricesource.CoinbaseIdentitySHA256() ||
 		policy.ReturnTrigger != nil &&
 			policy.ReturnTrigger.SecondarySourceSHA256 == pricesource.CoinbaseIdentitySHA256() {

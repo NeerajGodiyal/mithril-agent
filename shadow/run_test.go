@@ -16,6 +16,34 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 )
 
+func TestNewRunnerRefusesLegacySeparateFeeDecimalMismatchBeforePorts(t *testing.T) {
+	for _, version := range []uint32{adaptiveLegacyVersion, adaptiveVersionTwo, AdaptiveVersion} {
+		policy := adaptiveJTOCostPolicy(t)
+		policy.Adaptive.Version = version
+		if version == adaptiveLegacyVersion {
+			policy.Adaptive.MinimumSignalBPS = 290
+		}
+		if err := policy.Validate(); err != nil {
+			t.Fatalf("historical v%d validation changed: %v", version, err)
+		}
+		runErr := policy.ValidateForRun()
+		_, err := NewRunner(policy, nil, nil, nil, nil)
+		if version < AdaptiveVersion {
+			if runErr == nil || err == nil || err.Error() != runErr.Error() {
+				t.Fatalf("legacy v%d reached reader setup: run=%v, runner=%v", version, runErr, err)
+			}
+		} else if runErr != nil || err == nil || !strings.Contains(err.Error(), "needs two price sources") {
+			t.Fatalf("current version was rejected before ordinary port validation: %v, %v", runErr, err)
+		}
+	}
+	for _, policy := range []Policy{observedCostPolicy(t), adaptiveTestPolicy()} {
+		policy.Adaptive.Version = adaptiveVersionTwo
+		if err := policy.ValidateForRun(); err != nil {
+			t.Fatalf("unaffected v2 policy was refused: %v", err)
+		}
+	}
+}
+
 type stubSource struct {
 	identity string
 	price    uint64

@@ -153,9 +153,10 @@ func ReplayObservedNativeCostComparison(policy Policy, ticks []Tick, quoteFor fu
 }
 
 func validateObservedNativeCostHistory(policy Policy, ticks []Tick) error {
-	if policy.Cluster != Mainnet || policy.Adaptive == nil || policy.Adaptive.Version != AdaptiveVersion ||
+	if policy.Cluster != Mainnet || policy.Adaptive == nil ||
+		(policy.Adaptive.Version != adaptiveVersionTwo && policy.Adaptive.Version != AdaptiveVersion) ||
 		policy.NativeFeePrice == nil || policy.IsSell() {
-		return errors.New("observed native cost experiment requires a v2 non-SOL Mainnet adaptive buy policy")
+		return errors.New("observed native cost experiment requires a v2 or v3 non-SOL Mainnet adaptive buy policy")
 	}
 	_, err := Replay(policy, ticks)
 	return err

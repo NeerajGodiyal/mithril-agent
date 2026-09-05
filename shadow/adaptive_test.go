@@ -558,6 +558,7 @@ func TestAdaptiveVersionOneRetainsItsHistoricalCostFloor(t *testing.T) {
 
 func TestAdaptiveVersionTwoCanResearchAMoveBelowTheExecutionTolerance(t *testing.T) {
 	base := adaptiveTestPolicy()
+	base.Adaptive.Version = adaptiveVersionTwo
 	base.Adaptive.MinimumSignalBPS = 20
 	base.Adaptive.MaxDrawdownBPS = 5_000
 	legacy := base
@@ -815,6 +816,84 @@ func TestAdaptiveQuoteGateRecomputesFeesForTheCurrentPosition(t *testing.T) {
 	shrunkBuy := Quote{InputAmount: 1_000, EstimatedOutput: 10_000, MinimumOutput: 9_960}
 	if passes, err := adaptiveQuotePasses(policy, buyDecision, shrunkBuy, 100_000_000, false); err != nil || passes {
 		t.Fatalf("shrunk buy ignored its larger fee burden: passes=%v err=%v", passes, err)
+	}
+}
+
+func adaptiveJTOCostPolicy(t *testing.T) Policy {
+	t.Helper()
+	jto := observedCostPolicy(t)
+	jto.Version, jto.Market = AdmittedVersion, MarketJTOUSDC
+	jto.MarketEvidenceClass = MarketEvidenceDevelopmentProvisional
+	jto.MarketEvidenceSHA256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	jto.OutputDecimals = 9
+	jto.QuoteRoute = MainnetMarketQuoteRoute(MarketJTOUSDC, false)
+	jto.Trigger.Version, jto.Trigger.Feed = pricetrigger.AdmittedFeedVersion, "JTO/USD"
+	returnTrigger := *jto.ReturnTrigger
+	returnTrigger.Version, returnTrigger.Feed = pricetrigger.AdmittedFeedVersion, "JTO/USD"
+	jto.ReturnTrigger = &returnTrigger
+	if err := jto.Validate(); err != nil {
+		t.Fatalf("nine-decimal buy-first policy fixture invalid: %v", err)
+	}
+	return jto
+}
+
+func TestAdaptiveTradeCostFloorUsesNineDecimalReverseSellUnits(t *testing.T) {
+	jup, jto := observedCostPolicy(t), adaptiveJTOCostPolicy(t)
+	// Both assets are priced at $2 and each attempted leg is worth exactly $2.
+	// The assumed native fee is 100000 lamports at $1000/SOL = $0.10.
+	// Two 500 bps fees plus the unchanged 10 bps margin require 1010 bps,
+	// independently of base-token denomination or first/return direction.
+	for _, test := range []struct {
+		name   string
+		policy Policy
+		sell   bool
+		quote  Quote
+	}{
+		{"six-decimal initial buy", jup, false, Quote{InputAmount: 2_000_000, EstimatedOutput: 1_000_000, MinimumOutput: 1_000_000}},
+		{"nine-decimal initial buy", jto, false, Quote{InputAmount: 2_000_000, EstimatedOutput: 1_000_000_000, MinimumOutput: 1_000_000_000}},
+		{"six-decimal reverse sell", jup, true, Quote{InputAmount: 1_000_000, EstimatedOutput: 2_000_000, MinimumOutput: 2_000_000}},
+		{"nine-decimal reverse sell", jto, true, Quote{InputAmount: 1_000_000_000, EstimatedOutput: 2_000_000, MinimumOutput: 2_000_000}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			floor, err := adaptiveTradeCostFloorBPS(test.policy, test.quote, 2_000_000, test.sell)
+			if err != nil || floor != 1010 {
+				t.Errorf("$2 leg fee floor = %d, %v; want 1010 bps", floor, err)
+			}
+			decision := &AdaptiveDecision{Strategy: StrategyMomentum, SignalBPS: 100}
+			passes, err := adaptiveQuotePasses(test.policy, decision, test.quote, 2_000_000, test.sell)
+			if err != nil || passes {
+				t.Errorf("100 bps signal passed $2 leg requiring 1010 bps: passes=%t, err=%v", passes, err)
+			}
+		})
+	}
+}
+
+func TestAdaptiveLegacyJTOCostFloorRemainsHistorical(t *testing.T) {
+	for _, test := range []struct {
+		version uint32
+		floor   uint32
+		passes  bool
+	}{
+		{adaptiveLegacyVersion, 212, false},
+		{adaptiveVersionTwo, 12, true},
+	} {
+		p := adaptiveJTOCostPolicy(t)
+		p.Adaptive.Version = test.version
+		if test.version == adaptiveLegacyVersion {
+			p.Adaptive.MinimumSignalBPS = 290
+		}
+		if err := p.Validate(); err != nil {
+			t.Fatalf("historical v%d policy no longer valid: %v", test.version, err)
+		}
+		quote := Quote{InputAmount: 1_000_000_000, EstimatedOutput: 2_000_000, MinimumOutput: 2_000_000}
+		floor, err := adaptiveTradeCostFloorBPS(p, quote, 2_000_000, true)
+		if err != nil || floor != test.floor {
+			t.Errorf("historical v%d floor = %d, %v; want %d", test.version, floor, err, test.floor)
+		}
+		passes, err := adaptiveQuotePasses(p, &AdaptiveDecision{Strategy: StrategyMomentum, SignalBPS: 100}, quote, 2_000_000, true)
+		if err != nil || passes != test.passes {
+			t.Errorf("historical v%d verdict changed: passes=%t, err=%v", test.version, passes, err)
+		}
 	}
 }
 

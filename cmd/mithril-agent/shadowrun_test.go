@@ -14,11 +14,70 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/journal"
+	"github.com/Overclock-Validator/mithril-agent/marketadmission"
 	"github.com/Overclock-Validator/mithril-agent/paperstatus"
 	"github.com/Overclock-Validator/mithril-agent/pricesource"
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
+
+func testJTOCostPolicy(t *testing.T) shadow.Policy {
+	t.Helper()
+	candidate, ok := marketadmission.Lookup(marketadmission.MarketJTOUSDC)
+	if !ok {
+		t.Fatal("JTO candidate missing")
+	}
+	primary, err := candidate.Pyth.IdentitySHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondary, err := candidate.Kraken.IdentitySHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := buildAdaptiveQuoteMarketPolicy(
+		shadow.AdmittedVersion, candidate.Market, candidate.Pyth.Feed,
+		primary, secondary, strings.Repeat("a", 64), candidate.QuoteNotionalUSDC,
+		4_000_000, 3_000_000, candidate.QuoteSlippageBPS, 100_000,
+		"11111111111111111111111111111111", 60,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return policy
+}
+
+func TestLegacyJTOCostPolicyIsHistoricalOnly(t *testing.T) {
+	current := testJTOCostPolicy(t)
+	if current.Adaptive.Version != 3 {
+		t.Fatal("new JTO policy did not select corrected cost semantics")
+	}
+	legacy := current
+	adaptive := *current.Adaptive
+	adaptive.Version = 2
+	legacy.Adaptive = &adaptive
+	if err := legacy.Validate(); err != nil {
+		t.Fatalf("legacy JTO policy is not a valid historical fixture: %v", err)
+	}
+	path := writeShadowPolicy(t, legacy)
+	if _, err := loadShadowPolicy(path); err != nil {
+		t.Fatalf("legacy JTO historical read rejected: %v", err)
+	}
+	if err := validateActiveShadowPolicy(legacy); err == nil || !strings.Contains(err.Error(), "new v3 policy") {
+		t.Fatalf("legacy JTO active validation: %v", err)
+	}
+	if _, err := loadActiveShadowPolicy(path); err == nil || !strings.Contains(err.Error(), "new v3 policy") {
+		t.Fatalf("legacy JTO active load: %v", err)
+	}
+	if _, err := loadActiveShadowPolicy(writeShadowPolicy(t, current)); err != nil {
+		t.Fatalf("corrected JTO policy rejected: %v", err)
+	}
+	_, jup, _, _ := shadowPortfolioTestPolicies(t)
+	jup.Adaptive.Version = 2
+	if _, err := loadActiveShadowPolicy(writeShadowPolicy(t, jup)); err != nil {
+		t.Fatalf("unaffected legacy JUP policy rejected: %v", err)
+	}
+}
 
 type cadencePriceSource struct {
 	candidatePriceSource

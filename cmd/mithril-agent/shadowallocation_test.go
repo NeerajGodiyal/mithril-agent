@@ -14,6 +14,25 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
 
+func TestShadowAllocationRejectsLegacyJTOCostPolicy(t *testing.T) {
+	policy := testJTOCostPolicy(t)
+	if err := validatePaperPolicySources(policy); err != nil {
+		t.Fatalf("corrected JTO allocation rejected: %v", err)
+	}
+	policy.Adaptive.Version = 2
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("legacy JTO fixture is invalid: %v", err)
+	}
+	if err := validatePaperPolicySources(policy); err == nil || !strings.Contains(err.Error(), "new v3 policy") {
+		t.Fatalf("legacy JTO allocation validation: %v", err)
+	}
+	_, jup, _, _ := shadowPortfolioTestPolicies(t)
+	jup.Adaptive.Version = 2
+	if err := validatePaperPolicySources(jup); err != nil {
+		t.Fatalf("unaffected legacy JUP allocation rejected: %v", err)
+	}
+}
+
 func TestShadowAllocationBuildsAnInactiveExactPaperGeneration(t *testing.T) {
 	_, _, solPath, jupPath := shadowPortfolioTestPolicies(t)
 	root, err := filepath.EvalSymlinks(t.TempDir())

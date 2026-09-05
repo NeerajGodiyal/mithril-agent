@@ -3346,14 +3346,19 @@ Jupiter quotes, settlement delay, ledger, fees, and replay checks. Its fixed,
 deterministic regime controller selects momentum in a trend, range reversion in
 a range, a bounded drawdown exit, or no action during warm-up, cooldown,
 excessive volatility, or when the raw signal does not clear the current cost
-hurdle. New adaptive policies use schema version 2: the configured maximum
+hurdle. New adaptive policies use schema version 3: the configured maximum
 slippage stays a hard fill-refusal boundary instead of being counted as a
 certain cost on both legs. The expected signal hurdle still covers both modeled
 fees and a margin and expands with observed volatility and adverse quote impact.
 It does not guarantee a profitable fill: a later settlement may still move
 against the decision, and the paper ledger records that later executable quote.
-Version 1 policies retain their original cost math for exact historical replay
-and must be regenerated explicitly to use version 2. The controller rewarms
+Version 3 also values each quoted leg with that asset's decimals. Legacy non-SOL
+policies whose base and quote decimals differ (currently JTO/USDC) cannot create
+new runs, allocations or qualified candidates. Generate a new policy and a
+separate evidence lineage; do not edit the old policy or journal. Existing
+SOL/JUP/WIF/PYTH policies remain usable.
+Version 1 and 2 policies retain their original cost math for exact historical replay
+and must be regenerated explicitly to use version 3. The controller rewarms
 after a data gap and remains risk-off after a filled drawdown exit. `shadow
 backtest` uses the policy directly; do not pass `--buy-at-usd` for
 an adaptive policy. Search and Hermes candidate generation may tune only the

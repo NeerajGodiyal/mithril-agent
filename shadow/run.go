@@ -220,7 +220,7 @@ func NewRunner(
 	recorder Recorder,
 	quoteReaders ...PriceReader,
 ) (*Runner, error) {
-	if err := policy.Validate(); err != nil {
+	if err := policy.ValidateForRun(); err != nil {
 		return nil, err
 	}
 	if primary == nil || secondary == nil || quoter == nil || recorder == nil {

@@ -205,6 +205,64 @@ func TestObservedNativeCostExperimentReusesReplayAndPreservesPolicy(t *testing.T
 	}
 }
 
+func TestAdaptiveVersionTwoObservedCostComparisonMatchesSixDecimalVersionThree(t *testing.T) {
+	current := observedCostPolicy(t)
+	legacy := current
+	oldAdaptive := *current.Adaptive
+	oldAdaptive.Version = adaptiveVersionTwo
+	legacy.Adaptive = &oldAdaptive
+	ticks := observedCostTicks(t, legacy, 100_000_000)
+	oldBase, oldObserved, err := ReplayObservedNativeCostComparison(legacy, ticks, observedCostQuote(legacy))
+	if err != nil {
+		t.Fatalf("v2 six-decimal comparison rejected: %v", err)
+	}
+	newBase, newObserved, err := ReplayObservedNativeCostComparison(current, ticks, observedCostQuote(current))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The version is deliberately fingerprint-bound; only that policy identity
+	// changes for six-decimal legs. Accounting and decision outcomes must not.
+	oldBase.Ledger.Policy, oldObserved.Ledger.Policy = current, current
+	if !reflect.DeepEqual(oldBase, newBase) || !reflect.DeepEqual(oldObserved, newObserved) {
+		t.Fatal("v3 changed six-decimal comparison math or decisions")
+	}
+}
+
+func TestAdaptiveLegacyJTOReplayDoesNotRenewPolicyIdentity(t *testing.T) {
+	current := adaptiveJTOCostPolicy(t)
+	// Flat-price decisions do not depend on quote-unit corrections. The current
+	// runner supplies valid paired evidence without starting a legacy runner.
+	ticks := observedCostTicksWithStep(t, current, 100_000_000, 0)
+	for _, version := range []uint32{adaptiveLegacyVersion, adaptiveVersionTwo} {
+		legacy := current
+		adaptive := *current.Adaptive
+		adaptive.Version = version
+		if version == adaptiveLegacyVersion {
+			adaptive.MinimumSignalBPS = 290
+		}
+		legacy.Adaptive = &adaptive
+		before, err := json.Marshal(legacy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fingerprint, err := legacy.Fingerprint()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Replay(legacy, ticks); err != nil {
+			t.Fatalf("historical JTO v%d replay rejected: %v", version, err)
+		}
+		after, err := json.Marshal(legacy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := legacy.Fingerprint()
+		if err != nil || got != fingerprint || !bytes.Equal(before, after) || legacy.Adaptive.Version != version {
+			t.Fatalf("historical JTO v%d policy identity changed: %v", version, err)
+		}
+	}
+}
+
 // roundTripPolicy is a sell-then-buy-back rule on one book: start holding SOL,
 // sell at or above $22, buy back at or below $18.
 func roundTripPolicy(t *testing.T, spreadBPS uint16) Policy {
