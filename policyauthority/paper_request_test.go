@@ -634,6 +634,80 @@ func TestPaperRequestAcquisitionExpiresDuringPreparation(t *testing.T) {
 	})
 }
 
+func TestValidatePaperRequestClaimBindsOriginalWithoutExpiry(t *testing.T) {
+	f := newPaperRequestFixture(t)
+	request, err := f.claim(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := journal.ReadRecords(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := records[0]
+	got, err := ValidatePaperRequestClaim(record, f.policy, request)
+	if err != nil || got != record.Hash {
+		t.Fatalf("original claim rejected: %q, %v", got, err)
+	}
+	// Completion checks original identity, not renewed wall-clock eligibility.
+	f.now = f.now.Add(24 * time.Hour)
+	if _, err := f.claim(t); err == nil {
+		t.Fatal("expired claim could return another request")
+	}
+	if _, err := ValidatePaperRequestClaim(record, f.policy, request); err != nil {
+		t.Fatalf("expired original request cannot be accounted for: %v", err)
+	}
+	for _, name := range []string{"policy", "request", "type", "sequence", "action", "legacy", "noncanonical", "bad acquisition"} {
+		t.Run(name, func(t *testing.T) {
+			changed, policy, expected := record, f.policy, request
+			switch name {
+			case "policy":
+				policy.TransactionPolicy.DailyDebitCapLamports++
+			case "request":
+				expected.PrimaryFeeContextSlot++
+			case "type":
+				changed.Type = "unrelated"
+			case "sequence":
+				changed.Sequence++
+			case "action":
+				changed.ActionID = strings.Repeat("b", 64)
+			case "legacy", "bad acquisition":
+				var claim paperRequestClaim
+				if err := json.Unmarshal(record.Payload, &claim); err != nil {
+					t.Fatal(err)
+				}
+				claim.AcquisitionSHA256 = ""
+				if name == "bad acquisition" {
+					claim.AcquisitionSHA256 = "not-a-hash"
+				}
+				changed.Payload, err = json.Marshal(claim)
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "noncanonical":
+				changed.Payload = append([]byte(" "), record.Payload...)
+			}
+			if got, err := ValidatePaperRequestClaim(changed, policy, expected); err == nil || got != "" {
+				t.Fatalf("changed claim accepted: %q, %v", got, err)
+			}
+		})
+	}
+	store, err := journal.Open(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(f.now, "paper.request-terminal-v1", request.ActionID, struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.now = f.ticks[0].At
+	if request, err := f.claim(t); err == nil || !reflect.DeepEqual(request, signer.Request{}) {
+		t.Fatalf("terminal marker released first-action lock: %v", err)
+	}
+}
+
 func TestPaperRequestBoundsAtPreparationCompletion(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

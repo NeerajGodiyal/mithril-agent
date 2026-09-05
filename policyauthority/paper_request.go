@@ -9,8 +9,10 @@ import (
 	"errors"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/internal/strictjson"
 	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
+	"github.com/Overclock-Validator/mithril-agent/riskgrant"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 	"github.com/Overclock-Validator/mithril-agent/signer"
 )
@@ -127,18 +129,12 @@ func checkPaperDecisionRecency(ticks []shadow.Tick, now time.Time, maxAge time.D
 }
 
 func claimPaperRequest(store *journal.Store, policy Policy, intent proposalcheck.PaperIntent, request signer.Request, now time.Time, maxDecisionAge time.Duration, acquisition string) error {
-	policyBytes, err := json.Marshal(policy)
+	policyHash, requestHash, err := paperRequestHashes(policy, request)
 	if err != nil {
 		return err
 	}
-	requestBytes, err := json.Marshal(request)
-	if err != nil {
-		return err
-	}
-	policyHash := sha256.Sum256(append([]byte(paperRequestClaimEvent+"/policy\x00"), policyBytes...))
-	requestHash := sha256.Sum256(append([]byte(paperRequestClaimEvent+"/request\x00"), requestBytes...))
 	claim := paperRequestClaim{PaperIntentSHA256: intent.SHA256, MaxDecisionAgeNS: int64(maxDecisionAge), AcquisitionSHA256: acquisition,
-		PolicySHA256: hex.EncodeToString(policyHash[:]), RequestSHA256: hex.EncodeToString(requestHash[:])}
+		PolicySHA256: policyHash, RequestSHA256: requestHash}
 	payload, err := json.Marshal(claim)
 	if err != nil {
 		return err
@@ -152,4 +148,56 @@ func claimPaperRequest(store *journal.Store, policy Policy, intent proposalcheck
 	}
 	_, err = store.Append(now.UTC(), paperRequestClaimEvent, request.ActionID, claim)
 	return err
+}
+
+// ValidatePaperRequestClaim binds one canonical original claim to its protected
+// policy and exact unsigned request. It performs no IO or expiry recheck: terminal
+// accounting must remain possible after a request expires. The caller must read
+// record from a verified, protected journal; this digest is not authority.
+func ValidatePaperRequestClaim(record journal.Record, policy Policy, request signer.Request) (string, error) {
+	if err := policy.Validate(); err != nil {
+		return "", err
+	}
+	if policy.TransactionPolicy.Jupiter == nil || request.RiskGrant != (riskgrant.Grant{}) ||
+		record.Type != paperRequestClaimEvent || record.Sequence != 1 || record.At.IsZero() || record.ActionID != request.ActionID {
+		return "", errors.New("original paper claim identity is invalid")
+	}
+	if _, err := signer.ValidateJupiterRequest(policy.TransactionPolicy, request); err != nil {
+		return "", err
+	}
+	var claim paperRequestClaim
+	if err := strictjson.Decode(record.Payload, &claim); err != nil {
+		return "", err
+	}
+	policyHash, requestHash, err := paperRequestHashes(policy, request)
+	if err != nil {
+		return "", err
+	}
+	validDigest := func(value string) bool {
+		decoded, err := hex.DecodeString(value)
+		return err == nil && len(decoded) == sha256.Size && hex.EncodeToString(decoded) == value
+	}
+	if claim.PolicySHA256 != policyHash || claim.RequestSHA256 != requestHash || claim.MaxDecisionAgeNS <= 0 ||
+		!validDigest(claim.PaperIntentSHA256) || !validDigest(claim.AcquisitionSHA256) || !validDigest(record.Hash) {
+		return "", errors.New("paper claim does not match the policy and unsigned request")
+	}
+	canonical, err := json.Marshal(claim)
+	if err != nil || !bytes.Equal(canonical, record.Payload) {
+		return "", errors.New("paper claim is not canonical")
+	}
+	return record.Hash, nil
+}
+
+func paperRequestHashes(policy Policy, request signer.Request) (string, string, error) {
+	policyBytes, err := json.Marshal(policy)
+	if err != nil {
+		return "", "", err
+	}
+	requestBytes, err := json.Marshal(request)
+	if err != nil {
+		return "", "", err
+	}
+	policyHash := sha256.Sum256(append([]byte(paperRequestClaimEvent+"/policy\x00"), policyBytes...))
+	requestHash := sha256.Sum256(append([]byte(paperRequestClaimEvent+"/request\x00"), requestBytes...))
+	return hex.EncodeToString(policyHash[:]), hex.EncodeToString(requestHash[:]), nil
 }
