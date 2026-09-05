@@ -3,7 +3,9 @@ package policyauthority
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/journal"
@@ -35,6 +38,8 @@ type paperRequestFixture struct {
 	now                time.Time
 	maxDecisionAge     time.Duration
 	path               string
+	acquisitionPath    string
+	maxAcquisitionAge  time.Duration
 }
 
 type paperReserveEvidence struct {
@@ -46,6 +51,7 @@ type paperReserveEvidence struct {
 	extra                      uint64
 	mutate                     func(*txflow.AccountEvidence)
 	err                        error
+	delay                      time.Duration
 }
 
 func (e *paperReserveEvidence) VerifyGenesis(ctx context.Context, expected string) error {
@@ -54,6 +60,7 @@ func (e *paperReserveEvidence) VerifyGenesis(ctx context.Context, expected strin
 }
 
 func (e *paperReserveEvidence) VerifyNativeReserve(_ context.Context, owner string, upfront, reserve, minimum, maximum uint64) (txflow.AccountEvidence, error) {
+	time.Sleep(e.delay)
 	e.calls++
 	e.owner, e.upfront, e.reserve, e.min, e.max = owner, upfront, reserve, minimum, maximum
 	account := txflow.AccountEvidence{
@@ -126,17 +133,46 @@ func newPaperRequestFixture(t *testing.T) paperRequestFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return paperRequestFixture{policy: policy, paper: p, ticks: ticks, candidate: candidate,
+	f := paperRequestFixture{policy: policy, paper: p, ticks: ticks, candidate: candidate,
 		bounds: proposalcheck.PaperIntentBounds{PolicySHA256: fingerprint, EvidenceSHA256: digest,
 			MaxInputAmount: 10, NativeBudgetLamports: 10_000_000, ReserveLamports: 1_000_000},
 		evidence: &paperReserveEvidence{Evidence: evidence}, primary: primary, secondary: secondary, start: start, now: now, maxDecisionAge: 2 * time.Hour,
 		path: filepath.Join(t.TempDir(), "paper-claim.jsonl")}
+	f.acquisitionPath = filepath.Join(t.TempDir(), "acquisition.jsonl")
+	f.maxAcquisitionAge = 2 * time.Hour
+	seedPaperAcquisition(t, f)
+	return f
+}
+
+func seedPaperAcquisition(t *testing.T, f paperRequestFixture) {
+	t.Helper()
+	encoded, err := proposalcheck.EncodeCandidate(f.candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(encoded)
+	payload := struct {
+		CandidateSHA256 string        `json:"candidate_sha256"`
+		ResponseSHA256  string        `json:"response_sha256"`
+		ReceivedAt      time.Time     `json:"received_at"`
+		MaxAge          time.Duration `json:"max_age_ns,string"`
+	}{hex.EncodeToString(digest[:]), strings.Repeat("a", 64), f.now, f.maxAcquisitionAge}
+	store, err := journal.Open(f.acquisitionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(f.now, "proposal.acquired-v1", payload.CandidateSHA256, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (f paperRequestFixture) claim(t *testing.T) (signer.Request, error) {
 	t.Helper()
 	return ClaimPaperRequest(t.Context(), f.path, f.policy, f.paper, f.ticks, f.bounds,
-		f.candidate, f.start, f.now, f.maxDecisionAge, f.evidence, f.primary, f.secondary)
+		f.candidate, f.start, f.now, f.maxDecisionAge, f.acquisitionPath, f.maxAcquisitionAge, f.evidence, f.primary, f.secondary)
 }
 
 func TestPaperRequestClaimIsDurableUnsignedAndIdempotent(t *testing.T) {
@@ -195,6 +231,8 @@ func TestPaperRequestClaimRejectsChangedOrStaleInputs(t *testing.T) {
 				f.now = f.now.Add(time.Hour)
 			case "request":
 				f.candidate.LastValidBlockHeight++
+				f.acquisitionPath = filepath.Join(t.TempDir(), "changed-candidate.jsonl")
+				seedPaperAcquisition(t, f)
 			case "decision":
 				f.now = f.now.Add(time.Second)
 				f.ticks[0].At = f.ticks[0].At.Add(time.Second)
@@ -222,8 +260,9 @@ func TestPaperRequestClaimRejectsChangedOrStaleInputs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if name == "window" || name == "request" || name == "decision" || name == "policy" ||
-				name == "input bound" || name == "native budget" || name == "reserve" || name == "max decision age" {
+			durableConflict := name == "window" || name == "request" || name == "decision" || name == "policy" ||
+				name == "input bound" || name == "native budget" || name == "reserve" || name == "max decision age"
+			if durableConflict {
 				// These must fail at the durable binding, not an unrelated
 				// fixture/policy error in either existing validator.
 				if _, err := proposalcheck.CheckPaperIntent(f.paper, f.ticks,
@@ -238,6 +277,9 @@ func TestPaperRequestClaimRejectsChangedOrStaleInputs(t *testing.T) {
 			request, err := f.claim(t)
 			if err == nil || !reflect.DeepEqual(request, signer.Request{}) {
 				t.Fatalf("rejected claim returned request: %v", err)
+			}
+			if durableConflict && !strings.Contains(err.Error(), "different or pending claim") {
+				t.Fatalf("changed input did not reach durable binding: %v", err)
 			}
 			after, err := os.ReadFile(f.path)
 			if err != nil || !bytes.Equal(before, after) {
@@ -285,7 +327,7 @@ func TestPaperRequestClaimRequiresSuccessfulAppend(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimPaperRequest(store, f.policy, intent, request, f.now, f.maxDecisionAge); err == nil {
+	if err := claimPaperRequest(store, f.policy, intent, request, f.now, f.maxDecisionAge, strings.Repeat("a", 64)); err == nil {
 		t.Fatal("failed append was accepted")
 	}
 	if records := store.Records(); len(records) != 0 {
@@ -349,34 +391,36 @@ func TestPaperRequestRecencyRejectsBeforeJournalOrPreparation(t *testing.T) {
 }
 
 func TestPaperRequestRecencyBoundaryAndExpiredRestart(t *testing.T) {
-	f := newPaperRequestFixture(t)
-	f.maxDecisionAge = time.Minute
-	f.now = f.now.Add(f.maxDecisionAge)
-	if _, err := f.claim(t); err != nil {
-		t.Fatalf("exact recency boundary rejected: %v", err)
-	}
-	before, err := os.ReadFile(f.path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.now = f.now.Add(time.Nanosecond)
-	// The historical receipt and exact unsigned request remain valid. Only
-	// current recency must reject this repeat after the journal was closed.
-	if _, err := proposalcheck.CheckPaperIntent(f.paper, f.ticks, f.candidate.Policy, f.candidate, f.bounds); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := PrepareJupiterRequest(t.Context(), f.policy, f.candidate, f.start, f.now, f.evidence, f.primary, f.secondary); err != nil {
-		t.Fatal(err)
-	}
-	f.evidence = unexpectedPaperPreparation{f.evidence}
-	request, err := f.claim(t)
-	if err == nil || !strings.Contains(err.Error(), "recency") || !reflect.DeepEqual(request, signer.Request{}) {
-		t.Fatalf("expired restart returned request or wrong error: %v", err)
-	}
-	after, err := os.ReadFile(f.path)
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatalf("expired restart changed journal: %v", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		f := newPaperRequestFixture(t)
+		f.maxDecisionAge = time.Minute
+		f.now = f.now.Add(f.maxDecisionAge)
+		if _, err := f.claim(t); err != nil {
+			t.Fatalf("exact recency boundary rejected: %v", err)
+		}
+		before, err := os.ReadFile(f.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.now = f.now.Add(time.Nanosecond)
+		// The historical receipt and exact unsigned request remain valid. Only
+		// current recency must reject this repeat after the journal was closed.
+		if _, err := proposalcheck.CheckPaperIntent(f.paper, f.ticks, f.candidate.Policy, f.candidate, f.bounds); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := PrepareJupiterRequest(t.Context(), f.policy, f.candidate, f.start, f.now, f.evidence, f.primary, f.secondary); err != nil {
+			t.Fatal(err)
+		}
+		f.evidence = unexpectedPaperPreparation{f.evidence}
+		request, err := f.claim(t)
+		if err == nil || !strings.Contains(err.Error(), "recency") || !reflect.DeepEqual(request, signer.Request{}) {
+			t.Fatalf("expired restart returned request or wrong error: %v", err)
+		}
+		after, err := os.ReadFile(f.path)
+		if err != nil || !bytes.Equal(before, after) {
+			t.Fatalf("expired restart changed journal: %v", err)
+		}
+	})
 }
 
 func TestPaperRequestRejectsLegacyClaimWithoutUpgrade(t *testing.T) {
@@ -527,6 +571,108 @@ func TestPaperRequestNativeReserveRejectsBeforeClaim(t *testing.T) {
 			if count != 0 {
 				t.Fatalf("failed reserve check appended %d records", count)
 			}
+		})
+	}
+}
+
+func TestPaperRequestAcquisitionRejectsWithoutRenewal(t *testing.T) {
+	for _, name := range []string{"missing", "expired", "changed age", "renewed receipt"} {
+		t.Run(name, func(t *testing.T) {
+			f := newPaperRequestFixture(t)
+			f.maxAcquisitionAge = time.Minute
+			f.acquisitionPath = filepath.Join(t.TempDir(), "original.jsonl")
+			seedPaperAcquisition(t, f)
+			if _, err := f.claim(t); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(f.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch name {
+			case "missing":
+				f.acquisitionPath = filepath.Join(t.TempDir(), "missing.jsonl")
+			case "expired":
+				f.now = f.now.Add(time.Minute + time.Nanosecond)
+			case "changed age":
+				f.maxAcquisitionAge++
+			case "renewed receipt":
+				f.now = f.now.Add(time.Second)
+				f.acquisitionPath = filepath.Join(t.TempDir(), "renewed.jsonl")
+				seedPaperAcquisition(t, f)
+			}
+			if name != "renewed receipt" {
+				f.evidence = unexpectedPaperPreparation{f.evidence}
+			}
+			request, err := f.claim(t)
+			if err == nil || !reflect.DeepEqual(request, signer.Request{}) {
+				t.Fatalf("changed acquisition returned request: %v", err)
+			}
+			after, err := os.ReadFile(f.path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("acquisition rejection rewrote claim: %v", err)
+			}
+		})
+	}
+}
+
+func TestPaperRequestAcquisitionExpiresDuringPreparation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newPaperRequestFixture(t)
+		f.maxAcquisitionAge = time.Second
+		f.acquisitionPath = filepath.Join(t.TempDir(), "short-lived.jsonl")
+		seedPaperAcquisition(t, f)
+		f.evidence.(*paperReserveEvidence).delay = time.Second + time.Nanosecond
+		request, err := f.claim(t)
+		if err == nil || !strings.Contains(err.Error(), "expired") || !reflect.DeepEqual(request, signer.Request{}) {
+			t.Fatalf("preparation renewed acquisition: %v", err)
+		}
+		records, err := journal.ReadRecords(f.path)
+		if err != nil || len(records) != 0 {
+			t.Fatalf("expired preparation appended claim: %v", err)
+		}
+	})
+}
+
+func TestPaperRequestBoundsAtPreparationCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		delay   time.Duration
+		wantErr string
+	}{
+		{"decision boundary", time.Second, ""},
+		{"decision expired", time.Second + time.Nanosecond, "recency"},
+		{"schedule inside", time.Second - time.Nanosecond, ""},
+		{"schedule ended", time.Second, "schedule window"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				f := newPaperRequestFixture(t)
+				f.maxDecisionAge = time.Second
+				if strings.HasPrefix(tc.name, "schedule") {
+					f.maxDecisionAge = 2 * time.Hour
+					f.now = time.Unix(f.start+3599, 0).UTC()
+				}
+				var err error
+				f.bounds.EvidenceSHA256, err = proposalcheck.PaperEvidenceSHA256(f.ticks)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.evidence.(*paperReserveEvidence).delay = tc.delay
+				request, err := f.claim(t)
+				if tc.wantErr == "" {
+					if err != nil || request.ActionID == "" {
+						t.Fatalf("valid completion boundary rejected: %v", err)
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !reflect.DeepEqual(request, signer.Request{}) {
+					t.Fatalf("expired completion returned request or wrong error: %v", err)
+				}
+				if records, err := journal.ReadRecords(f.path); err != nil || len(records) != 0 {
+					t.Fatalf("expired completion appended claim: %v", err)
+				}
+			})
 		})
 	}
 }
