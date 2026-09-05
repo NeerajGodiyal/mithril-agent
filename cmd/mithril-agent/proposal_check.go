@@ -284,7 +284,16 @@ directory as one offline bundle. It reads no key or provider and cannot
 authorize, sign, or send.
 
   --candidate PATH   absolute private candidate JSON path
-  --policy-dir DIR   absolute protected directory from proposal policy-create`
+  --policy-dir DIR   absolute protected directory from proposal policy-create
+
+Optional first-signal paper review (all three required together):
+  --paper-policy PATH   frozen private Mainnet shadow policy
+  --paper-journal PATH  policy-bound daily journal ending at its first signal
+  --paper-bounds PATH   private JSON with policy_sha256, evidence_sha256,
+                        max_input_amount, native_budget_lamports, reserve_lamports
+                        (amounts must be quoted decimal base-unit strings)
+The optional unsigned receipt proves no freshness, wallet balance, profitability,
+durable reservation, or live readiness. It cannot authorize, sign, or send.`
 
 const proposalCanaryCheckUsage = `Usage: mithril-agent proposal canary-check [options]
 
@@ -1130,6 +1139,9 @@ func runProposalBundleCheck(args []string, output io.Writer) error {
 	flags.SetOutput(io.Discard)
 	candidatePath := flags.String("candidate", "", "private candidate JSON path")
 	policyDir := flags.String("policy-dir", "", "generated Mainnet policy directory")
+	paperPolicy := flags.String("paper-policy", "", "frozen Mainnet paper policy")
+	paperJournal := flags.String("paper-journal", "", "first-signal daily paper journal")
+	paperBounds := flags.String("paper-bounds", "", "private frozen paper bounds")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, proposalBundleCheckUsage)
@@ -1140,6 +1152,9 @@ func runProposalBundleCheck(args []string, output io.Writer) error {
 	if flags.NArg() != 0 || !cleanAbsolutePath(*candidatePath) ||
 		!cleanAbsolutePath(*policyDir) || *candidatePath == *policyDir {
 		return errors.New("proposal bundle-check requires an absolute private candidate and protected policy directory")
+	}
+	if err := validatePaperBundlePaths(*paperPolicy, *paperJournal, *paperBounds); err != nil {
+		return err
 	}
 
 	authority, signing, submission, err := readProposalPolicyDirectory(*policyDir)
@@ -1162,19 +1177,24 @@ func runProposalBundleCheck(args []string, output io.Writer) error {
 	); err != nil {
 		return errors.New("candidate and generated Mainnet policies do not match")
 	}
+	paperIntent, err := checkPaperBundle(*paperPolicy, *paperJournal, *paperBounds, *signing.Jupiter, candidate)
+	if err != nil {
+		return err
+	}
 	return json.NewEncoder(output).Encode(struct {
-		Status            string `json:"status"`
-		Cluster           string `json:"cluster"`
-		Profile           string `json:"profile"`
-		ProfileSHA256     string `json:"profile_sha256"`
-		RecoveryMode      string `json:"recovery_mode"`
-		Next              string `json:"next"`
-		SigningEnabled    bool   `json:"signing_enabled"`
-		SubmissionEnabled bool   `json:"submission_enabled"`
+		Status            string                     `json:"status"`
+		Cluster           string                     `json:"cluster"`
+		Profile           string                     `json:"profile"`
+		ProfileSHA256     string                     `json:"profile_sha256"`
+		RecoveryMode      string                     `json:"recovery_mode"`
+		Next              string                     `json:"next"`
+		PaperIntent       *proposalcheck.PaperIntent `json:"unsigned_paper_intent,omitempty"`
+		SigningEnabled    bool                       `json:"signing_enabled"`
+		SubmissionEnabled bool                       `json:"submission_enabled"`
 	}{
 		Status: "bundle_consistent_not_authorized", Cluster: signing.Cluster,
 		Profile: signing.Profile, ProfileSHA256: signing.ProfileFingerprint,
-		RecoveryMode: submission.RecoveryMode, Next: "proposal_prepare",
+		RecoveryMode: submission.RecoveryMode, Next: "proposal_prepare", PaperIntent: paperIntent,
 	})
 }
 
