@@ -101,10 +101,11 @@ if [ "$has_instruction" = true ] &&
 fi
 
 if [ -f /var/lib/mithril-agent-research/index/events.jsonl ] &&
-  /usr/sbin/runuser -u mithril-agent-research -- \
+  index_status=$(/usr/sbin/runuser -u mithril-agent-research -- \
     /usr/local/libexec/mithril-agent/mithril-agent index doctor \
       --dir /var/lib/mithril-agent-research/index \
-      --max-record-age 15m >/dev/null; then
+      --max-record-age 15m --json) &&
+  /usr/bin/printf '%s\n' "$index_status" | /usr/bin/python3 -c 'import json, sys; status = json.load(sys.stdin); source = status["index"]["source"]; sys.exit(not (status["ready"] is True and source["cluster"] == "mainnet-beta" and source["genesis_hash"] == "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"))' 2>/dev/null; then
   research_toolsets="$research_toolsets,mithril_index"
   mithril_evidence=recently_ingested
 fi
@@ -199,7 +200,7 @@ collect_research_packet() (
   if [ "$mithril_evidence" = recently_ingested ]; then
     /usr/bin/printf '\nTrusted evidence availability: the local Mithril rooted index passed its 15-minute local-ingestion age check, and `mithril_index` is available as a read-only research tool. Its cursor has not been independently compared with the current chain root. Use it as recorded rooted history; do not call it current chain state. Replaying old records can also produce a recent local-ingestion timestamp.\n' >>"$research_query"
   else
-    /usr/bin/printf '\nTrusted evidence availability: no local Mithril rooted index passed its 15-minute record-age check for this run. `mithril_index` is unavailable; do not claim that Mithril evidence was consulted.\n' >>"$research_query"
+    /usr/bin/printf '\nTrusted evidence availability: no local Mithril rooted index passed both its 15-minute record-age check and the Mainnet cluster/genesis check for this run. `mithril_index` is unavailable; do not claim that Mithril evidence was consulted.\n' >>"$research_query"
   fi
   /usr/bin/printf '\nTrusted sanitized prior-complete-day paper diagnostics. These local replay results may reject or prioritize a hypothesis, but cannot replace external evidence or prove future profit. SOL/USDC: %s\nJUP/USDC: %s\n' \
     "$sol_diagnostics" "$jup_diagnostics" >>"$research_query"

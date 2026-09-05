@@ -1482,6 +1482,47 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	}
 }
 
+func TestHermesIndexGateRequiresMainnetIdentity(t *testing.T) {
+	runner := readDocumentation(t, "../../deploy/hermes-research/run-market-scout.sh")
+	start := strings.Index(runner, "if [ -f /var/lib/mithril-agent-research/index/events.jsonl ] &&")
+	if start < 0 {
+		t.Fatal("Hermes index gate is missing")
+	}
+	end := strings.Index(runner[start:], "\nfi")
+	if end < 0 {
+		t.Fatal("Hermes index gate is incomplete")
+	}
+	block := runner[start : start+end+3]
+	block = strings.Replace(block, "[ -f /var/lib/mithril-agent-research/index/events.jsonl ]", "true", 1)
+	doctorStart := strings.Index(block, "index_status=$(") + len("index_status=$(")
+	doctorEnd := strings.Index(block, ") &&")
+	if doctorStart < len("index_status=$(") || doctorEnd < doctorStart ||
+		!strings.Contains(block[doctorStart:doctorEnd], "--max-record-age 15m --json") {
+		t.Fatal("Hermes index gate does not capture a fresh JSON doctor result")
+	}
+	block = block[:doctorStart] + `/usr/bin/printf '%s' "$1"; exit "$2"` + block[doctorEnd:]
+	valid := `{"ready":true,"index":{"source":{"cluster":"mainnet-beta","genesis_hash":"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"}}}`
+	for _, test := range []struct {
+		status, exitCode, want string
+	}{
+		{valid, "0", "recently_ingested"},
+		{valid, "1", "unavailable"},
+		{strings.Replace(valid, "mainnet-beta", "devnet", 1), "0", "unavailable"},
+		{strings.Replace(valid, "mainnet-beta", "testnet", 1), "0", "unavailable"},
+		{strings.Replace(valid, "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d", "wrong", 1), "0", "unavailable"},
+		{strings.Replace(valid, "true", "false", 1), "0", "unavailable"},
+		{`{"ready":true,"index":{}}`, "0", "unavailable"},
+		{`not json`, "0", "unavailable"},
+	} {
+		script := "set -eu\nresearch_toolsets=web\nmithril_evidence=unavailable\n" + block +
+			"\nprintf '%s' \"$mithril_evidence\"\n"
+		output, err := exec.Command("/bin/sh", "-c", script, "test", test.status, test.exitCode).CombinedOutput()
+		if err != nil || string(output) != test.want {
+			t.Fatalf("doctor %q exit %s: got %q, %v; want %q", test.status, test.exitCode, output, err, test.want)
+		}
+	}
+}
+
 func TestHermesFinalizerSkipsNonCandidates(t *testing.T) {
 	runner := readDocumentation(t, "../../deploy/hermes-research/run-market-scout.sh")
 	line := func(prefix string) string {

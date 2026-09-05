@@ -169,6 +169,9 @@ sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
 An empty provisioned directory is not research evidence. The wrapper runs
 official-source research without the index until both `events.jsonl` exists and
 `index doctor --max-record-age 15m` passes.
+The wrapper also checks the doctor's JSON source for `mainnet-beta` and its
+exact Mainnet genesis hash. Missing source identity, another cluster, or a
+different genesis withholds the index even when local ingestion is recent.
 The doctor's last recorded time proves recent local ingestion, not that the recorded
 cursor has caught up with the chain. Replaying old records can pass this check.
 The wrapper exposes valid recently ingested records as rooted history and
