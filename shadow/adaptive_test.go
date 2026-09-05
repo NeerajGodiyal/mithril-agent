@@ -2,12 +2,97 @@ package shadow
 
 import (
 	"errors"
+	"math"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 )
+
+func TestObservedNativeCostHurdlePreservesPremiumAndBounds(t *testing.T) {
+	p := observedCostPolicy(t)
+	for _, test := range []struct {
+		native, amount uint64
+		want           uint32
+	}{
+		{1_000_000_000, 25_000_000, 90}, {100_000_000, 25_000_000, 18},
+		{100_000_001, 25_000_000, 20}, {100_000_000, 12_500_000, 26},
+	} {
+		got, err := observedNativeCostHurdle(p, test.native, 2_000_000, test.amount, false)
+		if err != nil || got != test.want {
+			t.Fatalf("hurdle(%d,%d)=%d,%v want %d", test.native, test.amount, got, err, test.want)
+		}
+	}
+	p.Adaptive.MinimumSignalBPS += 17
+	if got, err := observedNativeCostHurdle(p, 100_000_000, 2_000_000, 25_000_000, false); err != nil || got != 35 {
+		t.Fatalf("premium lost: %d,%v", got, err)
+	}
+	for _, native := range []uint64{0, 1_000_000_001, ^uint64(0)} {
+		if _, err := observedNativeCostHurdle(p, native, 2_000_000, 25_000_000, false); err == nil {
+			t.Fatal("invalid native price accepted")
+		}
+	}
+	if _, err := observedNativeCostHurdle(p, 100_000_000, 2_000_000, 0, false); err == nil {
+		t.Fatal("zero amount accepted")
+	}
+	if _, err := observedNativeCostHurdle(p, 100_000_000, ^uint64(0), ^uint64(0), true); err == nil {
+		t.Fatal("overflowing sell value accepted")
+	}
+	previous := uint32(0)
+	for native := uint64(10_000_000); native <= 1_000_000_000; native += 10_000_000 {
+		got, err := observedNativeCostHurdle(p, native, 2_000_000, 25_000_000, false)
+		if err != nil || got < previous || got < 27 {
+			t.Fatalf("non-monotone or missing safety/premium: %d,%v", got, err)
+		}
+		previous = got
+	}
+}
+
+func TestObservedNativeCostKeepsQuoteAndRiskGuards(t *testing.T) {
+	p := observedCostPolicy(t)
+	quote, err := observedCostQuote(p)(2_000_000, false, p.InputAmount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := AdaptiveDecision{Strategy: StrategyMomentum, SignalBPS: 100}
+	if ok, err := adaptiveQuotePassesWithHurdle(p, &decision, quote, 2_000_000, false, 18); err != nil || !ok {
+		t.Fatalf("valid observed-cost quote refused: %v,%v", ok, err)
+	}
+	bad := quote
+	bad.MinimumOutput--
+	if ok, _ := adaptiveQuotePassesWithHurdle(p, &decision, bad, 2_000_000, false, 18); ok {
+		t.Fatal("slippage floor weakened")
+	}
+	bad = quote
+	bad.EstimatedOutput /= 2
+	bad.MinimumOutput /= 2
+	if ok, _ := adaptiveQuotePassesWithHurdle(p, &decision, bad, 2_000_000, false, 18); ok {
+		t.Fatal("quote impact guard bypassed")
+	}
+	decision.SignalBPS = 18
+	if ok, _ := adaptiveQuotePassesWithHurdle(p, &decision, quote, 2_000_000, false, 18); ok {
+		t.Fatal("adverse quote impact omitted from hurdle")
+	}
+	p.StartingOutputUnits = 1_000_000
+	p.Adaptive.MaxDrawdownBPS = 1
+	ledger, err := NewLedger(p, 2_000_000, 100_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err = ledger.Mark(1_000_000, 100_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strategy, err := newAdaptiveStrategy(p.Adaptive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exit, triggered, err := strategy.decideWithHurdle(time.Now().UTC(), 1_000_000, true, ledger, math.MaxUint16)
+	if err != nil || !triggered || exit.Strategy != StrategyRiskExit {
+		t.Fatalf("unfundable ordinary hurdle suppressed risk exit: %+v,%v", exit, err)
+	}
+}
 
 func adaptiveTestPolicy() Policy {
 	policy := sellPolicy()

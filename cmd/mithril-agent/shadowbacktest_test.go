@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,90 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
+
+func TestObservedNativeCostBacktestIsOfflineAndProvenanceBound(t *testing.T) {
+	p, err := buildAdaptiveJUPPolicy(25_000_000, 20_000_000, 3_000_000, 100, 100_000, "So11111111111111111111111111111111111111112", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Adaptive.FastWindow, p.Adaptive.SlowWindow = 2, 4
+	dir := privateTestDirectory(t)
+	policyPath := filepath.Join(dir, "policy.json")
+	writeJSON(t, policyPath, p)
+	primary := &shadowSearchReader{identity: p.Trigger.PrimarySourceSHA256}
+	secondary := &shadowSearchReader{identity: p.Trigger.SecondarySourceSHA256}
+	peg1 := &shadowSearchReader{identity: p.QuotePeg.PrimarySourceSHA256, price: 1_000_000}
+	peg2 := &shadowSearchReader{identity: p.QuotePeg.SecondarySourceSHA256, price: 1_000_000}
+	native1 := &shadowSearchReader{identity: p.NativeFeePrice.PrimarySourceSHA256, price: 100_000_000}
+	native2 := &shadowSearchReader{identity: p.NativeFeePrice.SecondarySourceSHA256, price: 100_000_000}
+	log, err := newDailyJournal(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := log.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	runner, err := shadow.NewRunner(p, primary, secondary, shadowSearchUnavailableQuoter{}, log, peg1, peg2, native1, native2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 12; i++ {
+		at := start.Add(time.Duration(i) * time.Minute)
+		primary.price, secondary.price = 2_000_000+uint64(i)*6_000, 2_000_000+uint64(i)*6_000
+		for _, reader := range []*shadowSearchReader{primary, secondary, peg1, peg2, native1, native2} {
+			reader.at = at
+		}
+		if tick, err := runner.Step(t.Context(), at); err != nil || tick.Event != shadow.EventWaiting {
+			t.Fatalf("baseline did not wait: %+v,%v", tick, err)
+		}
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(dir, "shadow-2026-09-05.jsonl")
+	before, err := os.ReadFile(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--policy", policyPath, "--dir", dir, "--day", "2026-09-05", "--spread-bps", "1", "--cost-experiment", shadow.ObservedNativeCostVersion}
+	var output bytes.Buffer
+	if err := runShadowBacktest(args, &output); err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Version     string                 `json:"experiment"`
+		PolicyHash  string                 `json:"policy_sha256"`
+		HistoryHash string                 `json:"history_sha256"`
+		Fee         string                 `json:"assumed_fee_lamports"`
+		Model       bool                   `json:"pool_modelled"`
+		Admission   bool                   `json:"admission_evidence"`
+		Enabled     bool                   `json:"trading_enabled"`
+		Baseline    shadow.RoundTripResult `json:"baseline"`
+		Observed    shadow.RoundTripResult `json:"observed_native_cost"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	pin, err := p.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Version != shadow.ObservedNativeCostVersion || result.PolicyHash != pin || len(result.HistoryHash) != 64 || result.Fee != "100000" || !result.Model || result.Admission || result.Enabled || result.Baseline.Counts.Buys != 0 || result.Observed.Counts.Buys == 0 {
+		t.Fatalf("invalid experiment: %s", output.String())
+	}
+	after, err := os.ReadFile(journalPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("experiment changed journal")
+	}
+	for _, extra := range [][]string{{"--risk-lanes"}, {"--cost-experiment", "unknown"}} {
+		if err := runShadowBacktest(append(append([]string(nil), args...), extra...), io.Discard); err == nil {
+			t.Fatal("unsupported experiment combination accepted")
+		}
+	}
+}
 
 // roundTripFixture and reportFixture are the two values writeBacktest renders,
 // built here so the rendering tests do not depend on a recorded journal.

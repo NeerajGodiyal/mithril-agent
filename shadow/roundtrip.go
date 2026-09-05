@@ -2,6 +2,7 @@ package shadow
 
 import (
 	"errors"
+	"math"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
@@ -109,6 +110,30 @@ func ReplayRoundTripTicks(
 	return replayRoundTripTicks(policy, ticks, quoteFor, false)
 }
 
+// ObservedNativeCostVersion is an offline-only experiment, not a policy version.
+const ObservedNativeCostVersion = "observed-native-cost-v1"
+
+type roundTripCostModel uint8
+
+const (
+	policyNativeCost roundTripCostModel = iota
+	observedNativeCost
+)
+
+// ReplayObservedNativeCost strictly verifies the unchanged source journal before
+// rerunning it with observed SOL fee valuation. Quotes supplied by the caller
+// are counterfactual models, not historical venue evidence or admission evidence.
+func ReplayObservedNativeCost(policy Policy, ticks []Tick, quoteFor func(uint64, bool, uint64) (Quote, error)) (RoundTripResult, error) {
+	if policy.Cluster != Mainnet || policy.Adaptive == nil || policy.Adaptive.Version != AdaptiveVersion ||
+		policy.NativeFeePrice == nil || policy.IsSell() {
+		return RoundTripResult{}, errors.New("observed native cost experiment requires a v2 non-SOL Mainnet adaptive buy policy")
+	}
+	if _, err := Replay(policy, ticks); err != nil {
+		return RoundTripResult{}, err
+	}
+	return replayRoundTripTicksWithCost(policy, ticks, quoteFor, false, observedNativeCost)
+}
+
 // ReplayRoundTripTicksWithLiquidationMarks keeps strategy and quote prices
 // direction-aware while valuing every book at the same conservative sell mark.
 // It is intended for comparisons whose lanes can hold different inventory.
@@ -125,6 +150,12 @@ func replayRoundTripTicks(
 	ticks []Tick,
 	quoteFor func(priceMicros uint64, sell bool, inputAmount uint64) (Quote, error),
 	liquidationMarks bool,
+) (RoundTripResult, error) {
+	return replayRoundTripTicksWithCost(policy, ticks, quoteFor, liquidationMarks, policyNativeCost)
+}
+
+func replayRoundTripTicksWithCost(policy Policy, ticks []Tick,
+	quoteFor func(uint64, bool, uint64) (Quote, error), liquidationMarks bool, costModel roundTripCostModel,
 ) (RoundTripResult, error) {
 	if err := policy.Validate(); err != nil {
 		return RoundTripResult{}, err
@@ -163,7 +194,7 @@ func replayRoundTripTicks(
 			nativePrimary:     tick.NativeFeePrimary, nativeSecondary: tick.NativeFeeSecondary,
 		})
 	}
-	return replayRoundTrip(policy, observations, quoteFor, liquidationMarks)
+	return replayRoundTripWithCost(policy, observations, quoteFor, liquidationMarks, costModel)
 }
 
 type roundTripObservation struct {
@@ -191,6 +222,12 @@ func replayRoundTrip(
 	observations []roundTripObservation,
 	quoteFor func(priceMicros uint64, sell bool, inputAmount uint64) (Quote, error),
 	liquidationMarks bool,
+) (RoundTripResult, error) {
+	return replayRoundTripWithCost(policy, observations, quoteFor, liquidationMarks, policyNativeCost)
+}
+
+func replayRoundTripWithCost(policy Policy, observations []roundTripObservation,
+	quoteFor func(uint64, bool, uint64) (Quote, error), liquidationMarks bool, costModel roundTripCostModel,
 ) (RoundTripResult, error) {
 	if !policy.RoundTrip() {
 		return RoundTripResult{}, errors.New("policy has no return trigger; use Replay for one direction")
@@ -314,14 +351,31 @@ func replayRoundTrip(
 		triggered := thresholdMet(rule, price)
 		var decision *AdaptiveDecision
 		if strategy != nil {
-			adaptiveDecision, adaptiveTriggered, decisionErr := strategy.decide(
-				observation.at, price, sell, result.Ledger,
+			minimum := strategy.policy.MinimumSignalBPS
+			costUnavailable := false
+			if costModel == observedNativeCost {
+				amount, _ := paperAttempt(policy, result.Ledger, sell, nextAmount, price, nil)
+				// An unfundable ordinary lot must not suppress a drawdown exit.
+				minimum = math.MaxUint16
+				costUnavailable = true
+				if amount != 0 {
+					hurdle, err := observedNativeCostHurdle(policy, nativePrice[0], price, amount, sell)
+					if err == nil {
+						minimum, costUnavailable = uint16(hurdle), false
+					}
+				}
+			}
+			adaptiveDecision, adaptiveTriggered, decisionErr := strategy.decideWithHurdle(
+				observation.at, price, sell, result.Ledger, minimum,
 			)
 			if decisionErr != nil {
 				return RoundTripResult{}, decisionErr
 			}
 			decision = &adaptiveDecision
 			triggered = adaptiveTriggered
+			if costUnavailable && decision.Strategy != StrategyRiskExit {
+				triggered = false
+			}
 		}
 		if triggered {
 			if sell {
@@ -461,8 +515,15 @@ func replayRoundTrip(
 			}
 			return RoundTripResult{}, errors.New("round-trip quote changed the requested input amount")
 		}
-		passes, guardErr := adaptiveQuotePasses(
-			policy, decision, decisionQuote, price, sell,
+		var hurdle uint32
+		if costModel == observedNativeCost && decision.Strategy != StrategyRiskExit {
+			hurdle, err = observedNativeCostHurdle(policy, nativePrice[0], price, decisionQuote.InputAmount, sell)
+			if err != nil {
+				return RoundTripResult{}, err
+			}
+		}
+		passes, guardErr := adaptiveQuotePassesWithHurdle(
+			policy, decision, decisionQuote, price, sell, hurdle,
 		)
 		if guardErr != nil {
 			result.Counts.Missed++

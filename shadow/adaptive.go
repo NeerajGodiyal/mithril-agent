@@ -170,6 +170,17 @@ func newAdaptiveStrategy(policy *AdaptivePolicy) (*adaptiveStrategy, error) {
 func (s *adaptiveStrategy) decide(
 	at time.Time, price uint64, nextSell bool, ledger Ledger,
 ) (AdaptiveDecision, bool, error) {
+	if s == nil {
+		return AdaptiveDecision{}, false, errors.New("adaptive decision needs a strategy, price, and time")
+	}
+	return s.decideWithHurdle(at, price, nextSell, ledger, s.policy.MinimumSignalBPS)
+}
+
+// decideWithHurdle is shared with the offline cost experiment. Runtime callers
+// retain their versioned policy hurdle through decide; risk exits remain first.
+func (s *adaptiveStrategy) decideWithHurdle(
+	at time.Time, price uint64, nextSell bool, ledger Ledger, minimumSignal uint16,
+) (AdaptiveDecision, bool, error) {
 	if s == nil || price == 0 || at.IsZero() {
 		return AdaptiveDecision{}, false, errors.New("adaptive decision needs a strategy, price, and time")
 	}
@@ -229,8 +240,8 @@ func (s *adaptiveStrategy) decide(
 	decision.SignalBPS = signal
 	decision.VolatilityBPS = volatility
 
-	trendEdge := max(uint16(volatility/2), s.policy.MinimumSignalBPS)
-	rangeEdge := max(volatility, s.policy.MinimumSignalBPS)
+	trendEdge := max(uint16(volatility/2), minimumSignal)
+	rangeEdge := max(volatility, minimumSignal)
 	if volatility > s.policy.MaxVolatilityBPS {
 		decision.Regime = RegimeVolatile
 		decision.Reason = "volatility_limit"
@@ -400,6 +411,12 @@ func adaptiveQuoteSignalCostFloorBPS(
 func adaptiveQuotePasses(
 	policy Policy, decision *AdaptiveDecision, quote Quote, price uint64, sell bool,
 ) (bool, error) {
+	return adaptiveQuotePassesWithHurdle(policy, decision, quote, price, sell, 0)
+}
+
+func adaptiveQuotePassesWithHurdle(
+	policy Policy, decision *AdaptiveDecision, quote Quote, price uint64, sell bool, hurdle uint32,
+) (bool, error) {
 	if policy.Adaptive == nil {
 		return true, nil
 	}
@@ -419,15 +436,61 @@ func adaptiveQuotePasses(
 	if decision.Strategy == StrategyRiskExit {
 		return true, nil
 	}
-	dynamicFloor, floorErr := adaptiveTradeCostFloorBPS(policy, quote, price, sell)
-	if floorErr != nil {
-		return false, nil
+	if hurdle == 0 {
+		dynamicFloor, floorErr := adaptiveTradeCostFloorBPS(policy, quote, price, sell)
+		if floorErr != nil {
+			return false, nil
+		}
+		hurdle = max(uint32(policy.Adaptive.MinimumSignalBPS), dynamicFloor)
 	}
-	required := uint64(max(uint32(policy.Adaptive.MinimumSignalBPS), dynamicFloor))
+	required := uint64(hurdle)
 	if impact < 0 {
 		required += uint64(-(int64(impact)))
 	}
 	return uint64(magnitude32(decision.SignalBPS)) >= required, nil
+}
+
+// observedNativeCostHurdle changes only fee valuation, retaining the baseline's
+// extra selectivity above its ceiling-derived opening cost floor. This is used
+// only by the explicit offline experiment, never policy validation or runners.
+func observedNativeCostHurdle(policy Policy, nativePrice, marketPrice, amount uint64, sell bool) (uint32, error) {
+	if policy.Adaptive == nil || policy.Adaptive.Version != AdaptiveVersion || policy.NativeFeePrice == nil ||
+		nativePrice == 0 || nativePrice > policy.NativeFeePriceCeilingMicros || amount == 0 {
+		return 0, errors.New("observed native cost needs bounded native price and input")
+	}
+	openingFloor, err := adaptiveQuoteSignalCostFloorBPS(AdaptiveVersion, policy.SlippageBPS,
+		policy.FeeLamports, policy.NativeFeePriceCeilingMicros, policy.InputAmount, policy.InputDecimals)
+	if err != nil || uint32(policy.Adaptive.MinimumSignalBPS) < openingFloor {
+		return 0, errors.New("observed native cost needs a valid baseline hurdle")
+	}
+	inputValue, err := scaleToMicros(amount, quoteDecimalsFor(policy))
+	if sell {
+		inputValue, err = valueAt(amount, marketPrice, baseDecimalsFor(policy))
+	}
+	if err != nil {
+		return 0, err
+	}
+	// Round native fees up, not down to a USD micro before the basis-point
+	// ceiling: a fractional micro can cross an exact per-leg bps boundary.
+	high, low := bits.Mul64(policy.FeeLamports, nativePrice)
+	if high >= 1_000_000_000 {
+		return 0, errors.New("observed native fee value overflows")
+	}
+	feeValue, remainder := bits.Div64(high, low, 1_000_000_000)
+	if remainder != 0 {
+		if feeValue == math.MaxUint64 {
+			return 0, errors.New("observed native fee value overflows")
+		}
+		feeValue++
+	}
+	if feeValue == 0 {
+		return 0, errors.New("observed native fee value is invalid")
+	}
+	floor, err := adaptiveSignalCostFloorBPS(AdaptiveVersion, policy.SlippageBPS, feeValue, inputValue)
+	if err != nil {
+		return 0, err
+	}
+	return floor + uint32(policy.Adaptive.MinimumSignalBPS) - openingFloor, nil
 }
 
 func adaptiveTradeCostFloorBPS(

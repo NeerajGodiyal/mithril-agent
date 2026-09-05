@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -45,6 +47,15 @@ uses.
                     current, and aggressive paper settings on the same ticks
   --json            emit the report as JSON
 
+  --cost-experiment observed-native-cost-v1
+                    offline v2 non-SOL adaptive comparison using verified
+                    journaled SOL/USD for the fee hurdle; cannot combine with
+                    --risk-lanes. Retains fees, reserves, loss/source/slippage
+                    limits and extra selectivity above the original cost floor.
+                    Outputs modeled baseline and experiment as JSON. Missing
+                    historical venue quotes are modeled using --spread-bps;
+                    this is not admission evidence and activates nothing.
+
 The result is only as honest as --spread-bps. Read the pool's real quote with
 "mithril-agent swap discover" and set it from what you actually see.`
 
@@ -57,6 +68,7 @@ func runShadowBacktest(args []string, output io.Writer) error {
 	spreadBPS := flags.Uint("spread-bps", 100, "assumed pool cost each way, in basis points")
 	day := flags.String("day", "", "UTC day, YYYY-MM-DD")
 	riskLanes := flags.Bool("risk-lanes", false, "compare paper risk profiles")
+	costExperiment := flags.String("cost-experiment", "", "offline observed-native-cost-v1 comparison")
 	asJSON := flags.Bool("json", false, "emit JSON")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -67,6 +79,9 @@ func runShadowBacktest(args []string, output io.Writer) error {
 	}
 	if flags.NArg() != 0 || *policyPath == "" || *directory == "" {
 		return errors.New("shadow backtest requires --policy and --dir")
+	}
+	if *costExperiment != "" && (*costExperiment != shadow.ObservedNativeCostVersion || *riskLanes || *buyAtUSD != "") {
+		return errors.New("cost experiment must be observed-native-cost-v1 without --risk-lanes or --buy-at-usd")
 	}
 	// A pool that costs nothing is the single easiest way to make a paper
 	// result flatter itself, and 100% would consume every trade.
@@ -122,6 +137,9 @@ func runShadowBacktest(args []string, output io.Writer) error {
 	if len(prices) < 2 {
 		return errors.New("that day recorded fewer than two observable prices to score")
 	}
+	if *costExperiment != "" {
+		return writeNativeCostExperiment(output, chosen, uint64(*spreadBPS), policy, ticks)
+	}
 	if *riskLanes {
 		return writeRiskComparison(output, *asJSON, chosen, uint64(*spreadBPS), policy, ticks)
 	}
@@ -140,6 +158,46 @@ func runShadowBacktest(args []string, output io.Writer) error {
 		return err
 	}
 	return writeBacktest(output, *asJSON, chosen, uint64(*spreadBPS), result, report)
+}
+
+// writeNativeCostExperiment writes only stdout. The policy and source journal
+// remain unchanged; neither model is an executable quote or market admission.
+func writeNativeCostExperiment(output io.Writer, day string, spreadBPS uint64, policy shadow.Policy, ticks []shadow.Tick) error {
+	quote := modelledPool(policy, spreadBPS, policy.SlippageBPS)
+	experiment, err := shadow.ReplayObservedNativeCost(policy, ticks, quote)
+	if err != nil {
+		return err
+	}
+	baseline, err := shadow.ReplayRoundTripTicks(policy, ticks, quote)
+	if err != nil {
+		return err
+	}
+	policyHash, err := policy.Fingerprint()
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(ticks)
+	if err != nil {
+		return err
+	}
+	digest := sha256.Sum256(append([]byte("mithril-agent/cost-experiment-history-v1\x00"), encoded...))
+	return json.NewEncoder(output).Encode(struct {
+		Version           string                 `json:"experiment"`
+		Day               string                 `json:"day"`
+		PolicySHA256      string                 `json:"policy_sha256"`
+		HistorySHA256     string                 `json:"history_sha256"`
+		FeeLamports       uint64                 `json:"assumed_fee_lamports,string"`
+		SpreadBPS         uint64                 `json:"assumed_spread_bps"`
+		PoolModelled      bool                   `json:"pool_modelled"`
+		AdmissionEvidence bool                   `json:"admission_evidence"`
+		TradingEnabled    bool                   `json:"trading_enabled"`
+		Limitation        string                 `json:"limitation"`
+		Baseline          shadow.RoundTripResult `json:"baseline"`
+		Observed          shadow.RoundTripResult `json:"observed_native_cost"`
+	}{Version: shadow.ObservedNativeCostVersion, Day: day, PolicySHA256: policyHash, HistorySHA256: hex.EncodeToString(digest[:]),
+		FeeLamports: policy.FeeLamports, SpreadBPS: spreadBPS, PoolModelled: true,
+		Limitation: "Counterfactual venue quotes are modeled, not historical fills; fresh forward paper quotes are required before admission.",
+		Baseline:   baseline, Observed: experiment})
 }
 
 // observedPrices keeps only ticks where the market could actually be read. A

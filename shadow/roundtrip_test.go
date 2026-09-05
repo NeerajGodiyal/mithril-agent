@@ -1,11 +1,131 @@
 package shadow
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 )
+
+func observedCostPolicy(t *testing.T) Policy {
+	t.Helper()
+	p := jupBuyPolicy(t)
+	p.InputAmount, p.StartingInputUnits, p.FeeLamports = 25_000_000, 25_000_000, 100_000
+	p.StartingFeeReserveLamports = 20_000_000
+	adaptive, err := DefaultAdaptiveQuotePolicy(p.SlippageBPS, p.FeeLamports, p.NativeFeePriceCeilingMicros, p.InputAmount, p.InputDecimals, p.TickSeconds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adaptive.FastWindow, adaptive.SlowWindow = 2, 4
+	p.Adaptive = &adaptive
+	sell := p.Trigger
+	sell.Direction = pricetrigger.SellAtOrAbove
+	sell.ThresholdMicros = pricetrigger.MaxPriceMicros
+	p.ReturnTrigger = &sell
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func observedCostTicks(t *testing.T, p Policy, nativePrice uint64) []Tick {
+	t.Helper()
+	primary := &stubSource{identity: p.Trigger.PrimarySourceSHA256}
+	secondary := &stubSource{identity: p.Trigger.SecondarySourceSHA256}
+	peg1 := &stubSource{identity: p.QuotePeg.PrimarySourceSHA256, price: 1_000_000}
+	peg2 := &stubSource{identity: p.QuotePeg.SecondarySourceSHA256, price: 1_000_000}
+	native1 := &stubSource{identity: p.NativeFeePrice.PrimarySourceSHA256, price: nativePrice}
+	native2 := &stubSource{identity: p.NativeFeePrice.SecondarySourceSHA256, price: nativePrice}
+	recorder := &stubRecorder{}
+	runner, err := NewRunner(p, primary, secondary, &stubQuoter{}, recorder, peg1, peg2, native1, native2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 12; i++ {
+		at := start.Add(time.Duration(i) * p.Tick())
+		primary.price, secondary.price = 2_000_000+uint64(i)*6_000, 2_000_000+uint64(i)*6_000
+		for _, source := range []*stubSource{primary, secondary, peg1, peg2, native1, native2} {
+			source.at = at
+		}
+		tick, err := runner.Step(t.Context(), at)
+		if err != nil || tick.Event != EventWaiting {
+			t.Fatalf("baseline fixture should wait: %+v,%v", tick, err)
+		}
+	}
+	return recorder.ticks
+}
+
+func observedCostQuote(p Policy) func(uint64, bool, uint64) (Quote, error) {
+	return func(price uint64, sell bool, amount uint64) (Quote, error) {
+		out := amount * 1_000_000 / price
+		if sell {
+			out = amount * price / 1_000_000
+		}
+		out = out * 9999 / 10000
+		return Quote{InputAmount: amount, EstimatedOutput: out, MinimumOutput: (out*uint64(10000-p.SlippageBPS) + 9999) / 10000}, nil
+	}
+}
+
+func TestObservedNativeCostExperimentReusesReplayAndPreservesPolicy(t *testing.T) {
+	p := observedCostPolicy(t)
+	ticks := observedCostTicks(t, p, 100_000_000)
+	before, err := p.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline, err := ReplayRoundTripTicks(p, ticks, observedCostQuote(p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	experiment, err := ReplayObservedNativeCost(p, ticks, observedCostQuote(p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseline.Counts.Buys != 0 || experiment.Counts.Buys == 0 {
+		t.Fatalf("expected observed-price entry only: baseline=%+v experiment=%+v", baseline.Counts, experiment.Counts)
+	}
+	after, _ := p.Fingerprint()
+	if before != after || !reflect.DeepEqual(experiment.Ledger.Policy, p) || experiment.Ledger.FeeReserveLamports > p.StartingFeeReserveLamports || experiment.Ledger.LockedRentLamports != p.OneTimeSetupRentLamports {
+		t.Fatal("experiment changed policy, reserve funding or rent")
+	}
+	repeated, err := ReplayRoundTripTicks(p, ticks, observedCostQuote(p))
+	if err != nil || !reflect.DeepEqual(repeated, baseline) {
+		t.Fatal("experiment changed baseline")
+	}
+	ceilingTicks := observedCostTicks(t, p, 999_000_000)
+	want, err := ReplayRoundTripTicks(p, ceilingTicks, observedCostQuote(p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReplayObservedNativeCost(p, ceilingTicks, observedCostQuote(p))
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatal("ceiling-valued experiment differs from baseline")
+	}
+	for _, kind := range []string{"missing", "changed", "stale", "divergent", "ceiling"} {
+		t.Run(kind, func(t *testing.T) {
+			bad := append([]Tick(nil), ticks...)
+			sample := *bad[0].NativeFeePrimary
+			bad[0].NativeFeePrimary = &sample
+			switch kind {
+			case "missing":
+				bad[0].NativeFeePrimary = nil
+			case "changed":
+				bad[0].NativeFeePriceMicros++
+			case "stale":
+				sample.PublishedAt = sample.PublishedAt.Add(-time.Hour)
+			case "divergent":
+				sample.PriceMicros *= 2
+			case "ceiling":
+				sample.PriceMicros = 2 * p.NativeFeePriceCeilingMicros
+			}
+			if _, err := ReplayObservedNativeCost(p, bad, observedCostQuote(p)); err == nil {
+				t.Fatal("unverified source evidence accepted")
+			}
+		})
+	}
+}
 
 // roundTripPolicy is a sell-then-buy-back rule on one book: start holding SOL,
 // sell at or above $22, buy back at or below $18.
