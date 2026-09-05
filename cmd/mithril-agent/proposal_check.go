@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/internal/control"
@@ -141,12 +142,16 @@ Rechecks one private candidate against protected policy and providers. It cannot
 
   --candidate PATH               absolute private candidate JSON path
   --policy PATH                  absolute private expected policy JSON path
+  --retained-reserve-lamports N   optional positive decimal native reserve for advisory balance review
   --primary-trust-domain NAME    primary evidence provider owner
   --primary-origin-sha256 HEX    pinned primary credential-free origin hash
   --secondary-trust-domain NAME  secondary evidence provider owner
   --secondary-origin-sha256 HEX  pinned secondary credential-free origin hash
   --archive-probe-signature SIGNATURE
                                   protected old finalized v0 transaction signature
+
+The optional balance review uses the exact checked upfront cost. It neither
+reserves funds nor grants authority or proves execution readiness.
 
 Protected environment:
   MITHRIL_AGENT_MITHRIL_RPC_URL
@@ -466,6 +471,15 @@ func runProposalRecheck(ctx context.Context, args []string, output io.Writer) er
 	flags.SetOutput(io.Discard)
 	candidatePath := flags.String("candidate", "", "private candidate JSON path")
 	policyPath := flags.String("policy", "", "private expected policy JSON path")
+	var retainedReserve uint64
+	flags.Func("retained-reserve-lamports", "positive decimal native reserve for advisory review", func(raw string) error {
+		value, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil || value == 0 || strconv.FormatUint(value, 10) != raw {
+			return errors.New("retained reserve must be a positive canonical decimal uint64")
+		}
+		retainedReserve = value
+		return nil
+	})
 	primaryTrustDomain := flags.String("primary-trust-domain", "", "primary evidence provider trust domain")
 	primaryOrigin := flags.String("primary-origin-sha256", "", "pinned primary evidence origin")
 	secondaryTrustDomain := flags.String("secondary-trust-domain", "", "secondary evidence provider trust domain")
@@ -509,14 +523,23 @@ func runProposalRecheck(ctx context.Context, args []string, output io.Writer) er
 	if err != nil {
 		return err
 	}
+	bindings := proposalcheck.ProviderBindings{
+		PrimaryTrustDomain: *primaryTrustDomain, PrimaryOriginSHA256: *primaryOrigin,
+		SecondaryTrustDomain: *secondaryTrustDomain, SecondaryOriginSHA256: *secondaryOrigin,
+		ArchiveProbeSignature: *archiveProbeSignature,
+	}
+	if retainedReserve != 0 {
+		result, err := proposalcheck.RecheckWithNativeReserve(ctx, lifecycle,
+			providers.primary, providers.secondary, expectedPolicy, bindings, candidate, retainedReserve)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(output).Encode(result)
+	}
 	result, err := proposalcheck.Recheck(
 		ctx, lifecycle, providers.primary, providers.secondary,
 		expectedPolicy,
-		proposalcheck.ProviderBindings{
-			PrimaryTrustDomain: *primaryTrustDomain, PrimaryOriginSHA256: *primaryOrigin,
-			SecondaryTrustDomain: *secondaryTrustDomain, SecondaryOriginSHA256: *secondaryOrigin,
-			ArchiveProbeSignature: *archiveProbeSignature,
-		},
+		bindings,
 		candidate,
 	)
 	if err != nil {

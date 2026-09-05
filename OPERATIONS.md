@@ -2062,6 +2062,22 @@ rejects a changed provider origin and repeats every chain/evidence check over
 the exact candidate. Its result remains `checked_not_authorized`; the recheck
 command itself neither grants authority nor reaches signing or submission.
 
+Optionally add `--retained-reserve-lamports N` to that recheck for an advisory
+native SOL balance check. `N` is a positive decimal integer in lamports
+(1 SOL = 1,000,000,000 lamports): the SOL to retain, not the trade amount.
+The check requires matching independent balances for the protected wallet
+owner, within the checked proposal's evidence-context bounds, sufficient for
+both this reserve and the exact checked maximum upfront requirement. That
+requirement includes the transaction's native spend, fees and applicable rent;
+expected swap proceeds do not count toward it. Token-input funding remains
+subject to the existing separate token-account check.
+
+The additional `native_reserve` result is an observation, not a reservation:
+other activity can spend that balance after the check. It grants no authority,
+does not bypass exact approval or signer limits, and does not enable an
+autonomous funded runtime. Omitting the option leaves the ordinary recheck
+unchanged; passing it does not establish execution readiness.
+
 Success returns `checked_not_authorized` with
 `mainnet_signing_policy_not_configured`. That is the expected terminal state,
 not an error and not permission to sign. Do not place a private key in the
