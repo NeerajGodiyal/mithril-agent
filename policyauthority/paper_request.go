@@ -26,9 +26,10 @@ type paperRequestClaim struct {
 
 // ClaimPaperRequest binds the first frozen paper decision to one exact unsigned,
 // ungranted request in a dedicated, caller-protected journal. It rechecks chain
-// evidence but neither authorizes nor signs nor submits. This is not funded
-// readiness: supplied paper budgets are not native-wallet reserve evidence, and
-// rechecking a transaction does not establish the original quote's wall-clock age.
+// evidence and observes native balance against the checked upfront cost plus
+// bounds.ReserveLamports, but neither authorizes nor signs nor submits. This is
+// not funded readiness: the balance observation is not a durable funds reservation,
+// and rechecking a transaction does not establish the original quote's wall-clock age.
 // maxDecisionAge bounds recorded decision and quote receipt recency only; it is
 // not a provider quote TTL or evidence of a newly acquired executable quote.
 //
@@ -47,7 +48,7 @@ func ClaimPaperRequest(
 	scheduleWindowStartUnix int64,
 	now time.Time,
 	maxDecisionAge time.Duration,
-	evidence proposalcheck.Evidence,
+	evidence proposalcheck.NativeReserveEvidence,
 	primary, secondary proposalcheck.FinalizedSlotReader,
 ) (request signer.Request, err error) {
 	if err := policy.Validate(); err != nil {
@@ -80,8 +81,12 @@ func ClaimPaperRequest(
 	if err != nil {
 		return signer.Request{}, err
 	}
-	request, err = PrepareJupiterRequest(ctx, policy, candidate,
-		scheduleWindowStartUnix, now, evidence, primary, secondary)
+	checked, err := proposalcheck.RecheckWithNativeReserve(ctx, evidence, primary, secondary,
+		*policy.TransactionPolicy.Jupiter, *policy.JupiterProviders, candidate, bounds.ReserveLamports)
+	if err != nil {
+		return signer.Request{}, err
+	}
+	request, err = requestFromJupiterCheck(policy, candidate, checked.Result, scheduleWindowStartUnix, now)
 	if err != nil {
 		return signer.Request{}, err
 	}

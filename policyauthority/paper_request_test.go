@@ -20,6 +20,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 	"github.com/Overclock-Validator/mithril-agent/signer"
 	"github.com/Overclock-Validator/mithril-agent/solana"
+	"github.com/Overclock-Validator/mithril-agent/txflow"
 )
 
 type paperRequestFixture struct {
@@ -28,12 +29,42 @@ type paperRequestFixture struct {
 	ticks              []shadow.Tick
 	bounds             proposalcheck.PaperIntentBounds
 	candidate          proposalcheck.Candidate
-	evidence           proposalcheck.Evidence
+	evidence           proposalcheck.NativeReserveEvidence
 	primary, secondary jupiterSlot
 	start              int64
 	now                time.Time
 	maxDecisionAge     time.Duration
 	path               string
+}
+
+type paperReserveEvidence struct {
+	proposalcheck.Evidence
+	calls                      int
+	genesisChecks              int
+	owner                      string
+	upfront, reserve, min, max uint64
+	extra                      uint64
+	mutate                     func(*txflow.AccountEvidence)
+	err                        error
+}
+
+func (e *paperReserveEvidence) VerifyGenesis(ctx context.Context, expected string) error {
+	e.genesisChecks++
+	return e.Evidence.VerifyGenesis(ctx, expected)
+}
+
+func (e *paperReserveEvidence) VerifyNativeReserve(_ context.Context, owner string, upfront, reserve, minimum, maximum uint64) (txflow.AccountEvidence, error) {
+	e.calls++
+	e.owner, e.upfront, e.reserve, e.min, e.max = owner, upfront, reserve, minimum, maximum
+	account := txflow.AccountEvidence{
+		Address: owner, PrimaryOwner: "11111111111111111111111111111111", SecondaryOwner: "11111111111111111111111111111111",
+		PrimaryLamports: upfront + reserve + e.extra, SecondaryLamports: upfront + reserve + e.extra,
+		PrimaryContextSlot: minimum, SecondaryContextSlot: minimum,
+	}
+	if e.mutate != nil {
+		e.mutate(&account)
+	}
+	return account, e.err
 }
 
 func newPaperRequestFixture(t *testing.T) paperRequestFixture {
@@ -98,7 +129,7 @@ func newPaperRequestFixture(t *testing.T) paperRequestFixture {
 	return paperRequestFixture{policy: policy, paper: p, ticks: ticks, candidate: candidate,
 		bounds: proposalcheck.PaperIntentBounds{PolicySHA256: fingerprint, EvidenceSHA256: digest,
 			MaxInputAmount: 10, NativeBudgetLamports: 10_000_000, ReserveLamports: 1_000_000},
-		evidence: evidence, primary: primary, secondary: secondary, start: start, now: now, maxDecisionAge: 2 * time.Hour,
+		evidence: &paperReserveEvidence{Evidence: evidence}, primary: primary, secondary: secondary, start: start, now: now, maxDecisionAge: 2 * time.Hour,
 		path: filepath.Join(t.TempDir(), "paper-claim.jsonl")}
 }
 
@@ -139,7 +170,9 @@ func TestPaperRequestClaimIsDurableUnsignedAndIdempotent(t *testing.T) {
 	}
 }
 
-type expiredPaperEvidence struct{ proposalcheck.Evidence }
+type expiredPaperEvidence struct {
+	proposalcheck.NativeReserveEvidence
+}
 
 func (expiredPaperEvidence) NodeBlockHeight(context.Context, uint64) (uint64, error) {
 	return 200, nil
@@ -260,7 +293,9 @@ func TestPaperRequestClaimRequiresSuccessfulAppend(t *testing.T) {
 	}
 }
 
-type unexpectedPaperPreparation struct{ proposalcheck.Evidence }
+type unexpectedPaperPreparation struct {
+	proposalcheck.NativeReserveEvidence
+}
 
 func (unexpectedPaperPreparation) EvidenceProviderIdentities() (string, string) {
 	panic("rejected recency reached preparation")
@@ -389,5 +424,109 @@ func TestPaperRequestRejectsLegacyClaimWithoutUpgrade(t *testing.T) {
 	after, err := os.ReadFile(f.path)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatalf("legacy claim was upgraded or rewritten: %v", err)
+	}
+}
+
+func TestPaperRequestNativeReserveRechecksWithoutChangingClaim(t *testing.T) {
+	f := newPaperRequestFixture(t)
+	evidence := f.evidence.(*paperReserveEvidence)
+	checked, err := proposalcheck.Recheck(t.Context(), evidence, f.primary, f.secondary,
+		f.candidate.Policy, *f.policy.JupiterProviders, f.candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rechecks := evidence.genesisChecks
+	first, err := f.claim(t)
+	if err != nil {
+		t.Fatalf("exact reserve equality rejected: %v", err)
+	}
+	if got := evidence.genesisChecks; got != rechecks+1 {
+		t.Fatalf("claim performed %d proposal rechecks, want one", got-rechecks)
+	}
+	if evidence.calls != 1 || evidence.owner != f.candidate.Policy.Owner ||
+		evidence.upfront != checked.MaximumUpfrontLamports || evidence.reserve != f.bounds.ReserveLamports ||
+		evidence.min != max(checked.MinimumContextSlot, checked.PrimaryFeeContextSlot, checked.SecondaryFeeContextSlot, checked.SimulationContextSlot) ||
+		evidence.max != checked.MinimumContextSlot+proposalcheck.MaxEvidenceSlotSkew {
+		t.Fatalf("reserve check did not bind exact checked costs and contexts: %+v", evidence)
+	}
+	before, err := os.ReadFile(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence.extra = 100
+	again, err := f.claim(t)
+	if err != nil || evidence.calls != 2 || !reflect.DeepEqual(first, again) {
+		t.Fatalf("repeat did not reread balance and preserve request: calls=%d err=%v", evidence.calls, err)
+	}
+	after, err := os.ReadFile(f.path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("fresh balance changed durable claim: %v", err)
+	}
+	evidence.mutate = func(a *txflow.AccountEvidence) {
+		a.PrimaryLamports = evidence.upfront + evidence.reserve - 1
+		a.SecondaryLamports = a.PrimaryLamports
+	}
+	request, err := f.claim(t)
+	if err == nil || evidence.calls != 3 || !reflect.DeepEqual(request, signer.Request{}) {
+		t.Fatalf("repeat reused stale sufficient balance: calls=%d err=%v", evidence.calls, err)
+	}
+	after, err = os.ReadFile(f.path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("insufficient repeat changed durable claim: %v", err)
+	}
+}
+
+func TestPaperRequestNativeReserveRejectsBeforeClaim(t *testing.T) {
+	for _, name := range []string{"insufficient", "wrong account", "wrong owner", "disagreeing balance", "stale context", "future context", "reader error", "provider"} {
+		t.Run(name, func(t *testing.T) {
+			f := newPaperRequestFixture(t)
+			evidence := f.evidence.(*paperReserveEvidence)
+			evidence.mutate = func(a *txflow.AccountEvidence) {
+				switch name {
+				case "insufficient":
+					a.PrimaryLamports--
+					a.SecondaryLamports--
+				case "wrong account":
+					a.Address = "wrong"
+				case "wrong owner":
+					a.PrimaryOwner = "wrong"
+					a.SecondaryOwner = "wrong"
+				case "disagreeing balance":
+					a.SecondaryLamports++
+				case "stale context":
+					a.PrimaryContextSlot--
+				case "future context":
+					a.SecondaryContextSlot = evidence.max + 1
+				}
+			}
+			if name == "reader error" {
+				evidence.err = errors.New("native balance unavailable")
+			}
+			if name == "provider" {
+				f.primary.identity = strings.Repeat("3", 64)
+			}
+			request, err := f.claim(t)
+			if err == nil || !reflect.DeepEqual(request, signer.Request{}) {
+				t.Fatalf("invalid balance qualification returned request: %v", err)
+			}
+			wantCalls := 1
+			if name == "provider" {
+				wantCalls = 0
+			}
+			if evidence.calls != wantCalls {
+				t.Fatalf("reserve calls=%d, want %d", evidence.calls, wantCalls)
+			}
+			store, err := journal.Open(f.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			count := len(store.Records())
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatalf("failed reserve check appended %d records", count)
+			}
+		})
 	}
 }
