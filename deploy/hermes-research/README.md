@@ -169,8 +169,12 @@ sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
 An empty provisioned directory is not research evidence. The wrapper runs
 official-source research without the index until both `events.jsonl` exists and
 `index doctor --max-record-age 15m` passes.
-Check the doctor's last recorded time as well as its ready result; stale rooted
-evidence must not be presented to Hermes as current market context.
+The doctor's last recorded time proves recent local ingestion, not that the recorded
+cursor has caught up with the chain. Replaying old records can pass this check.
+The wrapper exposes valid recently ingested records as rooted history and
+explicitly tells Hermes that current chain state has not been verified. The
+dashboard reports the same limit. Comparing an independently observed producer
+root with the ingestion cursor is still required before claiming current data.
 
 For rootful Docker, copy the reviewed deployment inputs into a root-owned
 directory before running Compose. Running root-equivalent Compose from a

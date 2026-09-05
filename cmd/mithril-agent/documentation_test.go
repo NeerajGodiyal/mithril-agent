@@ -907,6 +907,8 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"finalizer_toolsets='mithril_paper'",
 		"/var/lib/mithril-agent-research/index/events.jsonl",
 		"index doctor", "--max-record-age 15m",
+		"mithril_evidence=recently_ingested",
+		"do not call it current chain state",
 		"research_toolsets=\"$research_toolsets,mithril_index\"",
 		"*,mithril_paper,*|*,mithril_paper_jup,*) exit 1",
 		"*,delegation,*) exit 1",
@@ -960,7 +962,7 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"--sessions \"$session_export\" --packet \"$validated_research\"",
 		"/var/lib/mithril-agent-research/evidence",
 		"/var/lib/mithril-agent-dashboard/research-evidence.json",
-		"if [ -n \"$finalizer_toolsets\" ]",
+		"if [ \"$packet_disposition\" = candidate ] && [ -n \"$finalizer_toolsets\" ]",
 		"export MITHRIL_HERMES_TOOLSETS=\"$finalizer_toolsets\"",
 		"/usr/bin/docker compose run --rm --no-TTY hermes-research >\"$finalizer_raw\"",
 		"ulimit -f 128",
@@ -1476,6 +1478,44 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	for _, forbidden := range []string{"hermes cron create", "supervised gateway", "restore the gateway"} {
 		if strings.Contains(deployReadme, forbidden) {
 			t.Errorf("Hermes deployment README contains obsolete schedule guidance %q", forbidden)
+		}
+	}
+}
+
+func TestHermesFinalizerSkipsNonCandidates(t *testing.T) {
+	runner := readDocumentation(t, "../../deploy/hermes-research/run-market-scout.sh")
+	line := func(prefix string) string {
+		t.Helper()
+		for _, value := range strings.Split(runner, "\n") {
+			if strings.HasPrefix(value, prefix) {
+				return value
+			}
+		}
+		t.Fatalf("Hermes wrapper is missing %q", prefix)
+		return ""
+	}
+	parser := line("packet_disposition=$(")
+	gate := line(`if [ "$packet_disposition"`)
+	script := "set -eu\npacket_receipt=$1\nfinalizer_toolsets=$2\n" + parser + "\n" + gate +
+		"\nprintf finalize\nelse\nprintf skip\nfi\n"
+	for _, test := range []struct {
+		receipt, toolsets, want string
+	}{
+		{`{"disposition":"candidate"}`, "mithril_paper", "finalize"},
+		{`{"disposition":"candidate"}`, "", "skip"},
+		{`{"hypothesis_id":"candidate","disposition":"no_change"}`, "mithril_paper", "skip"},
+		{`{"disposition": "blocked"}`, "mithril_paper_jup", "skip"},
+		{`{"disposition":"invented"}`, "mithril_paper", ""},
+		{`{}`, "mithril_paper", ""},
+		{`not json`, "mithril_paper", ""},
+	} {
+		output, err := exec.Command("/bin/sh", "-c", script, "test", test.receipt, test.toolsets).Output()
+		if test.want == "" {
+			if err == nil || len(output) != 0 {
+				t.Fatalf("invalid receipt reached dispatch: %q, %q, %v", test.receipt, output, err)
+			}
+		} else if err != nil || string(output) != test.want {
+			t.Fatalf("receipt %q with tools %q: got %q, %v; want %q", test.receipt, test.toolsets, output, err, test.want)
 		}
 	}
 }

@@ -63,6 +63,8 @@ func TestDashboardDoesNotPresentHermesAsTradingAuthority(t *testing.T) {
 		`Hermes risk review (advisory)`,
 		`Deterministic replay gates alone decide whether any paper plan may change.`,
 		`Individual source publication freshness is unavailable in this bounded view; packet age is not source age.`,
+		`Recorded history available`,
+		`Whether they include the latest chain activity has not been verified.`,
 	} {
 		if !strings.Contains(appJS, want) {
 			t.Errorf("Hermes boundary copy omits %q", want)

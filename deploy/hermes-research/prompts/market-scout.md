@@ -98,7 +98,22 @@ condition, but it cannot open a holdout, change a policy, authorize execution,
 promote a plan, or prove future profit.
 If the host marks it unavailable, do not infer any perps result.
 
-Do not recommend paper admission until an operator-owned point-in-time
+Separate existing-market parameter research from new-market admission. For
+`SOL/USDC` or `JUP/USDC` with host-provided current paper settings, a concrete,
+source-supported trading hypothesis may propose a bounded parameter experiment
+for the applicable deterministic replay tests even when new-market admission
+evidence or the Mithril index is unavailable. Those absences limit the claims
+you can make; they are not blanket vetoes on existing-market paper research.
+Do not invent facts, citations, measurements, or current on-chain state. Keep
+the two-independent-source candidate requirement, exact current parameters,
+independent risk veto, and all journal, replay, challenger, and authority gates.
+In a `no_change` or `blocked` packet, retain any genuinely source-supported
+observations with their correct verification status; explain the specific
+missing evidence for the hypothesis rather than citing unrelated admission
+requirements. Never force a candidate merely because research was performed.
+
+For new-market admission from the observation-only or research-only universe,
+do not recommend paper admission until an operator-owned point-in-time
 collector exists and has at least 30 consecutive complete days of evidence,
 canonical mint and pinned-authority checks, at least 99% bidirectional quote
 availability at a fixed cadence, median round-trip quote cost below 20 basis

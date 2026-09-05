@@ -54,7 +54,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	flags.StringVar(&marketAdmissionPath, "market-admission-status-path", "", "private WIF, JTO, and PYTH collection projection")
 	flags.StringVar(&recordMarketAdmissionPath, "record-market-admission", "", "atomically record the three fixed market collector credentials")
 	flags.StringVar(&recordMithrilPath, "record-mithril-evidence", "", "atomically record the latest Mithril evidence check")
-	flags.StringVar(&mithrilStatus, "mithril-evidence", "", "current or unavailable")
+	flags.StringVar(&mithrilStatus, "mithril-evidence", "", "recently_ingested or unavailable (current is a legacy alias for recently_ingested)")
 	flags.StringVar(&renderInstructionPath, "render-instruction", "", "render a validated preference for the Hermes research prompt")
 	flags.StringVar(&exportInstructionPath, "export-instruction", "", "export one validated canonical operator instruction")
 	if err := flags.Parse(args); err != nil {
@@ -97,11 +97,11 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 		if flags.NArg() != 0 || len(sockets) != 0 || len(optionalSockets) != 0 || instructionPath != "" || researchPath != "" ||
 			mithrilEvidencePath != "" || marketAdmissionPath != "" || renderInstructionPath != "" || exportInstructionPath != "" ||
 			!cleanAbsolutePath(recordMithrilPath) ||
-			(mithrilStatus != "current" && mithrilStatus != "unavailable") {
-			return errors.New("--record-mithril-evidence requires one path and current or unavailable")
+			(mithrilStatus != "recently_ingested" && mithrilStatus != "current" && mithrilStatus != "unavailable") {
+			return errors.New("--record-mithril-evidence requires one path and recently_ingested or unavailable")
 		}
 		return paperdashboard.RecordMithrilEvidence(
-			recordMithrilPath, mithrilStatus == "current", time.Now(),
+			recordMithrilPath, mithrilStatus != "unavailable", time.Now(),
 		)
 	}
 	if renderInstructionPath != "" {

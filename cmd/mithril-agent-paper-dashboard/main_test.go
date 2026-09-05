@@ -102,6 +102,23 @@ func TestRecordMithrilEvidenceModeDoesNotOpenAListener(t *testing.T) {
 	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("recorded status info=%v err=%v", info, err)
 	}
+	for _, status := range []string{"recently_ingested", "current"} {
+		if err := run(t.Context(), []string{
+			"--record-mithril-evidence", path, "--mithril-evidence", status,
+		}, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var recorded struct {
+			Available bool `json:"available_at_check"`
+		}
+		if err := json.Unmarshal(body, &recorded); err != nil || !recorded.Available {
+			t.Fatalf("local-ingestion status %q = %s, %v", status, body, err)
+		}
+	}
 	if err := run(t.Context(), []string{
 		"--record-mithril-evidence", path, "--mithril-evidence", "invented",
 	}, &bytes.Buffer{}); err == nil {

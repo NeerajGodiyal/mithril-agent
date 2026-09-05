@@ -106,7 +106,7 @@ if [ -f /var/lib/mithril-agent-research/index/events.jsonl ] &&
       --dir /var/lib/mithril-agent-research/index \
       --max-record-age 15m >/dev/null; then
   research_toolsets="$research_toolsets,mithril_index"
-  mithril_evidence=current
+  mithril_evidence=recently_ingested
 fi
 
 /usr/sbin/runuser -u mithril-agent-dashboard -- \
@@ -196,8 +196,8 @@ collect_research_packet() (
   valid_until=$(/usr/bin/date -u -d '6 hours' +%Y-%m-%dT%H:%M:%SZ)
   /usr/bin/printf '\n\nTrusted run-time anchors: `created_at` is %s and `valid_until` is %s. Copy both exact values; do not invent, round, reuse an older value, or calculate either timestamp.\n' \
     "$created_at" "$valid_until" >>"$research_query"
-  if [ "$mithril_evidence" = current ]; then
-    /usr/bin/printf '\nTrusted evidence availability: the local Mithril rooted index passed its 15-minute record-age check for this run, and `mithril_index` is available as a read-only research tool.\n' >>"$research_query"
+  if [ "$mithril_evidence" = recently_ingested ]; then
+    /usr/bin/printf '\nTrusted evidence availability: the local Mithril rooted index passed its 15-minute local-ingestion age check, and `mithril_index` is available as a read-only research tool. Its cursor has not been independently compared with the current chain root. Use it as recorded rooted history; do not call it current chain state. Replaying old records can also produce a recent local-ingestion timestamp.\n' >>"$research_query"
   else
     /usr/bin/printf '\nTrusted evidence availability: no local Mithril rooted index passed its 15-minute record-age check for this run. `mithril_index` is unavailable; do not claim that Mithril evidence was consulted.\n' >>"$research_query"
   fi
@@ -270,18 +270,20 @@ digest_prefix=$(/usr/bin/printf '%s' "$session_digest" | /usr/bin/cut -c1-16)
   "$session_export" "$evidence_archive/$run_stamp-$digest_prefix.sessions.jsonl"
 /usr/bin/install -o mithril-agent-research -g mithril-agent-research -m 0600 \
   "$research_evidence" "$evidence_archive/$run_stamp-$digest_prefix.evidence.json"
-/usr/sbin/runuser -u mithril-agent-research -- \
+packet_receipt=$(/usr/sbin/runuser -u mithril-agent-research -- \
   /usr/local/libexec/mithril-agent/mithril-agent research packet-record \
     --in "$bound_packet" \
     --archive-dir /var/lib/mithril-agent-research/reports \
-    --latest "$latest"
+    --latest "$latest")
+/usr/bin/printf '%s\n' "$packet_receipt"
+packet_disposition=$(/usr/bin/printf '%s\n' "$packet_receipt" | /usr/bin/python3 -c 'import json, sys; value = json.load(sys.stdin)["disposition"]; assert value in ("candidate", "no_change", "blocked"); print(value)')
 /usr/bin/install -o mithril-agent-research -g mithril-agent-research -m 0600 \
   "$research_evidence" "$latest_evidence"
 
 # A separate non-delegating session may turn the already validated hypothesis
 # into a paper challenger. It receives only the exact paper MCP toolsets whose
 # live gates passed above; its response is never used as research evidence.
-if [ -n "$finalizer_toolsets" ]; then
+if [ "$packet_disposition" = candidate ] && [ -n "$finalizer_toolsets" ]; then
   /usr/bin/cp "$base_query" "$finalizer_query"
   finalizer_created_at=$(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ)
   finalizer_valid_until=$(/usr/bin/date -u -d '6 hours' +%Y-%m-%dT%H:%M:%SZ)
@@ -301,6 +303,9 @@ if [ -n "$finalizer_toolsets" ]; then
     ulimit -f 128
     /usr/bin/docker compose run --rm --no-TTY hermes-research >"$finalizer_raw"
   )
+else
+  /usr/bin/printf 'Hermes finalizer skipped: disposition=%s; available paper toolsets=%s\n' \
+    "$packet_disposition" "${finalizer_toolsets:-none}"
 fi
 
 # Validate the dashboard projection again as the unprivileged dashboard user.
