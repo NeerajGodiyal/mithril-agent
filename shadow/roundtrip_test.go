@@ -1,6 +1,9 @@
 package shadow
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -31,6 +34,17 @@ func observedCostPolicy(t *testing.T) Policy {
 
 func observedCostTicks(t *testing.T, p Policy, nativePrice uint64) []Tick {
 	t.Helper()
+	ticks := observedCostTicksWithStep(t, p, nativePrice, 6_000)
+	for _, tick := range ticks {
+		if tick.Event != EventWaiting {
+			t.Fatalf("baseline fixture should wait: %+v", tick)
+		}
+	}
+	return ticks
+}
+
+func observedCostTicksWithStep(t *testing.T, p Policy, nativePrice, step uint64) []Tick {
+	t.Helper()
 	primary := &stubSource{identity: p.Trigger.PrimarySourceSHA256}
 	secondary := &stubSource{identity: p.Trigger.SecondarySourceSHA256}
 	peg1 := &stubSource{identity: p.QuotePeg.PrimarySourceSHA256, price: 1_000_000}
@@ -45,16 +59,80 @@ func observedCostTicks(t *testing.T, p Policy, nativePrice uint64) []Tick {
 	start := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 12; i++ {
 		at := start.Add(time.Duration(i) * p.Tick())
-		primary.price, secondary.price = 2_000_000+uint64(i)*6_000, 2_000_000+uint64(i)*6_000
+		primary.price, secondary.price = 2_000_000+uint64(i)*step, 2_000_000+uint64(i)*step
 		for _, source := range []*stubSource{primary, secondary, peg1, peg2, native1, native2} {
 			source.at = at
 		}
 		tick, err := runner.Step(t.Context(), at)
-		if err != nil || tick.Event != EventWaiting {
-			t.Fatalf("baseline fixture should wait: %+v,%v", tick, err)
+		if err != nil {
+			t.Fatalf("runner fixture failed: %+v,%v", tick, err)
 		}
 	}
 	return recorder.ticks
+}
+
+func TestObservedNativeCostComparisonExplainsOnlyFilteredSignals(t *testing.T) {
+	p := observedCostPolicy(t)
+	ticks := observedCostTicksWithStep(t, p, 100_000_000, 40_000)
+	for _, kind := range []string{"slippage_mismatch", "quote_impact_limit", "quote error", "malformed quote"} {
+		t.Run(kind, func(t *testing.T) {
+			quote := func(price uint64, sell bool, amount uint64) (Quote, error) {
+				q, err := observedCostQuote(p)(price, sell, amount)
+				switch kind {
+				case "slippage_mismatch":
+					q.MinimumOutput--
+				case "quote_impact_limit":
+					q.EstimatedOutput /= 2
+					q.MinimumOutput = q.EstimatedOutput
+				case "quote error":
+					return Quote{}, errors.New("modeled quote unavailable")
+				case "malformed quote":
+					q.InputAmount = 0
+				}
+				return q, err
+			}
+			baseline, observed, err := ReplayObservedNativeCostComparison(p, ticks, quote)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ordinary, err := ReplayRoundTripTicks(p, ticks, quote)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oldObserved, err := ReplayObservedNativeCost(p, ticks, quote)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for index, lane := range []RoundTripResult{baseline, observed} {
+				if lane.Counts.BuySignals == 0 {
+					t.Fatal("fixture did not exercise a signal in both lanes")
+				}
+				var total uint64
+				for _, count := range lane.FilteredReasons {
+					total += count
+				}
+				if total != lane.Counts.Filtered {
+					t.Fatalf("reason denominator differs from filtered: %+v", lane)
+				}
+				if kind == "quote error" || kind == "malformed quote" {
+					if total != 0 || lane.Counts.Missed != lane.Counts.BuySignals {
+						t.Fatalf("errors became filtered: %+v", lane)
+					}
+				} else if total == 0 || lane.FilteredReasons[kind] != lane.Counts.Filtered || lane.Counts.Missed != 0 {
+					t.Fatalf("wrong filter classification: %+v", lane)
+				}
+				lane.FilteredReasons = nil
+				want := []RoundTripResult{ordinary, oldObserved}[index]
+				if !reflect.DeepEqual(lane, want) || want.FilteredReasons != nil {
+					t.Fatal("diagnostics changed existing API results")
+				}
+				encoded, err := json.Marshal(want)
+				if err != nil || bytes.Contains(encoded, []byte("filtered_reasons")) {
+					t.Fatal("ordinary encoding acquired diagnostic output")
+				}
+			}
+		})
+	}
 }
 
 func observedCostQuote(p Policy) func(uint64, bool, uint64) (Quote, error) {

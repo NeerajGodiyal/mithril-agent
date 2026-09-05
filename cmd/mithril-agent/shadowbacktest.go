@@ -164,11 +164,7 @@ func runShadowBacktest(args []string, output io.Writer) error {
 // remain unchanged; neither model is an executable quote or market admission.
 func writeNativeCostExperiment(output io.Writer, day string, spreadBPS uint64, policy shadow.Policy, ticks []shadow.Tick) error {
 	quote := modelledPool(policy, spreadBPS, policy.SlippageBPS)
-	experiment, err := shadow.ReplayObservedNativeCost(policy, ticks, quote)
-	if err != nil {
-		return err
-	}
-	baseline, err := shadow.ReplayRoundTripTicks(policy, ticks, quote)
+	baseline, experiment, err := shadow.ReplayObservedNativeCostComparison(policy, ticks, quote)
 	if err != nil {
 		return err
 	}

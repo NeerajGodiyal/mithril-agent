@@ -87,6 +87,25 @@ func TestObservedNativeCostBacktestIsOfflineAndProvenanceBound(t *testing.T) {
 	if result.Version != shadow.ObservedNativeCostVersion || result.PolicyHash != pin || len(result.HistoryHash) != 64 || result.Fee != "100000" || !result.Model || result.Admission || result.Enabled || result.Baseline.Counts.Buys != 0 || result.Observed.Counts.Buys == 0 {
 		t.Fatalf("invalid experiment: %s", output.String())
 	}
+	output.Reset()
+	if err := runShadowBacktest(append(append([]string(nil), args...), "--spread-bps", "100"), &output); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Observed.Counts.Filtered == 0 || result.Observed.FilteredReasons["signal_below_cost_hurdle"] != result.Observed.Counts.Filtered || result.Observed.Counts.Missed != 0 {
+		t.Fatalf("modeled adverse spread lacks exact rejection explanation: %s", output.String())
+	}
+	for _, lane := range []shadow.RoundTripResult{result.Baseline, result.Observed} {
+		var total uint64
+		for _, count := range lane.FilteredReasons {
+			total += count
+		}
+		if total != lane.Counts.Filtered {
+			t.Fatal("CLI filtered reason denominator changed")
+		}
+	}
 	after, err := os.ReadFile(journalPath)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatal("experiment changed journal")

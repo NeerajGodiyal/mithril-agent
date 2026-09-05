@@ -94,6 +94,46 @@ func TestObservedNativeCostKeepsQuoteAndRiskGuards(t *testing.T) {
 	}
 }
 
+func TestAdaptiveQuoteRejectionNamesExistingBranches(t *testing.T) {
+	for _, name := range []string{"pass", "slippage_mismatch", "quote_impact_limit", "trade_cost_floor_unavailable", "signal_below_cost_hurdle", "guard error", "risk exit"} {
+		t.Run(name, func(t *testing.T) {
+			p := observedCostPolicy(t)
+			quote, err := observedCostQuote(p)(2_000_000, false, p.InputAmount)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision := AdaptiveDecision{Strategy: StrategyMomentum, SignalBPS: 100}
+			price, hurdle := uint64(2_000_000), uint32(18)
+			want := name
+			switch name {
+			case "pass":
+				want = ""
+			case "slippage_mismatch":
+				quote.MinimumOutput--
+			case "quote_impact_limit":
+				quote.EstimatedOutput /= 2
+				quote.MinimumOutput = quote.EstimatedOutput
+			case "trade_cost_floor_unavailable":
+				p.FeeLamports, hurdle = math.MaxUint64, 0
+			case "signal_below_cost_hurdle":
+				decision.SignalBPS = 18 // adverse impact is added to the 18 bps hurdle
+			case "guard error":
+				price, want = 0, ""
+			case "risk exit":
+				decision.Strategy, decision.SignalBPS, want = StrategyRiskExit, 0, ""
+			}
+			reason, err := adaptiveQuoteRejection(p, &decision, quote, price, false, hurdle)
+			if reason != want || (err != nil) != (name == "guard error") {
+				t.Fatalf("reason=%q error=%v, want %q", reason, err, want)
+			}
+			passes, wrapperErr := adaptiveQuotePassesWithHurdle(p, &decision, quote, price, false, hurdle)
+			if passes != (reason == "" && err == nil) || (wrapperErr != nil) != (err != nil) {
+				t.Fatal("existing guard wrapper changed the verdict")
+			}
+		})
+	}
+}
+
 func adaptiveTestPolicy() Policy {
 	policy := sellPolicy()
 	policy.SlippageBPS = 40

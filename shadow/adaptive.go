@@ -417,29 +417,38 @@ func adaptiveQuotePasses(
 func adaptiveQuotePassesWithHurdle(
 	policy Policy, decision *AdaptiveDecision, quote Quote, price uint64, sell bool, hurdle uint32,
 ) (bool, error) {
+	reason, err := adaptiveQuoteRejection(policy, decision, quote, price, sell, hurdle)
+	return reason == "" && err == nil, err
+}
+
+// adaptiveQuoteRejection names only existing guard branches. An empty reason
+// with nil error passes; computation errors remain distinct from filtering.
+func adaptiveQuoteRejection(
+	policy Policy, decision *AdaptiveDecision, quote Quote, price uint64, sell bool, hurdle uint32,
+) (string, error) {
 	if policy.Adaptive == nil {
-		return true, nil
+		return "", nil
 	}
 	if decision == nil {
-		return false, errors.New("adaptive quote guard needs its market decision")
+		return "", errors.New("adaptive quote guard needs its market decision")
 	}
 	if !quoteMatchesSlippage(policy.SlippageBPS, quote) {
-		return false, nil
+		return "slippage_mismatch", nil
 	}
 	impact, bounded, err := adaptiveQuoteImpact(policy, quote, price, sell)
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	if !bounded {
-		return false, nil
+		return "quote_impact_limit", nil
 	}
 	if decision.Strategy == StrategyRiskExit {
-		return true, nil
+		return "", nil
 	}
 	if hurdle == 0 {
 		dynamicFloor, floorErr := adaptiveTradeCostFloorBPS(policy, quote, price, sell)
 		if floorErr != nil {
-			return false, nil
+			return "trade_cost_floor_unavailable", nil
 		}
 		hurdle = max(uint32(policy.Adaptive.MinimumSignalBPS), dynamicFloor)
 	}
@@ -447,7 +456,10 @@ func adaptiveQuotePassesWithHurdle(
 	if impact < 0 {
 		required += uint64(-(int64(impact)))
 	}
-	return uint64(magnitude32(decision.SignalBPS)) >= required, nil
+	if uint64(magnitude32(decision.SignalBPS)) < required {
+		return "signal_below_cost_hurdle", nil
+	}
+	return "", nil
 }
 
 // observedNativeCostHurdle changes only fee valuation, retaining the baseline's
