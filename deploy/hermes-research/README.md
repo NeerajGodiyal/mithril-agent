@@ -528,6 +528,19 @@ Its initial limit of 256 receipts per symbol is not a week-long automated loop;
 do not delete receipts to evade the limit. All receipts remain unauthorized and
 nonpromotable, with no signing or order-submission capability.
 
+`shadow perps-evaluate --proposal PATH` verifies only that proposal's assigned
+attempt. A pending result describes the published prefix that was inspected;
+it is not saved as a terminal outcome or proof that newer records do not exist.
+Completed comparisons reuse the frozen baseline and proposed key on the same
+recorded tape, at normal and doubled fees. Zero trades is distinct from missing
+evidence or an unfillable final position. A short, incomplete, already-started
+or differently configured attempt cannot be replaced with a later one.
+Missing or corrupt bound provenance is an error, not a strategy result.
+Terminal outcomes are immutable; retries reverify their original prefix,
+evidence and timestamp. Results are modeled historical comparisons, not actual
+venue fills, qualification, plan selection or proof of profitability. Hermes
+invocation and sanitized feedback wiring are separate from these host commands.
+
 Each current-format perps final tape and its evaluation are recorded first in
 the symbol's hash-chained, segmented finalization journal. The journal keeps
 every prior receipt, treats an exact repeat as idempotent, and rejects

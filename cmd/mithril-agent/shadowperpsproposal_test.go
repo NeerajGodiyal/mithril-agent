@@ -196,7 +196,7 @@ func TestPerpsFreezeHelpIsRegisteredAndNonAuthorizing(t *testing.T) {
 	if err := run([]string{"shadow", "perps-freeze", "--help"}, &output); err != nil {
 		t.Fatal(err)
 	}
-	for _, text := range []string{"pending", "unauthorized", "nonpromotable", "not claimed to be latest", "Evaluation is not implemented"} {
+	for _, text := range []string{"pending", "unauthorized", "nonpromotable", "not claimed to be latest", "use perps-evaluate"} {
 		if !strings.Contains(output.String(), text) {
 			t.Fatalf("help missing %q", text)
 		}
@@ -256,6 +256,6 @@ func TestPerpsFreezeStalePrefixNeverAdvancesTarget(t *testing.T) {
 	if proposal.TargetEpisode != "2" || proposal.Status != "pending_advisory" || proposal.Authorized || proposal.Promotable || !proposal.FrozenAt.After(next.start.At) {
 		t.Fatalf("proposal=%+v", proposal)
 	}
-	// There is no evaluator in this slice. Episode 2 is already too early;
-	// future evaluation must report unevaluable rather than choose episode 3.
+	// Episode 2 is already too early. Evaluation must report unevaluable
+	// rather than choose episode 3.
 }

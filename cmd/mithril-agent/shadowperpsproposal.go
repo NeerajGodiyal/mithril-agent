@@ -33,7 +33,8 @@ This is an initial advisory ceiling, not a week-long automated research loop.
 The model must not control host paths or write the receipt directory.
 The verified published episode prefix is not claimed to be latest. Its next
 attempt ID is permanent: an already-started, failed or incomplete target must
-not be replaced with a later winner. Evaluation is not implemented here.
+not be replaced with a later winner. This command only freezes the proposal;
+use perps-evaluate to inspect its assigned attempt.
 Every output remains pending, advisory-only, unauthorized and nonpromotable.`
 
 type shadowPerpsProposalInput struct {
