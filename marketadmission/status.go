@@ -24,8 +24,8 @@ const (
 	DashboardPaperOutcomeCandidateRejected = "candidate_rejected"
 	// DashboardPaperOutcomeCandidateReady permits only further paper testing.
 	DashboardPaperOutcomeCandidateReady = "candidate_ready_for_more_paper_testing"
-	// DashboardPaperCheckVersion adds bounded candidate rejection diagnostics.
-	DashboardPaperCheckVersion = uint32(1)
+	// DashboardPaperCheckVersion adds optional, authoritative training activity.
+	DashboardPaperCheckVersion = uint32(2)
 	// DashboardPaperCandidateLimit keeps public counts bounded and exactly
 	// representable by dashboard clients while leaving room for a larger grid.
 	DashboardPaperCandidateLimit = uint64(1024)
@@ -47,7 +47,17 @@ type DashboardPaperCheck struct {
 	StressAfterCostVersusHoldMicros  int64                            `json:"stress_after_cost_versus_hold_micros"`
 	CandidatesEvaluated              uint64                           `json:"candidates_evaluated,omitempty"`
 	TrainingRejections               DashboardPaperTrainingRejections `json:"training_rejections,omitzero"`
+	TrainingActivity                 *DashboardPaperTrainingActivity  `json:"training_activity,omitempty"`
 	Reasons                          []string                         `json:"reasons"`
+}
+
+// DashboardPaperTrainingActivity counts strategies with no entry signal in
+// training. Absence means unknown, not zero; it does not identify why the
+// strategy waited (for example, warmup, volatility, direction, or signal size).
+type DashboardPaperTrainingActivity struct {
+	Version                      uint32 `json:"version"`
+	BaseMinimumSignalBPS         uint16 `json:"base_minimum_signal_bps"`
+	CandidatesWithoutEntrySignal uint64 `json:"candidates_without_entry_signal"`
 }
 
 // DashboardPaperTrainingRejections exposes only fixed, aggregate learning
@@ -226,6 +236,10 @@ func LoadDashboardStatus(raw []byte) (DashboardStatus, error) {
 func (status DashboardStatus) WithPaperCheck(check DashboardPaperCheck) (DashboardStatus, error) {
 	copyCheck := check
 	copyCheck.Reasons = append([]string{}, check.Reasons...)
+	if check.TrainingActivity != nil {
+		activity := *check.TrainingActivity
+		copyCheck.TrainingActivity = &activity
+	}
 	status.PaperCheck = &copyCheck
 	if err := status.Validate(); err != nil {
 		return DashboardStatus{}, err
@@ -311,6 +325,16 @@ func (check DashboardPaperCheck) validate(status DashboardStatus) error {
 		check.Reasons == nil {
 		return errors.New("market dashboard paper check envelope is invalid")
 	}
+	if activity := check.TrainingActivity; activity != nil {
+		if check.Version < 2 || activity.Version != 1 || check.CandidatesEvaluated == 0 ||
+			activity.BaseMinimumSignalBPS == 0 || activity.BaseMinimumSignalBPS > 2_000 ||
+			activity.CandidatesWithoutEntrySignal > check.CandidatesEvaluated ||
+			activity.CandidatesWithoutEntrySignal > check.TrainingRejections.NoRoundTrip {
+			return errors.New("market dashboard paper training activity is invalid")
+		}
+	} else if check.Version >= 2 && check.CandidatesEvaluated != 0 {
+		return errors.New("market dashboard paper training activity is missing")
+	}
 	seen := make(map[string]struct{}, len(check.Reasons))
 	for _, reason := range check.Reasons {
 		if !validDashboardPaperReason(reason) {
@@ -348,7 +372,7 @@ func (check DashboardPaperCheck) validate(status DashboardStatus) error {
 		check.TrainingRejections.RejectedCandidates != 0 || hasTrainingRejection) {
 		return errors.New("legacy market dashboard paper check contains candidate diagnostics")
 	}
-	if check.Version == DashboardPaperCheckVersion &&
+	if check.Version >= 1 &&
 		((check.TrainingRejections.RejectedCandidates == 0) != !hasTrainingRejection) {
 		return errors.New("market dashboard paper check rejection counts are inconsistent")
 	}
@@ -365,7 +389,7 @@ func (check DashboardPaperCheck) validate(status DashboardStatus) error {
 		if !zeroScores || check.TrainingCoverageBPS < ProvisionalMinimumAvailabilityBPS ||
 			check.HoldoutCoverageBPS < ProvisionalMinimumAvailabilityBPS ||
 			!equalStrings(check.Reasons, []string{"no_qualified_training_candidate"}) ||
-			(check.Version == DashboardPaperCheckVersion &&
+			(check.Version >= 1 &&
 				(check.CandidatesEvaluated == 0 || !hasTrainingRejection ||
 					check.TrainingRejections.RejectedCandidates != check.CandidatesEvaluated)) {
 			return errors.New("market dashboard no-candidate check is invalid")
@@ -374,7 +398,7 @@ func (check DashboardPaperCheck) validate(status DashboardStatus) error {
 		if check.TrainingCoverageBPS < ProvisionalMinimumAvailabilityBPS ||
 			check.HoldoutCoverageBPS < ProvisionalMinimumAvailabilityBPS ||
 			len(check.Reasons) == 0 || hasDashboardPaperSetupReason(check.Reasons) ||
-			(check.Version == DashboardPaperCheckVersion &&
+			(check.Version >= 1 &&
 				(check.CandidatesEvaluated == 0 ||
 					check.TrainingRejections.RejectedCandidates >= check.CandidatesEvaluated)) {
 			return errors.New("market dashboard rejected check is invalid")
@@ -386,7 +410,7 @@ func (check DashboardPaperCheck) validate(status DashboardStatus) error {
 			check.HoldoutAfterCostVersusHoldMicros <= 0 ||
 			check.StressAfterCostNetReturnMicros <= 0 ||
 			check.StressAfterCostVersusHoldMicros <= 0 ||
-			(check.Version == DashboardPaperCheckVersion &&
+			(check.Version >= 1 &&
 				(check.CandidatesEvaluated == 0 ||
 					check.TrainingRejections.RejectedCandidates >= check.CandidatesEvaluated)) {
 			return errors.New("market dashboard ready check is invalid")

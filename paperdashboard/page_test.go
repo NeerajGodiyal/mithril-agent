@@ -80,10 +80,16 @@ func TestDashboardExplainsWhyCandidateMarketTrainingFoundNoPlan(t *testing.T) {
 		`check.training_rejections||{}`,
 		`Tested '+tested+' paper plans. Most often,`,
 		`A plan can fail more than one check.`,
+		`activity.candidates_without_entry_signal===tested`,
+		`this search never lowers it.`,
 	} {
 		if !strings.Contains(appJS, want) {
 			t.Errorf("candidate-market training explanation omits %q", want)
 		}
+	}
+	if !strings.Contains(indexHTML, `aria-describedby="instruction-preference-help"`) ||
+		!strings.Contains(indexHTML, `It does not lower the minimum move needed to cover the plan's cost allowance.`) {
+		t.Fatal("research preference omits its entry-hurdle limit")
 	}
 }
 

@@ -66,6 +66,7 @@ type MarketPaperCheck struct {
 	StressAfterCostVersusHoldMicros  int64                                            `json:"stress_after_cost_versus_hold_micros,string"`
 	CandidatesEvaluated              uint64                                           `json:"candidates_evaluated,omitempty"`
 	TrainingRejections               marketadmission.DashboardPaperTrainingRejections `json:"training_rejections,omitzero"`
+	TrainingActivity                 *marketadmission.DashboardPaperTrainingActivity  `json:"training_activity,omitempty"`
 	Reasons                          []string                                         `json:"reasons"`
 }
 
@@ -169,6 +170,7 @@ func readMarketAdmission(path string, now time.Time) ([]MarketResearch, error) {
 				StressAfterCostVersusHoldMicros:  status.PaperCheck.StressAfterCostVersusHoldMicros,
 				CandidatesEvaluated:              status.PaperCheck.CandidatesEvaluated,
 				TrainingRejections:               status.PaperCheck.TrainingRejections,
+				TrainingActivity:                 status.PaperCheck.TrainingActivity,
 				Reasons:                          append([]string(nil), status.PaperCheck.Reasons...),
 			}
 		}

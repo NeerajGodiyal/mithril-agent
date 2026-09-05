@@ -57,6 +57,7 @@ func TestShadowMarketPaperCheckIsPrintOnlyResearchAndChecksSplitCoverage(t *test
 		t.Fatal(err)
 	}
 	if result.Status != "research_only" || result.Outcome != "insufficient_evidence" ||
+		result.CandidatesEvaluated != 0 || result.TrainingActivity != nil ||
 		!result.PaperOnly || result.Authorized || result.Promotable ||
 		result.Market != marketadmission.MarketWIFUSDC || result.InputSHA256 == "" ||
 		result.TrainingCoverageBPS != 9_250 || result.HoldoutCoverageBPS != 10_000 ||
@@ -183,6 +184,48 @@ func TestShadowMarketPaperCheckWritesExactRunnablePolicy(t *testing.T) {
 	); err != nil {
 		t.Fatalf("checked result did not reproduce: %v", err)
 	}
+	// Version-three artifacts predate activity. Preserve their original input
+	// hash and encoding, and reverify without inventing missing diagnostics.
+	legacy := result
+	legacy.Version, legacy.TrainingActivity = marketPaperCheckLegacyVersion, nil
+	legacy.InputSHA256, err = marketPaperCheckInputSHA256(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.ContentSHA256, err = marketPaperCheckFingerprint(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(filepath.Dir(resultPath), "legacy-paper-check.json")
+	writeJSON(t, legacyPath, legacy)
+	loadedLegacy, err := loadMarketPaperCheckResult(legacyPath, checked, artifact, journalPath, now)
+	if err != nil || loadedLegacy.ContentSHA256 != legacy.ContentSHA256 || loadedLegacy.TrainingActivity != nil {
+		t.Fatalf("legacy checked result did not reproduce unchanged: %+v, %v", loadedLegacy, err)
+	}
+	legacyProjection, err := dashboardPaperCheckFromResult(legacy, now)
+	if err != nil || legacyProjection.Version != 1 || legacyProjection.TrainingActivity != nil {
+		t.Fatalf("legacy activity was inferred: %+v, %v", legacyProjection, err)
+	}
+	for _, version := range []uint32{marketPaperCheckLegacyVersion, marketPaperCheckVersion, 99} {
+		forgedActivity := result
+		forgedActivity.Version = version
+		activity := *result.TrainingActivity
+		activity.CandidatesWithoutEntrySignal = result.CandidatesEvaluated + 1
+		forgedActivity.TrainingActivity = &activity
+		forgedActivity.InputSHA256, err = marketPaperCheckInputSHA256(forgedActivity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		forgedActivity.ContentSHA256, err = marketPaperCheckFingerprint(forgedActivity)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(t.TempDir(), "forged-activity.json")
+		writeJSON(t, path, forgedActivity)
+		if _, err := loadMarketPaperCheckResult(path, checked, artifact, journalPath, now); err == nil {
+			t.Fatalf("version %d accepted self-hashed activity that disagrees with replay", version)
+		}
+	}
 	unchecked := checked
 	adaptive := *unchecked.Adaptive
 	adaptive.MaxDrawdownBPS++
@@ -267,10 +310,12 @@ func TestMarketPaperCheckDashboardUpdateRefusesMissingOrMismatchedStatus(t *test
 	through := time.Now().UTC().Truncate(time.Minute)
 	path := filepath.Join(directory, "dashboard-status.json")
 	result := marketPaperCheckResult{
-		Market: marketadmission.MarketWIFUSDC, Through: through,
+		Version: marketPaperCheckVersion,
+		Market:  marketadmission.MarketWIFUSDC, Through: through,
 		Outcome:             marketadmission.DashboardPaperOutcomeCandidateRejected,
 		TrainingCoverageBPS: 10_000, HoldoutCoverageBPS: 10_000,
 		CandidatesEvaluated: 1,
+		TrainingActivity:    &marketadmission.DashboardPaperTrainingActivity{Version: 1, BaseMinimumSignalBPS: 90},
 		Holdout:             &marketPaperCheckScore{NetReturnMicros: -1, VersusHoldMicros: -2},
 		Stress:              &marketPaperCheckScore{NetReturnMicros: -3, VersusHoldMicros: -4},
 		Reasons:             []string{"holdout_net_return_not_positive"},
@@ -617,6 +662,9 @@ func TestProvisionalMarketPaperCheckExplainsEveryRejectedTrainingCandidate(t *te
 		t.Fatal(err)
 	}
 	if result.Outcome != marketadmission.DashboardPaperOutcomeNoTrainingCandidate ||
+		result.TrainingActivity == nil || result.TrainingActivity.Version != 1 ||
+		result.TrainingActivity.BaseMinimumSignalBPS != policy.Adaptive.MinimumSignalBPS ||
+		result.TrainingActivity.CandidatesWithoutEntrySignal != result.CandidatesEvaluated ||
 		result.CandidatesEvaluated != uint64(len(adaptiveSearchPolicies(policy))) ||
 		result.TrainingRejections.RejectedCandidates != result.CandidatesEvaluated ||
 		result.TrainingRejections.NoRoundTrip != result.CandidatesEvaluated ||
@@ -629,8 +677,48 @@ func TestProvisionalMarketPaperCheckExplainsEveryRejectedTrainingCandidate(t *te
 	}
 	check, err := dashboardPaperCheckFromResult(result, result.Through.Add(time.Minute))
 	if err != nil || check.CandidatesEvaluated != result.CandidatesEvaluated ||
-		check.TrainingRejections.NoRoundTrip != result.CandidatesEvaluated {
+		check.TrainingRejections.NoRoundTrip != result.CandidatesEvaluated ||
+		check.TrainingActivity == nil || *check.TrainingActivity != *result.TrainingActivity {
 		t.Fatalf("projected no-candidate diagnostics = %+v, %v", check, err)
+	}
+}
+
+func TestMarketPaperTrainingActivityDoesNotConfuseFilteredSignalsWithNoSignal(t *testing.T) {
+	artifactPath, journalPath, now := writePassingProvisionalEvidence(t)
+	artifact, err := loadProvisionalMarketAdmission(artifactPath, journalPath, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := buildAdaptiveProvisionalPolicy(
+		artifact, artifact.Candidate.QuoteNotionalUSDC,
+		defaultTokenFeeReserveLamports, defaultTokenSetupRentLamports,
+		artifact.Candidate.QuoteSlippageBPS, defaultPaperFeeLamports,
+		artifact.Observe, uint64(artifact.Thresholds.CadenceSeconds),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Adaptive.FastWindow, policy.Adaptive.SlowWindow, policy.Adaptive.CooldownSeconds = 2, 3, 0
+	points, err := artifact.ReplayPoints(journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	training, _ := splitMarketPaperPoints(points, artifact.From.Add(80*time.Minute))
+	ticks, err := provisionalMarketTicks(policy, training)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const spread = 600 // Larger than the quote-impact guard, so signals cannot fill.
+	replay, err := shadow.ReplayRoundTripTicksWithLiquidationMarks(policy, ticks, modelledPool(policy, spread, policy.SlippageBPS))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay.Counts.BuySignals == 0 || replay.Counts.Filtered == 0 || replay.Counts.Buys != 0 {
+		t.Fatalf("fixture must generate filtered buy signals without fills: %+v", replay.Counts)
+	}
+	score, err := scoreMarketPaperCandidate(policy, ticks, spread)
+	if err != nil || score.NoEntrySignal || score.Paper.FullRoundTrips != 0 {
+		t.Fatalf("filtered signals were reported as no signal: %+v, %v", score, err)
 	}
 }
 

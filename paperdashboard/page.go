@@ -107,11 +107,12 @@ const indexHTML = `<!doctype html>
             <legend>Scope</legend>
 	            <p>Applies to the configurable spot markets bound to the reviewed research generation.</p>
             <label>Research goal
-              <select id="instruction-preference">
+              <select id="instruction-preference" aria-describedby="instruction-preference-help">
                 <option value="balanced">Keep it balanced</option>
                 <option value="more-opportunities">Look for more opportunities</option>
                 <option value="more-selective">Be more selective</option>
               </select>
+              <small id="instruction-preference-help">More opportunities explores timing. It does not lower the minimum move needed to cover the plan's cost allowance.</small>
             </label>
           </fieldset>
           <fieldset class="instruction-group">
@@ -865,6 +866,11 @@ function paperCheckView(m){
   const failures=check.training_rejections||{},tested=Number(check.candidates_evaluated||0);
   const ranked=[[Number(failures.no_round_trip||0),'did not complete a full buy-and-sell cycle'],[Number(failures.net_return_not_positive||0),'did not finish ahead after costs'],[Number(failures.did_not_beat_holding||0),'did not beat simply holding'],[Number(failures.failed_execution||0),'had a simulated execution failure'],[Number(failures.unmatched_filled_leg||0),'ended with an unmatched paper order'],[Number(failures.pending_decision||0),'ended with a decision still pending'],[Number(failures.drawdown_above_limit||0),'fell past the loss limit']].filter(item=>item[0]>0).sort((left,right)=>right[0]-left[0]);
   view.note=check.outcome==='no_training_candidate'&&tested&&ranked.length?'Tested '+tested+' paper plans. Most often, '+ranked[0][0]+' '+ranked[0][1]+'. A plan can fail more than one check.':check.reasons?.length?paperCheckReason(check.reasons[0]):'It stayed ahead after costs in both the untouched and higher-cost replays. This is only a short paper check, not proof of future profit.';
+  const activity=check.training_activity;
+  if(check.outcome==='no_training_candidate'&&tested&&activity?.version===1&&activity.candidates_without_entry_signal===tested){
+    view.label='No entry signal';
+    view.note='None of the '+tested+' tested plans generated an entry signal. The base minimum move was '+percent(activity.base_minimum_signal_bps)+'; this search never lowers it.';
+  }
   return view;
 }
 function paperCheckGateReason(reason){

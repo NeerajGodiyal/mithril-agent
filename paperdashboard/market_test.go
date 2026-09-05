@@ -37,10 +37,26 @@ func TestMarketAdmissionProjectionIsFixedMinimalAndAtomic(t *testing.T) {
 				StressAfterCostNetReturnMicros:   -40_000,
 				StressAfterCostVersusHoldMicros:  -30_000,
 				CandidatesEvaluated:              12,
+				TrainingActivity: &marketadmission.DashboardPaperTrainingActivity{
+					Version: 1, BaseMinimumSignalBPS: 90, CandidatesWithoutEntrySignal: 7,
+				},
 				TrainingRejections: marketadmission.DashboardPaperTrainingRejections{
 					RejectedCandidates: 11, NoRoundTrip: 7, DidNotBeatHolding: 5,
 				},
 				Reasons: []string{"holdout_net_return_not_positive"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if item.market == marketadmission.MarketJTOUSDC {
+			var err error
+			status, err = status.WithPaperCheck(marketadmission.DashboardPaperCheck{
+				Version: 1, Market: item.market, CheckedAt: now, Through: status.Diagnostic.Through,
+				Outcome:             marketadmission.DashboardPaperOutcomeNoTrainingCandidate,
+				TrainingCoverageBPS: 10_000, HoldoutCoverageBPS: 10_000, CandidatesEvaluated: 12,
+				TrainingRejections: marketadmission.DashboardPaperTrainingRejections{RejectedCandidates: 12, NoRoundTrip: 12},
+				Reasons:            []string{"no_qualified_training_candidate"},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -62,7 +78,11 @@ func TestMarketAdmissionProjectionIsFixedMinimalAndAtomic(t *testing.T) {
 		markets[0].PaperCheck.HoldoutAfterCostNetReturnMicros != -25_000 ||
 		markets[0].PaperCheck.CandidatesEvaluated != 12 ||
 		markets[0].PaperCheck.TrainingRejections.RejectedCandidates != 11 ||
-		markets[0].PaperCheck.TrainingRejections.NoRoundTrip != 7 {
+		markets[0].PaperCheck.TrainingRejections.NoRoundTrip != 7 ||
+		markets[0].PaperCheck.TrainingActivity == nil ||
+		*markets[0].PaperCheck.TrainingActivity != (marketadmission.DashboardPaperTrainingActivity{
+			Version: 1, BaseMinimumSignalBPS: 90, CandidatesWithoutEntrySignal: 7,
+		}) || markets[1].PaperCheck == nil || markets[1].PaperCheck.TrainingActivity != nil {
 		t.Fatalf("market projection = %+v", markets)
 	}
 	raw, err := os.ReadFile(output)

@@ -20,7 +20,8 @@ import (
 )
 
 const (
-	marketPaperCheckVersion         = uint32(3)
+	marketPaperCheckLegacyVersion   = uint32(3)
+	marketPaperCheckVersion         = uint32(4)
 	marketPaperCheckTrainingMinutes = 80
 	marketPaperCheckHoldoutMinutes  = 40
 	// Two baseline legs equal the code-owned 50 bps p95 round-trip admission
@@ -89,6 +90,8 @@ type marketPaperCheckResult struct {
 	Stress                    *marketPaperCheckScore        `json:"stress,omitempty"`
 	Reasons                   []string                      `json:"reasons"`
 	ContentSHA256             string                        `json:"content_sha256"`
+
+	TrainingActivity *marketadmission.DashboardPaperTrainingActivity `json:"training_activity,omitempty"`
 }
 
 func runShadowMarketPaperCheck(args []string, output io.Writer) error {
@@ -224,7 +227,7 @@ func loadMarketPaperCheckResult(
 	if err != nil {
 		return marketPaperCheckResult{}, errors.New("paper-check artifact journal is invalid")
 	}
-	want, err := checkProvisionalMarketPaper(result.BasePolicy, artifact, points)
+	want, err := checkProvisionalMarketPaperVersion(result.BasePolicy, artifact, points, result.Version)
 	if err != nil {
 		return marketPaperCheckResult{}, errors.New("paper-check artifact cannot be reproduced")
 	}
@@ -329,6 +332,7 @@ func dashboardPaperCheckFromResult(
 		Outcome: result.Outcome, TrainingCoverageBPS: result.TrainingCoverageBPS,
 		HoldoutCoverageBPS:  result.HoldoutCoverageBPS,
 		CandidatesEvaluated: result.CandidatesEvaluated,
+		TrainingActivity:    result.TrainingActivity,
 		TrainingRejections: marketadmission.DashboardPaperTrainingRejections{
 			RejectedCandidates:   result.TrainingRejections.RejectedCandidates,
 			NoRoundTrip:          result.TrainingRejections.NoRoundTrip,
@@ -340,6 +344,9 @@ func dashboardPaperCheckFromResult(
 			DrawdownAboveLimit:   result.TrainingRejections.DrawdownAboveLimit,
 		},
 		Reasons: append([]string{}, result.Reasons...),
+	}
+	if result.Version == marketPaperCheckLegacyVersion {
+		check.Version = 1
 	}
 	scored := result.Holdout != nil || result.Stress != nil
 	switch result.Outcome {
@@ -368,6 +375,20 @@ func checkProvisionalMarketPaper(
 	artifact marketadmission.ProvisionalArtifact,
 	points []marketadmission.ProvisionalReplayPoint,
 ) (marketPaperCheckResult, error) {
+	return checkProvisionalMarketPaperVersion(policy, artifact, points, marketPaperCheckVersion)
+}
+
+// Reproduce legacy receipts with their original version and omitted diagnostics;
+// their input digest and full-result fingerprint must remain unchanged.
+func checkProvisionalMarketPaperVersion(
+	policy shadow.Policy,
+	artifact marketadmission.ProvisionalArtifact,
+	points []marketadmission.ProvisionalReplayPoint,
+	version uint32,
+) (marketPaperCheckResult, error) {
+	if version != marketPaperCheckLegacyVersion && version != marketPaperCheckVersion {
+		return marketPaperCheckResult{}, errors.New("paper-check version is unsupported")
+	}
 	policySHA256, err := policy.Fingerprint()
 	if err != nil {
 		return marketPaperCheckResult{}, err
@@ -385,7 +406,7 @@ func checkProvisionalMarketPaper(
 	spreadBPS := marketPaperCheckSpreadBPS
 	stress := spreadBPS * 2
 	result := marketPaperCheckResult{
-		Version: marketPaperCheckVersion, Status: "research_only", Outcome: "candidate_rejected",
+		Version: version, Status: "research_only", Outcome: "candidate_rejected",
 		PaperOnly: true, Market: artifact.Candidate.Market,
 		ProvisionalEvidenceSHA256: artifact.ContentSHA256, PolicySHA256: policySHA256,
 		Journal: artifact.Journal, From: artifact.From, Through: artifact.Through,
@@ -436,6 +457,16 @@ func checkProvisionalMarketPaper(
 				return shadowSearchScore{}, err
 			}
 			candidatesEvaluated++
+			if version == marketPaperCheckVersion {
+				if result.TrainingActivity == nil {
+					result.TrainingActivity = &marketadmission.DashboardPaperTrainingActivity{
+						Version: 1, BaseMinimumSignalBPS: policy.Adaptive.MinimumSignalBPS,
+					}
+				}
+				if score.NoEntrySignal {
+					result.TrainingActivity.CandidatesWithoutEntrySignal++
+				}
+			}
 			reasons := marketPaperScoreReasons(
 				"training", score.Paper, 1, policy.Adaptive.MaxDrawdownBPS,
 			)
@@ -532,8 +563,9 @@ func addMarketPaperTrainingRejections(
 }
 
 type scoredMarketPaperCandidate struct {
-	Search shadowSearchScore
-	Paper  marketPaperCheckScore
+	Search        shadowSearchScore
+	Paper         marketPaperCheckScore
+	NoEntrySignal bool
 }
 
 func scoreMarketPaperCandidate(
@@ -559,7 +591,8 @@ func scoreMarketPaperCandidate(
 		return scoredMarketPaperCandidate{}, errors.New("paper-check equity is too large to compare")
 	}
 	return scoredMarketPaperCandidate{
-		Search: score,
+		Search:        score,
+		NoEntrySignal: replay.Counts.BuySignals == 0 && replay.Counts.SellSignals == 0,
 		Paper: marketPaperCheckScore{
 			FullRoundTrips: score.FullRoundTrips,
 			Sells:          replay.Counts.Sells, Buys: replay.Counts.Buys,
