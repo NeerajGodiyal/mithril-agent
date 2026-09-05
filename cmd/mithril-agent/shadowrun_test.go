@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/journal"
@@ -18,6 +19,193 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
+
+type cadencePriceSource struct {
+	candidatePriceSource
+	before func()
+}
+
+func (source cadencePriceSource) Latest(ctx context.Context, feed string) (pricetrigger.Sample, error) {
+	if source.before != nil {
+		source.before()
+	}
+	current := source.candidatePriceSource
+	current.at = time.Now().UTC()
+	return current.Latest(ctx, feed)
+}
+
+type cadenceTickWriter struct {
+	ticks []shadow.Tick
+	delay time.Duration
+}
+
+func (writer *cadenceTickWriter) Write(data []byte) (int, error) {
+	var tick shadow.Tick
+	if json.Unmarshal(data, &tick) == nil && tick.Event != "" {
+		writer.ticks = append(writer.ticks, tick)
+		// This work occurs after the event timestamp, like quotes/status writes.
+		time.Sleep(writer.delay)
+		writer.delay = 0
+	}
+	return len(data), nil
+}
+
+func cadenceRun(t *testing.T, before func()) *shadowRun {
+	t.Helper()
+	root := privateTestDirectory(t)
+	policy := candidateTestPolicy()
+	policy.TickSeconds = 15
+	fingerprint, err := policy.Fingerprint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	roll, err := newDailyJournal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := roll.openFor(time.Now().UTC()); err != nil {
+		roll.Close()
+		t.Fatal(err)
+	}
+	alerts, err := paperstatus.OpenWriter(filepath.Join(root, "alerts.json"))
+	if err != nil {
+		roll.Close()
+		t.Fatal(err)
+	}
+	run := &shadowRun{policy: policy, policySHA256: fingerprint, roll: roll, alerts: alerts,
+		primary:   cadencePriceSource{candidatePriceSource: candidatePriceSource{identity: policy.Trigger.PrimarySourceSHA256}, before: before},
+		secondary: cadencePriceSource{candidatePriceSource: candidatePriceSource{identity: policy.Trigger.SecondarySourceSHA256}},
+		quoter:    liveStubQuoter{estimated: 21_525},
+	}
+	if run.runner, err = run.newRunner(); err != nil {
+		roll.Close()
+		t.Fatal(err)
+	}
+	return run
+}
+
+func TestShadowDriveUTCCadenceAfterCompletedWork(t *testing.T) {
+	for _, test := range []struct {
+		name                   string
+		delays, starts, events []time.Duration
+		work                   time.Duration
+	}{
+		// A recurring ticker started at 14s instead emits at 16s, 29.5s,
+		// and 46s: two observations in bucket 1 and none in bucket 2.
+		{"jitter", []time.Duration{2 * time.Second, time.Second / 2, 2 * time.Second},
+			[]time.Duration{14 * time.Second, 30 * time.Second, 45 * time.Second},
+			[]time.Duration{16 * time.Second, 30*time.Second + time.Second/2, 47 * time.Second}, 0},
+		{"slow acquisition", []time.Duration{20 * time.Second, time.Second, time.Second},
+			[]time.Duration{14 * time.Second, 45 * time.Second, 60 * time.Second},
+			[]time.Duration{34 * time.Second, 46 * time.Second, 61 * time.Second}, 0},
+		{"post timestamp work", []time.Duration{2 * time.Second, time.Second / 2, 2 * time.Second},
+			[]time.Duration{14 * time.Second, 45 * time.Second, 60 * time.Second},
+			[]time.Duration{16 * time.Second, 45*time.Second + time.Second/2, 62 * time.Second}, 21 * time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				day := time.Now().UTC()
+				time.Sleep(14 * time.Second)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				var starts []time.Duration
+				run := cadenceRun(t, func() {
+					index := len(starts)
+					if index >= len(test.delays) {
+						t.Fatal("unexpected catch-up acquisition")
+					}
+					starts = append(starts, time.Now().Sub(day))
+					time.Sleep(test.delays[index])
+					if index == len(test.delays)-1 {
+						cancel()
+					}
+				})
+				defer run.roll.Close()
+				output := &cadenceTickWriter{delay: test.work}
+				if err := run.drive(ctx, false, output); err != nil {
+					t.Fatal(err)
+				}
+				if len(starts) != len(test.starts) || len(output.ticks) != len(test.events) {
+					t.Fatalf("polls=%v events=%d", starts, len(output.ticks))
+				}
+				for i := range starts {
+					if starts[i] != test.starts[i] || output.ticks[i].At.Sub(day) != test.events[i] {
+						t.Fatalf("poll %d start=%v event=%v, want %v/%v", i, starts[i], output.ticks[i].At.Sub(day), test.starts[i], test.events[i])
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestShadowDriveCadenceOnceAndCancellation(t *testing.T) {
+	for _, once := range []bool{false, true} {
+		synctest.Test(t, func(t *testing.T) {
+			time.Sleep(14 * time.Second)
+			start := time.Now()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			run := cadenceRun(t, func() { calls++; time.Sleep(2 * time.Second) })
+			defer run.roll.Close()
+			if !once {
+				go func() { time.Sleep(7 * time.Second); cancel() }()
+			}
+			if err := run.drive(ctx, once, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			want := 7 * time.Second
+			if once {
+				want = 2 * time.Second
+			}
+			if calls != 1 || time.Since(start) != want {
+				t.Fatalf("once=%v calls=%d elapsed=%v, want 1/%v", once, calls, time.Since(start), want)
+			}
+		})
+	}
+}
+
+func TestShadowDriveCadenceDiscardsMidnightObservation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		day := time.Now().UTC()
+		time.Sleep(24*time.Hour - time.Second)
+		calls := 0
+		run := cadenceRun(t, func() {
+			calls++
+			if calls == 1 {
+				time.Sleep(2 * time.Second)
+			} else {
+				time.Sleep(time.Second / 2)
+			}
+		})
+		defer run.roll.Close()
+		output := &cadenceTickWriter{}
+		if err := run.drive(context.Background(), true, output); err != nil {
+			t.Fatal(err)
+		}
+		if calls != 2 || len(output.ticks) != 1 || !output.ticks[0].At.Equal(day.Add(24*time.Hour+time.Second+time.Second/2)) {
+			t.Fatalf("midnight calls=%d ticks=%+v", calls, output.ticks)
+		}
+		if run.runner.Counts().Ticks != 1 {
+			t.Fatal("discarded old-day read mutated new runner")
+		}
+	})
+}
+
+func TestNextShadowPollAtUsesDayAnchoredStrictBoundaries(t *testing.T) {
+	day := time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)
+	for _, test := range []struct{ at, interval, want time.Duration }{
+		{14 * time.Second, 15 * time.Second, 15 * time.Second},
+		{15 * time.Second, 15 * time.Second, 30 * time.Second},
+		{31 * time.Second, 15 * time.Second, 45 * time.Second},
+		{time.Second, 7 * time.Second, 7 * time.Second},
+		{24*time.Hour - time.Second, 7 * time.Second, 24 * time.Hour},
+	} {
+		if got := nextShadowPollAt(day.Add(test.at), test.interval); !got.Equal(day.Add(test.want)) {
+			t.Fatalf("at=%v interval=%v got=%v want=%v", test.at, test.interval, got, day.Add(test.want))
+		}
+	}
+}
 
 func TestShadowRunSystemdReadinessNotification(t *testing.T) {
 	directory, err := os.MkdirTemp("/tmp", "mithril-shadow-notify-")

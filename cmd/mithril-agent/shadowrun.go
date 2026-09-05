@@ -864,9 +864,6 @@ func (s *shadowRun) rollDay(now time.Time, output io.Writer) (bool, error) {
 // the journal. A UTC rollover discards the old runner's prepared observation
 // before it can mutate or write the new day's evidence.
 func (s *shadowRun) drive(ctx context.Context, once bool, output io.Writer) error {
-	ticker := time.NewTicker(s.policy.Tick())
-	defer ticker.Stop()
-
 	for {
 		now := time.Now().UTC()
 		if _, err := s.rollDay(now, output); err != nil {
@@ -908,17 +905,36 @@ func (s *shadowRun) drive(ctx context.Context, once bool, output io.Writer) erro
 		if once {
 			return nil
 		}
+		// Reads, quotes and status writes can cross cadence boundaries. Skip
+		// elapsed slots rather than consuming an overdue recurring ticker event.
+		timer := time.NewTimer(time.Until(nextShadowPollAt(time.Now(), s.policy.Tick())))
 		select {
 		case <-ctx.Done():
+		case <-timer.C:
+		}
+		timer.Stop()
+		// Prefer cancellation when the timer and context are both ready.
+		if ctx.Err() != nil {
 			// A clean stop still produces the day's report, so an interrupted
 			// run is not a silently discarded one.
 			if err := s.runner.ClosePeriod(tick.At, s.lastPrice); err != nil {
 				return err
 			}
 			return s.finishDayAt(output, tick.At)
-		case <-ticker.C:
 		}
 	}
+}
+
+// nextShadowPollAt returns a strictly future boundary of this UTC day's cadence.
+// Midnight starts a new grid even when the interval does not divide a day.
+func nextShadowPollAt(now time.Time, interval time.Duration) time.Time {
+	now = now.UTC()
+	day := now.Truncate(24 * time.Hour)
+	next := day.Add((now.Sub(day)/interval + 1) * interval)
+	if midnight := day.Add(24 * time.Hour); next.After(midnight) {
+		return midnight
+	}
+	return next
 }
 
 func printShadowTick(output io.Writer, tick shadow.Tick) error {

@@ -174,8 +174,8 @@ b02f9b84f89ffbbb2cf345050dc571b713d1cb86045e8d8404bdc3b17b238bc1  ./cmd/mithril-
 e249bfac658d1ed7bfd926a35b9bb94b98d32c456b17d14eb0d1ff81febf8ef9  ./cmd/mithril-agent/shadowresearchrejection_test.go
 a25121c90900ee64e0f58d7bb729968b57e8a6b686cdf49f96280e8ff9c0268d  ./cmd/mithril-agent/shadowreview.go
 b6fcb2835e155fbfc3e3bb735106088e0124b0f232a40c9a22cdbc7e3849f736  ./cmd/mithril-agent/shadowreview_test.go
-4b9eab4a68cac8511079cc2df0c58096cc50bb293c88af73b6f630b2cb942616  ./cmd/mithril-agent/shadowrun.go
-cb88a3762de5b0e67c057c666bb7cfd7fe6add5633007ce547e9e19e02eb5f7c  ./cmd/mithril-agent/shadowrun_test.go
+bb78b77805304f3941d9206610a5e90d918d139b778d2b22265369e6733d74fe  ./cmd/mithril-agent/shadowrun.go
+a08acc026bcb1a84f636181fe942f220e228a7b3394fb4b3639297fb04683b52  ./cmd/mithril-agent/shadowrun_test.go
 9578f14d40ace8928b88e0e14d93088b5d2c24cfd741525b0e61ec9a4e2fd730  ./cmd/mithril-agent/shadowsearch.go
 ed4e359fbe00478c33ed431b183ddae4b31e030f1dc26e4e675051f8d851c004  ./cmd/mithril-agent/shadowsearch_test.go
 095e2645670644a9fa70f1c48d4c07402701752671b739916cd807e828230642  ./cmd/mithril-agent/sign-destination-proof.html
