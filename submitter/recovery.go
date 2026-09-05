@@ -19,6 +19,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/jupiterswap"
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
 	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
+	"github.com/Overclock-Validator/mithril-agent/riskgrant"
 	"github.com/Overclock-Validator/mithril-agent/signer"
 	"github.com/Overclock-Validator/mithril-agent/solana"
 	"github.com/Overclock-Validator/mithril-agent/txflow"
@@ -227,6 +228,73 @@ func ReadJupiterRecoveryStatus(policy Policy) (JupiterRecoveryStatus, error) {
 		return nil
 	})
 	return status, err
+}
+
+// JupiterFinalizedEvidence is a read-only terminal projection, not inventory or
+// permission to release a claim. InputSpent and OutputReceived are zero on
+// finalized failure; FeeLamports still records the verified paid fee. Amounts
+// are base units. Fees/rent are separate from swap amounts, not net wallet deltas.
+type JupiterFinalizedEvidence struct {
+	ActionID            string `json:"action_id"`
+	RequestSHA256       string `json:"request_sha256"`
+	TransactionSHA256   string `json:"transaction_sha256"`
+	Verdict             string `json:"verdict"`
+	FinalizedSlot       uint64 `json:"finalized_slot"`
+	PrimaryEffectSlot   uint64 `json:"primary_effect_slot"`
+	SecondaryEffectSlot uint64 `json:"secondary_effect_slot"`
+	InputMint           string `json:"input_mint"`
+	OutputMint          string `json:"output_mint"`
+	InputSpent          uint64 `json:"input_spent,string"`
+	OutputReceived      uint64 `json:"output_received,string"`
+	FeeLamports         uint64 `json:"fee_lamports,string"`
+	OutputAccountRent   uint64 `json:"output_account_rent_lamports,string"`
+}
+
+// ReadJupiterFinalizedEvidence binds validated durable terminal effects to the
+// caller's exact unsigned request. It uses no RPC and cannot sign, submit,
+// modify recovery, release a claim or credit strategy inventory.
+func ReadJupiterFinalizedEvidence(policy Policy, expected signer.Request) (JupiterFinalizedEvidence, error) {
+	if err := ValidateJupiterPolicy(policy); err != nil {
+		return JupiterFinalizedEvidence{}, err
+	}
+	if expected.RiskGrant != (riskgrant.Grant{}) {
+		return JupiterFinalizedEvidence{}, errors.New("finalized evidence requires an unsigned ungranted request")
+	}
+	var result JupiterFinalizedEvidence
+	err := withRecoveryLock(policy, func() error {
+		record, transaction, decoded, err := readRecovery(policy)
+		defer clear(transaction)
+		if err != nil {
+			return err
+		}
+		if decoded.jupiter == nil || record.Version != jupiterRecoveryVersion || !record.Finalized || record.Reconciliation == nil {
+			return errors.New("verified Jupiter terminal effects are unavailable")
+		}
+		messageHash := sha256.Sum256(decoded.message)
+		binding, err := signer.RiskBinding(expected, hex.EncodeToString(messageHash[:]))
+		if err != nil || binding.RequestSHA256 != record.RequestSHA256 || binding.ActionID != record.ActionID {
+			return errors.New("finalized Jupiter evidence does not match the expected request")
+		}
+		reconciliation := record.Reconciliation
+		effects := reconciliation.JupiterEffects
+		result = JupiterFinalizedEvidence{
+			ActionID: record.ActionID, RequestSHA256: record.RequestSHA256,
+			TransactionSHA256: effects.TransactionSHA256, Verdict: reconciliation.Verdict,
+			FinalizedSlot: reconciliation.Slot, PrimaryEffectSlot: effects.PrimaryEffectSlot,
+			SecondaryEffectSlot: effects.SecondaryEffectSlot,
+			InputMint:           decoded.jupiter.Policy.InputMint, OutputMint: decoded.jupiter.Policy.OutputMint,
+			OutputReceived: effects.OutputAmount, FeeLamports: effects.FeeLamports,
+			OutputAccountRent: effects.OutputAccountRent,
+		}
+		if reconciliation.Verdict == txflow.VerdictFinalized {
+			result.InputSpent = effects.InputAmount
+		}
+		return nil
+	})
+	if err != nil {
+		return JupiterFinalizedEvidence{}, err
+	}
+	return result, nil
 }
 
 func checkJupiterRecoveryReadinessAt(
