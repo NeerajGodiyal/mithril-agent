@@ -108,13 +108,14 @@ func runShadowResearchContext(args []string, output io.Writer) error {
 // immutable paper candidate. The safety markers are explicit and validated;
 // prose is never interpreted as authority.
 type shadowPaperHypothesis struct {
-	Version    uint32                     `json:"version" jsonschema:"Paper hypothesis schema version; must be 1"`
-	Status     string                     `json:"status" jsonschema:"Must be paper_hypothesis"`
-	Authorized bool                       `json:"authorized" jsonschema:"Must be false; research never grants authority"`
-	Promotable bool                       `json:"promotable" jsonschema:"Must be false; research is not promotion evidence"`
-	PaperOnly  bool                       `json:"paper_only" jsonschema:"Must be true"`
-	Thesis     string                     `json:"thesis" jsonschema:"Plain-text paper hypothesis, 1 to 1000 bytes"`
-	Sources    []shadowHypothesisEvidence `json:"sources" jsonschema:"One to eight direct HTTPS source citations"`
+	Version                uint32                     `json:"version" jsonschema:"Paper hypothesis schema version; must be 1"`
+	Status                 string                     `json:"status" jsonschema:"Must be paper_hypothesis"`
+	Authorized             bool                       `json:"authorized" jsonschema:"Must be false; research never grants authority"`
+	Promotable             bool                       `json:"promotable" jsonschema:"Must be false; research is not promotion evidence"`
+	PaperOnly              bool                       `json:"paper_only" jsonschema:"Must be true"`
+	Thesis                 string                     `json:"thesis" jsonschema:"Plain-text paper hypothesis, 1 to 1000 bytes"`
+	Sources                []shadowHypothesisEvidence `json:"sources" jsonschema:"One to eight direct HTTPS source citations"`
+	RecordedEvidenceSHA256 string                     `json:"recorded_evidence_sha256,omitempty" jsonschema:"Host-bound recorded evidence digest; never supplied by a legacy hypothesis"`
 }
 
 type shadowHypothesisEvidence struct {
@@ -136,6 +137,7 @@ type shadowResearchCandidateReceipt struct {
 	Promotable               bool                    `json:"promotable"`
 	PaperOnly                bool                    `json:"paper_only"`
 	ForwardEvidenceRequired  bool                    `json:"forward_evidence_required"`
+	RetrospectiveScreening   bool                    `json:"retrospective_screening,omitempty"`
 	ChallengerPointerUpdated bool                    `json:"challenger_pointer_updated"`
 	ChampionPointerUpdated   bool                    `json:"champion_pointer_updated"`
 	Artifact                 string                  `json:"artifact"`
@@ -410,7 +412,7 @@ func serveShadowResearchMCP(
 	}
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name: "mithril_paper_create_challenger", Title: "Create Paper Challenger",
-		Description: "Schema-validate and attach a cited paper-only hypothesis, bind the operator-fixed experiment requirement for adaptive policies, require seven chronological train/out-of-sample folds from eight consecutive completed journals, write one immutable challenger artifact, and atomically update only the dedicated paper challenger pointer. A failed training round-trip check may retain one typed replay-rejection receipt. Never selects a champion or promotes to live trading.",
+		Description: "Bind a paper-only hypothesis and operator-fixed experiment requirement, then screen it on seven chronological historical folds from eight completed journals. A research-informed candidate is retrospective screening, not untouched validation; separate forward evidence is mandatory. Write one immutable challenger artifact and update only its dedicated paper pointer. A failed training round-trip check may retain one typed rejection receipt. Never selects a champion or enables real trading.",
 		Annotations: createAnnotations,
 	}, func(_ context.Context, _ *mcpsdk.CallToolRequest, input shadowResearchCandidateInput) (*mcpsdk.CallToolResult, shadowResearchCandidateReceipt, error) {
 		result, err := controller.createCandidate(input, controller.now())
@@ -547,6 +549,7 @@ func (controller *shadowResearchController) createCandidate(
 	return shadowResearchCandidateReceipt{
 		Status: "paper_challenger_ready", PaperOnly: true,
 		ForwardEvidenceRequired:  true,
+		RetrospectiveScreening:   binding != nil,
 		ChallengerPointerUpdated: !pointerState.sameArtifact,
 		ChampionPointerUpdated:   false,
 		Artifact:                 artifact, ArtifactSHA256: artifactSHA256,
@@ -566,6 +569,11 @@ func (controller *shadowResearchController) bindResearchPacket(
 	}
 	if packet.Market != shadowMarketPair(controller.policy) {
 		return shadow.Policy{}, nil, shadowPaperHypothesis{}, errors.New("research packet market does not match this paper server")
+	}
+	if packet.RecordedObservations != nil {
+		if err := verifyResearchObservations(*packet.RecordedObservations, controller.policy, controller.journalDir, now); err != nil {
+			return shadow.Policy{}, nil, shadowPaperHypothesis{}, err
+		}
 	}
 	currentFingerprint, err := controller.policy.Fingerprint()
 	baseFingerprint, baseErr := controller.basePolicy.Fingerprint()
@@ -615,6 +623,16 @@ func validateShadowResearchPacketBinding(
 	}
 	if result.WalkForward == nil {
 		return errors.New("research packet binding needs walk-forward evidence")
+	}
+	if recorded := packet.RecordedObservations; recorded != nil {
+		baseHash, err := base.Fingerprint()
+		if err != nil || recorded.PolicySHA256 != baseHash || len(result.WalkForward.Folds) == 0 {
+			return errors.New("recorded research binding differs from base policy")
+		}
+		last := result.WalkForward.Folds[len(result.WalkForward.Folds)-1].ValidationJournal
+		if recorded.Journal.Day != last.Day || recorded.Journal.Records != last.Records || recorded.Journal.ChainHeadSHA256 != last.ChainHeadSHA256 {
+			return errors.New("recorded research binding differs from screened journal")
+		}
 	}
 	fingerprint, err := candidate.Fingerprint()
 	if err != nil {
@@ -687,6 +705,11 @@ func setShadowAdaptiveParameter(policy *shadow.AdaptivePolicy, name string, valu
 }
 
 func shadowHypothesisFromPacket(packet researchpacket.Packet) shadowPaperHypothesis {
+	if packet.RecordedObservations != nil {
+		return shadowPaperHypothesis{Version: 2, Status: "paper_hypothesis", PaperOnly: true,
+			Thesis:                 "Recorded paper observations for " + packet.Market + " on " + packet.RecordedObservations.Journal.Day + ": " + cleanShadowResearchText(packet.BullCase, 800),
+			RecordedEvidenceSHA256: packet.RecordedObservations.ContentSHA256}
+	}
 	hypothesis := shadowPaperHypothesis{
 		Version: shadowPaperHypothesisVersion, Status: "paper_hypothesis", PaperOnly: true,
 		Thesis: "Research packet " + packet.HypothesisID + ": " + cleanShadowResearchText(packet.VerifiedFacts[0].Claim, 800),
@@ -960,6 +983,9 @@ func (controller *shadowResearchController) ensureCandidateArtifact(path string,
 }
 
 func (input shadowResearchCandidateInput) validate(now time.Time) error {
+	if input.Hypothesis.Version != shadowPaperHypothesisVersion || input.Hypothesis.RecordedEvidenceSHA256 != "" {
+		return errors.New("recorded hypothesis requires a host-bound research packet")
+	}
 	if err := input.Hypothesis.validate(); err != nil {
 		return err
 	}
@@ -985,10 +1011,19 @@ func (input shadowResearchCandidateInput) validateDays(now time.Time) error {
 }
 
 func (hypothesis shadowPaperHypothesis) validate() error {
-	if hypothesis.Version != shadowPaperHypothesisVersion ||
+	if (hypothesis.Version != shadowPaperHypothesisVersion && hypothesis.Version != 2) ||
 		hypothesis.Status != "paper_hypothesis" || hypothesis.Authorized ||
 		hypothesis.Promotable || !hypothesis.PaperOnly {
 		return errors.New("paper hypothesis safety markers are invalid")
+	}
+	if hypothesis.Version == 2 {
+		if !boundedResearchText(hypothesis.Thesis, 1000) || !validLowerSHA256(hypothesis.RecordedEvidenceSHA256) || len(hypothesis.Sources) != 0 {
+			return errors.New("recorded paper hypothesis is invalid")
+		}
+		return nil
+	}
+	if hypothesis.RecordedEvidenceSHA256 != "" {
+		return errors.New("web hypothesis contains recorded evidence")
 	}
 	if !boundedResearchText(hypothesis.Thesis, 1000) ||
 		len(hypothesis.Sources) == 0 || len(hypothesis.Sources) > shadowHypothesisMaxSources {

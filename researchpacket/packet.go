@@ -74,22 +74,24 @@ type ParameterChange struct {
 }
 
 type Packet struct {
-	Version                uint32            `json:"version"`
-	HypothesisID           string            `json:"hypothesis_id"`
-	CreatedAt              time.Time         `json:"created_at"`
-	ValidUntil             time.Time         `json:"valid_until"`
-	Market                 string            `json:"market"`
-	Disposition            string            `json:"disposition"`
-	VerifiedFacts          []Fact            `json:"verified_facts"`
-	BullCase               string            `json:"bull_case"`
-	BearCase               string            `json:"bear_case"`
-	NoTradeCase            string            `json:"no_trade_case"`
-	ExecutionCostCase      string            `json:"execution_cost_case"`
-	RiskVeto               RiskVeto          `json:"risk_veto"`
-	CandidateParameterDiff []ParameterChange `json:"candidate_parameter_diff"`
-	RejectionConditions    []string          `json:"rejection_conditions"`
-	OutOfSampleTest        string            `json:"out_of_sample_test"`
-	ContentSHA256          string            `json:"content_sha256,omitempty"`
+	Version                uint32                `json:"version"`
+	HypothesisID           string                `json:"hypothesis_id"`
+	CreatedAt              time.Time             `json:"created_at"`
+	ValidUntil             time.Time             `json:"valid_until"`
+	Market                 string                `json:"market"`
+	Disposition            string                `json:"disposition"`
+	VerifiedFacts          []Fact                `json:"verified_facts"`
+	BullCase               string                `json:"bull_case"`
+	BearCase               string                `json:"bear_case"`
+	NoTradeCase            string                `json:"no_trade_case"`
+	ExecutionCostCase      string                `json:"execution_cost_case"`
+	RiskVeto               RiskVeto              `json:"risk_veto"`
+	CandidateParameterDiff []ParameterChange     `json:"candidate_parameter_diff"`
+	RejectionConditions    []string              `json:"rejection_conditions"`
+	OutOfSampleTest        string                `json:"out_of_sample_test"`
+	RecordedEvidence       *RecordedReference    `json:"recorded_evidence,omitempty"`
+	RecordedObservations   *RecordedObservations `json:"recorded_observations,omitempty"`
+	ContentSHA256          string                `json:"content_sha256,omitempty"`
 }
 
 type Status struct {
@@ -101,6 +103,12 @@ type Status struct {
 
 // Parse accepts one strict JSON object from Hermes and adds the content hash.
 func Parse(data []byte, now time.Time) (Packet, error) {
+	return ParseWithRecorded(data, nil, now)
+}
+
+// ParseWithRecorded binds a host-reconstructed observation artifact for a v2
+// packet. It never accepts a model-supplied artifact. Web-only v1 stays unchanged.
+func ParseWithRecorded(data []byte, observation *RecordedObservations, now time.Time) (Packet, error) {
 	if len(data) == 0 || len(data) > MaxBytes {
 		return Packet{}, errors.New("research packet size is invalid")
 	}
@@ -108,8 +116,18 @@ func Parse(data []byte, now time.Time) (Packet, error) {
 	if err := strictjson.Decode(data, &packet); err != nil {
 		return Packet{}, errors.New("research packet JSON is invalid")
 	}
-	if packet.ContentSHA256 != "" {
-		return Packet{}, errors.New("research packet digest must be assigned by mithril-agent")
+	if packet.ContentSHA256 != "" || packet.RecordedObservations != nil {
+		return Packet{}, errors.New("research packet digest and recorded observations must be assigned by mithril-agent")
+	}
+	if packet.Version == RecordedVersion {
+		if observation == nil || !observation.CurrentAt(now) {
+			return Packet{}, errors.New("research packet needs current host-recorded observations")
+		}
+		bound := *observation
+		packet.RecordedObservations = &bound
+		if packet.VerifiedFacts == nil {
+			packet.VerifiedFacts = []Fact{}
+		}
 	}
 	if err := packet.validate(now.UTC(), true); err != nil {
 		return Packet{}, err
@@ -154,13 +172,16 @@ func (packet Packet) StatusAt(now time.Time) Status {
 		}
 	}
 	status.Current = !now.UTC().Before(packet.CreatedAt) && now.UTC().Before(packet.ValidUntil)
+	if packet.RecordedObservations != nil {
+		status.Current = status.Current && packet.RecordedObservations.CurrentAt(now)
+	}
 	status.Actionable = status.Current && packet.Disposition == DispositionCandidate &&
 		packet.RiskVeto.Decision == VetoPass && len(packet.CandidateParameterDiff) != 0
 	return status
 }
 
 func (packet Packet) validate(now time.Time, fresh bool) error {
-	if packet.Version != Version || !safeID(packet.HypothesisID) ||
+	if (packet.Version != Version && packet.Version != RecordedVersion) || !safeID(packet.HypothesisID) ||
 		packet.CreatedAt.IsZero() || packet.ValidUntil.IsZero() ||
 		!packet.CreatedAt.Equal(packet.CreatedAt.UTC()) ||
 		!packet.ValidUntil.Equal(packet.ValidUntil.UTC()) ||
@@ -180,12 +201,21 @@ func (packet Packet) validate(now time.Time, fresh bool) error {
 		packet.CreatedAt.After(now.Add(2*time.Minute)) || !now.Before(packet.ValidUntil)) {
 		return errors.New("research packet creation time is not current")
 	}
+	if packet.Version == Version {
+		if packet.RecordedEvidence != nil || packet.RecordedObservations != nil {
+			return errors.New("web-only research packet contains recorded evidence")
+		}
+	} else if packet.RecordedEvidence == nil || packet.RecordedObservations == nil ||
+		!packet.RecordedObservations.CurrentAt(packet.CreatedAt) || packet.RecordedObservations.Market != packet.Market ||
+		packet.RecordedEvidence.validate(*packet.RecordedObservations) != nil {
+		return errors.New("research packet recorded evidence binding is invalid")
+	}
 	for _, condition := range packet.RejectionConditions {
 		if !boundedText(condition, 600) {
 			return errors.New("research packet rejection condition is invalid")
 		}
 	}
-	allVerified := len(packet.VerifiedFacts) != 0
+	allVerified := len(packet.VerifiedFacts) != 0 || packet.Version == RecordedVersion
 	seenFacts := make(map[string]struct{}, len(packet.VerifiedFacts))
 	latestSourceTime := packet.ValidUntil
 	if fresh && now.Add(2*time.Minute).Before(latestSourceTime) {
@@ -211,7 +241,7 @@ func (packet Packet) validate(now time.Time, fresh bool) error {
 	case DispositionCandidate:
 		if packet.RiskVeto.Decision != VetoPass || len(packet.CandidateParameterDiff) == 0 ||
 			!allVerified {
-			return errors.New("research candidate lacks two-source claims or a Hermes-reported pass")
+			return errors.New("research candidate lacks verified evidence or a Hermes-reported pass")
 		}
 	case DispositionNoChange, DispositionBlocked:
 		if packet.RiskVeto.Decision != VetoReject || len(packet.CandidateParameterDiff) != 0 {

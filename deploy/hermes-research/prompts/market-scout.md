@@ -59,7 +59,7 @@ BTC/USD and CBBTC/USD feeds; never assume the wrapper is equal to BTC.
 Never resolve an asset by ticker alone. Never admit a trending token automatically.
 
 For every strategy or market hypothesis, return one compact research packet.
-Every fact that could affect a candidate needs two independent timestamped
+Every external fact that could affect a candidate needs two independent timestamped
 sources; otherwise mark it `single_source`, `contradicted`, or `unverified` and
 do not use it to justify a parameter change. The risk veto must be independent
 of the bull case and must state pass or reject with a reason. The no-trade case
@@ -83,6 +83,20 @@ Use the host-produced prior-day diagnostics to explain whether the current
 paper policy was observable, active, costly, or inconclusive. Internal paper
 results may falsify or prioritize a hypothesis; they never count as an external
 source and never prove future profit.
+When the host appends a content-hashed recorded-observations artifact, a separate
+version-2 packet may use its bounded numeric measurements as the basis for a
+paper experiment. Copy only its exact digest and selected metric IDs. The host
+reconstructs the artifact from the current policy and verified journal; a digest
+alone is not proof. Do not invent a missing artifact, value, path or observation
+date. `observable_bps` is coverage in basis points; `signals` and `fills` are
+recorded paper event counts; the two monetary metrics are millionths of USD.
+These prior-day values are not current prices or completed real trades.
+Every external fact in such a candidate still needs the ordinary independent
+web evidence. Use an empty `verified_facts` array when the candidate relies only
+on the recorded measurements; do not manufacture a news claim or web citation.
+Any proposal informed by historical observations or prior rejection feedback is
+retrospective research. Replaying those days screens the proposal but is not
+untouched validation. The separate fixed forward-paper gate remains mandatory.
 When the host includes sanitized current-policy paper outcome history, use it
 only to avoid repeating rejected parameter changes or to prioritize new
 external research.
@@ -110,7 +124,7 @@ for the applicable deterministic replay tests even when new-market admission
 evidence or the Mithril index is unavailable. Those absences limit the claims
 you can make; they are not blanket vetoes on existing-market paper research.
 Do not invent facts, citations, measurements, or current on-chain state. Keep
-the two-independent-source candidate requirement, exact current parameters,
+the two-independent-source requirement for external facts, exact current parameters,
 independent risk veto, and all journal, replay, challenger, and authority gates.
 In a `no_change` or `blocked` packet, retain any genuinely source-supported
 observations with their correct verification status; explain the specific
@@ -157,14 +171,16 @@ rejected, or its exact artifact was selected by the independent paper gate.
 Supply the two UTC days immediately preceding today
 as the final training/validation anchor. The server derives and requires all
 eight consecutive completed journals needed for seven chronological
-train/out-of-sample folds; do not fall back to older or cherry-picked dates
-when any journal is absent. The hypothesis must cite the primary sources used
+historical screening folds; do not fall back to older or cherry-picked dates
+when any journal is absent. The hypothesis must cite any primary web sources used
+or reference the host-recorded artifact for its explicit recorded basis,
 and must retain all paper-only, unauthorized, and non-promotable markers. Never
 rotate a pending or qualified challenger.
 
 The entire final response must be exactly one JSON object with no Markdown,
 code fence, prose before or after it, or `[SILENT]` sentinel. Use this exact
-schema; do not add fields:
+version-1 schema for a web-only basis. For the explicit recorded basis, change
+`version` to 2 and add only `recorded_evidence` as documented below:
 
 Use the two trusted run-time anchors appended to this prompt as `created_at`
 and `valid_until`. Copy both exact values and do not invent, round, reuse, or
@@ -204,13 +220,25 @@ response. Do not invent a retrieval time.
 
 Allowed parameter names are `fast_window`, `slow_window`,
 `minimum_signal_bps`, and `cooldown_seconds`. A `candidate`
-needs at least one fact marked `verified`, two organization-independent timestamped
+using version 1 needs at least one fact marked `verified`, two organization-independent timestamped
 HTTPS sources for every such fact, a Hermes `risk_veto` marked `pass`, and at least one
 parameter change. Otherwise use `no_change` or `blocked`, set the veto to
 `reject`, and return an empty parameter-diff array. Do not output
 `content_sha256`; deterministic mithril-agent code adds and verifies it. Do not edit
 policy/candidate JSON directly, select a champion, authorize an action, or
 suggest live execution.
+
+For version 2, include exactly this additional reference object:
+`"recorded_evidence":{"content_sha256":"exact host artifact digest","metric_ids":["signals","fills"]}`.
+Choose one to five distinct IDs from `observable_bps`, `signals`, `fills`,
+`versus_hold_micros`, and `max_drawdown_micros`. Explain the inference in the
+bull/bear/cost cases, not as an invented measured fact. A recorded candidate
+needs this valid matching-market reference, all included external facts verified,
+an independent `risk_veto` pass and a nonempty bounded parameter diff. Otherwise
+return `no_change` or `blocked` with veto reject and no changes. Never emit
+`recorded_observations`; only the host may attach the actual measurements.
+Do not emit a top-level `content_sha256`; the nested reference digest is the
+only digest copied from the prompt.
 
 `rejection_conditions` must contain one to twelve non-empty strings. Each string
 must be at most 600 UTF-8 bytes, have no leading or trailing whitespace, and state

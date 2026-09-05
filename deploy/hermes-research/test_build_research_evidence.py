@@ -116,6 +116,44 @@ class ResearchEvidenceTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "without a successful Hermes retrieval"):
             self.build(self.sessions("https://status.solana.com/"))
 
+    def test_recorded_only_packet_preserves_reference_without_web_citations(self):
+        raw = json.loads(self.packet())
+        raw.pop("content_sha256")
+        raw.update(version=2, verified_facts=[], recorded_evidence={
+            "content_sha256": "b" * 64, "metric_ids": ["signals", "fills"],
+        })
+        # Recorded-only means no external citations, not skipping web research.
+        sessions = self.sessions_with_final(json.dumps(raw))
+        extracted = evidence.extract_packet(sessions, self.created, self.created + 5)
+        bound = json.loads(evidence.bind_source_times(
+            sessions, extracted, self.created, self.created + 5,
+        ))
+        self.assertEqual(bound, raw)
+        # Packet sealing and journal reconstruction belong to the Go validator.
+        bound["content_sha256"] = "a" * 64
+        result = self.build(sessions, json.dumps(bound).encode())
+        self.assertEqual(result["official_pages_checked"], 0)
+        self.assertEqual(result["retrieved_urls"], ["https://solana.com/changelog"])
+        self.assertEqual(result["packet_sha256"], "a" * 64)
+
+    def test_recorded_basis_does_not_bypass_external_citation_provenance(self):
+        packet = json.loads(self.packet())
+        packet.update(version=2, recorded_evidence={
+            "content_sha256": "b" * 64, "metric_ids": ["signals"],
+        })
+        with self.assertRaisesRegex(ValueError, "without a successful Hermes retrieval"):
+            self.build(self.sessions("https://status.solana.com/"), json.dumps(packet).encode())
+        packet["verified_facts"][0]["sources"][0]["retrieved_at"] = "2026-09-02T12:00:02Z"
+        with self.assertRaisesRegex(ValueError, "does not match its Hermes retrieval"):
+            self.build(packet=json.dumps(packet).encode())
+        packet.pop("content_sha256")
+        packet["verified_facts"][0]["sources"][0].pop("retrieved_at")
+        with self.assertRaisesRegex(ValueError, "without a successful Hermes retrieval"):
+            evidence.bind_source_times(
+                self.sessions("https://status.solana.com/"), json.dumps(packet).encode(),
+                self.created, self.created + 5,
+            )
+
     def test_binds_source_time_from_the_successful_tool_result(self):
         raw = json.loads(self.packet())
         raw.pop("content_sha256")

@@ -3,7 +3,7 @@
 This deploys Nous Research Hermes Agent as a scheduled two-phase paper research
 process. The first container may delegate up to three leaf source reviews but
 has no policy, journal, challenger, wallet, or writable trading mount. Mithril
-validates that phase's strict source-cited JSON before a separate
+validates that phase's strict evidence-bound JSON before a separate
 non-delegating session may create one immutable paper challenger through the
 existing bounded MCP gate. The validated packet is hashed, archived, and
 projected to the dashboard. Neither phase can change the champion or live
@@ -74,6 +74,42 @@ citation is rejected unless its exact URL appears in a successful
 `web_extract` result. The dashboard deliberately separates cited official pages
 that were actually retrieved from two-source claims labelled by Hermes. Console
 prose is never treated as retrieval evidence.
+
+### Recorded paper observations
+
+The host also computes a bounded observation artifact from the immediately
+preceding complete UTC day's private journal and exact active SOL/USDC or
+JUP/USDC paper policy. It requires verified journal contents, paired market
+sources and at least 95% observable coverage. Coverage, signals, fills, result
+versus holding, and maximum drawdown are measurements of recorded paper data,
+not current prices, web facts, or real wallet results.
+
+A version-2 research packet may reference the artifact's content digest and
+one to five supported metric IDs. Hermes cannot supply the artifact itself.
+`research packet-record` reconstructs it from operator-fixed policy/journal
+paths before attaching and archiving it; the challenger MCP repeats that
+verification. A digest binds content, not provenance. Recreating an artifact
+does not renew its observation day, and a run spanning UTC midnight must use
+the new completed day or fail closed. Version-1 web packets remain compatible.
+
+Recorded-only candidates may have no cited web facts, but this research profile
+still requires a successful web retrieval trace. Any external fact included in
+a candidate retains the existing independent-source and retrieval checks.
+Dashboard web-source counts never include recorded measurements. Its sealed
+projection uses `research packet-project`; that command checks integrity and
+currentness, not journal provenance, and must receive protected host output.
+
+Historical replay after Hermes sees these observations is retrospective
+screening, not untouched validation. Neither recorded evidence nor a replay
+result changes the separate forward-paper selection requirements.
+
+Deploy compatible agent/dashboard readers before enabling the updated research
+wrapper and prompt. Back up the current projections and candidate-pointer
+identities while writers and selectors are idle. Once a pointer references a
+version-2 candidate, a version-1-only binary is not a safe automatic rollback:
+retain compatible readers or stop for an explicit recovery decision. Do not
+rewind trading journals, ledgers, or candidate pointers to make an old reader
+start.
 
 The Compose bind mounts deliberately set `create_host_path: false`. A typo or
 missing source therefore stops startup instead of silently creating a directory

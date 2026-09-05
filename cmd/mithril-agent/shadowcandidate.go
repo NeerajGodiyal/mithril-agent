@@ -155,8 +155,17 @@ func (candidate shadowPaperCandidate) validateAgainst(base shadow.Policy) error 
 		if err := candidate.Hypothesis.validate(); err != nil {
 			return errors.New("shadow paper candidate hypothesis is invalid")
 		}
+		if candidate.Hypothesis.Version == 2 && (candidate.ResearchPacket == nil ||
+			candidate.ResearchPacket.RecordedObservations == nil ||
+			candidate.Hypothesis.RecordedEvidenceSHA256 != candidate.ResearchPacket.RecordedObservations.ContentSHA256) {
+			return errors.New("recorded hypothesis lacks its bound packet")
+		}
 	}
 	if candidate.ResearchPacket != nil {
+		if candidate.ResearchPacket.Version == researchpacket.RecordedVersion &&
+			(candidate.Hypothesis == nil || candidate.Hypothesis.Version != 2) {
+			return errors.New("recorded research packet lacks its recorded hypothesis")
+		}
 		if candidate.Hypothesis == nil || validateShadowResearchPacketBinding(
 			*candidate.ResearchPacket, base, candidate.Policy, candidate.Research,
 		) != nil {

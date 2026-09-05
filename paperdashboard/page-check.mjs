@@ -32,3 +32,28 @@ for (const changed of [{ ...activity, candidates_without_entry_signal: 71 }, { .
 }
 assert.equal(view({ paper_check: { ...old, outcome: 'insufficient_evidence', candidates_evaluated: 0, training_activity: activity } }).label, 'Not enough data');
 console.log('Paper-check renderer: legacy, no-entry, mixed, unknown and incomplete cases passed.');
+
+const researchStart = source.indexOf('function researchView(');
+const researchEnd = source.indexOf('function mithrilEvidenceView(', researchStart);
+assert(researchStart > 0 && researchEnd > researchStart, 'research renderer boundaries missing');
+const research = packet => runInNewContext(source.slice(researchStart, researchEnd) + '\nresearchView()', {
+  current: { research_enabled: true, research: packet }, age: () => 'just now',
+});
+const web = { market: 'SOL/USDC', current: true, actionable: true, disposition: 'candidate', risk_decision: 'pass',
+  risk_reason: 'Paper only.', sources_checked: 0, retrieved_pages: 0, successful_web_searches: 0,
+  two_source_claims: 0, single_source_facts: 0, contradicted_facts: 0, unverified_facts: 0 };
+const legacyResearch = research(web);
+const webResearch = research({ ...web, evidence_basis: 'web_sources', retrospective_screening: false });
+assert.equal(JSON.stringify(legacyResearch), JSON.stringify(webResearch), 'v1 rendering changed');
+assert.doesNotMatch(webResearch.detail, /Uses recorded|Still needs testing/);
+for (const current of [true, false]) {
+  const recorded = research({ ...web, current, evidence_basis: 'recorded_paper_observations',
+    observation_day: '2026-09-04', observation_metric_ids: ['signals', 'fills'], retrospective_screening: true });
+  assert.match(recorded.detail, /Uses recorded paper data from 2026-09-04/);
+  assert.match(recorded.detail, /Still needs testing on new market data/);
+  assert.match(recorded.description, /0 unique sources/);
+  assert.match(recorded.description, /0 two-source facts/);
+  assert.equal(recorded.label, current ? 'Proposal ready' : 'Expired');
+}
+assert.doesNotMatch(research({ ...web, evidence_basis: 'future_unknown', retrospective_screening: true }).detail, /Uses recorded/);
+console.log('Research renderer: legacy, web, recorded, expired and unknown evidence bases passed.');

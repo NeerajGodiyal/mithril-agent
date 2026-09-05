@@ -802,12 +802,13 @@ function researchView(){
 	const outcomes=packet.two_source_claims+' two-source fact'+(packet.two_source_claims===1?'':'s')+' · '+packet.single_source_facts+' one-source fact'+(packet.single_source_facts===1?'':'s')+' · '+packet.contradicted_facts+' contradicted · '+packet.unverified_facts+' unverified';
 	const evidence=retrieved+'; '+cited+'; '+outcomes;
 	const sourceFreshness='Individual source publication freshness is unavailable in this bounded view; packet age is not source age.';
-  if(!packet.current)return {label:'Expired',tone:'amber',description:packet.market+' research expired. '+evidence+'.',detail:'It cannot be used for a new paper experiment. '+sourceFreshness};
+	const basisDetail=packet.evidence_basis==='recorded_paper_observations'&&packet.retrospective_screening===true?'Uses recorded paper data from '+packet.observation_day+'. Still needs testing on new market data. ':'';
+  if(!packet.current)return {label:'Expired',tone:'amber',description:packet.market+' research expired. '+evidence+'.',detail:basisDetail+'It cannot be used for a new paper experiment. '+sourceFreshness};
   const passed=packet.risk_decision==='pass';
   const label=packet.disposition==='candidate'&&packet.actionable?'Proposal ready':packet.disposition==='blocked'?'Hermes advised no change':'No change';
   const tone=packet.disposition==='candidate'&&packet.actionable?'blue':packet.disposition==='blocked'?'red':'green';
   const changes=(packet.proposed_changes||[]).map(change=>change.name.replaceAll('_',' ')+' '+change.current+' → '+change.proposed).join(' · ');
-	  return {label,tone,description:packet.market+' · '+evidence+' · '+age(packet.created_at)+'.',detail:'Hermes risk review (advisory): '+(passed?'continue to deterministic testing':'do not propose this change')+' · '+packet.risk_reason+(changes?' Proposed only: '+changes+'.':'')+' Deterministic replay gates alone decide whether any paper plan may change. '+sourceFreshness};
+	  return {label,tone,description:packet.market+' · '+evidence+' · '+age(packet.created_at)+'.',detail:basisDetail+'Hermes risk review (advisory): '+(passed?'continue to deterministic testing':'do not propose this change')+' · '+packet.risk_reason+(changes?' Proposed only: '+changes+'.':'')+' Deterministic replay gates alone decide whether any paper plan may change. '+sourceFreshness};
 }
 function mithrilEvidenceView(){
   if(!current.mithril_evidence_enabled)return {label:'Not connected',tone:'amber',description:'No host-produced Mithril evidence status is configured.'};
