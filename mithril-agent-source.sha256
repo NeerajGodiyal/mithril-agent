@@ -72,7 +72,7 @@ dbc75b18d84298345a45fea6527cd1716a401c21e592b88d983a15bd22d223ef  ./cmd/mithril-
 418a35e944a1524d6cde659c70309b8b046c72a06a41ba458b2b874564775f7c  ./cmd/mithril-agent/index_test.go
 54c2f606a14bd889fcce29c0e92a3ccaaf70c893ad0e98d4d54f8a36b4ea736b  ./cmd/mithril-agent/journal.go
 a231f8e63c8d16e027362818c17852387e70aea6ecfca4db0f2eeddb47a1f139  ./cmd/mithril-agent/journal_test.go
-ae8d5356a901bd6867c6dbb6f951cedae9c8aedf33c4e929d6eee20ce624b5d6  ./cmd/mithril-agent/main.go
+b086a2cc5722f3260b4a09882991612b24fe27aef71267b65615ede0dff5bc77  ./cmd/mithril-agent/main.go
 6fcd32ead5752752dcb714ed354cbcbf87c4fb1807e60a0f4a276cba2f93a251  ./cmd/mithril-agent/main_test.go
 fda6ae2baa361f38cc6cfba161de6a21b43ae1eaabea1dbc59f6e84d2aa20066  ./cmd/mithril-agent/mcpconfig.go
 4feff09637f14e9f09ee3c157a4f634ea16c78f8962b01a76bf363d0a604840d  ./cmd/mithril-agent/mcpconfig_test.go
@@ -158,6 +158,8 @@ e7fd434421e754dd25ffc740ceda9c96b0c3324e77174603acf0530398f73d3d  ./cmd/mithril-
 07b3a307e45f364ce58c0ce906c649f55b353f45f81a4ac5ff4da1a2e6b6a6a9  ./cmd/mithril-agent/shadowperpsepisode_test.go
 9a120e2de55796a7a3d6e97759b51bd8ae3f35174e1deb21e53d8bece2a0d6b1  ./cmd/mithril-agent/shadowperpsplan.go
 20e0d49ad286b6ca125dd7e1be19253a5d8ae5a16693c2098b098e92c9baee3b  ./cmd/mithril-agent/shadowperpsplan_test.go
+2636a3b6b057f558faf74979a1c9b66b09f1642fd5c3207286c77e15146ed492  ./cmd/mithril-agent/shadowperpsproposal.go
+1983d1c7bcbc7539eddb311cde1dd8357ee08d257869c3e40261784b758ed0fd  ./cmd/mithril-agent/shadowperpsproposal_test.go
 3599cc49782e7a5b197ba155058f6e02b540562363f5de05e694575d18ef3c20  ./cmd/mithril-agent/shadowperpsqualification.go
 71d152ab5a648796484c50d8f769f36e9d5d0b99fa2755f696a7c8efb1a1b147  ./cmd/mithril-agent/shadowperpsqualification_test.go
 da7f936d74c58cc47ffc2e492150028ffb1aeee4bd93611f8ce3d85fd7486f74  ./cmd/mithril-agent/shadowperpsstatus_test.go
@@ -237,7 +239,7 @@ c2d21e71dee20c074624f1ff0e77a8501bf796f04067ab05b0371f912642ac99  ./cmd/mithril-
 0ee330cc5b9256be01f162995b70cf6e2dee2e762f10984e54394ebb94a713aa  ./deploy/hermes-research/.gitignore
 3f212ffe6fb263e541d832c680b3b6c6a33676d7c7d4b09c8007511d1d4906fc  ./deploy/hermes-research/AGENTS-research.md
 5c8b51e17ca8348207bb66df0a95e243b295d96e56fcc2ab5cc2da279d412561  ./deploy/hermes-research/AGENTS.md
-037b51483a211e2f76a3910370c424f8b47d3c34fe2fa6b555b0fdf5b235f8d6  ./deploy/hermes-research/README.md
+d4562106e5f335fc3d28b2e51002b3af748bfa1580b4664e9341014b7e21e092  ./deploy/hermes-research/README.md
 bb80b7144a95e78b049b6ec44899f0f6aa6e37fce07aee8a82dccefb0e19206e  ./deploy/hermes-research/SOUL-research.md
 a8e2a6c87c5fbe2f416c17d3543f4008ac730bfb7016e0a76ec535683ca8f5f0  ./deploy/hermes-research/SOUL.md
 cf67aba82955fa03d582ec2e060c1095115b7e783c4d2854496e69f68f83fd3e  ./deploy/hermes-research/apply-paper-instruction.sh

@@ -104,6 +104,7 @@ Other supported tools:
   mithril-agent shadow perps-tournament --tape PATH
   mithril-agent shadow perps-qualify --tape PATH
   mithril-agent shadow perps-walk-forward --tape PATH --tape PATH
+  mithril-agent shadow perps-freeze --state-dir PATH --in PATH --tape PATH
   mithril-agent shadow perps-restore --state-dir PATH --symbol SOL
   mithril-agent shadow report --policy PATH --dir PATH
   mithril-agent shadow review --policy PATH --dir PATH --days N
@@ -349,6 +350,9 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		}
 		if len(args) > 1 && args[1] == "perps-walk-forward" {
 			return runShadowPerpsWalkForward(args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "perps-freeze" {
+			return runShadowPerpsFreeze(args[2:], output, time.Now)
 		}
 		if len(args) > 1 && args[1] == "perps-restore" {
 			return runShadowPerpsRestore(args[2:], output)
@@ -1846,6 +1850,9 @@ func runShadow(args []string, output io.Writer) error {
   mithril-agent shadow perps-walk-forward --tape PATH --tape PATH
                                        choose on earlier sealed tapes, then test
                                        the fixed leader on the held-out tape; JSON only
+  mithril-agent shadow perps-freeze --state-dir PATH --in PATH --tape PATH
+                                       freeze a pending advisory proposal;
+                                       never evaluate, select, promote or trade
   mithril-agent shadow perps-restore --state-dir PATH --symbol SOL
                                        restore the previous paper-only perps plan
   mithril-agent shadow market collect --market NAME --observe ADDR --journal PATH

@@ -512,6 +512,22 @@ tapes can span invocations. These records do not select a plan, change scoring,
 or enable Hermes proposals. A prefix is a bounded historical view, not proof
 that no newer attempt or terminal record exists.
 
+`shadow perps-freeze --state-dir PATH --in PATH --tape PATH [--tape PATH ...]`
+records a pending advisory proposal without changing the active paper plan.
+The private input contains only `hypothesis_id`, `symbol`, `risk_arm`, `strategy`
+and `rationale`. The host chooses the paths and verifies 1–64 chronological,
+immutable training tapes, their finalization times, the current baseline and
+the published episode prefix. The model must not own these paths or receipts.
+One proposal per symbol and target attempt is retained under the state parent's
+`proposals` directory; an identical retry returns the original receipt and time.
+The fixed target is the next attempt after that exact prefix. If it had already
+started by the freeze time, a later evaluator must mark it unevaluable rather
+than skip to another attempt. Failed and empty attempts must not be discarded.
+This command does not evaluate results or connect Hermes to the perps runner.
+Its initial limit of 256 receipts per symbol is not a week-long automated loop;
+do not delete receipts to evade the limit. All receipts remain unauthorized and
+nonpromotable, with no signing or order-submission capability.
+
 Each current-format perps final tape and its evaluation are recorded first in
 the symbol's hash-chained, segmented finalization journal. The journal keeps
 every prior receipt, treats an exact repeat as idempotent, and rejects
