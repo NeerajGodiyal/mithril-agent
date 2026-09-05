@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -68,6 +70,10 @@ func TestResearchObservationsBindPreviousDayWithoutRenewingAge(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil || decoded.ContentSHA256 != artifact.ContentSHA256 {
 		t.Fatalf("CLI artifact differs: %+v, %v", decoded, err)
 	}
+	var explained bytes.Buffer
+	if err := runResearchObservations([]string{"--policy", writeShadowPolicy(t, policy), "--journal-dir", directory, "--explain-unavailable"}, &explained, func() time.Time { return now }); err != nil || !bytes.Equal(output.Bytes(), explained.Bytes()) {
+		t.Fatalf("diagnostic flag changed a qualifying artifact: %v", err)
+	}
 	if err := runResearchObservations([]string{"--policy", "relative", "--journal-dir", directory}, io.Discard, func() time.Time { return now }); err == nil {
 		t.Fatal("relative policy path was accepted")
 	}
@@ -124,5 +130,98 @@ func TestResearchObservationsRejectSparseIncompleteAndUnpairedJournals(t *testin
 	}
 	if _, err := buildResearchObservations(policy, directory, now); err == nil {
 		t.Fatal("hash-valid journal without paired source evidence was accepted")
+	}
+	var output bytes.Buffer
+	if err := runResearchObservations([]string{"--policy", writeShadowPolicy(t, policy), "--journal-dir", directory, "--explain-unavailable"}, &output, func() time.Time { return now }); err == nil || output.Len() != 0 {
+		t.Fatalf("unpaired journal produced measured coverage: %q, %v", output.String(), err)
+	}
+}
+
+func TestResearchObservationsExplainOnlyVerifiedLowCoverage(t *testing.T) {
+	policy := validShadowResearchPolicy()
+	now := time.Date(2026, 9, 5, 1, 0, 0, 0, time.UTC)
+	source := privateTestDirectory(t)
+	writeShadowResearchDay(t, source, policy, "2026-09-04", []uint64{100_000_000})
+	records, err := journal.ReadRecords(filepath.Join(source, "shadow-2026-09-04.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := privateTestDirectory(t)
+	store, err := journal.Open(filepath.Join(directory, "shadow-2026-09-04.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropped := false
+	for _, record := range records {
+		if record.Type == shadow.EventWaiting && !dropped {
+			dropped = true
+			continue
+		}
+		if _, err := store.Append(record.At, record.Type, record.ActionID, record.Payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := buildResearchObservations(policy, directory, now)
+	var coverage *researchCoverageError
+	if !dropped || !errors.As(err, &coverage) || artifact.ContentSHA256 != "" ||
+		coverage.ObservableBPS != 22*10_000/24 || coverage.RequiredObservableBPS != 9500 ||
+		coverage.Market != "SOL/USDC" || coverage.Day != "2026-09-04" ||
+		coverage.Kind != "recorded_paper_observations_unavailable" || coverage.Reason != "coverage_below_threshold" {
+		t.Fatalf("wrong low-coverage result: %+v, %v", coverage, err)
+	}
+	args := []string{"--policy", writeShadowPolicy(t, policy), "--journal-dir", directory}
+	var output bytes.Buffer
+	if err := runResearchObservations(args, &output, func() time.Time { return now }); err == nil || output.Len() != 0 {
+		t.Fatalf("default failure emitted output: %q, %v", output.String(), err)
+	}
+	args = append(args, "--explain-unavailable")
+	if err := runResearchObservations(args, &output, func() time.Time { return now }); !errors.As(err, &coverage) {
+		t.Fatalf("diagnostic changed failure into success: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(output.Bytes(), &fields); err != nil || len(fields) != 6 {
+		t.Fatalf("unexpected diagnostic fields: %q, %v", output.String(), err)
+	}
+	var decoded researchCoverageError
+	if err := json.Unmarshal(output.Bytes(), &decoded); err != nil || decoded != *coverage {
+		t.Fatalf("CLI diagnostic differs: %+v, %v", decoded, err)
+	}
+	var nonArtifact researchpacket.RecordedObservations
+	if err := json.Unmarshal(output.Bytes(), &nonArtifact); err != nil || nonArtifact.Validate() == nil {
+		t.Fatal("diagnostic was accepted as a qualifying artifact")
+	}
+	closedOutput, err := os.CreateTemp(t.TempDir(), "closed-output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := closedOutput.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runResearchObservations(args, closedOutput, func() time.Time { return now }); !errors.Is(err, os.ErrClosed) || !errors.As(err, &coverage) {
+		t.Fatalf("diagnostic lost output failure or coverage error: %v", err)
+	}
+	for _, name := range []string{"missing", "corrupt", "wrong policy"} {
+		t.Run(name, func(t *testing.T) {
+			journalDir, current := directory, policy
+			if name != "wrong policy" {
+				journalDir = privateTestDirectory(t)
+			}
+			if name == "corrupt" {
+				if err := os.WriteFile(filepath.Join(journalDir, "shadow-2026-09-04.jsonl"), []byte("not a journal\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if name == "wrong policy" {
+				current.FeeLamports++
+			}
+			var output bytes.Buffer
+			err := runResearchObservations([]string{"--policy", writeShadowPolicy(t, current), "--journal-dir", journalDir, "--explain-unavailable"}, &output, func() time.Time { return now })
+			if err == nil || errors.As(err, &coverage) || output.Len() != 0 {
+				t.Fatalf("unverified journal produced measured coverage: %q, %v", output.String(), err)
+			}
+		})
 	}
 }

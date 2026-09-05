@@ -224,20 +224,20 @@ collect_research_packet() (
   # and packet-record independently reconstructs them before publication.
   if sol_observations=$(/usr/sbin/runuser -u mithril-agent-research -- \
     /usr/local/libexec/mithril-agent/mithril-agent research observations \
-      --policy "$sol_policy" --journal-dir "$sol_journals"); then
+      --policy "$sol_policy" --journal-dir "$sol_journals" --explain-unavailable); then
     :
   else
-    sol_observations=unavailable
+    sol_observations="${sol_observations:-unavailable}"
   fi
   jup_observations=unavailable
   if [ -f "$jup_policy" ] && jup_observations=$(/usr/sbin/runuser -u mithril-agent-research -- \
     /usr/local/libexec/mithril-agent/mithril-agent research observations \
-      --policy "$jup_policy" --journal-dir "$jup_journals"); then
+      --policy "$jup_policy" --journal-dir "$jup_journals" --explain-unavailable); then
     :
   else
-    jup_observations=unavailable
+    jup_observations="${jup_observations:-unavailable}"
   fi
-  /usr/bin/printf '\nHost-verified recorded paper observations follow. These are prior-day measurements, not web citations, current prices or proof of future profit. You may use the matching artifact digest and selected metric IDs as the explicit version-2 recorded basis for a bounded parameter experiment. No artifact means this basis is unavailable. Historical replay of a proposal informed by these observations is retrospective screening, not untouched out-of-sample validation. SOL/USDC: %s\nJUP/USDC: %s\n' \
+  /usr/bin/printf '\nHost-verified recorded paper observations follow. These are prior-day measurements, not web citations, current prices or proof of future profit. You may use the matching artifact digest and selected metric IDs as the explicit version-2 recorded basis for a bounded parameter experiment. No artifact means this basis is unavailable. A recorded_paper_observations_unavailable diagnostic explains verified low coverage only: it has no artifact digest and cannot serve as a recorded basis or support performance claims. Historical replay of a proposal informed by these observations is retrospective screening, not untouched out-of-sample validation. SOL/USDC: %s\nJUP/USDC: %s\n' \
     "$sol_observations" "$jup_observations" >>"$research_query"
   /usr/bin/printf '\nTrusted current paper-strategy settings. For a candidate, copy the matching market values exactly into the `current` side of `candidate_parameter_diff`; never infer a missing market. These values are not external evidence and cannot authorize, activate, select, promote, or execute anything. SOL/USDC: %s\nJUP/USDC: %s\n' \
     "$sol_policy_context" "$jup_policy_context" >>"$research_query"

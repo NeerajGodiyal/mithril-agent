@@ -13,18 +13,34 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
 
-const researchObservationsUsage = `Usage: mithril-agent research observations --policy PATH --journal-dir PATH
+const researchObservationsUsage = `Usage: mithril-agent research observations --policy PATH --journal-dir PATH [--explain-unavailable]
 
 Emits host-verified paper observations for the immediately preceding complete UTC
 day. Requires the exact current Mainnet SOL/USDC or JUP/USDC policy, paired market
 source evidence, and at least 95% observable coverage. This read-only artifact is
-advisory: it cannot authorize, promote, or execute a trade.`
+advisory: it cannot authorize, promote, or execute a trade.
+With --explain-unavailable, verified low coverage emits a separate diagnostic and
+still exits unsuccessfully. That diagnostic is not a recorded-basis artifact.`
+
+type researchCoverageError struct {
+	Kind                  string `json:"kind"`
+	Reason                string `json:"reason"`
+	Market                string `json:"market"`
+	Day                   string `json:"day"`
+	ObservableBPS         int32  `json:"observable_bps"`
+	RequiredObservableBPS int32  `json:"required_observable_bps"`
+}
+
+func (*researchCoverageError) Error() string {
+	return "recorded observations lack 95% observable coverage"
+}
 
 func runResearchObservations(args []string, output io.Writer, now func() time.Time) error {
 	flags := flag.NewFlagSet("research observations", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	policyPath := flags.String("policy", "", "exact current paper policy")
 	journalDir := flags.String("journal-dir", "", "private daily paper journal directory")
+	explainUnavailable := flags.Bool("explain-unavailable", false, "emit a nonqualifying diagnostic for verified low coverage")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, err = fmt.Fprintln(output, researchObservationsUsage)
@@ -40,6 +56,10 @@ func runResearchObservations(args []string, output io.Writer, now func() time.Ti
 	}
 	artifact, err := buildResearchObservations(policy, *journalDir, now())
 	if err != nil {
+		var coverage *researchCoverageError
+		if *explainUnavailable && errors.As(err, &coverage) {
+			return errors.Join(err, json.NewEncoder(output).Encode(coverage))
+		}
 		return err
 	}
 	return json.NewEncoder(output).Encode(artifact)
@@ -69,6 +89,13 @@ func buildResearchObservations(policy shadow.Policy, journalDir string, now time
 	}
 	report.ObservableBPS = shadowWalkForwardObservableBPS(ticks, dayStart, policy.Tick())
 	if !report.Trustworthy() {
+		if report.ObservableBPS < 9500 {
+			return researchpacket.RecordedObservations{}, &researchCoverageError{
+				Kind: "recorded_paper_observations_unavailable", Reason: "coverage_below_threshold",
+				Market: shadowMarketPair(policy), Day: day,
+				ObservableBPS: report.ObservableBPS, RequiredObservableBPS: 9500,
+			}
+		}
 		return researchpacket.RecordedObservations{}, errors.New("recorded observations lack 95% observable coverage")
 	}
 	fingerprint, err := policy.Fingerprint()

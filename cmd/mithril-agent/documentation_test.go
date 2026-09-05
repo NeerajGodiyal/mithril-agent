@@ -1490,6 +1490,44 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 	}
 }
 
+func TestHermesRetainsNonqualifyingObservationDiagnostics(t *testing.T) {
+	runner := readDocumentation(t, "../../deploy/hermes-research/run-market-scout.sh")
+	start := strings.Index(runner, "  if sol_observations=$(")
+	if start < 0 {
+		t.Fatal("Hermes observations block is missing")
+	}
+	end := strings.Index(runner[start:], "  /usr/bin/printf")
+	if end < 0 {
+		t.Fatal("Hermes observations block is incomplete")
+	}
+	block := runner[start : start+end]
+	command := "/usr/sbin/runuser -u mithril-agent-research -- \\\n    /usr/local/libexec/mithril-agent/mithril-agent research observations"
+	if strings.Count(block, command) != 2 || strings.Count(block, "--explain-unavailable") != 2 {
+		t.Fatal("both markets must request unavailable diagnostics")
+	}
+	block = strings.ReplaceAll(block, command, "fake_observations")
+	diagnostic := `{"kind":"recorded_paper_observations_unavailable","reason":"coverage_below_threshold","market":"SOL/USDC","day":"2026-09-04","observable_bps":9166,"required_observable_bps":9500}`
+	for _, test := range []struct {
+		name, value, exitCode, jupAvailable, want, wantJUP string
+	}{
+		{"low coverage", diagnostic, "1", "true", diagnostic, diagnostic},
+		{"invalid or missing", "", "1", "true", "unavailable", "unavailable"},
+		{"qualifying", `{"kind":"recorded_paper_observations"}`, "0", "true", `{"kind":"recorded_paper_observations"}`, `{"kind":"recorded_paper_observations"}`},
+		{"missing JUP policy", diagnostic, "1", "false", diagnostic, "unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			script := "set -eu\nvalue=$1\ncode=$2\nsol_policy=unused\nsol_journals=unused\njup_policy=/dev/null\njup_journals=unused\n" +
+				"fake_observations() { printf '%s' \"$value\"; return \"$code\"; }\n" +
+				strings.Replace(block, `[ -f "$jup_policy" ]`, test.jupAvailable, 1) +
+				"printf '%s\\n%s' \"$sol_observations\" \"$jup_observations\"\n"
+			output, err := exec.Command("/bin/sh", "-c", script, "test", test.value, test.exitCode).CombinedOutput()
+			if err != nil || string(output) != test.want+"\n"+test.wantJUP {
+				t.Fatalf("observations were lost: %q, %v", output, err)
+			}
+		})
+	}
+}
+
 func TestHermesIndexGateRequiresMainnetIdentity(t *testing.T) {
 	runner := readDocumentation(t, "../../deploy/hermes-research/run-market-scout.sh")
 	start := strings.Index(runner, "if [ -f /var/lib/mithril-agent-research/index/events.jsonl ] &&")
