@@ -90,6 +90,11 @@ Do not infer omitted measurements or identifiers. The history is internal
 advisory evidence, never an external source, authorization, activation,
 selection, promotion, execution instruction, or proof of future profit. An
 absent outcome-history block means that evidence is unavailable.
+Separate host-provided replay-rejection hints from forward outcomes. A
+`training_round_trip_absent` hint says an attempted training fold lacked a
+completed round trip. It does not say every fold ran, no entry signal existed,
+or those parameters are permanently invalid. Use the hint to refine research;
+it is not external evidence, permission, or proof of future profit.
 Use the host-produced completed perps summary to compare the recorded SOL-PERP,
 BTC-PERP, and ETH-PERP training attempts, costs, fills, and drawdown when those
 fields are present. Treat its content hash and completed-snapshot hashes as integrity bindings,

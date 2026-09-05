@@ -43,6 +43,7 @@ Serves two local MCP tools that create a bounded, cited paper challenger and
 report its paired evidence status. Adaptive policies require an operator-fixed
 experiment requirement. They may
 read the paper champion but atomically update only the paper challenger pointer.
+One latest typed replay-rejection receipt is kept beside the challenger pointer.
 They cannot change a champion pointer, authorize, sign, submit, or load a wallet.`
 
 const shadowResearchContextUsage = `Usage: mithril-agent shadow research-context --policy PATH
@@ -176,6 +177,7 @@ type shadowResearchController struct {
 	journalDir        string
 	candidateDir      string
 	challengerPointer string
+	replayRejection   string
 	lifecycleLock     string
 	championPointer   string
 	championRoot      string
@@ -234,6 +236,9 @@ func runShadowResearchMCP(
 	)
 	if err != nil {
 		return err
+	}
+	if controller.replayRejection == *instructionPath || controller.replayRejection == *researchPacketPath {
+		return errors.New("shadow research replay rejection conflicts with an instruction or packet")
 	}
 	controller.experiment, err = loadRequiredShadowPaperExperiment(*instructionPath, controller.policy)
 	if err != nil {
@@ -326,6 +331,17 @@ func newShadowResearchController(
 		return nil, errors.New("shadow research MCP challenger pointer must be a clean absolute path outside the candidate directory with a private 0700 parent")
 	}
 	lifecycleLock := filepath.Join(filepath.Dir(challengerPointer), "lifecycle.lock")
+	replayRejection := challengerPointer + ".replay-rejection.json"
+	for _, input := range []string{policyPath, basePolicyPath, challengerPointer, championPointer, lifecycleLock} {
+		if replayRejection == input {
+			return nil, errors.New("shadow research replay rejection conflicts with a fixed input")
+		}
+	}
+	for _, root := range []string{journalDir, candidateDir, championRoot, challengerRoot} {
+		if root != "" && pathWithinShadowResearchRoot(replayRejection, root) {
+			return nil, errors.New("shadow research replay rejection conflicts with an evidence root")
+		}
+	}
 	if lifecycleLock == challengerPointer || lifecycleLock == championPointer ||
 		lifecycleLock == policyPath || lifecycleLock == basePolicyPath {
 		return nil, errors.New("shadow research MCP lifecycle lock conflicts with a fixed input")
@@ -357,6 +373,7 @@ func newShadowResearchController(
 		policy: policy, basePolicy: basePolicy,
 		journalDir: journalDir, candidateDir: candidateDir,
 		challengerPointer: challengerPointer, lifecycleLock: lifecycleLock, spreadBPS: spreadBPS,
+		replayRejection: replayRejection,
 		championPointer: championPointer, championRoot: championRoot,
 		challengerRoot: challengerRoot, maxCandidates: maxCandidates,
 		challengeDays: challengeDays,
@@ -384,7 +401,7 @@ func serveShadowResearchMCP(
 	}
 	server := mcpsdk.NewServer(&mcpsdk.Implementation{
 		Name: "mithril-paper-research", Title: "Mithril paper challenger research", Version: "0.1.0",
-	}, &mcpsdk.ServerOptions{Instructions: "Create only immutable, unauthorized paper challenger artifacts from operator-fixed policies, experiment requirements, and completed journals, then update only the operator-fixed paper challenger pointer. This server may read but cannot change the paper champion pointer, and has no wallet, signer, submitter, live policy, terminal, or network authority."})
+	}, &mcpsdk.ServerOptions{Instructions: "Create only immutable, unauthorized paper challenger artifacts from operator-fixed policies, experiment requirements, and completed journals, then update only the operator-fixed paper challenger pointer. A failed training round-trip check may retain one typed replay-rejection receipt beside that pointer. This server may read but cannot change the paper champion pointer, and has no wallet, signer, submitter, live policy, terminal, or network authority."})
 	server.AddReceivingMiddleware(mcpstdio.LimitToolCalls(1))
 	closedWorld, nonDestructive := false, false
 	createAnnotations := &mcpsdk.ToolAnnotations{
@@ -393,7 +410,7 @@ func serveShadowResearchMCP(
 	}
 	mcpsdk.AddTool(server, &mcpsdk.Tool{
 		Name: "mithril_paper_create_challenger", Title: "Create Paper Challenger",
-		Description: "Schema-validate and attach a cited paper-only hypothesis, bind the operator-fixed experiment requirement for adaptive policies, require seven chronological train/out-of-sample folds from eight consecutive completed journals, write one immutable challenger artifact, and atomically update only the dedicated paper challenger pointer. Never selects a champion or promotes to live trading.",
+		Description: "Schema-validate and attach a cited paper-only hypothesis, bind the operator-fixed experiment requirement for adaptive policies, require seven chronological train/out-of-sample folds from eight consecutive completed journals, write one immutable challenger artifact, and atomically update only the dedicated paper challenger pointer. A failed training round-trip check may retain one typed replay-rejection receipt. Never selects a champion or promotes to live trading.",
 		Annotations: createAnnotations,
 	}, func(_ context.Context, _ *mcpsdk.CallToolRequest, input shadowResearchCandidateInput) (*mcpsdk.CallToolResult, shadowResearchCandidateReceipt, error) {
 		result, err := controller.createCandidate(input, controller.now())
@@ -473,7 +490,7 @@ func (controller *shadowResearchController) createCandidate(
 		)
 	}
 	if err != nil {
-		return shadowResearchCandidateReceipt{}, err
+		return shadowResearchCandidateReceipt{}, controller.retainReplayRejection(err, binding, exactCandidates, days, now)
 	}
 	training := days[len(days)-2].Provenance
 	validation := days[len(days)-1].Provenance

@@ -383,6 +383,9 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		if len(args) > 1 && args[1] == "research-outcomes" {
 			return runShadowResearchOutcomeSummary(args[2:], output)
 		}
+		if len(args) > 1 && args[1] == "research-rejection" {
+			return runShadowResearchRejection(args[2:], output)
+		}
 		if len(args) > 1 && args[1] == "research-context" {
 			return runShadowResearchContext(args[2:], output)
 		}

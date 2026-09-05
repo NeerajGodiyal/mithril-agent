@@ -22,7 +22,8 @@ All four MCP entries deliberately use `trust: full`. Pinned Hermes has an
 it reads the Python MCP annotation by its wire-format name, so read-only tools
 on an untrusted server enter the interactive approval path. That path can wait
 up to 300 seconds in this noninteractive profile. The paper server also has one
-intentional write, bounded challenger creation, which cannot run unattended
+intentional write tool, bounded challenger creation and its latest typed
+replay-rejection receipt, which cannot run unattended
 under `trust: untrusted` even after the annotation bug is fixed.
 
 In this Hermes release, `full` removes the per-call approval gate for a server;
@@ -1255,6 +1256,18 @@ the run. These hints are internal advisory evidence: they do not count as
 external sources and cannot authorize, activate, select, promote, or execute
 anything. The shipped unit does not enable this option, and JUP outcomes are
 ignored when the current allocation has no JUP policy.
+
+The same opt-in also includes a separate `shadow research-rejection --receipt
+PATH --policy CURRENT --max-age 168h` projection. The candidate tool retains at
+most one `<challenger-pointer>.replay-rejection.json` beside each pointer when
+an exact packet-bound candidate reaches the typed training round-trip failure.
+It records the validated input journals, not a claim that every fold ran. A
+repeat of the same experiment does not renew its timestamp. Missing receipts
+are omitted; malformed, unsafe or future-dated receipts stop the scout. Old
+policy, other-market and expired receipts yield no hint. This private latest
+receipt is not an immutable history, a forward outcome, a trading instruction,
+or a permanent ban on its parameters. No raw model error prose enters the hint,
+and no champion/challenger pointer is changed by recording a rejection.
 
 Malformed replies and pre-publication validation failures keep the last
 validated research packet and dashboard research projection unchanged. The

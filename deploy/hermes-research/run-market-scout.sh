@@ -18,6 +18,8 @@ sol_champion=$generation/selection/sol/champion/active.json
 jup_policy=$generation/jup-policy.json
 jup_journals=$generation/runs/jup/base
 jup_champion=$generation/selection/jup/champion/active.json
+sol_replay_receipt=$generation/selection/sol/challenger/active.json.replay-rejection.json
+jup_replay_receipt=$generation/selection/jup/challenger/active.json.replay-rejection.json
 runtime_instruction=/run/mithril-hermes-research/instruction.json
 base_query=/opt/mithril-hermes-research/prompts/market-scout.md
 research_query=/run/mithril-hermes-research/market-research.md
@@ -63,6 +65,15 @@ outcome_journal_exists() {
     return 0
   done
   return 1
+}
+
+replay_rejection_hint() {
+  if [ "$outcome_feedback" -ne 1 ] || { [ ! -e "$1" ] && [ ! -L "$1" ]; }; then
+    return 0
+  fi
+  /usr/sbin/runuser -u mithril-agent-research -- \
+    /usr/local/libexec/mithril-agent/mithril-agent shadow research-rejection \
+      --receipt "$1" --policy "$2" --max-age 168h
 }
 
 /usr/bin/install -d -o mithril-agent-research -g mithril-agent-research -m 0700 \
@@ -158,6 +169,11 @@ if reviewed=$(/usr/sbin/runuser -u mithril-agent-research -- \
 fi
 sol_outcome_history=
 jup_outcome_history=
+sol_replay_history=$(replay_rejection_hint "$sol_replay_receipt" "$sol_policy")
+jup_replay_history=
+if [ -f "$jup_policy" ]; then
+  jup_replay_history=$(replay_rejection_hint "$jup_replay_receipt" "$jup_policy")
+fi
 if [ "$outcome_feedback" -eq 1 ]; then
   if outcome_journal_exists "$sol_outcome_journal"; then
     sol_outcome_history=$(/usr/sbin/runuser -u mithril-agent-research -- \
@@ -214,6 +230,11 @@ collect_research_packet() (
       "$sol_outcome_history" >>"$research_query"
     [ -z "$jup_outcome_history" ] || /usr/bin/printf 'JUP/USDC: %s\n' \
       "$jup_outcome_history" >>"$research_query"
+  fi
+  if [ -n "$sol_replay_history$jup_replay_history" ]; then
+    /usr/bin/printf '\nTrusted sanitized replay-rejection hints follow, separate from forward outcomes. An attempted training fold lacked a completed round trip. This does not mean every fold ran, no entry signal existed, or the parameter choice is permanently invalid. These are internal advisory results, not external sources or proof of future profit.\n' >>"$research_query"
+    [ -z "$sol_replay_history" ] || /usr/bin/printf 'SOL/USDC: %s\n' "$sol_replay_history" >>"$research_query"
+    [ -z "$jup_replay_history" ] || /usr/bin/printf 'JUP/USDC: %s\n' "$jup_replay_history" >>"$research_query"
   fi
   if [ "$has_instruction" = true ]; then
     /usr/bin/printf '%s' "$rendered" >>"$research_query"
