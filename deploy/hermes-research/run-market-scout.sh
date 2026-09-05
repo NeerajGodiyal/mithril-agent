@@ -133,21 +133,6 @@ case ",$finalizer_toolsets," in
   *,delegation,*) exit 1 ;;
 esac
 
-sol_diagnostics='{"status":"prior_complete_day_unavailable"}'
-if reviewed=$(/usr/sbin/runuser -u mithril-agent-research -- \
-    /usr/local/libexec/mithril-agent/mithril-agent shadow review \
-    --policy "$sol_policy" \
-    --dir "$sol_journals" --days 1 --json 2>/dev/null); then
-  sol_diagnostics=$reviewed
-fi
-jup_diagnostics='{"status":"prior_complete_day_unavailable"}'
-if [ -f "$jup_policy" ] &&
-  reviewed=$(/usr/sbin/runuser -u mithril-agent-research -- \
-    /usr/local/libexec/mithril-agent/mithril-agent shadow review \
-      --policy "$jup_policy" \
-      --dir "$jup_journals" --days 1 --json 2>/dev/null); then
-  jup_diagnostics=$reviewed
-fi
 sol_policy_context=$(/usr/sbin/runuser -u mithril-agent-research -- \
   /usr/local/libexec/mithril-agent/mithril-agent shadow research-context \
     --policy "$sol_policy")
@@ -218,8 +203,20 @@ collect_research_packet() (
   else
     /usr/bin/printf '\nTrusted evidence availability: no local Mithril rooted index passed both its 15-minute record-age check and the Mainnet cluster/genesis check for this run. `mithril_index` is unavailable; do not claim that Mithril evidence was consulted.\n' >>"$research_query"
   fi
-  /usr/bin/printf '\nTrusted sanitized prior-complete-day paper diagnostics. These local replay results may reject or prioritize a hypothesis, but cannot replace external evidence or prove future profit. SOL/USDC: %s\nJUP/USDC: %s\n' \
-    "$sol_diagnostics" "$jup_diagnostics" >>"$research_query"
+  sol_behavior=unavailable
+  if reviewed=$(/usr/sbin/runuser -u mithril-agent-research -- \
+    /usr/local/libexec/mithril-agent/mithril-agent research behavior \
+      --policy "$sol_policy" --journal-dir "$sol_journals" 2>/dev/null); then
+    sol_behavior=$reviewed
+  fi
+  jup_behavior=unavailable
+  if [ -f "$jup_policy" ] && reviewed=$(/usr/sbin/runuser -u mithril-agent-research -- \
+    /usr/local/libexec/mithril-agent/mithril-agent research behavior \
+      --policy "$jup_policy" --journal-dir "$jup_journals" 2>/dev/null); then
+    jup_behavior=$reviewed
+  fi
+  /usr/bin/printf '\nHost-verified prior-complete-day strategy behavior. Counts describe recorded adaptive decisions, not filled orders or time buckets. Check coverage and the observation window first; missing observations are unknown, and low-coverage counts describe only the verified portion. This is always diagnostic-only, never a recorded-basis artifact, current market data, performance evidence or trade permission. Use it to prioritize or falsify a research hypothesis. SOL/USDC: %s\nJUP/USDC: %s\n' \
+    "$sol_behavior" "$jup_behavior" >>"$research_query"
   # Recompute within each attempt. No delegated container owns these values,
   # and packet-record independently reconstructs them before publication.
   if sol_observations=$(/usr/sbin/runuser -u mithril-agent-research -- \

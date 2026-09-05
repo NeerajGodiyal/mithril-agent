@@ -66,33 +66,16 @@ func runResearchObservations(args []string, output io.Writer, now func() time.Ti
 }
 
 func buildResearchObservations(policy shadow.Policy, journalDir string, now time.Time) (researchpacket.RecordedObservations, error) {
-	if now.IsZero() || policy.Validate() != nil || validateActiveShadowPolicy(policy) != nil ||
-		policy.Cluster != shadow.Mainnet ||
-		(shadowMarketPair(policy) != "SOL/USDC" && shadowMarketPair(policy) != "JUP/USDC") ||
-		!cleanResearchPath(journalDir) || validatePrivateDirectory(journalDir) != nil {
-		return researchpacket.RecordedObservations{}, errors.New("recorded observations require a current Mainnet paper policy and private journal directory")
-	}
-	dayStart := now.UTC().Truncate(24*time.Hour).AddDate(0, 0, -1)
-	day := dayStart.Format("2006-01-02")
-	ticks, provenance, err := readShadowSearchJournal(filepath.Join(journalDir, "shadow-"+day+".jsonl"), day, policy)
+	day, err := readResearchDay(policy, journalDir, now)
 	if err != nil {
 		return researchpacket.RecordedObservations{}, err
 	}
-	replayed, err := shadow.Replay(policy, ticks)
-	if err != nil {
-		return researchpacket.RecordedObservations{}, err
-	}
-	report, err := shadow.BuildReport(policy, replayed.Ledger, replayed.Counts, replayed.Stats,
-		replayed.ClosingPrice, dayStart, replayed.PeriodEnd)
-	if err != nil {
-		return researchpacket.RecordedObservations{}, err
-	}
-	report.ObservableBPS = shadowWalkForwardObservableBPS(ticks, dayStart, policy.Tick())
+	report, provenance := day.report, day.provenance
 	if !report.Trustworthy() {
 		if report.ObservableBPS < 9500 {
 			return researchpacket.RecordedObservations{}, &researchCoverageError{
 				Kind: "recorded_paper_observations_unavailable", Reason: "coverage_below_threshold",
-				Market: shadowMarketPair(policy), Day: day,
+				Market: shadowMarketPair(policy), Day: provenance.Day,
 				ObservableBPS: report.ObservableBPS, RequiredObservableBPS: 9500,
 			}
 		}
@@ -105,7 +88,7 @@ func buildResearchObservations(policy shadow.Policy, journalDir string, now time
 	artifact := researchpacket.RecordedObservations{
 		Version: 1, Kind: "recorded_paper_observations", PaperOnly: true, AdvisoryOnly: true,
 		Market: shadowMarketPair(policy), PolicySHA256: fingerprint,
-		ObservedFrom: dayStart, ObservedThrough: replayed.PeriodEnd,
+		ObservedFrom: report.From, ObservedThrough: report.To,
 		Journal: researchpacket.RecordedJournal{
 			Day: provenance.Day, Records: provenance.Records, ChainHeadSHA256: provenance.ChainHeadSHA256,
 		},
@@ -115,6 +98,40 @@ func buildResearchObservations(policy shadow.Policy, journalDir string, now time
 		},
 	}
 	return artifact.Seal()
+}
+
+type researchDay struct {
+	ticks      []shadow.Tick
+	provenance shadowJournalProvenance
+	report     shadow.Report
+}
+
+// readResearchDay verifies observations before either consumer can expose any
+// measurements. Coverage qualification remains the recorded-artifact gate.
+func readResearchDay(policy shadow.Policy, journalDir string, now time.Time) (researchDay, error) {
+	if now.IsZero() || policy.Validate() != nil || validateActiveShadowPolicy(policy) != nil ||
+		policy.Cluster != shadow.Mainnet ||
+		(shadowMarketPair(policy) != "SOL/USDC" && shadowMarketPair(policy) != "JUP/USDC") ||
+		!cleanResearchPath(journalDir) || validatePrivateDirectory(journalDir) != nil {
+		return researchDay{}, errors.New("recorded observations require a current Mainnet paper policy and private journal directory")
+	}
+	dayStart := now.UTC().Truncate(24*time.Hour).AddDate(0, 0, -1)
+	day := dayStart.Format("2006-01-02")
+	ticks, provenance, err := readShadowSearchJournal(filepath.Join(journalDir, "shadow-"+day+".jsonl"), day, policy)
+	if err != nil {
+		return researchDay{}, err
+	}
+	replayed, err := shadow.Replay(policy, ticks)
+	if err != nil {
+		return researchDay{}, err
+	}
+	report, err := shadow.BuildReport(policy, replayed.Ledger, replayed.Counts, replayed.Stats,
+		replayed.ClosingPrice, dayStart, replayed.PeriodEnd)
+	if err != nil {
+		return researchDay{}, err
+	}
+	report.ObservableBPS = shadowWalkForwardObservableBPS(ticks, dayStart, policy.Tick())
+	return researchDay{ticks: ticks, provenance: provenance, report: report}, nil
 }
 
 func verifyResearchObservations(artifact researchpacket.RecordedObservations, policy shadow.Policy, journalDir string, now time.Time) error {

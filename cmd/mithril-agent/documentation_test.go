@@ -923,10 +923,11 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		"Trusted run-time anchors", "/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ",
 		"/usr/bin/date -u -d '6 hours' +%Y-%m-%dT%H:%M:%SZ",
 		"Copy both exact values; do not invent, round, reuse an older value, or calculate either timestamp.",
-		"sol_diagnostics='{\"status\":\"prior_complete_day_unavailable\"}'",
-		"jup_diagnostics='{\"status\":\"prior_complete_day_unavailable\"}'",
-		"mithril-agent shadow review", "--days 1 --json",
-		"Trusted sanitized prior-complete-day paper diagnostics.",
+		"sol_behavior=unavailable", "jup_behavior=unavailable",
+		"mithril-agent research behavior",
+		"Host-verified prior-complete-day strategy behavior.",
+		"not filled orders or time buckets",
+		"always diagnostic-only, never a recorded-basis artifact",
 		"mithril-agent research observations",
 		`--policy "$sol_policy" --journal-dir "$sol_journals"`,
 		`--policy "$jup_policy" --journal-dir "$jup_journals"`,
@@ -1487,6 +1488,44 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 		if strings.Contains(deployReadme, forbidden) {
 			t.Errorf("Hermes deployment README contains obsolete schedule guidance %q", forbidden)
 		}
+	}
+}
+
+func TestHermesBehaviorContextIsAttemptLocalAndFailsClosed(t *testing.T) {
+	runner := readDocumentation(t, "../../deploy/hermes-research/run-market-scout.sh")
+	start := strings.Index(runner, "  sol_behavior=unavailable")
+	if attempt := strings.Index(runner, "collect_research_packet() ("); attempt < 0 || start <= attempt {
+		t.Fatal("Hermes behavior must be recomputed inside each research attempt")
+	}
+	end := strings.Index(runner[start:], "  /usr/bin/printf")
+	if end < 0 {
+		t.Fatal("Hermes behavior block is incomplete")
+	}
+	block := runner[start : start+end]
+	command := "/usr/sbin/runuser -u mithril-agent-research -- \\\n    /usr/local/libexec/mithril-agent/mithril-agent research behavior"
+	if strings.Count(block, command) != 2 {
+		t.Fatal("both markets must request verified behavior")
+	}
+	block = strings.ReplaceAll(block, command, "fake_behavior")
+	diagnostic := `{"kind":"recorded_paper_strategy_behavior","diagnostic_only":true,"recorded_basis_eligible":false,"coverage_sufficient":false}`
+	for _, test := range []struct {
+		name, value, exitCode, jupAvailable, want, wantJUP string
+	}{
+		{"verified partial coverage", diagnostic, "0", "true", diagnostic, diagnostic},
+		{"invalid or missing", "", "1", "true", "unavailable", "unavailable"},
+		{"failed output discarded", diagnostic, "1", "true", "unavailable", "unavailable"},
+		{"missing JUP policy", diagnostic, "0", "false", diagnostic, "unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			script := "set -eu\nvalue=$1\ncode=$2\nsol_policy=unused\nsol_journals=unused\njup_policy=/dev/null\njup_journals=unused\n" +
+				"fake_behavior() { printf '%s' \"$value\"; return \"$code\"; }\n" +
+				strings.Replace(block, `[ -f "$jup_policy" ]`, test.jupAvailable, 1) +
+				"printf '%s\\n%s' \"$sol_behavior\" \"$jup_behavior\"\n"
+			output, err := exec.Command("/bin/sh", "-c", script, "test", test.value, test.exitCode).CombinedOutput()
+			if err != nil || string(output) != test.want+"\n"+test.wantJUP {
+				t.Fatalf("behavior context: got %q, %v; want %q and %q", output, err, test.want, test.wantJUP)
+			}
+		})
 	}
 }
 

@@ -1,6 +1,15 @@
-Research material Solana protocol, infrastructure, liquidity, market, and
-security changes published or occurring in the previous 12 hours. Use only
-current primary sources and the configured Mithril and Solana evidence tools.
+Start from the host-verified strategy behavior and paper observations appended
+below. Check the exact market, policy, observation window and coverage before
+forming a hypothesis about why the strategy acted or waited. Research what
+could explain that behavior or falsify a concrete bounded parameter experiment.
+If internal evidence is unavailable, say so and research current conditions
+without inventing a diagnosis. More signals or trades alone are not improvement.
+
+Research relevant market, liquidity, execution-cost, Solana protocol,
+infrastructure and security changes from the previous 12 hours.
+Use only current primary sources and the configured Mithril and
+Solana evidence tools. Documentation and status pages establish capabilities
+or incidents; they are not live prices, order flow or evidence of an edge.
 The trusted run-time availability line appended by the host is authoritative:
 never claim Mithril evidence was consulted when that line marks it unavailable.
 Call `web_extract` with one
@@ -79,10 +88,17 @@ authoritative values for the `current` side of `candidate_parameter_diff`.
 Copy the matching market's value exactly. They are internal context, not an
 external source or permission to change a policy. If that market is marked
 unavailable, do not infer its values and do not propose a candidate for it.
-Use the host-produced prior-day diagnostics to explain whether the current
-paper policy was observable, active, costly, or inconclusive. Internal paper
-results may falsify or prioritize a hypothesis; they never count as an external
-source and never prove future profit.
+Use the host-produced prior-day strategy behavior only to describe recorded
+regimes, strategies and decision reasons under that exact policy. Its count
+denominator is `observed_decisions`, not expected time buckets or filled orders.
+Check `observable_bps` and the explicit coverage fields before generalizing;
+low coverage describes only a partial window. Missing decisions are unknown,
+not evidence that no signal existed. Fixed-policy absence of adaptive decisions
+is not an adaptive strategy that waited. This diagnostic is always advisory and
+`recorded_basis_eligible` is false, even at full coverage. It has no qualifying
+artifact digest or performance measurements. Internal results may falsify or
+prioritize a hypothesis; they never count as an external source, authorize a
+trade, or prove future profit.
 When the host appends a content-hashed recorded-observations artifact, a separate
 version-2 packet may use its bounded numeric measurements as the basis for a
 paper experiment. Copy only its exact digest and selected metric IDs. The host

@@ -20,6 +20,7 @@ const researchUsage = `Usage:
       [--sol-policy PATH --sol-journal-dir DIR --jup-policy PATH --jup-journal-dir DIR]
   mithril-agent research packet-project --in PATH --latest PATH
   mithril-agent research observations --policy PATH --journal-dir DIR
+  mithril-agent research behavior --policy PATH --journal-dir DIR
 
 Validates one strict Hermes packet with web or host-recorded evidence. The optional archive is
 immutable; latest is an atomic read-only projection for the dashboard. This
@@ -31,6 +32,8 @@ func runResearch(args []string, output io.Writer) error {
 		return err
 	}
 	switch args[0] {
+	case "behavior":
+		return runResearchBehavior(args[1:], output, time.Now)
 	case "observations":
 		return runResearchObservations(args[1:], output, time.Now)
 	case "packet-project":
@@ -38,7 +41,7 @@ func runResearch(args []string, output io.Writer) error {
 	case "packet-record":
 		return runResearchPacketRecord(args[1:], output, time.Now)
 	default:
-		return errors.New("research expects packet-record, packet-project, or observations")
+		return errors.New("research expects packet-record, packet-project, observations, or behavior")
 	}
 }
 
