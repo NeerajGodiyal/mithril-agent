@@ -541,6 +541,30 @@ evidence and timestamp. Results are modeled historical comparisons, not actual
 venue fills, qualification, plan selection or proof of profitability. Hermes
 invocation and sanitized feedback wiring are separate from these host commands.
 
+`shadow perps-context --state-dir PATH --symbol SOL --tape PATH --out PATH`
+creates a private, write-once input bundle for a later proposal session. The
+host supplies 1–8 chronological corpus tapes and optionally up to eight
+`--evaluation PATH` results; nothing is selected by profitability. The bundle
+contains reverified historical strategy metrics, the current baseline identity
+and resolved outcomes with their original strategy keys and known-at times.
+Pending results, raw market records, model rationale and local paths are not
+included. Historical training and holdout results are no longer unseen evidence
+for a new proposal. Retrying an output path preserves its original bytes/time.
+
+Pass that same bundle to `perps-freeze --context PATH` alongside the original
+host-selected tapes. The freezer checks the baseline under its existing lock,
+rejects a changed selection and binds the context digest into the receipt.
+The five-field model response cannot choose the context, corpus paths or
+baseline. This prepares the host boundary; it does not yet schedule Hermes or
+activate a proposal.
+
+For a separate tool-free proposal session, the existing session reader accepts
+`--extract-output PATH --require-no-tools`. That explicit mode rejects any
+exported tool calls/results and retains session time, lineage and final-JSON
+checks. Normal research extraction and source evidence still require a
+successful page retrieval. This output check does not replace checking the
+actual Hermes tool registry and container isolation before launch.
+
 Each current-format perps final tape and its evaluation are recorded first in
 the symbol's hash-chained, segmented finalization journal. The journal keeps
 every prior receipt, treats an exact repeat as idempotent, and rejects

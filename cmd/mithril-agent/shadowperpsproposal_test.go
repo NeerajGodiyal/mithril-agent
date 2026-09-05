@@ -259,3 +259,168 @@ func TestPerpsFreezeStalePrefixNeverAdvancesTarget(t *testing.T) {
 	// Episode 2 is already too early. Evaluation must report unevaluable
 	// rather than choose episode 3.
 }
+
+func TestPerpsFreezeContextAssociationAndOriginalRetry(t *testing.T) {
+	contextArgs, args, path, at := contextFixture(t)
+	context := createContextForTest(t, contextArgs, at)
+	args = append(args, "--context", path)
+	var output bytes.Buffer
+	if err := runShadowPerpsFreeze(args, &output, func() time.Time { return at.Add(time.Second) }); err != nil {
+		t.Fatal(err)
+	}
+	var proposal shadowPerpsProposal
+	if err := json.Unmarshal(output.Bytes(), &proposal); err != nil {
+		t.Fatal(err)
+	}
+	if proposal.ContextSHA256 != context.ContentSHA256 || proposal.BaselineSHA256 != context.BaselineSHA256 {
+		t.Fatalf("context association=%+v", proposal)
+	}
+	var retry bytes.Buffer
+	if err := runShadowPerpsFreeze(args, &retry, func() time.Time { t.Fatal("retry renewed context freeze"); return at }); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(output.Bytes(), retry.Bytes()) {
+		t.Fatal("associated retry changed original receipt")
+	}
+	var omitted bytes.Buffer
+	if err := runShadowPerpsFreeze(args[:len(args)-2], &omitted, func() time.Time { return at }); err == nil || omitted.Len() != 0 {
+		t.Fatal("associated receipt accepted without original context")
+	}
+}
+
+func TestPerpsFreezeContextRejectsChangedBaselineAndFutureContext(t *testing.T) {
+	for _, mode := range []string{"baseline", "future", "tampered_metrics"} {
+		t.Run(mode, func(t *testing.T) {
+			contextArgs, args, path, at := contextFixture(t)
+			context := createContextForTest(t, contextArgs, at)
+			freezeAt := at.Add(time.Second)
+			switch mode {
+			case "baseline":
+				changed := context.Baseline
+				changed.Key.RiskArm = perpspaper.Experimental
+				raw, digest, err := canonicalShadowPerpsPlan(changed)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, artifacts, active, _, _ := shadowPerpsPlanPaths(args[1], perpspaper.SOL)
+				artifact := filepath.Join(artifacts, "plan-"+digest+".json")
+				if err := ensureShadowPerpsPlanArtifact(artifact, raw); err != nil {
+					t.Fatal(err)
+				}
+				if err := replaceShadowPerpsPlanPointer(active, shadowPerpsPlanPointer{Version: shadowPerpsPlanVersion, PlanPath: artifact, PlanSHA256: digest, SelectedAt: freezeAt}); err != nil {
+					t.Fatal(err)
+				}
+			case "future":
+				freezeAt = at.Add(-time.Nanosecond)
+			case "tampered_metrics":
+				context.Training[0].TrainingFrames++
+				raw, err := canonicalPerpsContext(context)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var output bytes.Buffer
+			err := runShadowPerpsFreeze(append(args, "--context", path), &output, func() time.Time { return freezeAt })
+			if err == nil || output.Len() != 0 {
+				t.Fatalf("err=%v output=%s", err, output.String())
+			}
+			if mode == "baseline" && !strings.Contains(err.Error(), "baseline changed") {
+				t.Fatalf("did not reach expected-baseline guard: %v", err)
+			}
+			if mode == "future" && !strings.Contains(err.Error(), "context became known after freeze") {
+				t.Fatalf("did not reach context cutoff: %v", err)
+			}
+		})
+	}
+}
+
+func TestPerpsFreezeWithoutContextKeepsLegacyEncoding(t *testing.T) {
+	contextArgs, args, _, at := contextFixture(t)
+	createContextForTest(t, contextArgs, at)
+	var output bytes.Buffer
+	if err := runShadowPerpsFreeze(args, &output, func() time.Time { return at }); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(output.Bytes(), []byte("context_sha256")) {
+		t.Fatal("optional context changed legacy receipt encoding")
+	}
+	var proposal shadowPerpsProposal
+	if err := json.Unmarshal(output.Bytes(), &proposal); err != nil {
+		t.Fatal(err)
+	}
+	if proposal.ContextSHA256 != "" {
+		t.Fatal("operator receipt acquired an inferred context")
+	}
+	canonical, err := canonicalPerpsProposal(proposal)
+	if err != nil || !bytes.Equal(canonical, output.Bytes()) {
+		t.Fatalf("legacy receipt changed: %v", err)
+	}
+}
+
+func TestPerpsFreezeTrainingUsesCollectorClockContract(t *testing.T) {
+	for _, mode := range []string{"venue_within_skew", "venue_beyond_skew", "host_after_known"} {
+		t.Run(mode, func(t *testing.T) {
+			args, state, _, at := perpsFreezeFixture(t)
+			known := at.Add(2 * time.Hour)
+			old, _, err := readShadowPerpsCorpusTape(args[5])
+			if err != nil {
+				t.Fatal(err)
+			}
+			prices := shadowPerpsPlanWavePrices(3)
+			future := int64(2000)
+			if mode == "venue_beyond_skew" {
+				future = shadowPerpsMaxClockSkew.Milliseconds() + 1
+			}
+			// Keep closed candles in the host's past; only the last venue book
+			// is ahead of the independently captured host receipt.
+			offset := known.UnixMilli() - int64(len(prices))*60_000 - 1000
+			old.Frames = shadowPerpsPlanTestFrames(offset, prices)
+			old.Frames[len(old.Frames)-1].Book.Time = known.UnixMilli() + future
+			old.Frames[len(old.Frames)-1].Context.ReceivedAt = known.UnixMilli()
+			if mode == "host_after_known" {
+				old.Frames[len(old.Frames)-1].Context.ReceivedAt++
+			}
+			path, err := sealShadowPerpsTape(state, old)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest := strings.TrimSuffix(filepath.Base(path), ".json")
+			qualification, err := perpspaper.QualifyTournament(old.Config.qualificationConfig(), old.Frames)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replay, err := replayShadowPerpsTape(old.Config, old.Frames)
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipt, err := newShadowPerpsFinalizationReceipt(old, digest, replay, qualification, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := appendShadowPerpsFinalizationReceipt(state, receipt, known); err != nil {
+				t.Fatal(err)
+			}
+			args[5] = path
+			var output bytes.Buffer
+			err = runShadowPerpsFreeze(args, &output, func() time.Time { return known })
+			if mode == "venue_within_skew" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				proposalPath := filepath.Join(filepath.Dir(state), "proposals", "sol", "test-proposal.json")
+				proposal, raw, err := readPerpsProposal(proposalPath)
+				if err != nil || !bytes.Equal(raw, output.Bytes()) {
+					t.Fatalf("canonical receipt read failed: %v", err)
+				}
+				if proposal.Training[0].LastTime != known.UnixMilli()+future || !proposal.Training[0].KnownAt.Equal(known) {
+					t.Fatalf("clock bindings=%+v", proposal.Training)
+				}
+			} else if err == nil || output.Len() != 0 {
+				t.Fatalf("unsafe clock accepted: err=%v output=%s", err, output.String())
+			}
+		})
+	}
+}

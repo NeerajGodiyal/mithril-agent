@@ -3,6 +3,8 @@ import datetime
 import json
 import os
 import pathlib
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -56,6 +58,11 @@ class ResearchEvidenceTest(unittest.TestCase):
             "content": content or '{"created_at":"2026-09-02T12:00:00Z","verified_facts":[]}',
             "timestamp": self.created + 4,
         })
+        return (json.dumps(session) + "\n").encode()
+
+    def no_tool_sessions(self):
+        session = json.loads(self.sessions_with_final('{"hypothesis_id":"bounded-test"}'))
+        session["messages"] = session["messages"][-1:]
         return (json.dumps(session) + "\n").encode()
 
     def compressed_sessions_with_final(self):
@@ -224,6 +231,116 @@ class ResearchEvidenceTest(unittest.TestCase):
             self.sessions_with_final(), self.created, self.created + 5,
         )
         self.assertEqual(json.loads(packet)["verified_facts"], [])
+
+    def test_extraction_rejects_nonfinite_run_bounds(self):
+        for started, finished in (
+            (float("nan"), self.created + 5),
+            (self.created, float("nan")),
+            (float("-inf"), self.created + 5),
+            (self.created, float("inf")),
+        ):
+            with self.subTest(started=started, finished=finished):
+                with self.assertRaises(ValueError):
+                    evidence.extract_packet(self.sessions_with_final(), started, finished)
+
+    def test_no_tool_extraction_is_explicit_and_keeps_research_retrieval_gate(self):
+        sessions = self.no_tool_sessions()
+        raw_packet = json.loads(self.packet())
+        del raw_packet["content_sha256"]
+        self.assertEqual(
+            evidence.extract_packet(sessions, self.created, self.created + 5, require_no_tools=True),
+            b'{"hypothesis_id":"bounded-test"}\n',
+        )
+        for operation in (
+            lambda: evidence.extract_packet(sessions, self.created, self.created + 5),
+            lambda: evidence.bind_source_times(sessions, json.dumps(raw_packet).encode(), self.created, self.created + 5),
+            lambda: evidence.build_evidence(sessions, self.packet(), self.created, self.created + 5),
+        ):
+            with self.assertRaisesRegex(ValueError, "successful page retrieval trace"):
+                operation()
+
+    def test_no_tool_extraction_rejects_calls_results_and_sibling_activity(self):
+        for activity in (
+            {"role": "assistant", "tool_calls": [{"id": "call", "function": {"name": "terminal"}}]},
+            {"role": "tool", "tool_call_id": "unmatched", "tool_name": "terminal", "content": "ignored"},
+            {"role": "tool", "content": "unmatched unnamed result"},
+        ):
+            for sibling in (False, True):
+                with self.subTest(activity=activity, sibling=sibling):
+                    session = json.loads(self.no_tool_sessions())
+                    activity = dict(activity, timestamp=self.created + 3)
+                    sessions = [session]
+                    if sibling:
+                        sessions.append(dict(session, id="sibling", source="subagent",
+                                             parent_session_id="parent", messages=[activity]))
+                    else:
+                        session["messages"].insert(0, activity)
+                    raw = b"\n".join(json.dumps(item).encode() for item in sessions)
+                    with self.assertRaisesRegex(ValueError, "tool activity"):
+                        evidence.extract_packet(raw, self.created, self.created + 5, require_no_tools=True)
+
+    def test_extraction_rejects_falsey_malformed_tool_calls_in_both_modes(self):
+        for calls in (False, 0, {}, ""):
+            for no_tools in (False, True):
+                with self.subTest(calls=calls, no_tools=no_tools):
+                    session = json.loads(self.no_tool_sessions() if no_tools else self.sessions_with_final())
+                    session["messages"][-1]["tool_calls"] = calls
+                    with self.assertRaisesRegex(ValueError, "tool calls are invalid"):
+                        evidence.extract_packet(json.dumps(session).encode(), self.created, self.created + 5,
+                                                require_no_tools=no_tools)
+
+    def test_no_tool_extraction_preserves_compression_and_lineage_checks(self):
+        sessions = [json.loads(line) for line in self.compressed_sessions_with_final().splitlines()]
+        sessions = [session for session in sessions if session["id"] in ("parent", "continuation")]
+        sessions[0]["messages"] = []
+        raw = b"\n".join(json.dumps(item).encode() for item in sessions)
+        self.assertEqual(json.loads(evidence.extract_packet(
+            raw, self.created, self.created + 5, require_no_tools=True,
+        ))["verified_facts"], [])
+        sessions.append(dict(sessions[1], id="other-continuation"))
+        with self.assertRaisesRegex(ValueError, "incomplete or ambiguous"):
+            evidence.extract_packet(b"\n".join(json.dumps(item).encode() for item in sessions),
+                                    self.created, self.created + 5, require_no_tools=True)
+
+    def test_no_tool_extraction_retains_time_and_final_response_checks(self):
+        for mutate in (
+            lambda session: session.update(ended_at=self.created + 6),
+            lambda session: session["messages"][-1].update(timestamp=self.created - 1),
+            lambda session: session["messages"][-1].update(timestamp=float("nan")),
+            lambda session: session.update(end_reason="error"),
+            lambda session: session["messages"][-1].update(finish_reason="length"),
+            lambda session: session["messages"][-1].update(content='{} {}'),
+            lambda session: session["messages"][-1].update(content='[]'),
+            lambda session: session["messages"][-1].update(content=json.dumps({"x": "x" * (64 << 10)})),
+        ):
+            session = json.loads(self.no_tool_sessions())
+            mutate(session)
+            with self.subTest(session=session):
+                with self.assertRaises(ValueError):
+                    evidence.extract_packet(json.dumps(session).encode(), self.created, self.created + 5,
+                                            require_no_tools=True)
+        for started, finished in ((float("nan"), self.created + 5),
+                                  (self.created, float("inf")), (self.created + 5, self.created)):
+            with self.assertRaises(ValueError):
+                evidence.extract_packet(self.no_tool_sessions(), started, finished, require_no_tools=True)
+
+    def test_no_tool_cli_flag_is_extract_only_and_preserves_output_on_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            sessions, output = root / "sessions.jsonl", root / "output.json"
+            sessions.write_bytes(self.no_tool_sessions())
+            sessions.chmod(0o600)
+            base = [sys.executable, str(MODULE_PATH), "--sessions", str(sessions),
+                    "--run-started", str(self.created), "--run-finished", str(self.created + 5)]
+            for mode in ("--output", "--bind-output"):
+                output.write_bytes(b"unchanged")
+                result = subprocess.run(base + [mode, str(output), "--require-no-tools"], capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"--require-no-tools requires --extract-output", result.stderr)
+                self.assertEqual(output.read_bytes(), b"unchanged")
+            result = subprocess.run(base + ["--extract-output", str(output), "--require-no-tools"], capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(output.read_bytes(), b'{"hypothesis_id":"bounded-test"}\n')
 
     def test_extracts_final_response_from_compression_continuation(self):
         packet = evidence.extract_packet(

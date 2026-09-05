@@ -435,7 +435,7 @@ func TestPerpsEvaluateShortTapeRequiresBoundFinalization(t *testing.T) {
 
 func TestPerpsProposalFrameTimesUseHostObservationBounds(t *testing.T) {
 	at := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
-	for _, name := range []string{"inclusive_bounds", "context_before_start", "book_before_start", "training_context_after_known", "training_book_after_known", "submillisecond_start"} {
+	for _, name := range []string{"inclusive_bounds", "context_before_start", "book_before_start", "training_context_after_known", "venue_book_at_skew_limit", "venue_book_beyond_skew", "submillisecond_start"} {
 		t.Run(name, func(t *testing.T) {
 			start, known := at, at.Add(time.Second)
 			// This directly exercises the time guard, not tape replay validity.
@@ -451,15 +451,66 @@ func TestPerpsProposalFrameTimesUseHostObservationBounds(t *testing.T) {
 			case "training_context_after_known":
 				start = time.Time{}
 				frames[1].Context.ReceivedAt++
-			case "training_book_after_known":
+			case "venue_book_at_skew_limit":
 				start = time.Time{}
-				frames[1].Book.Time++
+				frames[1].Book.Time = known.Add(shadowPerpsMaxClockSkew).UnixMilli()
+			case "venue_book_beyond_skew":
+				start = time.Time{}
+				frames[1].Book.Time = known.Add(shadowPerpsMaxClockSkew).UnixMilli() + 1
 			case "submillisecond_start":
 				start = start.Add(time.Nanosecond)
 			}
 			err := validatePerpsProposalFrameTimes(frames, start, known)
-			if (err == nil) != (name == "inclusive_bounds") {
+			wantValid := name == "inclusive_bounds" || name == "book_before_start" || name == "venue_book_at_skew_limit" || name == "submillisecond_start"
+			if (err == nil) != wantValid {
 				t.Fatalf("time guard error=%v", err)
+			}
+		})
+	}
+}
+
+func TestPerpsProposalFrameTimesAcceptCollectorTimestampSemantics(t *testing.T) {
+	for _, name := range []string{"venue_before_start", "same_millisecond_context", "venue_within_clock_skew"} {
+		t.Run(name, func(t *testing.T) {
+			at := time.Date(2026, 9, 5, 12, 5, 30, 0, time.UTC)
+			if name == "same_millisecond_context" {
+				at = at.Add(750 * time.Microsecond)
+			}
+			reader := validStubShadowPerpsReader(at)
+			switch name {
+			case "venue_before_start":
+				reader.book.Time = at.Add(-time.Second).UnixMilli()
+			case "venue_within_clock_skew":
+				reader.book.Time = at.Add(2 * time.Second).UnixMilli()
+			}
+			parent := t.TempDir()
+			state := filepath.Join(parent, "current")
+			if err := runShadowPerpsPaperWith(t.Context(), []string{
+				"--state-dir", state, "--archive-dir", filepath.Join(parent, "runs"), "--symbols", "SOL", "--once",
+			}, &bytes.Buffer{}, func() time.Time { return at }, func(perpspaper.Environment) (shadowPerpsReader, error) { return reader, nil }); err != nil {
+				t.Fatalf("real collector rejected fixture: %v", err)
+			}
+			path := filepath.Join(state, "sol-tape.json")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var header shadowPerpsTape
+			if err := json.Unmarshal(raw, &header); err != nil {
+				t.Fatal(err)
+			}
+			tape, _, err := readShadowPerpsTape(path, header.Config)
+			if err != nil || len(tape.Frames) != 1 {
+				t.Fatalf("collector tape replay: frames=%d err=%v", len(tape.Frames), err)
+			}
+			frame := tape.Frames[0]
+			if frame.Book.Time != reader.book.Time || frame.Context.ReceivedAt != at.UnixMilli() {
+				t.Fatalf("collector changed source timestamps: book=%d context=%d", frame.Book.Time, frame.Context.ReceivedAt)
+			}
+			// A one-frame tape is insufficient for evaluation; this isolates the
+			// time guard's compatibility with observations the real writer accepts.
+			if err := validatePerpsProposalFrameTimes(tape.Frames, at, at); err != nil {
+				t.Fatalf("time guard rejected collector-valid timestamps: %v", err)
 			}
 		})
 	}

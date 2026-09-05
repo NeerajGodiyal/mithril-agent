@@ -175,19 +175,21 @@ func verifyProposalTapeRecord(tape shadowPerpsTape, digest string, record journa
 	return nil
 }
 
-// validatePerpsProposalFrameTimes bounds observations by when the host could
-// have known them. Historical candles may warm indicators and are not bounded
-// by the episode start; the book and sampled context must belong to its window.
+// validatePerpsProposalFrameTimes bounds host receipts at their recorded
+// millisecond precision. Venue book time is a separate clock: retain the
+// collector's existing skew allowance, with replay checking book/context age.
+// Historical candles may warm indicators and have no episode-start bound.
 func validatePerpsProposalFrameTimes(frames []perpspaper.TapeFrame, startedAt, knownAt time.Time) error {
 	if knownAt.IsZero() || !startedAt.IsZero() && knownAt.Before(startedAt) {
 		return errors.New("perps proposal observation window is invalid")
 	}
 	for _, frame := range frames {
-		for _, timestamp := range [...]int64{frame.Book.Time, frame.Context.ReceivedAt} {
-			observed := time.UnixMilli(timestamp)
-			if timestamp <= 0 || observed.After(knownAt) || !startedAt.IsZero() && observed.Before(startedAt) {
-				return errors.New("perps proposal observation is outside host evidence window")
-			}
+		if frame.Context.ReceivedAt <= 0 || frame.Context.ReceivedAt > knownAt.UnixMilli() ||
+			!startedAt.IsZero() && frame.Context.ReceivedAt < startedAt.UnixMilli() {
+			return errors.New("perps proposal host receipt is outside evidence window")
+		}
+		if frame.Book.Time <= 0 || frame.Book.Time > knownAt.Add(shadowPerpsMaxClockSkew).UnixMilli() {
+			return errors.New("perps proposal venue time exceeds collector skew allowance")
 		}
 	}
 	return nil
@@ -225,7 +227,7 @@ func evaluateFrozenPerpsProposal(proposal shadowPerpsProposal, prefix journal.Du
 		}
 		record, ok := byHash[training.FinalizationSHA256]
 		if !ok || !record.At.Equal(training.KnownAt) || record.At.After(proposal.FrozenAt) || tape.Config.Environment != proposal.Baseline.Environment || tape.Config.qualificationConfig() != proposal.Baseline.Config ||
-			len(tape.Frames) != training.Frames || tape.Frames[0].Book.Time != training.FirstTime || tape.Frames[len(tape.Frames)-1].Book.Time != training.LastTime || training.LastTime > record.At.UnixMilli() {
+			len(tape.Frames) != training.Frames || tape.Frames[0].Book.Time != training.FirstTime || tape.Frames[len(tape.Frames)-1].Book.Time != training.LastTime || training.LastTime > record.At.Add(shadowPerpsMaxClockSkew).UnixMilli() {
 			return result, lastAt, errors.New("perps frozen training provenance mismatch")
 		}
 		if err := verifyProposalTapeRecord(tape, digest, record); err != nil {

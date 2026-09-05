@@ -35,6 +35,8 @@ The verified published episode prefix is not claimed to be latest. Its next
 attempt ID is permanent: an already-started, failed or incomplete target must
 not be replaced with a later winner. This command only freezes the proposal;
 use perps-evaluate to inspect its assigned attempt.
+Optional host --context PATH requires its exact selected tapes and expected
+baseline. Future model integrations must use it; no-context operator use remains.
 Every output remains pending, advisory-only, unauthorized and nonpromotable.`
 
 type shadowPerpsProposalInput struct {
@@ -69,6 +71,7 @@ type shadowPerpsProposal struct {
 	BaselineSHA256 string                        `json:"baseline_sha256"`
 	Baseline       shadowPerpsPlan               `json:"baseline"`
 	Training       []shadowPerpsProposalTraining `json:"training"`
+	ContextSHA256  string                        `json:"context_sha256,omitempty"`
 	ContentSHA256  string                        `json:"content_sha256"`
 }
 
@@ -116,6 +119,9 @@ func canonicalPerpsProposal(proposal shadowPerpsProposal) ([]byte, error) {
 		len(proposal.Training) < 1 || len(proposal.Training) > 64 {
 		return nil, errors.New("perps proposal receipt is invalid")
 	}
+	if proposal.ContextSHA256 != "" && !validLowerSHA256(proposal.ContextSHA256) {
+		return nil, errors.New("perps proposal context digest is invalid")
+	}
 	_, baselineSHA, err := canonicalShadowPerpsPlan(proposal.Baseline)
 	if err != nil || baselineSHA != proposal.BaselineSHA256 || proposal.Baseline.Config.Symbol != proposal.Input.Symbol {
 		return nil, errors.New("perps proposal baseline is invalid")
@@ -128,7 +134,7 @@ func canonicalPerpsProposal(proposal shadowPerpsProposal) ([]byte, error) {
 	for i, tape := range proposal.Training {
 		if !validLowerSHA256(tape.TapeSHA256) || !validLowerSHA256(tape.FinalizationSHA256) || seen[tape.TapeSHA256] || tape.KnownAt.IsZero() || tape.KnownAt.After(proposal.FrozenAt) ||
 			tape.Frames < perpspaper.QualificationMinimumFrames || tape.Frames > shadowPerpsMaxFrames || tape.FirstTime <= 0 || tape.LastTime < tape.FirstTime ||
-			tape.LastTime > proposal.FrozenAt.UnixMilli() || i > 0 && tape.FirstTime <= last {
+			tape.LastTime > proposal.FrozenAt.Add(shadowPerpsMaxClockSkew).UnixMilli() || i > 0 && tape.FirstTime <= last {
 			return nil, errors.New("perps proposal training is invalid")
 		}
 		seen[tape.TapeSHA256] = true
@@ -203,6 +209,7 @@ func runShadowPerpsFreeze(args []string, output io.Writer, now func() time.Time)
 	flags.SetOutput(io.Discard)
 	state := flags.String("state-dir", "", "host-controlled current state directory")
 	inputPath := flags.String("in", "", "private model proposal JSON")
+	contextPath := flags.String("context", "", "optional immutable host context")
 	var paths repeatedPathFlag
 	flags.Var(&paths, "tape", "host-selected immutable training tape, chronological")
 	if err := flags.Parse(args); err != nil {
@@ -211,7 +218,7 @@ func runShadowPerpsFreeze(args []string, output io.Writer, now func() time.Time)
 		}
 		return err
 	}
-	if flags.NArg() != 0 || !cleanResearchPath(*state) || !cleanResearchPath(*inputPath) {
+	if flags.NArg() != 0 || !cleanResearchPath(*state) || !cleanResearchPath(*inputPath) || (*contextPath != "" && !cleanResearchPath(*contextPath)) {
 		return errors.New("perps freeze requires clean absolute --state-dir and --in")
 	}
 	raw, err := securefile.ReadPrivate(*inputPath, 8192)
@@ -226,6 +233,23 @@ func runShadowPerpsFreeze(args []string, output io.Writer, now func() time.Time)
 	if err != nil {
 		return err
 	}
+	var context *shadowPerpsContext
+	contextDigest := ""
+	if *contextPath != "" {
+		verified, _, err := readPerpsContext(*contextPath, *state)
+		if err != nil {
+			return err
+		}
+		if verified.Symbol != input.Symbol || len(verified.Training) != len(ids) {
+			return errors.New("perps context selection differs from proposal")
+		}
+		for i, id := range ids {
+			if verified.Training[i].TapeSHA256 != id {
+				return errors.New("perps context training selection differs")
+			}
+		}
+		context, contextDigest = &verified, verified.ContentSHA256
+	}
 	root := filepath.Join(filepath.Dir(*state), "proposals")
 	directory := filepath.Join(root, strings.ToLower(string(input.Symbol)))
 	for _, dir := range []string{root, directory} {
@@ -237,7 +261,7 @@ func runShadowPerpsFreeze(args []string, output io.Writer, now func() time.Time)
 	return withShadowLifecycleLock(filepath.Join(directory, "freeze.lock"), func() error {
 		stored, encoded, err := readPerpsProposal(path)
 		if err == nil {
-			if stored.Input != input || stored.StateDir != *state || len(stored.Training) != len(ids) {
+			if stored.Input != input || stored.StateDir != *state || len(stored.Training) != len(ids) || stored.ContextSHA256 != contextDigest {
 				return errors.New("perps hypothesis already frozen differently")
 			}
 			for i, id := range ids {
@@ -274,7 +298,7 @@ func runShadowPerpsFreeze(args []string, output io.Writer, now func() time.Time)
 		if len(existing) >= 256 {
 			return errors.New("perps proposal directory has reached its 256 receipt limit")
 		}
-		proposal, err := preparePerpsProposal(*state, input, paths, now)
+		proposal, err := preparePerpsProposal(*state, input, paths, now, context)
 		if err != nil {
 			return err
 		}
@@ -295,7 +319,7 @@ func runShadowPerpsFreeze(args []string, output io.Writer, now func() time.Time)
 	})
 }
 
-func preparePerpsProposal(state string, input shadowPerpsProposalInput, paths []string, now func() time.Time) (shadowPerpsProposal, error) {
+func preparePerpsProposal(state string, input shadowPerpsProposalInput, paths []string, now func() time.Time, context *shadowPerpsContext) (shadowPerpsProposal, error) {
 	proposal := shadowPerpsProposal{Version: 1, Status: "pending_advisory", PaperOnly: true, Input: input, StateDir: state,
 		EpisodeJournal: filepath.Join(filepath.Dir(state), filepath.Base(state)+"-episodes.jsonl")}
 	records, err := journal.ReadRecords(shadowPerpsFinalizationJournalPath(state, input.Symbol))
@@ -326,12 +350,18 @@ func preparePerpsProposal(state string, input shadowPerpsProposalInput, paths []
 				training.KnownAt = record.At
 			}
 		}
+		if err := validatePerpsProposalFrameTimes(tape.Frames, time.Time{}, training.KnownAt); err != nil {
+			return proposal, err
+		}
 		proposal.Training = append(proposal.Training, training)
 	}
 	_, _, active, _, lock := shadowPerpsPlanPaths(state, input.Symbol)
 	err = withShadowLifecycleLock(lock, func() error {
 		var err error
 		proposal.Baseline, proposal.BaselineSHA256, _, err = loadBoundShadowPerpsPlanPointer(active, config.Environment, config.qualificationConfig())
+		if err == nil && context != nil && proposal.BaselineSHA256 != context.BaselineSHA256 {
+			return errors.New("perps baseline changed since host context")
+		}
 		return err
 	})
 	if err != nil {
@@ -354,6 +384,12 @@ func preparePerpsProposal(state string, input shadowPerpsProposalInput, paths []
 	}
 	proposal.TargetEpisode = strconv.FormatUint(count+1, 10)
 	proposal.FrozenAt = now().UTC()
+	if context != nil {
+		if context.ContextKnownAt.After(proposal.FrozenAt) {
+			return proposal, errors.New("perps context became known after freeze")
+		}
+		proposal.ContextSHA256 = context.ContentSHA256
+	}
 	if episodes[len(episodes)-1].At.After(proposal.FrozenAt) {
 		return proposal, errors.New("perps episode boundary is future dated")
 	}
