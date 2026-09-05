@@ -499,6 +499,19 @@ not start a legacy spot journal. Complete
 the optional JUP portfolio setup below, save the dashboard instruction, and use
 the atomic activation procedure before expecting paper observers to run.
 
+Each perps invocation records a host-owned attempt before reading provider data
+in `<state-directory-name>-episodes.jsonl`, beside the state directory. Its
+private `.prefix.json` projection identifies a durable, hash-verified prefix
+that readers can inspect while collection holds the writer lock. An unresolved
+start is not success: the next exclusive runner marks it interrupted before
+starting a new attempt. Ordinary failures remain incomplete. A finished record
+binds only new finalization receipts for that attempt; missing or short tapes
+are not sufficient evidence for a prospective strategy test. Non-archive runs
+are recorded but cannot supply isolated prospective episodes because their
+tapes can span invocations. These records do not select a plan, change scoring,
+or enable Hermes proposals. A prefix is a bounded historical view, not proof
+that no newer attempt or terminal record exists.
+
 Each current-format perps final tape and its evaluation are recorded first in
 the symbol's hash-chained, segmented finalization journal. The journal keeps
 every prior receipt, treats an exact repeat as idempotent, and rejects

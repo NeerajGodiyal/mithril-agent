@@ -151,9 +151,11 @@ c4c8efc75ea545d9838211d5ed69854e68cc14c13d953184af7b055e15082882  ./cmd/mithril-
 c0037506045b3fd661aab30397c358d9e9b728b4a3d634fa95e286a3b47be19d  ./cmd/mithril-agent/shadowmarketcurve_test.go
 bebd1716c65db729f0318516eacd17879a04846b681209876cace236e01cd447  ./cmd/mithril-agent/shadowmarketpaper.go
 9971e88b3d60c3088a70f62206425d11fc70703c8ba4923c47928cc1b0316c8e  ./cmd/mithril-agent/shadowmarketpaper_test.go
-7e092f26951f80595532eec661edb1c0d5aade52d49c6927b54e4180b9061c2e  ./cmd/mithril-agent/shadowperps.go
+e7fd434421e754dd25ffc740ceda9c96b0c3324e77174603acf0530398f73d3d  ./cmd/mithril-agent/shadowperps.go
 27ab6cfdbac4d2e75158b932ba3585f2f4b7ab92c3514370015acf860cc8d483  ./cmd/mithril-agent/shadowperps_test.go
 6199a1e4b4a1dfc6fb738f5d3b2b0af1a1726d20e1b5d23bd5c2921f92829694  ./cmd/mithril-agent/shadowperpscorpus.go
+17d70229a319904bb009cd4ef39b083abc9c45b410f6b6ff617132da6b0cb2a1  ./cmd/mithril-agent/shadowperpsepisode.go
+07b3a307e45f364ce58c0ce906c649f55b353f45f81a4ac5ff4da1a2e6b6a6a9  ./cmd/mithril-agent/shadowperpsepisode_test.go
 9a120e2de55796a7a3d6e97759b51bd8ae3f35174e1deb21e53d8bece2a0d6b1  ./cmd/mithril-agent/shadowperpsplan.go
 20e0d49ad286b6ca125dd7e1be19253a5d8ae5a16693c2098b098e92c9baee3b  ./cmd/mithril-agent/shadowperpsplan_test.go
 3599cc49782e7a5b197ba155058f6e02b540562363f5de05e694575d18ef3c20  ./cmd/mithril-agent/shadowperpsqualification.go
@@ -235,7 +237,7 @@ c2d21e71dee20c074624f1ff0e77a8501bf796f04067ab05b0371f912642ac99  ./cmd/mithril-
 0ee330cc5b9256be01f162995b70cf6e2dee2e762f10984e54394ebb94a713aa  ./deploy/hermes-research/.gitignore
 3f212ffe6fb263e541d832c680b3b6c6a33676d7c7d4b09c8007511d1d4906fc  ./deploy/hermes-research/AGENTS-research.md
 5c8b51e17ca8348207bb66df0a95e243b295d96e56fcc2ab5cc2da279d412561  ./deploy/hermes-research/AGENTS.md
-0809897cd48145982de9e082ffc2a2cb2569802e5655f05ceee0e23c3a581009  ./deploy/hermes-research/README.md
+037b51483a211e2f76a3910370c424f8b47d3c34fe2fa6b555b0fdf5b235f8d6  ./deploy/hermes-research/README.md
 bb80b7144a95e78b049b6ec44899f0f6aa6e37fce07aee8a82dccefb0e19206e  ./deploy/hermes-research/SOUL-research.md
 a8e2a6c87c5fbe2f416c17d3543f4008ac730bfb7016e0a76ec535683ca8f5f0  ./deploy/hermes-research/SOUL.md
 cf67aba82955fa03d582ec2e060c1095115b7e783c4d2854496e69f68f83fd3e  ./deploy/hermes-research/apply-paper-instruction.sh

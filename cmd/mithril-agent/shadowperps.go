@@ -168,6 +168,17 @@ func runShadowPerpsPaperWith(
 	}
 	runCtx, cancel := context.WithTimeout(ctx, *duration)
 	defer cancel()
+	episode, err := beginShadowPerpsEpisode(*stateDir, shadowPerpsEpisodeConfig{
+		Environment: environment, Symbols: symbols, RiskArm: arm, Collateral: collateral,
+		Cadence: *cadence, Duration: *duration, Archived: *archiveDir != "", Once: *once,
+	}, now().UTC())
+	if err != nil {
+		return err
+	}
+	publishQualification := false
+	defer func() {
+		returnErr = errors.Join(returnErr, episode.finish(*stateDir, now().UTC(), publishQualification && returnErr == nil))
+	}()
 	reader, err := newReader(environment)
 	if err != nil {
 		return err
@@ -193,7 +204,6 @@ func runShadowPerpsPaperWith(
 	}
 
 	startedAt := now().UTC()
-	publishQualification := false
 	if *archiveDir != "" {
 		if err := prepareShadowPerpsRun(*stateDir, *archiveDir, startedAt); err != nil {
 			return err
