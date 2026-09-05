@@ -151,8 +151,8 @@ func TestObservationUsesThePostReadTimeWithoutEarlyMutation(t *testing.T) {
 	policy.StartingInputUnits = 1_000_000_000
 	startedAt := time.Unix(1_700_000_000, 0).UTC()
 	clock := startedAt
-	primary := &advancingSource{
-		identity: policy.Trigger.PrimarySourceSHA256, price: 23_000_000, clock: &clock,
+	primary := &stubSource{
+		identity: policy.Trigger.PrimarySourceSHA256, price: 23_000_000, at: startedAt,
 	}
 	secondary := &advancingSource{
 		identity: policy.Trigger.SecondarySourceSHA256, price: 23_000_000,
@@ -189,6 +189,72 @@ func TestObservationUsesThePostReadTimeWithoutEarlyMutation(t *testing.T) {
 	if tick, err := fixed.Step(t.Context(), startedAt); err != nil ||
 		tick.Event != EventUnobservable || tick.Reason != ReasonMarketPriceInvalid {
 		t.Fatalf("fixed pre-read time did not reproduce future evidence: tick=%+v err=%v", tick, err)
+	}
+}
+
+type pairedSource struct {
+	stubSource
+	read func(context.Context, string) (pricetrigger.Sample, error)
+}
+
+func (s *pairedSource) Latest(ctx context.Context, feed string) (pricetrigger.Sample, error) {
+	return s.read(ctx, feed)
+}
+
+func TestRunnerReadsIndependentSourcesTogether(t *testing.T) {
+	for _, pair := range []string{"market", "quote", "native"} {
+		t.Run(pair, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+			defer cancel()
+			entered := make(chan struct{}, 2)
+			release := make(chan struct{})
+			at := time.Unix(1_700_000_000, 0).UTC()
+			var sources [2]*pairedSource
+			for index := range sources {
+				sample := pricetrigger.Sample{PriceMicros: uint64(index + 1), PublishedAt: at}
+				sources[index] = &pairedSource{read: func(ctx context.Context, feed string) (pricetrigger.Sample, error) {
+					entered <- struct{}{}
+					select {
+					case <-release:
+						sample.Feed = feed
+						return sample, nil
+					case <-ctx.Done():
+						return pricetrigger.Sample{}, ctx.Err()
+					}
+				}}
+			}
+			runner := &Runner{policy: mainnetPolicy(), primary: sources[0], secondary: sources[1],
+				quotePrimary: sources[0], quoteSecondary: sources[1], nativePrimary: sources[0], nativeSecondary: sources[1]}
+			native := runner.policy.Trigger
+			runner.policy.NativeFeePrice = &native
+			read := runner.read
+			feed := runner.policy.Trigger.Feed
+			if pair == "quote" {
+				read, feed = runner.readQuotePeg, runner.policy.QuotePeg.Feed
+			} else if pair == "native" {
+				read = runner.readNativeFeePrice
+			}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				primary, secondary, err := read(ctx)
+				if err != nil || primary.PriceMicros != 1 || secondary.PriceMicros != 2 ||
+					primary.Feed != feed || secondary.Feed != feed ||
+					!primary.PublishedAt.Equal(at) || !secondary.PublishedAt.Equal(at) {
+					t.Errorf("paired observations differ: primary=%+v secondary=%+v err=%v", primary, secondary, err)
+				}
+			}()
+			for range sources {
+				select {
+				case <-entered:
+				case <-ctx.Done():
+					<-done
+					t.Fatal("independent source reads were serialized")
+				}
+			}
+			close(release)
+			<-done
+		})
 	}
 }
 

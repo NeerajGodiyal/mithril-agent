@@ -3341,6 +3341,14 @@ guaranteed maximum loss because a delayed quote can cross the boundary. The
 paper book and its stop reset at 00:00 UTC. Low-level test scripts may still
 use `--amount` for the first lot instead of the mandate aliases.
 
+The paper observer reads each independent source pair concurrently, retaining
+market, USDC and native-price pair ordering. It waits for both readers to finish
+before returning, including after cancellation. Provider request limits and
+source timestamps are unchanged; the event time is still established after
+all required reads. Both providers may now be contacted when one fails, so
+monitor total request demand and observed coverage rather than assuming that
+concurrent reads eliminate every missed interval.
+
 The adaptive runner uses the same independently validated price evidence,
 Jupiter quotes, settlement delay, ledger, fees, and replay checks. Its fixed,
 deterministic regime controller selects momentum in a trend, range reversion in

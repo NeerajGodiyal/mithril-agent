@@ -3,6 +3,7 @@ package shadow
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
@@ -53,7 +54,8 @@ func validUnobservableReason(reason UnobservableReason) bool {
 
 // PriceReader is one independently identified price source. It is the whole of
 // what shadow mode is allowed to do with the network besides asking for a
-// quote: read.
+// quote: read. Independent readers are queried concurrently within a pair.
+// Latest must honor cancellation; Observe waits for both reads to finish.
 type PriceReader interface {
 	IdentitySHA256() string
 	Latest(ctx context.Context, feed string) (pricetrigger.Sample, error)
@@ -853,39 +855,54 @@ func (r *Runner) activeTrigger() pricetrigger.Policy {
 }
 
 func (r *Runner) read(ctx context.Context) (pricetrigger.Sample, pricetrigger.Sample, error) {
-	primary, err := r.primary.Latest(ctx, r.policy.Trigger.Feed)
-	if err != nil {
-		return pricetrigger.Sample{}, pricetrigger.Sample{}, err
-	}
-	secondary, err := r.secondary.Latest(ctx, r.policy.Trigger.Feed)
-	if err != nil {
-		return pricetrigger.Sample{}, pricetrigger.Sample{}, err
-	}
-	return primary, secondary, nil
+	return readPricePair(ctx, r.primary, r.secondary, r.policy.Trigger.Feed)
 }
 
 func (r *Runner) readQuotePeg(ctx context.Context) (pricetrigger.Sample, pricetrigger.Sample, error) {
-	primary, err := r.quotePrimary.Latest(ctx, r.policy.QuotePeg.Feed)
-	if err != nil {
-		return pricetrigger.Sample{}, pricetrigger.Sample{}, err
-	}
-	secondary, err := r.quoteSecondary.Latest(ctx, r.policy.QuotePeg.Feed)
-	if err != nil {
-		return pricetrigger.Sample{}, pricetrigger.Sample{}, err
-	}
-	return primary, secondary, nil
+	return readPricePair(ctx, r.quotePrimary, r.quoteSecondary, r.policy.QuotePeg.Feed)
 }
 
 func (r *Runner) readNativeFeePrice(ctx context.Context) (pricetrigger.Sample, pricetrigger.Sample, error) {
-	primary, err := r.nativePrimary.Latest(ctx, r.policy.NativeFeePrice.Feed)
-	if err != nil {
+	return readPricePair(ctx, r.nativePrimary, r.nativeSecondary, r.policy.NativeFeePrice.Feed)
+}
+
+// readPricePair overlaps independent provider latency without changing source
+// timestamps or validation. Each provider still applies its own request gate.
+func readPricePair(ctx context.Context, primary, secondary PriceReader, feed string) (pricetrigger.Sample, pricetrigger.Sample, error) {
+	if err := ctx.Err(); err != nil {
 		return pricetrigger.Sample{}, pricetrigger.Sample{}, err
 	}
-	secondary, err := r.nativeSecondary.Latest(ctx, r.policy.NativeFeePrice.Feed)
-	if err != nil {
-		return pricetrigger.Sample{}, pricetrigger.Sample{}, err
+	type result struct {
+		index  int
+		sample pricetrigger.Sample
+		err    error
 	}
-	return primary, secondary, nil
+	ctx, cancel := context.WithCancel(ctx)
+	var reads sync.WaitGroup
+	defer func() {
+		cancel()
+		reads.Wait()
+	}()
+	results := make(chan result, 2)
+	for index, source := range []PriceReader{primary, secondary} {
+		reads.Go(func() {
+			sample, err := source.Latest(ctx, feed)
+			results <- result{index: index, sample: sample, err: err}
+		})
+	}
+	var samples [2]pricetrigger.Sample
+	for range samples {
+		select {
+		case <-ctx.Done():
+			return pricetrigger.Sample{}, pricetrigger.Sample{}, ctx.Err()
+		case result := <-results:
+			if result.err != nil {
+				return pricetrigger.Sample{}, pricetrigger.Sample{}, result.err
+			}
+			samples[result.index] = result.sample
+		}
+	}
+	return samples[0], samples[1], nil
 }
 
 // emit records the tick and returns it, so every outcome reaches the journal by
