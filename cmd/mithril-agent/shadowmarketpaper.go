@@ -141,7 +141,13 @@ func runShadowMarketPaperCheck(args []string, output io.Writer) error {
 	if *candidatePolicyOut != "" && *resultOut == "" {
 		return errors.New("--candidate-policy-out requires --result-out")
 	}
-	artifact, err := loadProvisionalMarketAdmission(*artifactPath, *journalPath, time.Now())
+	var artifact marketadmission.ProvisionalArtifact
+	var err error
+	if *costExperiment != "" {
+		artifact, err = loadMarketPaperCostEvidence(*artifactPath, time.Now())
+	} else {
+		artifact, err = loadProvisionalMarketAdmission(*artifactPath, *journalPath, time.Now())
+	}
 	if err != nil {
 		return err
 	}

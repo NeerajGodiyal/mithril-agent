@@ -212,3 +212,28 @@ func TestMarketCostComparisonSplitCoverageAndWriterError(t *testing.T) {
 		t.Fatalf("successful-comparison writer error = %v", err)
 	}
 }
+
+func TestMarketCostComparisonHistoricalEvidenceDoesNotRelaxStartup(t *testing.T) {
+	_, artifact, points, args := marketCostFixture(t)
+	later := artifact.Through.Add(24 * time.Hour)
+	historical, err := loadMarketPaperCostEvidence(args[3], later)
+	if err != nil || !reflect.DeepEqual(historical, artifact) {
+		t.Fatalf("historical evidence changed or was rejected: %v", err)
+	}
+	got, err := historical.ReplayPoints(args[5])
+	if err != nil || !reflect.DeepEqual(got, points) {
+		t.Fatalf("historical journal did not reproduce original points: %v", err)
+	}
+	if _, err := loadProvisionalMarketAdmission(args[3], args[5], later); err == nil {
+		t.Fatal("ordinary startup accepted expired evidence")
+	}
+	for _, now := range []time.Time{{}, artifact.Through.Add(-time.Nanosecond)} {
+		if _, err := loadMarketPaperCostEvidence(args[3], now); err == nil {
+			t.Fatal("historical loader accepted missing time or future evidence")
+		}
+	}
+	_, otherJournal, _ := writeReadyProvisionalEvidence(t)
+	if _, err := historical.ReplayPoints(otherJournal); err == nil {
+		t.Fatal("historical loader bypassed exact journal verification")
+	}
+}

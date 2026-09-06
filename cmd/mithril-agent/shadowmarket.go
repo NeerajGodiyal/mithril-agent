@@ -43,6 +43,8 @@ The optional cost experiment compares the supplied policy using recorded
 SOL/USD instead of its conservative fee valuation. Assumed lamports stay fixed;
 route spreads are modeled at 25/50 bps each way. It prints historical diagnostics
 only, rejects all output-file flags, and never selects or qualifies a candidate.
+Expired checkpoints may be replayed here against their original verified journal;
+ordinary paper-check and trading startup still require current checkpoints.
 
 These commands are keyless and cannot sign or submit.
 Allowlisted markets: WIF/USDC, JTO/USDC, PYTH/USDC`

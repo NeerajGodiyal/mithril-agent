@@ -38,6 +38,17 @@ type marketPaperCostComparison struct {
 	Lanes                     []marketPaperCostLane `json:"lanes"`
 }
 
+// loadMarketPaperCostEvidence permits expired historical checkpoints only for
+// stdout diagnostics. The caller must verify their exact journal via ReplayPoints.
+func loadMarketPaperCostEvidence(path string, now time.Time) (marketadmission.ProvisionalArtifact, error) {
+	var artifact marketadmission.ProvisionalArtifact
+	if err := readStrictJSON(path, &artifact); err != nil || artifact.Validate() != nil ||
+		!artifact.ProvisionalPaperReady || now.IsZero() || artifact.Through.After(now) {
+		return marketadmission.ProvisionalArtifact{}, errors.New("historical cost evidence is invalid or not yet observed")
+	}
+	return artifact, nil
+}
+
 // writeMarketPaperCostComparison scores the supplied policy without parameter
 // search. It cannot write a candidate or qualify a market.
 func writeMarketPaperCostComparison(output io.Writer, policy shadow.Policy,
