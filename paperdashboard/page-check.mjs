@@ -81,6 +81,14 @@ const existingHTML = proposals({markets: [{symbol:'SOL', status:'already_saved',
 for (const expected of ['Already saved', 'Last checked', 'Saved earlier', 'No new model call',
   'Paper run #6', 'Research was not repeated']) assert(existingHTML.includes(expected), expected);
 assert.doesNotMatch(existingHTML, /Data reviewed|recorded runs|earlier results|undefined|Selected/);
+for (const status of ['retained_baseline', 'already_retained']) {
+  const html = proposals({ markets: [{ symbol: 'ETH', status, target_episode: '7',
+    reviewed_at: '2026-09-06T12:00:00Z' }] }, false);
+  for (const expected of ['Reviewed · 2h ago', 'No strategy change', 'No challenger created',
+    'Paper run #7', 'Not a trade or an order']) assert(html.includes(expected), expected);
+  assert.doesNotMatch(html, /Suggested plan|recorded runs|earlier results|undefined|Profit|Selected/);
+  assert.equal(html.includes('No new model call'), status === 'already_retained');
+}
 for (const status of ['unavailable', 'cleanup_required', 'interrupted']) {
   const html = proposals({ markets: [{ symbol: 'BTC', status }] }, false);
   assert.match(html, /A saved proposal, if any, has not been confirmed here/);

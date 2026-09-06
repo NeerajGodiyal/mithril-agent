@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import time
+import unicodedata
 import uuid
 
 
@@ -78,7 +79,9 @@ def make_prompt(raw, symbol):
         "Prefer retaining the baseline when the evidence does not support a change. "
         "Your proposal will be frozen before a separately assigned later paper attempt; it cannot "
         "activate a strategy, change limits, trade or access a wallet. "
-        "Return exactly one JSON object with only hypothesis_id, symbol, risk_arm, strategy, rationale. "
+        "Return exactly one JSON object: either hypothesis_id, symbol, risk_arm, strategy, rationale "
+        "for an experiment, or hypothesis_id, symbol, decision, rationale with decision=retain_baseline "
+        "to decline a new experiment. Retention does not create a candidate or claim a scored outcome. "
         f"Copy hypothesis_id={hypothesis} and symbol={symbol} exactly. "
         "risk_arm must be conservative, balanced or experimental. strategy must be momentum, "
         "mean_reversion, breakout or regime. Give a short single-line rationale (1–2000 UTF-8 bytes), "
@@ -102,9 +105,16 @@ def extract_bound_proposal(sessions, prompt, context_raw, symbol, started, finis
     if len(users) != 1 or users[0].get("content") != expected_prompt:
         raise ValueError("session does not contain the exact host prompt")
     proposal = evidence.strict_json_object(raw)
-    if (set(proposal) != {"hypothesis_id", "symbol", "risk_arm", "strategy", "rationale"}
+    retention = set(proposal) == {"hypothesis_id", "symbol", "decision", "rationale"}
+    if ((not retention and set(proposal) != {"hypothesis_id", "symbol", "risk_arm", "strategy", "rationale"})
             or proposal.get("hypothesis_id") != hypothesis or proposal.get("symbol") != symbol):
         raise ValueError("proposal changed its host-bound identity")
+    if retention:
+        rationale = proposal["rationale"]
+        if (proposal["decision"] != "retain_baseline" or not isinstance(rationale, str)
+                or not 1 <= len(rationale.encode("utf-8")) <= 2000 or rationale.strip() != rationale
+                or any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in rationale)):
+            raise ValueError("retention decision is invalid")
     receipt = {
         "version": 1, "status": "model_output_verified", "paper_only": True,
         "authorized": False, "promotable": False, "symbol": symbol,
@@ -114,6 +124,8 @@ def extract_bound_proposal(sessions, prompt, context_raw, symbol, started, finis
         "run_started": started, "run_finished": finished, "image": IMAGE,
         "provider": "openai-codex", "model": "gpt-5.6-terra", "tool_calls": 0,
     }
+    if retention:
+        receipt["decision"] = "retain_baseline"
     return raw, receipt
 
 
@@ -173,21 +185,31 @@ def cleanup_containers():
         raise ContainerCleanupError("paper research cleanup is incomplete")
 
 
-def run_symbol(symbol, directory, home, identity, run_id, progress):
-    progress["phase"] = "check_reservation"
+def read_reservation(symbol):
     raw = as_research(AGENT, "shadow", "perps-reservation", "--state-dir", STATE,
                       "--symbol", symbol, timeout=30)
     if len(raw) > 16 << 10:
         raise ValueError("paper reservation output exceeds bound")
     reservation = evidence.strict_json_object(raw)
     target = reservation.get("target_episode")
+    observed, prefix = reservation.get("observed_at"), reservation.get("episode_prefix_sha256")
     if (type(reservation.get("version")) is not int or reservation["version"] != 1
             or reservation.get("status") not in ("reserved", "unreserved")
             or reservation.get("symbol") != symbol or reservation.get("paper_only") is not True
             or reservation.get("authorized") is not False or reservation.get("promotable") is not False
             or not isinstance(target, str) or not target.isascii() or not target.isdecimal()
-            or str(int(target)) != target or not 0 < int(target) < 1 << 64):
+            or str(int(target)) != target or not 0 < int(target) < 1 << 64
+            or not isinstance(observed, str) or not observed.endswith("Z")
+            or not 0 < evidence.iso_epoch(observed) <= time.time()
+            or not isinstance(prefix, str) or not evidence.SHA256.fullmatch(prefix)):
         raise ValueError("paper reservation envelope is invalid")
+    return reservation
+
+
+def run_symbol(symbol, directory, home, identity, run_id, progress):
+    progress["phase"] = "check_reservation"
+    reservation = read_reservation(symbol)
+    target = reservation["target_episode"]
     if reservation["status"] == "reserved":
         digest = reservation.get("proposal_sha256")
         context = reservation.get("context_sha256", "")
@@ -206,6 +228,11 @@ def run_symbol(symbol, directory, home, identity, run_id, progress):
                 "proposal_sha256": digest, "context_sha256": context,
                 "strategy": reservation["strategy"], "risk_arm": reservation["risk_arm"],
                 "frozen_at": frozen}
+    retained = retained_for_target(symbol, target, reservation["episode_prefix_sha256"])
+    if retained is not None:
+        if evidence.iso_epoch(retained["reviewed_at"]) > evidence.iso_epoch(reservation["observed_at"]):
+            raise ValueError("reservation predates retained review")
+        return dict(retained, status="already_retained")
     data = directory / "evidence"
     data.mkdir(mode=0o700)
     os.chown(data, identity.pw_uid, identity.pw_gid)
@@ -236,6 +263,28 @@ def run_symbol(symbol, directory, home, identity, run_id, progress):
         "--context", context_path, "--prompt", prompt_path, "--symbol", symbol,
         "--data", data, "--started", str(started), "--finished", str(finished),
     ))
+    if metadata.get("decision") == "retain_baseline":
+        verified = verify_retention_evidence(directory, symbol, metadata)
+        if verified["context_file_sha256"] != sha256(raw):
+            raise ValueError("retention context changed after preparation")
+        progress["phase"] = "check_reservation"
+        final = read_reservation(symbol)
+        prefix = reservation.get("episode_prefix_sha256")
+        if (final["status"] != "unreserved" or final["target_episode"] != target
+                or not isinstance(prefix, str) or not evidence.SHA256.fullmatch(prefix)
+                or final.get("episode_prefix_sha256") != prefix
+                or not 0 < evidence.iso_epoch(reservation.get("observed_at", "")) <= started
+                or not finished <= evidence.iso_epoch(final.get("observed_at", "")) <= time.time()):
+            raise ValueError("retention target changed during review")
+        row = {"symbol": symbol, "status": "retained_baseline", "target_episode": target,
+               "context_sha256": verified["context_sha256"],
+               "decision_sha256": verified["proposal_input_sha256"], "reviewed_at": final["observed_at"]}
+        progress["phase"] = "record_invocation"
+        create_invocation_receipt(directory / "retention.json", {
+            "version": 1, "paper_only": True, "authorized": False, "promotable": False,
+            "result": row, "model_output": verified, "reservation": final,
+        })
+        return row
     args = [AGENT, "shadow", "perps-freeze", "--state-dir", str(STATE),
             "--in", str(data / "proposal.json"), "--context", str(context_path)]
     for tape in context["training"]:
@@ -281,6 +330,102 @@ def create_invocation_receipt(path, value):
         os.fsync(parent)
     finally:
         os.close(parent)
+
+
+def verify_retention_evidence(directory, symbol, expected):
+    # Research owns these bounded artifacts, but only the host seals a retention.
+    # Recompute the session binding rather than trusting extractor metadata alone.
+    owner = pwd.getpwnam(USER).pw_uid
+    data = directory / "evidence"
+    info = data.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != owner or info.st_mode & 0o077:
+        raise ValueError("retention evidence directory is invalid")
+    values = {}
+    for name, maximum in (("context.json", 256 << 10), ("sessions.jsonl", evidence.MAX_EXPORT_BYTES),
+                          ("proposal.json", 64 << 10), ("model-output.json", 64 << 10)):
+        descriptor = os.open(data / name, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != owner or info.st_mode & 0o077:
+                raise ValueError("retention evidence file is invalid")
+            values[name] = stream.read(maximum + 1)
+            if not values[name] or len(values[name]) > maximum:
+                raise ValueError("retention evidence exceeds bound")
+    descriptor = os.open(directory / "prompt.txt", os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            raise ValueError("retention prompt is invalid")
+        prompt = stream.read((256 << 10) + 4097)
+    if len(prompt) > (256 << 10) + 4096:
+        raise ValueError("retention prompt exceeds bound")
+    proposal, verified = extract_bound_proposal(values["sessions.jsonl"], prompt.decode("utf-8"),
+        values["context.json"], symbol, expected["run_started"], expected["run_finished"])
+    if (verified.get("decision") != "retain_baseline" or verified != expected
+            or evidence.strict_json_object(values["model-output.json"]) != verified
+            or values["proposal.json"] != proposal):
+        raise ValueError("retention evidence binding is invalid")
+    return verified
+
+
+def retained_for_target(symbol, target, prefix):
+    if not ROOT.exists():
+        return None
+    found = None
+    count = 0
+    # ponytail: reuse the bounded UUID archive; index only if the 256 ceiling grows.
+    for archive in ROOT.iterdir():
+        if len(archive.name) != 32 or any(c not in "0123456789abcdef" for c in archive.name):
+            continue
+        directory = archive / symbol.lower()
+        for path in (archive, directory):
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                break
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+                raise ValueError("retention archive is invalid")
+        else:
+            try:
+                saved = private_invocation(directory / "retention.json")
+            except FileNotFoundError:
+                continue
+            count += 1
+            if count > 256:
+                raise ValueError("retention archive exceeds bound")
+            row = saved.get("result", {})
+            reservation = saved.get("reservation", {})
+            if not isinstance(row, dict) or not isinstance(reservation, dict):
+                raise ValueError("retention receipt is invalid")
+            saved_prefix = reservation.get("episode_prefix_sha256")
+            saved_target = row.get("target_episode")
+            if (type(saved.get("version")) is not int or saved["version"] != 1
+                    or saved.get("paper_only") is not True or saved.get("authorized") is not False
+                    or saved.get("promotable") is not False or row.get("symbol") != symbol
+                    or row.get("status") != "retained_baseline"
+                    or type(reservation.get("version")) is not int or reservation["version"] != 1
+                    or reservation.get("status") != "unreserved" or reservation.get("symbol") != symbol
+                    or reservation.get("paper_only") is not True or reservation.get("authorized") is not False
+                    or reservation.get("promotable") is not False
+                    or not isinstance(saved_target, str) or not saved_target.isascii() or not saved_target.isdecimal()
+                    or str(int(saved_target)) != saved_target or not 0 < int(saved_target) < 1 << 64
+                    or reservation.get("target_episode") != saved_target
+                    or not isinstance(saved_prefix, str) or not evidence.SHA256.fullmatch(saved_prefix)):
+                raise ValueError("retention receipt is invalid")
+            if row.get("target_episode") != target or saved_prefix != prefix:
+                continue
+            verified = verify_retention_evidence(directory, symbol, saved["model_output"])
+            if (set(row) != {"symbol", "status", "target_episode", "context_sha256", "decision_sha256", "reviewed_at"}
+                    or row["context_sha256"] != verified["context_sha256"]
+                    or row["decision_sha256"] != verified["proposal_input_sha256"]
+                    or reservation.get("status") != "unreserved" or reservation.get("symbol") != symbol
+                    or reservation.get("target_episode") != target or row["reviewed_at"] != reservation.get("observed_at")
+                    or not isinstance(row["reviewed_at"], str) or not row["reviewed_at"].endswith("Z")
+                    or not verified["run_finished"] <= evidence.iso_epoch(row["reviewed_at"]) <= time.time()
+                    or found is not None):
+                raise ValueError("retention receipt chronology is invalid")
+            found = row
+    return found
 
 
 def recorded_proposals():
@@ -562,7 +707,7 @@ def collect_lifecycle(enabled):
 def publish_dashboard(status):
     identity = pwd.getpwnam("mithril-agent-dashboard")
     fields = ("symbol", "status", "phase", "target_episode", "context_sha256", "proposal_sha256",
-              "strategy", "risk_arm", "training_tapes", "resolved_outcomes", "frozen_at")
+              "strategy", "risk_arm", "training_tapes", "resolved_outcomes", "frozen_at", "decision_sha256", "reviewed_at")
     projection = {key: status[key] for key in
                   ("version", "paper_only", "authorized", "promotable", "run_id", "finished_at")}
     projection["markets"] = [{key: row[key] for key in fields if key in row} for row in status["markets"]]
@@ -662,7 +807,7 @@ def run():
         except (ValueError, OSError, KeyError):
             print("perps proposal dashboard publication failed; private receipt retained", file=sys.stderr)
             raise
-        if lifecycle_interrupted or any(result["status"] not in ("pending_advisory", "already_saved") for result in results):
+        if lifecycle_interrupted or any(result["status"] not in ("pending_advisory", "already_saved", "retained_baseline", "already_retained") for result in results):
             raise ValueError("one or more paper proposal phases were unavailable")
 
 

@@ -36,6 +36,48 @@ func writeHermesPerpsFixture(t *testing.T, path string, value map[string]any) {
 	}
 }
 
+func TestHermesPerpsRetentionIsNotAProposalOrFailure(t *testing.T) {
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "perps-proposals.json")
+	fixture := func(status string) (map[string]any, map[string]any) {
+		value := hermesPerpsFixture(now)
+		row := map[string]any{"symbol": "SOL", "status": status, "target_episode": "2",
+			"context_sha256": strings.Repeat("b", 64), "decision_sha256": strings.Repeat("c", 64),
+			"reviewed_at": now.Add(-time.Minute).Format(time.RFC3339Nano)}
+		value["markets"] = []any{row}
+		return value, row
+	}
+	for _, status := range []string{"retained_baseline", "already_retained"} {
+		value, _ := fixture(status)
+		writeHermesPerpsFixture(t, path, value)
+		got, err := readHermesPerps(path, now)
+		if err != nil || got.Markets[0].Status != status || got.Markets[0].ReviewedAt == nil {
+			t.Fatalf("valid retention rejected: %+v %v", got, err)
+		}
+		for field, invalid := range map[string]any{
+			"context_sha256": "invalid", "decision_sha256": "", "target_episode": "02",
+			"reviewed_at": now.Add(time.Second).Format(time.RFC3339Nano), "phase": "model_proposal",
+			"strategy": "regime", "risk_arm": "conservative", "proposal_sha256": strings.Repeat("d", 64),
+			"training_tapes": 0, "resolved_outcomes": 0, "frozen_at": now.Format(time.RFC3339Nano),
+		} {
+			value, row := fixture(status)
+			row[field] = invalid
+			writeHermesPerpsFixture(t, path, value)
+			if _, err := readHermesPerps(path, now); err == nil {
+				t.Fatalf("accepted %s with invalid %s", status, field)
+			}
+		}
+	}
+	for field, invalid := range map[string]any{"decision_sha256": strings.Repeat("d", 64), "reviewed_at": now.Format(time.RFC3339Nano)} {
+		value := hermesPerpsFixture(now)
+		value["markets"].([]any)[0].(map[string]any)[field] = invalid
+		writeHermesPerpsFixture(t, path, value)
+		if _, err := readHermesPerps(path, now); err == nil {
+			t.Fatalf("proposal accepted retention field %s", field)
+		}
+	}
+}
+
 func hermesLifecycleFixture(now time.Time) (map[string]any, map[string]any, map[string]any) {
 	value := hermesPerpsFixture(now)
 	proposal := map[string]any{"symbol": "SOL", "proposal_sha256": strings.Repeat("d", 64), "target_episode": "2", "frozen_at": now.Add(-time.Hour).Format(time.RFC3339Nano), "evaluation_status": "pending", "evaluation_observed_at": now.Format(time.RFC3339Nano), "selection_status": "paused"}

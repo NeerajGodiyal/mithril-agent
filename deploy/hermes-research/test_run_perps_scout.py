@@ -116,6 +116,153 @@ class PerpsScoutTest(unittest.TestCase):
         _, _, prompt = scout.make_prompt(self.context(), "SOL")
         return scout.extract_bound_proposal(raw, prompt, self.context(), "SOL", 100, 105)
 
+    def test_retention_is_disjoint_and_strictly_bound(self):
+        session = self.session()
+        value = {"hypothesis_id": "hermes-" + "a" * 48, "symbol": "SOL",
+                 "decision": "retain_baseline", "rationale": "The evidence does not justify a new experiment."}
+        session["messages"][-1]["content"] = json.dumps(value)
+        raw, receipt = self.extract(session)
+        self.assertEqual(json.loads(raw), value)
+        self.assertEqual(receipt["decision"], "retain_baseline")
+        for key, changed in (("decision", "hold"), ("strategy", "regime"), ("symbol", "ETH"),
+                             ("hypothesis_id", "other"), ("rationale", ""), ("rationale", 0),
+                             ("rationale", " x"), ("rationale", "x\ny"), ("rationale", "x\u2028y"),
+                             ("rationale", "é" * 1001)):
+            invalid = dict(value, **{key: changed})
+            session["messages"][-1]["content"] = json.dumps(invalid)
+            with self.subTest(key=key, changed=changed), self.assertRaises(ValueError):
+                self.extract(session)
+        session["messages"][-1]["content"] = json.dumps(value)
+        session["messages"][0]["content"] += "changed"
+        with self.assertRaises(ValueError):
+            self.extract(session)
+
+    def retention_run(self, root, mutation=None):
+        directory = root / ("1" * 32) / "sol"
+        directory.parent.mkdir(mode=0o700)
+        directory.mkdir(mode=0o700)
+        identity = types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
+        clock = [100]
+        reservation = json.loads(self.reservation())
+        reservation["observed_at"] = scout.evidence.rfc3339nano_epoch(99)
+        calls = []
+
+        def host(*args, **kwargs):
+            calls.append(args)
+            if "perps-reservation" in args:
+                result = dict(reservation)
+                if clock[0] == 104:
+                    clock[0] = 105
+                    result["observed_at"] = scout.evidence.rfc3339nano_epoch(105)
+                    if mutation == "target":
+                        result["target_episode"] = "10"
+                    if mutation == "prefix":
+                        result["episode_prefix_sha256"] = "e" * 64
+                    if mutation == "reserved":
+                        result["status"] = "reserved"
+                return json.dumps(result).encode()
+            if "perps-context" in args:
+                scout.evidence.replace_private(directory / "evidence/context.json", self.context())
+                return self.context()
+            if "extract" in args:
+                session = self.session()
+                session["messages"][-1]["content"] = json.dumps({
+                    "hypothesis_id": "hermes-" + "a" * 48, "symbol": "SOL",
+                    "decision": "retain_baseline", "rationale": "private retention rationale"})
+                sessions = json.dumps(session).encode() + b"\n"
+                prompt = (directory / "prompt.txt").read_text()
+                raw, metadata = scout.extract_bound_proposal(sessions, prompt, self.context(), "SOL", 100, 104)
+                for name, content in (("sessions.jsonl", sessions), ("proposal.json", raw),
+                                      ("model-output.json", json.dumps(metadata).encode())):
+                    scout.evidence.replace_private(directory / "evidence" / name, content)
+                if mutation in ("context.json", "sessions.jsonl", "proposal.json", "model-output.json"):
+                    scout.evidence.replace_private(directory / "evidence" / mutation, b"{}")
+                if mutation == "prompt":
+                    (directory / "prompt.txt").write_text(prompt + "changed")
+                return json.dumps(metadata).encode()
+            self.fail("unexpected host command: " + str(args))
+
+        def model(*args, **kwargs):
+            clock[0] = 104
+
+        with patch.object(scout, "ROOT", root), patch.object(scout, "as_research", side_effect=host), \
+                patch.object(scout, "container", side_effect=model), patch.object(scout.os, "chown"), \
+                patch.object(scout.pwd, "getpwnam", return_value=identity), \
+                patch.object(scout.time, "time", side_effect=lambda: clock[0]):
+            result = scout.run_symbol("SOL", directory, root / "home", identity, "1" * 32, {})
+        return result, directory, calls
+
+    def test_retention_saved_verified_and_same_target_deduplicated(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result, directory, calls = self.retention_run(root)
+            self.assertEqual(result["status"], "retained_baseline")
+            self.assertEqual(set(result), {"symbol", "status", "target_episode", "context_sha256", "decision_sha256", "reviewed_at"})
+            self.assertNotIn("private retention", json.dumps(result))
+            saved = directory / "retention.json"
+            before = saved.read_bytes()
+            self.assertEqual(stat.S_IMODE(saved.stat().st_mode), 0o600)
+            self.assertEqual(saved.stat().st_uid, os.geteuid())
+            self.assertFalse((directory / "invocation.json").exists())
+            self.assertFalse(any(any(command in args for command in ("perps-freeze", "perps-evaluate", "perps-select-proposal")) for args in calls))
+            with patch.object(scout, "ROOT", root), \
+                    patch.object(scout.pwd, "getpwnam", return_value=types.SimpleNamespace(pw_uid=os.getuid())), \
+                    patch.object(scout, "as_research", return_value=self.reservation()) as host, \
+                    patch.object(scout, "container") as model:
+                repeated = scout.run_symbol("SOL", None, None, None, "unused", {})
+                self.assertEqual(repeated, dict(result, status="already_retained"))
+                self.assertEqual(host.call_count, 1)
+                model.assert_not_called()
+                self.assertEqual(scout.recorded_proposals()["SOL"], [])
+                self.assertIsNone(scout.retained_for_target("SOL", "10", "d" * 64))
+                self.assertIsNone(scout.retained_for_target("BTC", "9", "d" * 64))
+                self.assertEqual(saved.read_bytes(), before)
+                later = json.loads(self.reservation())
+                later["target_episode"] = "10"
+                fresh = root / "next"
+                fresh.mkdir(mode=0o700)
+                with patch.object(scout, "as_research", side_effect=[json.dumps(later).encode(), self.context()]) as next_host, \
+                        patch.object(scout, "container", side_effect=subprocess.TimeoutExpired("new model", 150)) as next_model, \
+                        patch.object(scout.os, "chown"):
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        scout.run_symbol("SOL", fresh, root / "next-home",
+                            types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid()), "next", {})
+                    self.assertEqual(next_host.call_count, 2)
+                    next_model.assert_called_once()
+                changed_prefix = json.loads(self.reservation())
+                changed_prefix["episode_prefix_sha256"] = "e" * 64
+                changed = root / "changed-prefix"
+                changed.mkdir(mode=0o700)
+                with patch.object(scout, "as_research", side_effect=[json.dumps(changed_prefix).encode(), self.context()]) as next_host, \
+                        patch.object(scout, "container", side_effect=subprocess.TimeoutExpired("new model", 150)) as next_model, \
+                        patch.object(scout.os, "chown"):
+                    with self.assertRaises(subprocess.TimeoutExpired):
+                        scout.run_symbol("SOL", changed, root / "changed-home",
+                            types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid()), "next", {})
+                    self.assertEqual(next_host.call_count, 2)
+                    next_model.assert_called_once()
+                evidence_path = directory / "evidence/proposal.json"
+                original = evidence_path.read_bytes()
+                evidence_path.unlink()
+                evidence_path.symlink_to(directory / "evidence/context.json")
+                with self.assertRaises(OSError):
+                    scout.run_symbol("SOL", None, None, None, "unused", {})
+                evidence_path.unlink()
+                scout.evidence.replace_private(evidence_path, original)
+                scout.evidence.replace_private(directory / "evidence/proposal.json", b"{}")
+                with self.assertRaises(ValueError):
+                    scout.run_symbol("SOL", None, None, None, "unused", {})
+
+    def test_retention_refuses_changed_target_or_saved_evidence(self):
+        for mutation in ("target", "prefix", "reserved", "context.json", "sessions.jsonl",
+                         "proposal.json", "model-output.json", "prompt"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                with self.assertRaises(ValueError):
+                    self.retention_run(root, mutation)
+                self.assertFalse((root / ("1" * 32) / "sol/retention.json").exists())
+                self.assertFalse((root / ("1" * 32) / "sol/invocation.json").exists())
+
     def test_exact_context_and_session_binding(self):
         proposal, receipt = self.extract(self.session())
         self.assertEqual(receipt["context_sha256"], "a" * 64)
@@ -212,6 +359,9 @@ class PerpsScoutTest(unittest.TestCase):
                   "target_episode": "9", "context_sha256": "a" * 64, "proposal_sha256": "b" * 64,
                   "strategy": "regime", "risk_arm": "conservative", "training_tapes": 1,
                   "resolved_outcomes": 0, "rationale": "private", "path": "/private/session"}]}
+        status["markets"].append({"symbol": "ETH", "status": "retained_baseline",
+            "target_episode": "9", "context_sha256": "e" * 64, "decision_sha256": "f" * 64,
+            "reviewed_at": "2026-09-05T19:00:00Z", "rationale": "private"})
         with tempfile.TemporaryDirectory() as root, \
                 patch.object(scout, "DASHBOARD", Path(root).resolve() / "perps-proposals.json"), \
                 patch.object(scout.pwd, "getpwnam", return_value=types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())):
@@ -220,6 +370,8 @@ class PerpsScoutTest(unittest.TestCase):
             self.assertNotIn(b"private", raw)
             self.assertNotIn(b"prompt", raw)
             self.assertEqual(json.loads(raw)["markets"][0]["resolved_outcomes"], 0)
+            self.assertEqual(set(json.loads(raw)["markets"][1]), {"symbol", "status", "target_episode",
+                "context_sha256", "decision_sha256", "reviewed_at"})
             self.assertEqual(stat.S_IMODE(scout.DASHBOARD.stat().st_mode), 0o600)
             self.assertEqual(scout.DASHBOARD.stat().st_uid, os.getuid())
             before = raw

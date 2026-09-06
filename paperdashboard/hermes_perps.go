@@ -177,6 +177,8 @@ type HermesPerpsMarket struct {
 	TrainingTapes    *uint64    `json:"training_tapes,omitempty"`
 	ResolvedOutcomes *uint64    `json:"resolved_outcomes,omitempty"`
 	FrozenAt         *time.Time `json:"frozen_at,omitempty"`
+	DecisionSHA256   string     `json:"decision_sha256,omitempty"`
+	ReviewedAt       *time.Time `json:"reviewed_at,omitempty"`
 }
 
 func readHermesPerps(path string, now time.Time) (*HermesPerps, error) {
@@ -208,6 +210,20 @@ func readHermesPerps(path string, now time.Time) (*HermesPerps, error) {
 			return nil, errors.New("hermes perps market is invalid")
 		}
 		seen[market.Symbol] = true
+		if market.Status == "retained_baseline" || market.Status == "already_retained" {
+			target, err := strconv.ParseUint(market.TargetEpisode, 10, 64)
+			if err != nil || target == 0 || strconv.FormatUint(target, 10) != market.TargetEpisode ||
+				!validSHA256(market.ContextSHA256) || !validSHA256(market.DecisionSHA256) ||
+				market.ReviewedAt == nil || market.ReviewedAt.IsZero() || market.ReviewedAt.Location() != time.UTC || market.ReviewedAt.After(stored.FinishedAt) ||
+				market.Phase != "" || market.Strategy != "" || market.RiskArm != "" || market.ProposalSHA256 != "" ||
+				market.TrainingTapes != nil || market.ResolvedOutcomes != nil || market.FrozenAt != nil {
+				return nil, errors.New("hermes perps retention evidence is invalid")
+			}
+			continue
+		}
+		if market.DecisionSHA256 != "" || market.ReviewedAt != nil {
+			return nil, errors.New("hermes perps attempt claims an unrelated retention decision")
+		}
 		if market.Status == "pending_advisory" || market.Status == "already_saved" {
 			target, err := strconv.ParseUint(market.TargetEpisode, 10, 64)
 			if err != nil || target == 0 || strconv.FormatUint(target, 10) != market.TargetEpisode || market.Phase != "" || !validSHA256(market.ProposalSHA256) {
