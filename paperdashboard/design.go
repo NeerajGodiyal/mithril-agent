@@ -1122,6 +1122,11 @@ footer.shell {
 .proposal-stages > span { min-width: 0; padding: 10px; border-radius: 10px; background: var(--surface-raised); }
 .proposal-stages small { display: block; color: var(--subtle); font-size: .68rem; line-height: 1.4; }
 .proposal-stages strong { display: block; margin-top: 4px; font-size: .75rem; line-height: 1.4; overflow-wrap: anywhere; }
+.proposal-scores strong { margin-bottom: 4px; font-size: 1rem; font-variant-numeric: tabular-nums; }
+.proposal-result-note { display: block; margin: 8px 0 0; color: var(--subtle); font-size: .68rem; line-height: 1.5; }
+.proposal-stress { margin-top: 10px; color: var(--muted); font-size: .7rem; }
+.proposal-stress summary { width: fit-content; padding: 6px 0; cursor: pointer; }
+.proposal-stress > small { display: block; margin-top: 4px; color: var(--subtle); }
 .research-stats > span { min-width: 0; padding: 10px; border-radius: 10px; background: var(--surface-raised); }
 .research-stats small,
 .research-stats strong,

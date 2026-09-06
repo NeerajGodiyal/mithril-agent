@@ -453,6 +453,31 @@ def reconcile_proposals(enabled):
             break
 
 
+def lifecycle_comparison(outcome):
+    comparison = {}
+    for name in ("proposed", "baseline", "proposed_stress", "baseline_stress"):
+        lane = outcome.get(name)
+        if not isinstance(lane, dict) or type(lane.get("eligible")) is not bool:
+            raise ValueError("proposal comparison lane is invalid")
+        score = lane.get("score")
+        if not lane["eligible"] and score is None:
+            comparison[name] = None
+            continue
+        if not lane["eligible"] or not isinstance(score, dict):
+            raise ValueError("proposal comparison score is unavailable")
+        projected = {}
+        for field in ("filled_orders", "closed_positions", "net_pnl_micros", "fees_paid_micros"):
+            value = score.get(field)
+            low, high = (-(1 << 63), 1 << 63) if field == "net_pnl_micros" else (0, 1 << 64)
+            if type(value) is not int or not low <= value < high:
+                raise ValueError("proposal comparison amount is invalid")
+            projected[field] = str(value)
+        if score["closed_positions"] > score["filled_orders"]:
+            raise ValueError("proposal comparison position counts are invalid")
+        comparison[name] = projected
+    return comparison
+
+
 def collect_lifecycle(enabled):
     history = recorded_proposals()
     markets, rows = [], []
@@ -496,7 +521,10 @@ def collect_lifecycle(enabled):
                         or not isinstance(observed, str) or not observed.endswith("Z")
                         or not frozen <= evidence.iso_epoch(observed) <= time.time()):
                     raise ValueError("proposal lifecycle evaluation is invalid")
+                comparison = lifecycle_comparison(result) if status == "evaluated" else None
                 row.update(evaluation_status=status, evaluation_observed_at=observed)
+                if comparison is not None:
+                    row["comparison"] = comparison
                 if status != "pending":
                     row["evaluation_sha256"] = digest
                 if saved is not None and not uncertain:

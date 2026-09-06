@@ -146,6 +146,97 @@ func TestHermesPerpsLifecycleRejectsMalformedStageOrEvidence(t *testing.T) {
 	}
 }
 
+func TestHermesPerpsLifecycleComparisonPreservesZeroAndUnscored(t *testing.T) {
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "perps-proposals.json")
+	for _, mode := range []string{"legacy", "unscored", "zero", "loss"} {
+		value, _, row := hermesLifecycleFixture(now)
+		row["evaluation_status"], row["evaluation_sha256"] = "evaluated", strings.Repeat("e", 64)
+		if mode != "legacy" {
+			comparison := map[string]any{"proposed": nil, "baseline": nil, "proposed_stress": nil, "baseline_stress": nil}
+			if mode == "zero" || mode == "loss" {
+				pnl := "0"
+				if mode == "loss" {
+					pnl = "-9223372036854775808"
+				}
+				comparison["proposed"] = map[string]any{"filled_orders": "0", "closed_positions": "0", "net_pnl_micros": pnl, "fees_paid_micros": "0"}
+			}
+			row["comparison"] = comparison
+		}
+		writeHermesPerpsFixture(t, path, value)
+		view, err := readHermesPerps(path, now)
+		if err != nil {
+			t.Fatalf("%s rejected: %v", mode, err)
+		}
+		comparison := view.Lifecycle.Proposals[0].Comparison
+		raw, err := json.Marshal(view)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mode == "legacy" {
+			if comparison != nil || bytes.Contains(raw, []byte(`"comparison"`)) {
+				t.Fatal("legacy gained result details")
+			}
+			continue
+		}
+		if comparison == nil || comparison.Baseline != nil || !bytes.Contains(raw, []byte(`"baseline":null`)) {
+			t.Fatal("unscored lane lost explicit null")
+		}
+		if mode == "unscored" && comparison.Proposed != nil {
+			t.Fatal("nil score became zero")
+		}
+		if mode == "zero" && (comparison.Proposed == nil || comparison.Proposed.NetPnLMicros != "0" || comparison.Proposed.FilledOrders != "0") {
+			t.Fatal("real zero score disappeared")
+		}
+	}
+}
+
+func TestHermesPerpsLifecycleComparisonRejectsMalformedScores(t *testing.T) {
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	for _, lane := range []string{"proposed", "baseline", "proposed_stress", "baseline_stress"} {
+		for _, field := range []string{"filled_orders", "closed_positions", "net_pnl_micros", "fees_paid_micros"} {
+			for _, invalid := range []any{nil, true, 1, "", "word", "+1", "-0", "01", "1.0", "18446744073709551616", "-9223372036854775809"} {
+				value, _, row := hermesLifecycleFixture(now)
+				row["evaluation_status"], row["evaluation_sha256"] = "evaluated", strings.Repeat("e", 64)
+				score := map[string]any{"filled_orders": "2", "closed_positions": "1", "net_pnl_micros": "0", "fees_paid_micros": "1"}
+				if invalid == nil {
+					delete(score, field)
+				} else {
+					score[field] = invalid
+				}
+				row["comparison"] = map[string]any{lane: score}
+				path := filepath.Join(t.TempDir(), "perps-proposals.json")
+				writeHermesPerpsFixture(t, path, value)
+				if _, err := readHermesPerps(path, now); err == nil {
+					t.Fatalf("accepted %s.%s=%v", lane, field, invalid)
+				}
+			}
+		}
+	}
+	value, _, row := hermesLifecycleFixture(now)
+	row["evaluation_status"], row["evaluation_sha256"] = "evaluated", strings.Repeat("e", 64)
+	row["comparison"] = map[string]any{"proposed": map[string]any{"filled_orders": "1", "closed_positions": "2", "net_pnl_micros": "0", "fees_paid_micros": "0"}}
+	path := filepath.Join(t.TempDir(), "perps-proposals.json")
+	writeHermesPerpsFixture(t, path, value)
+	if _, err := readHermesPerps(path, now); err == nil {
+		t.Fatal("closed positions exceeded fills")
+	}
+	for _, stage := range []string{"pending", "unevaluable", "unavailable"} {
+		value, _, row := hermesLifecycleFixture(now)
+		row["evaluation_status"], row["comparison"] = stage, map[string]any{}
+		if stage == "unevaluable" {
+			row["evaluation_sha256"] = strings.Repeat("e", 64)
+		}
+		if stage == "unavailable" {
+			delete(row, "evaluation_observed_at")
+		}
+		writeHermesPerpsFixture(t, path, value)
+		if _, err := readHermesPerps(path, now); err == nil {
+			t.Fatalf("comparison accepted for %s", stage)
+		}
+	}
+}
+
 func TestHermesPerpsLifecycleNineRowsStayBoundedAndOrdered(t *testing.T) {
 	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
 	value, lifecycle, _ := hermesLifecycleFixture(now)
@@ -153,7 +244,9 @@ func TestHermesPerpsLifecycleNineRowsStayBoundedAndOrdered(t *testing.T) {
 	for i, symbol := range []string{"SOL", "BTC", "ETH"} {
 		lifecycle["markets"].([]any)[i].(map[string]any)["recorded_proposals"] = 256
 		for j := 0; j < 3; j++ {
-			rows = append(rows, map[string]any{"symbol": symbol, "proposal_sha256": strings.Repeat(string(rune('1'+i*3+j)), 64), "target_episode": string(rune('1' + j)), "frozen_at": now.Add(time.Duration(j-3) * time.Hour).Format(time.RFC3339Nano), "evaluation_status": "pending", "evaluation_observed_at": now.Format(time.RFC3339Nano), "selection_status": "paused"})
+			score := map[string]any{"filled_orders": "18446744073709551615", "closed_positions": "18446744073709551615", "net_pnl_micros": "-9223372036854775808", "fees_paid_micros": "18446744073709551615"}
+			comparison := map[string]any{"proposed": score, "baseline": score, "proposed_stress": score, "baseline_stress": score}
+			rows = append(rows, map[string]any{"symbol": symbol, "proposal_sha256": strings.Repeat(string(rune('1'+i*3+j)), 64), "target_episode": "18446744073709551615", "frozen_at": now.Add(time.Duration(j-3) * time.Hour).Format(time.RFC3339Nano), "evaluation_status": "evaluated", "evaluation_observed_at": now.Format(time.RFC3339Nano), "evaluation_sha256": strings.Repeat("e", 64), "selection_status": "selected_previously", "plan_sha256": strings.Repeat("f", 64), "comparison": comparison})
 		}
 	}
 	lifecycle["proposals"] = rows

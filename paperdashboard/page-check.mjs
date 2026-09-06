@@ -90,7 +90,9 @@ assert(!proposals({ markets: [{ ...savedProposal, symbol: '<script>' }] }, false
 console.log('Hermes proposals: missing, invalid, saved, repeated, stale, failure and escaping cases passed.');
 const lifecycleStart = source.indexOf('function hermesLifecycleCards(');
 const lifecycleEnd = source.indexOf('function renderSystem(', lifecycleStart);
-const lifecycleCards = runInNewContext(source.slice(lifecycleStart, lifecycleEnd) + '\nhermesLifecycleCards', {
+const moneyFormatters = ['integer','decimal','money','paperValue','deltaValue','signedAmount','tone']
+  .map(name => {const line=source.match(new RegExp('^const '+name+'=.*;$','m'))?.[0];assert(line,name);return line;}).join('\n');
+const lifecycleCards = runInNewContext(moneyFormatters + '\n' + source.slice(lifecycleStart, lifecycleEnd) + '\nhermesLifecycleCards', {
   safe: value => String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'),
   age: () => 'Updated 2h ago',
 });
@@ -98,7 +100,7 @@ assert.match(lifecycleCards(null,false), /not connected yet/);
 assert.match(lifecycleCards({lifecycle_error:true},false), /could not be verified/);
 const lifecycle = {as_of:'2026-09-05T21:00:00Z',selection_enabled:false,
   markets:[{symbol:'SOL',recorded_proposals:4,manual_reconciliation_required:true}],
-  proposals:[{symbol:'SOL',target_episode:'27',frozen_at:'2026-09-05T20:00:00Z',evaluation_status:'evaluated',selection_status:'paused'},
+  proposals:[{symbol:'SOL',proposal_sha256:'a'.repeat(64),target_episode:'27',frozen_at:'2026-09-05T20:00:00Z',evaluation_status:'evaluated',selection_status:'paused'},
     {symbol:'SOL',target_episode:'28',frozen_at:'2026-09-05T20:00:00Z',evaluation_status:'pending',selection_status:'paused'}]};
 const lifecycleHTML = lifecycleCards({lifecycle},false);
 for(const text of ['Automatic selection paused','Test complete','Awaiting result','Selection paused',
@@ -110,6 +112,22 @@ const historicalHTML = lifecycleCards({lifecycle:{...lifecycle,proposals:[{...li
 assert.match(historicalHTML,/Selected previously/);
 assert.match(historicalHTML,/not confirmation of the plan running now/);
 console.log('Proposal lifecycle: missing, unavailable, paused, historical and older-warning cases passed.');
+const score = {filled_orders:'1',closed_positions:'1',net_pnl_micros:'-123456',fees_paid_micros:'1200'};
+const compared = comparison => lifecycleCards({lifecycle:{...lifecycle,proposals:[{...lifecycle.proposals[0],comparison}]}},false);
+const comparedHTML = compared({proposed:{...score,filled_orders:'0',closed_positions:'0',net_pnl_micros:'0',fees_paid_micros:'0'},
+  baseline:score,proposed_stress:null,baseline_stress:{...score,net_pnl_micros:'-999'}});
+for(const text of ['Proposed plan','Previous plan','$0.00','−$0.12','−&lt;$0.01','No positions opened',
+  '1 opened · 1 closed','Not scored','after costs','Not your account balance','Higher-fee test','2× modeled entry / exit fees']) {
+  assert(comparedHTML.includes(text),text);
+}
+assert.match(comparedHTML,/<details class="proposal-stress" data-detail="[^"]*"><summary>/);
+assert.doesNotMatch(comparedHTML,/Approved|Qualified|2× costs|undefined/);
+assert.match(compared(undefined),/Result details unavailable/);
+assert.doesNotMatch(compared(undefined),/\$0\.00|No positions opened/);
+assert.doesNotMatch(compared({proposed:null,baseline:null,proposed_stress:null,baseline_stress:null}),/\$0\.00|No positions opened/);
+assert.match(compared({proposed:{...score,net_pnl_micros:'123456'}}),/\+\$0\.12/);
+assert.match(compared({proposed:{...score,net_pnl_micros:'9223372036854775807'}}),/9,223,372,036,854\.78/);
+console.log('Proposal comparison: actual zero, loss, missing, unscored, sub-cent, large and higher-fee results passed.');
 const recordingFailure = proposals({ markets: [{ symbol: 'SOL', status: 'unavailable', phase: 'record_invocation' }] }, false);
 assert.doesNotMatch(recordingFailure, /No usable proposal|No proposal was saved/);
 assert.match(recordingFailure, /has not been confirmed here/);

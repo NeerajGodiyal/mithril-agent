@@ -122,6 +122,14 @@ visible review warning, not permission to retry. Historical selections do not
 identify the currently running plan. Counts cover recorded Hermes proposals,
 not every manually frozen proposal or the remaining canonical storage limit.
 
+Evaluated proposals optionally include four independent comparison scores: the
+proposed and previous plans, each at normal and doubled modeled entry/exit fees.
+Net P&L is ending equity minus starting collateral, already including modeled
+fees and funding; do not subtract fees again or add these alternative replays
+to the account balance. Counts and micro-dollar amounts use exact decimal
+strings. A missing lane is unscored, not zero. These figures describe one test,
+not qualification, a selected plan, or expected future returns.
+
 Deploy the compatible dashboard reader before the lifecycle-producing scout.
 Older readers reject the new fields. If reverting the scout, retain the new
 reader while lifecycle fields remain in the saved projection; preserve history.

@@ -36,15 +36,48 @@ type HermesPerpsLifecycleMarket struct {
 }
 
 type HermesPerpsLifecycleProposal struct {
-	Symbol               string     `json:"symbol"`
-	ProposalSHA256       string     `json:"proposal_sha256"`
-	TargetEpisode        string     `json:"target_episode"`
-	FrozenAt             time.Time  `json:"frozen_at"`
-	EvaluationStatus     string     `json:"evaluation_status"`
-	EvaluationObservedAt *time.Time `json:"evaluation_observed_at,omitempty"`
-	EvaluationSHA256     string     `json:"evaluation_sha256,omitempty"`
-	SelectionStatus      string     `json:"selection_status"`
-	PlanSHA256           string     `json:"plan_sha256,omitempty"`
+	Symbol               string                          `json:"symbol"`
+	ProposalSHA256       string                          `json:"proposal_sha256"`
+	TargetEpisode        string                          `json:"target_episode"`
+	FrozenAt             time.Time                       `json:"frozen_at"`
+	EvaluationStatus     string                          `json:"evaluation_status"`
+	EvaluationObservedAt *time.Time                      `json:"evaluation_observed_at,omitempty"`
+	EvaluationSHA256     string                          `json:"evaluation_sha256,omitempty"`
+	SelectionStatus      string                          `json:"selection_status"`
+	PlanSHA256           string                          `json:"plan_sha256,omitempty"`
+	Comparison           *HermesPerpsLifecycleComparison `json:"comparison,omitempty"`
+}
+
+// HermesPerpsLifecycleComparison reports verified modeled outcomes, not
+// qualification or fills on a real venue. Nil lanes remain explicitly unscored.
+type HermesPerpsLifecycleComparison struct {
+	Proposed       *HermesPerpsLifecycleScore `json:"proposed"`
+	Baseline       *HermesPerpsLifecycleScore `json:"baseline"`
+	ProposedStress *HermesPerpsLifecycleScore `json:"proposed_stress"`
+	BaselineStress *HermesPerpsLifecycleScore `json:"baseline_stress"`
+}
+
+type HermesPerpsLifecycleScore struct {
+	FilledOrders    string `json:"filled_orders"`
+	ClosedPositions string `json:"closed_positions"`
+	NetPnLMicros    string `json:"net_pnl_micros"`
+	FeesPaidMicros  string `json:"fees_paid_micros"`
+}
+
+func validHermesPerpsLifecycleScore(score *HermesPerpsLifecycleScore) bool {
+	if score == nil {
+		return true
+	}
+	var amounts [3]uint64
+	for i, text := range []string{score.FilledOrders, score.ClosedPositions, score.FeesPaidMicros} {
+		value, err := strconv.ParseUint(text, 10, 64)
+		if err != nil || strconv.FormatUint(value, 10) != text {
+			return false
+		}
+		amounts[i] = value
+	}
+	pnl, err := strconv.ParseInt(score.NetPnLMicros, 10, 64)
+	return err == nil && strconv.FormatInt(pnl, 10) == score.NetPnLMicros && amounts[1] <= amounts[0]
 }
 
 func validHermesPerpsLifecycle(value *HermesPerpsLifecycle, finished time.Time) bool {
@@ -98,6 +131,11 @@ func validHermesPerpsLifecycle(value *HermesPerpsLifecycle, finished time.Time) 
 			}
 		default:
 			return false
+		}
+		if comparison := proposal.Comparison; comparison != nil {
+			if proposal.EvaluationStatus != "evaluated" || !validHermesPerpsLifecycleScore(comparison.Proposed) || !validHermesPerpsLifecycleScore(comparison.Baseline) || !validHermesPerpsLifecycleScore(comparison.ProposedStress) || !validHermesPerpsLifecycleScore(comparison.BaselineStress) {
+				return false
+			}
 		}
 		switch proposal.SelectionStatus {
 		case "selected_previously", "retired":

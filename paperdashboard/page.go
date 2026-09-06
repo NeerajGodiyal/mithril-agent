@@ -937,17 +937,26 @@ function hermesLifecycleCards(packet,invalid){
   if(!history)return '<p class="market-research-empty">Strategy test history is not connected yet.</p>';
   const evaluation={pending:'Awaiting result',evaluated:'Test complete',unevaluable:'Could not score',unavailable:'Check unavailable'};
   const selection={paused:'Selection paused',not_attempted:'Not attempted',not_selected:'Not selected',selected_previously:'Selected previously',retired:'Replaced or restored',needs_attention:'Needs review'};
+  const scoreCard=(label,score)=>'<span><small>'+label+'</small>'+(score?'<strong class="'+tone(integer(score.net_pnl_micros))+'">'+safe(integer(score.net_pnl_micros)===0n?money('0'):signedAmount(score.net_pnl_micros,'USD'))+'</strong><small>'+(integer(score.filled_orders)===0n?'No positions opened':safe(score.filled_orders)+' opened · '+safe(score.closed_positions)+' closed')+'</small>':'<strong>Not scored</strong>')+'</span>';
+  const comparison=p=>{
+    if(p.evaluation_status!=='evaluated')return '';
+    const c=p.comparison;
+    if(!c)return '<p class="proposal-result-note">Result details unavailable.</p>';
+    return '<div class="proposal-stages proposal-scores">'+scoreCard('Proposed plan',c.proposed)+scoreCard('Previous plan',c.baseline)+'</div><small class="proposal-result-note">Simulated profit / loss after costs. Not your account balance.</small><details class="proposal-stress" data-detail="'+safe(p.proposal_sha256)+'"><summary>Higher-fee test</summary><small>2× modeled entry / exit fees</small><div class="proposal-stages proposal-scores">'+scoreCard('Proposed plan',c.proposed_stress)+scoreCard('Previous plan',c.baseline_stress)+'</div></details>';
+  };
   return '<div class="section-title compact"><div><h3>Recent strategy tests</h3><p>Checked '+safe(age(history.as_of).replace(/^Updated /,''))+'. A completed test is not an approval or a live order.</p></div><span class="badge '+(history.selection_enabled?'blue':'amber')+'">'+(history.selection_enabled?'Automatic selection enabled':'Automatic selection paused')+'</span></div><div class="market-research-grid">'+history.markets.map(m=>{
     const rows=history.proposals.filter(p=>p.symbol===m.symbol);
     return '<article class="market-research-card"><div class="research-market-head"><div><h3>'+safe(m.symbol)+' · Test history</h3><small>'+safe(m.recorded_proposals)+' recorded · showing '+rows.length+'</small></div></div>'+
       (m.manual_reconciliation_required?'<p class="error">A previous selection needs review. It will not be retried automatically.</p>':'')+
-      (rows.length?'<ol class="proposal-history">'+rows.map(p=>'<li><div class="proposal-history-heading"><strong>Paper run #'+safe(p.target_episode)+'</strong><small>Saved '+safe(age(p.frozen_at).replace(/^Updated /,''))+'</small></div><div class="proposal-stages"><span><small>Test result</small><strong>'+safe(evaluation[p.evaluation_status]||'Unknown')+'</strong></span><span><small>Selection decision</small><strong>'+safe(selection[p.selection_status]||'Unknown')+'</strong></span></div></li>').join('')+'</ol>':'<p>No recorded Hermes proposals yet.</p>')+
+      (rows.length?'<ol class="proposal-history">'+rows.map(p=>'<li><div class="proposal-history-heading"><strong>Paper run #'+safe(p.target_episode)+'</strong><small>Saved '+safe(age(p.frozen_at).replace(/^Updated /,''))+'</small></div><div class="proposal-stages"><span><small>Test result</small><strong>'+safe(evaluation[p.evaluation_status]||'Unknown')+'</strong></span><span><small>Selection decision</small><strong>'+safe(selection[p.selection_status]||'Unknown')+'</strong></span></div>'+comparison(p)+'</li>').join('')+'</ol>':'<p>No recorded Hermes proposals yet.</p>')+
       (rows.some(p=>p.selection_status==='selected_previously'||p.selection_status==='retired')?'<p>Past selections are not confirmation of the plan running now.</p>':'')+'</article>';
   }).join('')+'</div>';
 }
 function renderSystem(){
+  const openComparisons=new Set([...$('hermes-lifecycle').querySelectorAll('.proposal-stress[open]')].map(detail=>detail.dataset.detail));
   $('hermes-perps').innerHTML=hermesPerpsCards(current.hermes_perps,current.hermes_perps_error);
   $('hermes-lifecycle').innerHTML=hermesLifecycleCards(current.hermes_perps,current.hermes_perps_error);
+  openComparisons.forEach(detail=>$('hermes-lifecycle').querySelector('.proposal-stress[data-detail="'+CSS.escape(detail)+'"]')?.setAttribute('open',''));
   const required=current.markets.filter(market=>!market.optional),healthy=required.filter(marketDataHealthy).length,total=required.length;
   const additionalSpots=current.markets.filter(market=>market.optional&&!isPerps(market)),healthyAdditionalSpots=additionalSpots.filter(marketDataHealthy).length,completedAdditionalSpots=additionalSpots.filter(market=>market.completed).length;
 	const perpsMarkets=current.markets.filter(isPerps),completedPerps=perpsMarkets.filter(market=>latestCompletedPerps(market)).length,recordingPerps=perpsMarkets.filter(perpsRecordingInProgress).length;
@@ -969,6 +978,7 @@ function captureRenderFocus(){
   if(active?.matches('[data-plan-market]'))return {selector:'[data-plan-market="'+CSS.escape(active.dataset.planMarket)+'"]'};
   if(active?.matches('[data-chart-action]')){const view=active.closest('[data-chart-panel]')?.dataset.chartPanel;return {selector:'#markets [data-chart-panel="'+CSS.escape(view||'')+'"] [data-chart-action="'+CSS.escape(active.dataset.chartAction)+'"]'};}
   if(active?.matches('.chart-data summary'))return {selector:'.chart-data[data-detail="'+CSS.escape(active.closest('.chart-data').dataset.detail)+'"] summary'};
+  if(active?.matches('.proposal-stress summary'))return {selector:'.proposal-stress[data-detail="'+CSS.escape(active.closest('.proposal-stress').dataset.detail)+'"] summary'};
   return null;
 }
 function setNotice(message){if($('notice').textContent!==message)$('notice').textContent=message;}

@@ -271,12 +271,16 @@ class PerpsScoutTest(unittest.TestCase):
         return directory, receipt
 
     def outcome(self, receipt, status="evaluated"):
+        lane = {"strategy": "regime", "risk_arm": "conservative", "eligible": True,
+                "score": {"filled_orders": 0, "closed_positions": 0,
+                          "net_pnl_micros": 0, "fees_paid_micros": 0}}
         return {"version": 1, "status": status, "paper_only": True, "authorized": False,
                 "promotable": False, "proposal_sha256": receipt["proposal_sha256"],
                 "target_episode": receipt["target_episode"], "content_sha256": "e" * 64,
                 "observed_at": "2026-09-05T21:00:00Z", "start_sha256": "b" * 64,
                 "terminal_sha256": "c" * 64,
-                "proposed": {"strategy": "regime", "risk_arm": "conservative"}}
+                **{name: copy.deepcopy(lane) for name in
+                   ("proposed", "baseline", "proposed_stress", "baseline_stress")}}
 
     def test_invocation_fixture_is_private_with_group_writable_umask(self):
         previous = os.umask(0o002)
@@ -480,6 +484,38 @@ class PerpsScoutTest(unittest.TestCase):
                                  1 if mode == "clean" else 0)
                 self.assertEqual((first / "selection-attempt.json").exists(), mode == "clean")
 
+    def test_lifecycle_comparison_preserves_zero_loss_and_unscored(self):
+        value = self.outcome({"proposal_sha256": "a" * 64, "target_episode": "1"})
+        value["baseline"]["score"].update(filled_orders=1, closed_positions=1,
+                                         net_pnl_micros=-123456, fees_paid_micros=1200)
+        value["proposed_stress"] = {"eligible": False}
+        score = scout.lifecycle_comparison(value)
+        self.assertEqual(score["proposed"]["net_pnl_micros"], "0")
+        self.assertEqual(score["proposed"]["filled_orders"], "0")
+        self.assertEqual(score["baseline"]["net_pnl_micros"], "-123456")
+        self.assertEqual(score["baseline"]["fees_paid_micros"], "1200")
+        self.assertIsNone(score["proposed_stress"])
+        self.assertNotIn("eligible", score["baseline"])
+        for field, invalid in (("filled_orders", True), ("net_pnl_micros", "1"),
+                               ("net_pnl_micros", 1 << 63), ("net_pnl_micros", -(1 << 63)-1),
+                               ("fees_paid_micros", -1), ("fees_paid_micros", 1 << 64),
+                               ("closed_positions", 2), ("net_pnl_micros", None)):
+            with self.subTest(field=field, invalid=invalid):
+                changed = copy.deepcopy(value)
+                changed["baseline"]["score"][field] = invalid
+                with self.assertRaises(ValueError):
+                    scout.lifecycle_comparison(changed)
+        with tempfile.TemporaryDirectory() as root, patch.object(scout, "ROOT", Path(root)), \
+                patch.object(scout, "SYMBOLS", ("SOL",)):
+            _, receipt = self.invocation(root)
+            value = self.outcome(receipt)
+            value["proposed"]["score"].pop("net_pnl_micros")
+            with patch.object(scout, "as_research", return_value=json.dumps(value).encode()):
+                row = scout.collect_lifecycle(False)["proposals"][0]
+            self.assertEqual(row["evaluation_status"], "unavailable")
+            self.assertNotIn("comparison", row)
+            self.assertNotIn("evaluation_sha256", row)
+
     def test_lifecycle_is_bounded_recent_history_not_selection(self):
         with tempfile.TemporaryDirectory() as root, patch.object(scout, "ROOT", Path(root)), \
                 patch.object(scout, "SYMBOLS", ("SOL",)):
@@ -560,6 +596,9 @@ class PerpsScoutTest(unittest.TestCase):
                     self.assertEqual(row["selection_status"], "paused")
                     self.assertIn("evaluation_observed_at", row)
                     self.assertEqual("evaluation_sha256" in row, evaluation != "pending")
+                    self.assertEqual("comparison" in row, evaluation == "evaluated")
+                    if evaluation == "evaluated":
+                        self.assertEqual(row["comparison"]["proposed"]["net_pnl_micros"], "0")
                     self.assertNotIn("plan_sha256", row)
             self.assertEqual(len(list(Path(root).rglob("selection-attempt.json"))), 1)
             self.assertEqual(list(Path(root).rglob("selection-result.json")), [])
