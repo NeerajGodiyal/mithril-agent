@@ -332,6 +332,7 @@ class PerpsScoutTest(unittest.TestCase):
 
     def test_model_failure_never_calls_freeze(self):
         with tempfile.TemporaryDirectory() as root, patch.object(scout.os, "chown"), \
+                patch.object(scout, "ROOT", Path(root)), \
                 patch.object(scout, "as_research", side_effect=[self.reservation(), self.context()]) as host, \
                 patch.object(scout, "container", side_effect=subprocess.TimeoutExpired("model", 150)):
             directory = Path(root) / "archive"
@@ -350,6 +351,7 @@ class PerpsScoutTest(unittest.TestCase):
             "input": {"hypothesis_id": "hermes-" + "a" * 48, "strategy": "regime", "risk_arm": "conservative", "rationale": "private model prose"},
             "target_episode": "9", "frozen_at": "2026-09-05T20:00:00Z"}).encode()
         with tempfile.TemporaryDirectory() as root, patch.object(scout.os, "chown"), \
+                patch.object(scout, "ROOT", Path(root)), \
                 patch.object(scout, "container"), \
                 patch.object(scout, "as_research", side_effect=[self.reservation(), self.context(), b"{}", frozen]) as host:
             directory = Path(root) / "archive"
@@ -375,6 +377,7 @@ class PerpsScoutTest(unittest.TestCase):
                   "input": {"hypothesis_id": "hermes-" + "a" * 48,
                             "strategy": "regime", "risk_arm": "conservative"}}
         with tempfile.TemporaryDirectory() as root, patch.object(scout.os, "chown"), \
+                patch.object(scout, "ROOT", Path(root)), \
                 patch.object(scout, "container"), patch.object(scout, "as_research", side_effect=[
                     self.reservation(), json.dumps(context).encode(), b"{}", json.dumps(frozen).encode()]):
             directory = Path(root) / "archive"

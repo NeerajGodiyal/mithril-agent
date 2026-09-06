@@ -273,7 +273,7 @@ b717518e393e82f00c7b66e35e0248672139d87f2bb321adf80fd5a282754238  ./deploy/herme
 92e11289c83cdbde8a42bf00470897a9f9b31afe13270854e5f93cabfc33d3c8  ./deploy/hermes-research/run-perps-scout.py
 64b257eaf20565cbf1b296ff524d8ac84634910ed370a72f822a7e5de20ad639  ./deploy/hermes-research/test_build_research_evidence.py
 4a94c2f8d39cbc2243fdf0e75a9a7cd1f37693ec281b38dd3f8ce9d720bd6720  ./deploy/hermes-research/test_perps_proposal.py
-2391e11e45224aa38321b0234d0e033ff108e112fe9e978121a3af981e305fff  ./deploy/hermes-research/test_run_perps_scout.py
+3008ba68bfeb698134c9a22f547bc014dbaad01bac8d999903d1b5f82bcc15e7  ./deploy/hermes-research/test_run_perps_scout.py
 43df10ef5192a5bc6fa52796612132de5235c7ea42b068e05ccceb4457ea1dee  ./deploy/prometheus/mithril-agent.rules.test.yml
 7fc42a6028da27674219166fef22a1aa53db0e39f88b0c273b47804b76f6d44f  ./deploy/prometheus/mithril-agent.rules.yml
 9facf6d1cc9e384b5245ea21950323b39405c793914fe355063b4f0cfb1cbd1b  ./deploy/systemd/mithril-agent-demo.service
