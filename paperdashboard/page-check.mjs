@@ -88,6 +88,28 @@ for (const status of ['unavailable', 'cleanup_required', 'interrupted']) {
 }
 assert(!proposals({ markets: [{ ...savedProposal, symbol: '<script>' }] }, false).includes('<script>'));
 console.log('Hermes proposals: missing, invalid, saved, repeated, stale, failure and escaping cases passed.');
+const lifecycleStart = source.indexOf('function hermesLifecycleCards(');
+const lifecycleEnd = source.indexOf('function renderSystem(', lifecycleStart);
+const lifecycleCards = runInNewContext(source.slice(lifecycleStart, lifecycleEnd) + '\nhermesLifecycleCards', {
+  safe: value => String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'),
+  age: () => 'Updated 2h ago',
+});
+assert.match(lifecycleCards(null,false), /not connected yet/);
+assert.match(lifecycleCards({lifecycle_error:true},false), /could not be verified/);
+const lifecycle = {as_of:'2026-09-05T21:00:00Z',selection_enabled:false,
+  markets:[{symbol:'SOL',recorded_proposals:4,manual_reconciliation_required:true}],
+  proposals:[{symbol:'SOL',target_episode:'27',frozen_at:'2026-09-05T20:00:00Z',evaluation_status:'evaluated',selection_status:'paused'},
+    {symbol:'SOL',target_episode:'28',frozen_at:'2026-09-05T20:00:00Z',evaluation_status:'pending',selection_status:'paused'}]};
+const lifecycleHTML = lifecycleCards({lifecycle},false);
+for(const text of ['Automatic selection paused','Test complete','Awaiting result','Selection paused',
+  'previous selection needs review','not be retried automatically','4 recorded · showing 2','not an approval or a live order']) {
+  assert(lifecycleHTML.includes(text),text);
+}
+assert.doesNotMatch(lifecycleHTML,/Approved|Active plan|undefined/);
+const historicalHTML = lifecycleCards({lifecycle:{...lifecycle,proposals:[{...lifecycle.proposals[0],selection_status:'selected_previously'}]}},false);
+assert.match(historicalHTML,/Selected previously/);
+assert.match(historicalHTML,/not confirmation of the plan running now/);
+console.log('Proposal lifecycle: missing, unavailable, paused, historical and older-warning cases passed.');
 const recordingFailure = proposals({ markets: [{ symbol: 'SOL', status: 'unavailable', phase: 'record_invocation' }] }, false);
 assert.doesNotMatch(recordingFailure, /No usable proposal|No proposal was saved/);
 assert.match(recordingFailure, /has not been confirmed here/);

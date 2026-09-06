@@ -111,6 +111,23 @@ marker requires operator reconciliation; it is not automatically retried.
 Completed rejections and retired plans are not submitted again. Keep these
 markers with the invocation archive when backing up or restoring research.
 
+The optional dashboard lifecycle snapshot separates evaluation from selection.
+Once per scout cycle, the host reuses `perps-evaluate` for at most the three most
+recent recorded Hermes proposals per market, ordered by original invocation
+time. This may retain a newly verified immutable evaluation; it never calls the
+selector from the display path. Page refresh only reads the bounded projection.
+All recorded selection markers are checked, including older entries outside
+the display window. An unfinished, mismatched or conflicting marker remains a
+visible review warning, not permission to retry. Historical selections do not
+identify the currently running plan. Counts cover recorded Hermes proposals,
+not every manually frozen proposal or the remaining canonical storage limit.
+
+Deploy the compatible dashboard reader before the lifecycle-producing scout.
+Older readers reject the new fields. If reverting the scout, retain the new
+reader while lifecycle fields remain in the saved projection; preserve history.
+Interrupted runs skip further lifecycle work and retain an unavailable-history
+status alongside any completed proposal summary.
+
 All four MCP entries deliberately use `trust: full`. Pinned Hermes has an
 [open read-only annotation bug](https://github.com/NousResearch/hermes-agent/issues/88858):
 it reads the Python MCP annotation by its wire-format name, so read-only tools

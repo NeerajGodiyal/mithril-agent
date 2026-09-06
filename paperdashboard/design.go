@@ -1113,6 +1113,15 @@ footer.shell {
 .research-progress::-webkit-progress-value { border-radius: inherit; background: linear-gradient(90deg, #2d8d61, var(--green)); transition: width 400ms var(--ease-out); }
 .research-progress::-moz-progress-bar { border-radius: inherit; background: linear-gradient(90deg, #2d8d61, var(--green)); }
 .research-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 18px; }
+.proposal-history { display: grid; gap: 12px; list-style: none; margin: 18px 0 0; padding: 0; }
+.proposal-history > li { min-width: 0; padding-top: 12px; border-top: 1px solid var(--line); }
+.proposal-history-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.proposal-history-heading strong { font-size: .78rem; }
+.proposal-history-heading small { color: var(--subtle); font-size: .68rem; }
+.proposal-stages { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.proposal-stages > span { min-width: 0; padding: 10px; border-radius: 10px; background: var(--surface-raised); }
+.proposal-stages small { display: block; color: var(--subtle); font-size: .68rem; line-height: 1.4; }
+.proposal-stages strong { display: block; margin-top: 4px; font-size: .75rem; line-height: 1.4; overflow-wrap: anywhere; }
 .research-stats > span { min-width: 0; padding: 10px; border-radius: 10px; background: var(--surface-raised); }
 .research-stats small,
 .research-stats strong,

@@ -277,9 +277,7 @@ def create_invocation_receipt(path, value):
         os.close(parent)
 
 
-def reconcile_proposals(enabled):
-    if not enabled:
-        return  # perps-context --auto already resolves feedback without selection.
+def recorded_proposals():
     pending = {symbol: [] for symbol in SYMBOLS}
     for archive in ROOT.iterdir():
         if len(archive.name) != 32 or any(c not in "0123456789abcdef" for c in archive.name):
@@ -300,7 +298,7 @@ def reconcile_proposals(enabled):
             except FileNotFoundError:
                 continue
             context, proposal = receipt.get("context_sha256"), receipt.get("proposal_sha256")
-            if (receipt.get("version") != 1 or receipt.get("status") != "pending_advisory"
+            if (type(receipt.get("version")) is not int or receipt["version"] != 1 or receipt.get("status") != "pending_advisory"
                     or receipt.get("symbol") != symbol or receipt.get("paper_only") is not True
                     or receipt.get("authorized") is not False or receipt.get("promotable") is not False
                     or not isinstance(context, str) or not evidence.SHA256.fullmatch(context)
@@ -309,45 +307,90 @@ def reconcile_proposals(enabled):
             hypothesis = "hermes-" + context[:48]
             target = receipt.get("target_episode")
             started, finished = receipt.get("run_started"), receipt.get("run_finished")
+            frozen = receipt.get("frozen_at")
             if (receipt.get("hypothesis_id", hypothesis) != hypothesis
                     or not isinstance(target, str) or not target.isascii() or not target.isdecimal()
                     or str(int(target)) != target or not 0 < int(target) < 1 << 64
                     or any(type(at) not in (int, float) or not math.isfinite(at) or at <= 0 for at in (started, finished))
-                    or finished < started):
+                    or finished < started or not isinstance(frozen, str) or not frozen.endswith("Z")
+                    or not finished <= evidence.iso_epoch(frozen) <= time.time()):
                 raise ValueError("private proposal chronology is invalid")
             pending[symbol].append((started, archive.name, directory, receipt, hypothesis))
             if len(pending[symbol]) > 256:
                 raise ValueError("private proposal archive exceeds bound")
+    return pending
+
+
+def selection_result(directory, receipt):
+    intent, completed = None, None
+    for name in ("selection-attempt.json", "selection-result.json"):
+        try:
+            saved = private_invocation(directory / name)
+        except FileNotFoundError:
+            continue
+        statuses = ("selection_attempted",) if name == "selection-attempt.json" else (
+            "unevaluable", "evaluated_proposal_not_selected", "qualified_paper_plan_selected",
+            "qualified_paper_plan_already_selected", "qualified_paper_plan_retired")
+        digest = saved.get("evaluation_sha256")
+        if (type(saved.get("version")) is not int or saved["version"] != 1
+                or saved.get("status") not in statuses or not isinstance(digest, str)
+                or not evidence.SHA256.fullmatch(digest) or saved.get("symbol") != receipt["symbol"]
+                or saved.get("proposal_sha256") != receipt["proposal_sha256"]
+                or saved.get("target_episode") != receipt["target_episode"]
+                or saved.get("paper_only") is not True or saved.get("authorized") is not False
+                or saved.get("promotable") is not False):
+            raise ValueError("selection marker identity is invalid")
+        selected = saved["status"] in ("qualified_paper_plan_selected", "qualified_paper_plan_already_selected",
+                                       "qualified_paper_plan_retired")
+        plan = saved.get("plan_sha256")
+        if (selected and (not isinstance(plan, str) or not evidence.SHA256.fullmatch(plan))) or (not selected and plan is not None):
+            raise ValueError("selection marker plan is invalid")
+        if name == "selection-attempt.json":
+            intent = saved
+        else:
+            completed = saved
+    if intent is None and completed is None:
+        return None
+    if (completed is None or (completed["status"] != "unevaluable" and intent is None)
+            or (intent is not None and (completed["status"] == "unevaluable"
+                or intent["evaluation_sha256"] != completed["evaluation_sha256"]))):
+        raise ValueError("selection outcome is unresolved")
+    return completed
+
+
+def proposal_selection(items):
+    results, uncertain = {}, False
+    for _, _, directory, receipt, _ in items:
+        if any(receipt[key] != items[0][3][key] for key in
+               ("symbol", "context_sha256", "target_episode", "frozen_at")):
+            uncertain = True
+            continue
+        try:
+            saved = selection_result(directory, receipt)
+            if saved is not None:
+                key = (saved["status"], saved["evaluation_sha256"], saved.get("plan_sha256"))
+                results[key] = saved
+        except (ValueError, OSError):
+            uncertain = True
+    return next(iter(results.values()), None), uncertain or len(results) > 1
+
+
+def reconcile_proposals(enabled):
+    if not enabled:
+        return  # Context and lifecycle collection resolve feedback without selection.
+    pending = recorded_proposals()
     for symbol in SYMBOLS:
-        seen = set()
-        for _, _, directory, receipt, hypothesis in sorted(pending[symbol]):
-            if receipt["proposal_sha256"] in seen:
-                continue
-            seen.add(receipt["proposal_sha256"])
+        grouped = {}
+        for item in sorted(pending[symbol]):
+            grouped.setdefault(item[3]["proposal_sha256"], []).append(item)
+        for items in grouped.values():
+            _, _, directory, receipt, hypothesis = items[0]
             intent = directory / "selection-attempt.json"
             completed = directory / "selection-result.json"
             # A malformed or unresolved intent is never retried automatically.
-            if intent.exists() or intent.is_symlink() or completed.exists() or completed.is_symlink():
-                try:
-                    for marker in (intent, completed):
-                        if not marker.exists() and not marker.is_symlink():
-                            continue
-                        saved = private_invocation(marker)
-                        statuses = ("selection_attempted",) if marker == intent else (
-                            "unevaluable", "evaluated_proposal_not_selected", "qualified_paper_plan_selected",
-                            "qualified_paper_plan_already_selected", "qualified_paper_plan_retired")
-                        digest = saved.get("evaluation_sha256")
-                        if (type(saved.get("version")) is not int or saved["version"] != 1
-                                or saved.get("status") not in statuses or not isinstance(digest, str)
-                                or not evidence.SHA256.fullmatch(digest)
-                                or saved.get("symbol") != symbol or saved.get("proposal_sha256") != receipt["proposal_sha256"]
-                                or saved.get("target_episode") != receipt["target_episode"]
-                                or saved.get("paper_only") is not True or saved.get("authorized") is not False
-                                or saved.get("promotable") is not False):
-                            raise ValueError("selection marker identity is invalid")
-                    if not completed.exists():
-                        raise ValueError("selection outcome is unresolved")
-                except (ValueError, OSError):
+            saved, uncertain = proposal_selection(items)
+            if saved is not None or uncertain:
+                if uncertain:
                     print("perps selection requires manual reconciliation; private intent retained", file=sys.stderr)
                 continue
             path = STATE.parent / "proposals" / symbol.lower() / (hypothesis + ".json")
@@ -410,6 +453,78 @@ def reconcile_proposals(enabled):
             break
 
 
+def collect_lifecycle(enabled):
+    history = recorded_proposals()
+    markets, rows = [], []
+    for symbol in SYMBOLS:
+        grouped = {}
+        for item in sorted(history[symbol]):
+            grouped.setdefault(item[3]["proposal_sha256"], []).append(item)
+        market = {"symbol": symbol, "recorded_proposals": len(grouped), "manual_reconciliation_required": False}
+        markers = {}
+        # Inspect every bounded marker, including older attempts outside the UI window.
+        for digest, items in grouped.items():
+            saved, uncertain = proposal_selection(items)
+            market["manual_reconciliation_required"] |= uncertain
+            markers[digest] = (saved, uncertain)
+        previous_time = 0
+        # Latest by original invocation time, not returns. UI reads this projection only.
+        for items in list(grouped.values())[-3:]:
+            _, _, _, receipt, hypothesis = items[0]
+            frozen = evidence.iso_epoch(receipt["frozen_at"])
+            if frozen < previous_time:
+                raise ValueError("proposal history chronology is invalid")
+            previous_time = frozen
+            saved, uncertain = markers[receipt["proposal_sha256"]]
+            row = {"symbol": symbol, "proposal_sha256": receipt["proposal_sha256"],
+                   "target_episode": receipt["target_episode"], "frozen_at": receipt["frozen_at"],
+                   "evaluation_status": "unavailable",
+                   "selection_status": "needs_attention" if uncertain else "paused" if not enabled else "not_attempted"}
+            path = STATE.parent / "proposals" / symbol.lower() / (hypothesis + ".json")
+            try:
+                raw = as_research(AGENT, "shadow", "perps-evaluate", "--proposal", path, timeout=30)
+                if len(raw) > 64 << 10:
+                    raise ValueError("evaluation output exceeds bound")
+                result = evidence.strict_json_object(raw)
+                status, digest, observed = result.get("status"), result.get("content_sha256"), result.get("observed_at")
+                if (type(result.get("version")) is not int or result["version"] != 1
+                        or result.get("paper_only") is not True or result.get("authorized") is not False
+                        or result.get("promotable") is not False or status not in ("pending", "evaluated", "unevaluable")
+                        or result.get("proposal_sha256") != receipt["proposal_sha256"]
+                        or result.get("target_episode") != receipt["target_episode"]
+                        or not isinstance(digest, str) or not evidence.SHA256.fullmatch(digest)
+                        or not isinstance(observed, str) or not observed.endswith("Z")
+                        or not frozen <= evidence.iso_epoch(observed) <= time.time()):
+                    raise ValueError("proposal lifecycle evaluation is invalid")
+                row.update(evaluation_status=status, evaluation_observed_at=observed)
+                if status != "pending":
+                    row["evaluation_sha256"] = digest
+                if saved is not None and not uncertain:
+                    if (status == "pending" or saved["evaluation_sha256"] != digest
+                            or (saved["status"] == "unevaluable") != (status == "unevaluable")):
+                        uncertain = True
+                    else:
+                        row["selection_status"] = {
+                            "unevaluable": "not_selected", "evaluated_proposal_not_selected": "not_selected",
+                            "qualified_paper_plan_selected": "selected_previously",
+                            "qualified_paper_plan_already_selected": "selected_previously",
+                            "qualified_paper_plan_retired": "retired",
+                        }[saved["status"]]
+                        if "plan_sha256" in saved:
+                            row["plan_sha256"] = saved["plan_sha256"]
+            except (ValueError, KeyError, OSError, subprocess.SubprocessError):
+                # Failure is not a negative trading result or evidence of selection.
+                uncertain = uncertain or saved is not None
+            if uncertain:
+                row["selection_status"] = "needs_attention"
+                row.pop("plan_sha256", None)
+                market["manual_reconciliation_required"] = True
+            rows.append(row)
+        markets.append(market)
+    return {"as_of": evidence.rfc3339nano_epoch(time.time()), "selection_enabled": enabled,
+            "markets": markets, "proposals": rows}
+
+
 def publish_dashboard(status):
     identity = pwd.getpwnam("mithril-agent-dashboard")
     fields = ("symbol", "status", "phase", "target_episode", "context_sha256", "proposal_sha256",
@@ -417,6 +532,9 @@ def publish_dashboard(status):
     projection = {key: status[key] for key in
                   ("version", "paper_only", "authorized", "promotable", "run_id", "finished_at")}
     projection["markets"] = [{key: row[key] for key in fields if key in row} for row in status["markets"]]
+    for key in ("lifecycle", "lifecycle_error"):
+        if key in status:
+            projection[key] = status[key]
     if DASHBOARD.parent.resolve() != DASHBOARD.parent:
         raise ValueError("dashboard directory is invalid")
     parent = os.open(DASHBOARD.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -491,8 +609,18 @@ def run():
             except (ValueError, KeyError, OSError, subprocess.SubprocessError):
                 result = dict(progress, status="unavailable")
             results.append(result)
+        lifecycle = {"lifecycle_error": True}
+        lifecycle_interrupted = False
+        if not any(result["status"] in ("interrupted", "cleanup_required") for result in results):
+            try:
+                lifecycle = {"lifecycle": collect_lifecycle(selection == "1")}
+            except RunInterrupted:
+                lifecycle_interrupted = True
+            except (ValueError, KeyError, OSError, subprocess.SubprocessError):
+                print("perps proposal history could not be verified", file=sys.stderr)
         status = {"version": 1, "paper_only": True, "authorized": False, "promotable": False,
                   "run_id": run_id, "finished_at": evidence.rfc3339nano_epoch(time.time()), "markets": results}
+        status.update(lifecycle)
         evidence.replace_private(ROOT / "latest.json", json.dumps(status).encode() + b"\n")
         print(json.dumps(status))
         try:
@@ -500,7 +628,7 @@ def run():
         except (ValueError, OSError, KeyError):
             print("perps proposal dashboard publication failed; private receipt retained", file=sys.stderr)
             raise
-        if any(result["status"] not in ("pending_advisory", "already_saved") for result in results):
+        if lifecycle_interrupted or any(result["status"] not in ("pending_advisory", "already_saved") for result in results):
             raise ValueError("one or more paper proposal phases were unavailable")
 
 

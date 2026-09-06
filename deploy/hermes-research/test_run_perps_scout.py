@@ -449,6 +449,201 @@ class PerpsScoutTest(unittest.TestCase):
                 else:
                     scout.container({}, "owned-container", timeout=1)
 
+    def test_reconciliation_checks_all_duplicate_receipts_before_selection(self):
+        for mode in ("unresolved", "completed", "conflicting_binding", "clean"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as root, \
+                    patch.object(scout, "ROOT", Path(root)), patch.object(scout, "SYMBOLS", ("SOL",)), \
+                    patch.object(scout.sys, "stderr", new_callable=io.StringIO):
+                first, receipt = self.invocation(root, 1)
+                later, _ = self.invocation(root, 2)
+                duplicate = dict(receipt, run_started=20, run_finished=21)
+                if mode == "conflicting_binding":
+                    duplicate["target_episode"] = "2"
+                (later / "invocation.json").write_text(json.dumps(duplicate))
+                outcome = self.outcome(receipt)
+                if mode in ("unresolved", "completed"):
+                    marker = dict(version=1, status="selection_attempted", paper_only=True,
+                                  authorized=False, promotable=False, symbol="SOL",
+                                  proposal_sha256=receipt["proposal_sha256"],
+                                  target_episode=receipt["target_episode"],
+                                  evaluation_sha256=outcome["content_sha256"])
+                    scout.create_invocation_receipt(later / "selection-attempt.json", marker)
+                    if mode == "completed":
+                        scout.create_invocation_receipt(later / "selection-result.json",
+                            dict(marker, status="qualified_paper_plan_selected", plan_sha256="f" * 64))
+                with patch.object(scout, "as_research", side_effect=[json.dumps(outcome).encode(),
+                        json.dumps(self.selection(receipt, outcome)).encode()]) as host:
+                    scout.reconcile_proposals(True)
+                    scout.reconcile_proposals(True)
+                self.assertEqual(host.call_count, 2 if mode == "clean" else 0)
+                self.assertEqual(sum("perps-select-proposal" in call.args for call in host.call_args_list),
+                                 1 if mode == "clean" else 0)
+                self.assertEqual((first / "selection-attempt.json").exists(), mode == "clean")
+
+    def test_lifecycle_is_bounded_recent_history_not_selection(self):
+        with tempfile.TemporaryDirectory() as root, patch.object(scout, "ROOT", Path(root)), \
+                patch.object(scout, "SYMBOLS", ("SOL",)):
+            receipts = {}
+            for number in (4, 2, 1, 3):
+                _, receipt = self.invocation(root, number)
+                receipts["hermes-" + receipt["context_sha256"][:48] + ".json"] = receipt
+            def host(*args, **kwargs):
+                self.assertIn("perps-evaluate", args)
+                self.assertNotIn("perps-select-proposal", args)
+                return json.dumps(self.outcome(receipts[args[-1].name])).encode()
+            with patch.object(scout, "as_research", side_effect=host) as calls:
+                value = scout.collect_lifecycle(False)
+            self.assertEqual(calls.call_count, 3)
+            self.assertEqual([row["target_episode"] for row in value["proposals"]], ["2", "3", "4"])
+            self.assertEqual(value["markets"][0]["recorded_proposals"], 4)
+            self.assertFalse(value["markets"][0]["manual_reconciliation_required"])
+            for row in value["proposals"]:
+                self.assertEqual(row["selection_status"], "paused")
+                self.assertEqual(row["evaluation_status"], "evaluated")
+                self.assertNotIn("plan_sha256", row)
+            self.assertEqual(list(Path(root).rglob("selection-*.json")), [])
+
+    def test_three_market_lifecycle_collects_and_publishes_bounded_history(self):
+        with tempfile.TemporaryDirectory() as root, \
+                patch.object(scout, "ROOT", Path(root).resolve()), \
+                patch.object(scout, "DASHBOARD", Path(root).resolve() / "perps-proposals.json"), \
+                patch.object(scout.pwd, "getpwnam", return_value=types.SimpleNamespace(
+                    pw_uid=os.getuid(), pw_gid=os.getgid())):
+            self.assertEqual(scout.SYMBOLS, ("SOL", "BTC", "ETH"))
+            outcomes, expected = {}, {}
+            for index, (symbol, status) in enumerate(zip(
+                    scout.SYMBOLS, ("pending", "evaluated", "unevaluable"))):
+                expected[symbol] = []
+                # Deliberately create out of order; selection must use original
+                # invocation time, not directory order or modeled results.
+                for offset in (4, 2, 1, 3):
+                    number = index * 4 + offset
+                    directory, receipt = self.invocation(root, number, symbol)
+                    name = "hermes-" + receipt["context_sha256"][:48] + ".json"
+                    outcomes[name] = self.outcome(receipt, status)
+                    if offset > 1:
+                        expected[symbol].append((number, receipt["proposal_sha256"]))
+                    if symbol == "SOL" and offset == 1:
+                        scout.create_invocation_receipt(directory / "selection-attempt.json",
+                            dict(receipt, status="selection_attempted", evaluation_sha256="e" * 64))
+
+            def host(*args, **kwargs):
+                self.assertIn("perps-evaluate", args)
+                self.assertNotIn("perps-select-proposal", args)
+                return json.dumps(outcomes[args[-1].name]).encode()
+
+            with patch.object(scout, "as_research", side_effect=host) as calls:
+                lifecycle = scout.collect_lifecycle(False)
+            self.assertEqual(calls.call_count, 9)
+            status = {"version": 1, "paper_only": True, "authorized": False,
+                      "promotable": False, "run_id": "d" * 32,
+                      "finished_at": lifecycle["as_of"], "lifecycle": lifecycle,
+                      "markets": [{"symbol": symbol, "status": "unavailable",
+                                   "phase": "check_reservation"} for symbol in scout.SYMBOLS]}
+            scout.publish_dashboard(status)
+            raw = scout.DASHBOARD.read_bytes()
+            self.assertLess(len(raw), 16 << 10)
+            self.assertEqual(stat.S_IMODE(scout.DASHBOARD.stat().st_mode), 0o600)
+            saved = json.loads(raw)["lifecycle"]
+            self.assertEqual(saved, lifecycle)
+            self.assertEqual(saved["markets"], [
+                {"symbol": symbol, "recorded_proposals": 4,
+                 "manual_reconciliation_required": symbol == "SOL"} for symbol in scout.SYMBOLS])
+            self.assertEqual(len(saved["proposals"]), 9)
+            self.assertEqual(len({row["proposal_sha256"] for row in saved["proposals"]}), 9)
+            for symbol, evaluation in zip(scout.SYMBOLS, ("pending", "evaluated", "unevaluable")):
+                rows = [row for row in saved["proposals"] if row["symbol"] == symbol]
+                self.assertEqual([(int(row["target_episode"]), row["proposal_sha256"])
+                                  for row in rows], sorted(expected[symbol]))
+                for row in rows:
+                    self.assertEqual(row["evaluation_status"], evaluation)
+                    self.assertEqual(row["selection_status"], "paused")
+                    self.assertIn("evaluation_observed_at", row)
+                    self.assertEqual("evaluation_sha256" in row, evaluation != "pending")
+                    self.assertNotIn("plan_sha256", row)
+            self.assertEqual(len(list(Path(root).rglob("selection-attempt.json"))), 1)
+            self.assertEqual(list(Path(root).rglob("selection-result.json")), [])
+
+    def test_lifecycle_retains_older_unresolved_warning(self):
+        with tempfile.TemporaryDirectory() as root, patch.object(scout, "ROOT", Path(root)), \
+                patch.object(scout, "SYMBOLS", ("SOL",)):
+            receipts = {}
+            for number in range(1, 5):
+                directory, receipt = self.invocation(root, number)
+                receipts["hermes-" + receipt["context_sha256"][:48] + ".json"] = receipt
+                if number == 1:
+                    marker = dict(receipt, status="selection_attempted", evaluation_sha256="e" * 64)
+                    scout.create_invocation_receipt(directory / "selection-attempt.json", marker)
+            with patch.object(scout, "as_research", side_effect=lambda *args, **kwargs:
+                    json.dumps(self.outcome(receipts[args[-1].name], "pending")).encode()):
+                value = scout.collect_lifecycle(False)
+            self.assertTrue(value["markets"][0]["manual_reconciliation_required"])
+            self.assertNotIn("1", [row["target_episode"] for row in value["proposals"]])
+            for row in value["proposals"]:
+                self.assertEqual(row["evaluation_status"], "pending")
+                self.assertNotIn("evaluation_sha256", row)
+                self.assertEqual(row["selection_status"], "paused")
+
+    def test_lifecycle_historical_selection_requires_matching_result(self):
+        for mutation in (None, "digest", "missing_intent", "unavailable"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as root, \
+                    patch.object(scout, "ROOT", Path(root)), patch.object(scout, "SYMBOLS", ("SOL",)):
+                directory, receipt = self.invocation(root)
+                outcome = self.outcome(receipt)
+                with patch.object(scout, "as_research", side_effect=[json.dumps(outcome).encode(),
+                        json.dumps(self.selection(receipt, outcome)).encode()]):
+                    scout.reconcile_proposals(True)
+                if mutation == "missing_intent":
+                    (directory / "selection-attempt.json").unlink()
+                if mutation == "digest":
+                    outcome["content_sha256"] = "f" * 64
+                with patch.object(scout, "as_research", side_effect=OSError("unavailable") if mutation == "unavailable" else None,
+                        return_value=json.dumps(outcome).encode()):
+                    value = scout.collect_lifecycle(False)
+                row = value["proposals"][0]
+                self.assertEqual(row["selection_status"], "selected_previously" if mutation is None else "needs_attention")
+                self.assertEqual(value["markets"][0]["manual_reconciliation_required"], mutation is not None)
+                if mutation is None:
+                    self.assertEqual(row["plan_sha256"], "f" * 64)
+                else:
+                    self.assertNotIn("plan_sha256", row)
+                if mutation == "unavailable":
+                    self.assertEqual(row["evaluation_status"], "unavailable")
+                    self.assertNotIn("evaluation_observed_at", row)
+
+    def test_shutdown_does_not_start_lifecycle_work(self):
+        for error in (scout.RunInterrupted(), scout.ContainerCleanupError()):
+            with self.subTest(error=type(error)), tempfile.TemporaryDirectory() as root, \
+                    patch.object(scout, "ROOT", Path(root)), patch.object(scout, "RUNTIME", Path(root)), \
+                    patch.object(scout, "SYMBOLS", ("SOL",)), patch.object(scout.os, "geteuid", return_value=0), \
+                    patch.object(scout.pwd, "getpwnam"), \
+                    patch.object(Path, "lstat", return_value=types.SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o711)), \
+                    patch.object(scout.shutil, "disk_usage", return_value=types.SimpleNamespace(free=2 << 30)), \
+                    patch.object(scout, "run_symbol", side_effect=error), \
+                    patch.object(scout, "collect_lifecycle") as collect, patch.object(scout, "publish_dashboard") as publish, \
+                    patch.object(scout.sys, "stdout", new_callable=io.StringIO):
+                with self.assertRaises(ValueError):
+                    scout.run()
+                collect.assert_not_called()
+                self.assertTrue(publish.call_args.args[0]["lifecycle_error"])
+
+    def test_interrupted_lifecycle_still_publishes_completed_proposal_status(self):
+        row = {"symbol": "SOL", "status": "already_saved"}
+        with tempfile.TemporaryDirectory() as root, \
+                patch.object(scout, "ROOT", Path(root)), patch.object(scout, "RUNTIME", Path(root)), \
+                patch.object(scout, "SYMBOLS", ("SOL",)), patch.object(scout.os, "geteuid", return_value=0), \
+                patch.object(scout.pwd, "getpwnam"), \
+                patch.object(Path, "lstat", return_value=types.SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o711)), \
+                patch.object(scout.shutil, "disk_usage", return_value=types.SimpleNamespace(free=2 << 30)), \
+                patch.object(scout, "run_symbol", return_value=row), \
+                patch.object(scout, "collect_lifecycle", side_effect=scout.RunInterrupted()), \
+                patch.object(scout, "publish_dashboard") as publish, \
+                patch.object(scout.sys, "stdout", new_callable=io.StringIO):
+            with self.assertRaises(ValueError):
+                scout.run()
+            self.assertEqual(publish.call_args.args[0]["markets"], [row])
+            self.assertTrue(publish.call_args.args[0]["lifecycle_error"])
+
     def test_service_stop_cleanup_selects_only_owned_label(self):
         with patch.object(scout.os, "geteuid", return_value=0), patch.object(scout.subprocess, "run", side_effect=[
             subprocess.CompletedProcess([], 0, stdout=b"abc123\n"),

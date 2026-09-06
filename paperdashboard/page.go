@@ -158,6 +158,7 @@ const indexHTML = `<!doctype html>
       <div id="automation" class="automation-grid" aria-label="Automation roles"></div>
       <div class="section-title compact"><div><p class="eyebrow">Research, not execution</p><h2>Hermes proposals</h2><p>Last recorded attempt. Saving a proposal does not change the running strategy.</p></div></div>
       <div id="hermes-perps" class="market-research-grid" aria-label="Last Hermes paper proposals"></div>
+      <div id="hermes-lifecycle" aria-label="Recent paper strategy tests"></div>
       <div class="section-title compact"><div><p class="eyebrow">Paper market expansion</p><h2>Markets being checked</h2><p>Collection checks are separate from paper results. A market appears in Markets only while a bounded paper experiment is available.</p></div></div>
       <div id="market-research" class="market-research-grid" aria-label="Candidate market collection status"></div>
       <div class="section-title compact"><div><p class="eyebrow">Live status</p><h2>Market observers</h2></div></div>
@@ -929,8 +930,24 @@ function hermesPerpsCards(packet,invalid){
       (saved?'<div class="research-stats"><span><small>Suggested plan</small><strong>'+safe(strategies[m.strategy]||'Unknown')+'</strong><em>'+safe(risks[m.risk_arm]||'Unknown')+' risk</em></span>'+evidence+'<span><small>Reserved test</small><strong>Paper run #'+safe(m.target_episode)+'</strong><em>Not an active order</em></span></div><p>'+(existing?'This run already has a proposal. Research was not repeated.':'This receipt does not confirm a test result or a strategy change.')+'</p>':'<p>This attempt did not complete. A saved proposal, if any, has not been confirmed here.</p>')+'</article>';
   }).join('');
 }
+function hermesLifecycleCards(packet,invalid){
+  if(invalid)return '';
+  if(packet?.lifecycle_error)return '<p class="market-research-empty error">Strategy test history could not be verified. The last proposal summary above is separate.</p>';
+  const history=packet?.lifecycle;
+  if(!history)return '<p class="market-research-empty">Strategy test history is not connected yet.</p>';
+  const evaluation={pending:'Awaiting result',evaluated:'Test complete',unevaluable:'Could not score',unavailable:'Check unavailable'};
+  const selection={paused:'Selection paused',not_attempted:'Not attempted',not_selected:'Not selected',selected_previously:'Selected previously',retired:'Replaced or restored',needs_attention:'Needs review'};
+  return '<div class="section-title compact"><div><h3>Recent strategy tests</h3><p>Checked '+safe(age(history.as_of).replace(/^Updated /,''))+'. A completed test is not an approval or a live order.</p></div><span class="badge '+(history.selection_enabled?'blue':'amber')+'">'+(history.selection_enabled?'Automatic selection enabled':'Automatic selection paused')+'</span></div><div class="market-research-grid">'+history.markets.map(m=>{
+    const rows=history.proposals.filter(p=>p.symbol===m.symbol);
+    return '<article class="market-research-card"><div class="research-market-head"><div><h3>'+safe(m.symbol)+' · Test history</h3><small>'+safe(m.recorded_proposals)+' recorded · showing '+rows.length+'</small></div></div>'+
+      (m.manual_reconciliation_required?'<p class="error">A previous selection needs review. It will not be retried automatically.</p>':'')+
+      (rows.length?'<ol class="proposal-history">'+rows.map(p=>'<li><div class="proposal-history-heading"><strong>Paper run #'+safe(p.target_episode)+'</strong><small>Saved '+safe(age(p.frozen_at).replace(/^Updated /,''))+'</small></div><div class="proposal-stages"><span><small>Test result</small><strong>'+safe(evaluation[p.evaluation_status]||'Unknown')+'</strong></span><span><small>Selection decision</small><strong>'+safe(selection[p.selection_status]||'Unknown')+'</strong></span></div></li>').join('')+'</ol>':'<p>No recorded Hermes proposals yet.</p>')+
+      (rows.some(p=>p.selection_status==='selected_previously'||p.selection_status==='retired')?'<p>Past selections are not confirmation of the plan running now.</p>':'')+'</article>';
+  }).join('')+'</div>';
+}
 function renderSystem(){
   $('hermes-perps').innerHTML=hermesPerpsCards(current.hermes_perps,current.hermes_perps_error);
+  $('hermes-lifecycle').innerHTML=hermesLifecycleCards(current.hermes_perps,current.hermes_perps_error);
   const required=current.markets.filter(market=>!market.optional),healthy=required.filter(marketDataHealthy).length,total=required.length;
   const additionalSpots=current.markets.filter(market=>market.optional&&!isPerps(market)),healthyAdditionalSpots=additionalSpots.filter(marketDataHealthy).length,completedAdditionalSpots=additionalSpots.filter(market=>market.completed).length;
 	const perpsMarkets=current.markets.filter(isPerps),completedPerps=perpsMarkets.filter(market=>latestCompletedPerps(market)).length,recordingPerps=perpsMarkets.filter(perpsRecordingInProgress).length;

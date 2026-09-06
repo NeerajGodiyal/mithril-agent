@@ -14,8 +14,117 @@ import (
 // HermesPerps describes the last recorded proposal attempt, not current
 // activity, a selected paper plan, or authority to trade.
 type HermesPerps struct {
-	FinishedAt time.Time           `json:"finished_at"`
-	Markets    []HermesPerpsMarket `json:"markets"`
+	FinishedAt     time.Time             `json:"finished_at"`
+	Markets        []HermesPerpsMarket   `json:"markets"`
+	Lifecycle      *HermesPerpsLifecycle `json:"lifecycle,omitempty"`
+	LifecycleError bool                  `json:"lifecycle_error,omitempty"`
+}
+
+// HermesPerpsLifecycle is a host-recorded history snapshot, never the active
+// plan or permission to select one. Market warnings also cover older history.
+type HermesPerpsLifecycle struct {
+	AsOf             time.Time                      `json:"as_of"`
+	SelectionEnabled *bool                          `json:"selection_enabled"`
+	Markets          []HermesPerpsLifecycleMarket   `json:"markets"`
+	Proposals        []HermesPerpsLifecycleProposal `json:"proposals"`
+}
+
+type HermesPerpsLifecycleMarket struct {
+	Symbol                       string  `json:"symbol"`
+	RecordedProposals            *uint64 `json:"recorded_proposals"`
+	ManualReconciliationRequired *bool   `json:"manual_reconciliation_required"`
+}
+
+type HermesPerpsLifecycleProposal struct {
+	Symbol               string     `json:"symbol"`
+	ProposalSHA256       string     `json:"proposal_sha256"`
+	TargetEpisode        string     `json:"target_episode"`
+	FrozenAt             time.Time  `json:"frozen_at"`
+	EvaluationStatus     string     `json:"evaluation_status"`
+	EvaluationObservedAt *time.Time `json:"evaluation_observed_at,omitempty"`
+	EvaluationSHA256     string     `json:"evaluation_sha256,omitempty"`
+	SelectionStatus      string     `json:"selection_status"`
+	PlanSHA256           string     `json:"plan_sha256,omitempty"`
+}
+
+func validHermesPerpsLifecycle(value *HermesPerpsLifecycle, finished time.Time) bool {
+	if value == nil {
+		return true
+	}
+	if value.AsOf.IsZero() || value.AsOf.Location() != time.UTC || value.AsOf.After(finished) || value.SelectionEnabled == nil || len(value.Markets) != 3 || value.Proposals == nil || len(value.Proposals) > 9 {
+		return false
+	}
+	markets := make(map[string]HermesPerpsLifecycleMarket, 3)
+	for _, market := range value.Markets {
+		if (market.Symbol != "SOL" && market.Symbol != "BTC" && market.Symbol != "ETH") || market.RecordedProposals == nil || *market.RecordedProposals > 256 || market.ManualReconciliationRequired == nil {
+			return false
+		}
+		if _, exists := markets[market.Symbol]; exists {
+			return false
+		}
+		markets[market.Symbol] = market
+	}
+	seen := make(map[string]bool, len(value.Proposals))
+	counts := make(map[string]uint64, 3)
+	last := make(map[string]time.Time, 3)
+	for _, proposal := range value.Proposals {
+		market, ok := markets[proposal.Symbol]
+		id, err := strconv.ParseUint(proposal.TargetEpisode, 10, 64)
+		if !ok || err != nil || id == 0 || strconv.FormatUint(id, 10) != proposal.TargetEpisode || !validSHA256(proposal.ProposalSHA256) || seen[proposal.ProposalSHA256] || proposal.FrozenAt.IsZero() || proposal.FrozenAt.Location() != time.UTC || proposal.FrozenAt.After(value.AsOf) || proposal.FrozenAt.Before(last[proposal.Symbol]) {
+			return false
+		}
+		seen[proposal.ProposalSHA256] = true
+		counts[proposal.Symbol]++
+		if counts[proposal.Symbol] > 3 || counts[proposal.Symbol] > *market.RecordedProposals {
+			return false
+		}
+		last[proposal.Symbol] = proposal.FrozenAt
+		observed := proposal.EvaluationObservedAt
+		if observed != nil && (observed.IsZero() || observed.Location() != time.UTC || observed.Before(proposal.FrozenAt) || observed.After(value.AsOf)) {
+			return false
+		}
+		switch proposal.EvaluationStatus {
+		case "pending":
+			if observed == nil || proposal.EvaluationSHA256 != "" {
+				return false
+			}
+		case "evaluated", "unevaluable":
+			if observed == nil || !validSHA256(proposal.EvaluationSHA256) {
+				return false
+			}
+		case "unavailable":
+			if observed != nil || proposal.EvaluationSHA256 != "" {
+				return false
+			}
+		default:
+			return false
+		}
+		switch proposal.SelectionStatus {
+		case "selected_previously", "retired":
+			if proposal.EvaluationStatus != "evaluated" || !validSHA256(proposal.PlanSHA256) {
+				return false
+			}
+		case "not_selected":
+			if (proposal.EvaluationStatus != "evaluated" && proposal.EvaluationStatus != "unevaluable") || proposal.PlanSHA256 != "" {
+				return false
+			}
+		case "paused":
+			if *value.SelectionEnabled || proposal.PlanSHA256 != "" {
+				return false
+			}
+		case "not_attempted":
+			if !*value.SelectionEnabled || proposal.PlanSHA256 != "" {
+				return false
+			}
+		case "needs_attention":
+			if !*market.ManualReconciliationRequired || proposal.PlanSHA256 != "" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 type HermesPerpsMarket struct {
@@ -51,6 +160,9 @@ func readHermesPerps(path string, now time.Time) (*HermesPerps, error) {
 	runID, err := hex.DecodeString(stored.RunID)
 	if err != nil || len(runID) != 16 || stored.RunID != strings.ToLower(stored.RunID) || stored.Version != 1 || !stored.PaperOnly || stored.Authorized == nil || *stored.Authorized || stored.Promotable == nil || *stored.Promotable || stored.FinishedAt.IsZero() || stored.FinishedAt.After(now) || len(stored.Markets) < 1 || len(stored.Markets) > 3 {
 		return nil, errors.New("hermes perps projection envelope is invalid")
+	}
+	if (stored.LifecycleError && stored.Lifecycle != nil) || !validHermesPerpsLifecycle(stored.Lifecycle, stored.FinishedAt) {
+		return nil, errors.New("hermes perps lifecycle is invalid")
 	}
 	seen := make(map[string]bool)
 	for _, market := range stored.Markets {
