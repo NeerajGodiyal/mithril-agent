@@ -103,7 +103,7 @@ func runShadowMarketPaperCheck(args []string, output io.Writer) error {
 	dashboardStatusPath := flags.String("dashboard-status", "", "optional sibling dashboard-status.json")
 	candidatePolicyOut := flags.String("candidate-policy-out", "", "optional immutable checked paper policy")
 	resultOut := flags.String("result-out", "", "optional immutable paper-check result")
-	costExperiment := flags.String("cost-experiment", "", "stdout-only observed-native-cost-v1 comparison")
+	costExperiment := flags.String("cost-experiment", "", "stdout-only cost or recorded-route quote comparison")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, shadowMarketUsage)
@@ -114,9 +114,9 @@ func runShadowMarketPaperCheck(args []string, output io.Writer) error {
 	if flags.NArg() != 0 || *policyPath == "" || *artifactPath == "" || *journalPath == "" {
 		return errors.New("shadow market paper-check requires --policy, --provisional-artifact, and --journal")
 	}
-	if *costExperiment != "" && (*costExperiment != shadow.ObservedNativeCostVersion ||
+	if *costExperiment != "" && ((*costExperiment != shadow.ObservedNativeCostVersion && *costExperiment != marketRecordedQuoteVersion) ||
 		*dashboardStatusPath != "" || *candidatePolicyOut != "" || *resultOut != "") {
-		return errors.New("paper-check cost experiment requires observed-native-cost-v1 without output files")
+		return errors.New("paper-check cost experiment requires observed-native-cost-v1 or recorded-route-quotes-v1 without output files")
 	}
 	for _, item := range []struct{ name, path string }{
 		{"--policy", *policyPath}, {"--provisional-artifact", *artifactPath}, {"--journal", *journalPath},
@@ -163,7 +163,7 @@ func runShadowMarketPaperCheck(args []string, output io.Writer) error {
 		return err
 	}
 	if *costExperiment != "" {
-		return writeMarketPaperCostComparison(output, policy, artifact, points)
+		return writeMarketPaperCostExperiment(output, policy, artifact, points, *costExperiment)
 	}
 	result, err := checkProvisionalMarketPaper(policy, artifact, points)
 	if err != nil {

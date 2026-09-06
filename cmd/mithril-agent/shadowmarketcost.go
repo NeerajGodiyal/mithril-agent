@@ -20,22 +20,23 @@ type marketPaperCostLane struct {
 }
 
 type marketPaperCostComparison struct {
-	Experiment                string                `json:"experiment"`
-	Status                    string                `json:"status"`
-	Market                    string                `json:"market"`
-	PolicySHA256              string                `json:"policy_sha256"`
-	ProvisionalEvidenceSHA256 string                `json:"provisional_evidence_sha256"`
-	Journal                   journal.DurablePrefix `json:"journal"`
-	AssumedFeeLamports        uint64                `json:"assumed_fee_lamports,string"`
-	From                      time.Time             `json:"from"`
-	TrainingThrough           time.Time             `json:"training_through"`
-	Through                   time.Time             `json:"through"`
-	TrainingCoverageBPS       uint16                `json:"training_coverage_bps"`
-	HoldoutCoverageBPS        uint16                `json:"holdout_coverage_bps"`
-	AdmissionEvidence         bool                  `json:"admission_evidence"`
-	TradingEnabled            bool                  `json:"trading_enabled"`
-	Limitation                string                `json:"limitation"`
-	Lanes                     []marketPaperCostLane `json:"lanes"`
+	Experiment                string                    `json:"experiment"`
+	Status                    string                    `json:"status"`
+	Market                    string                    `json:"market"`
+	PolicySHA256              string                    `json:"policy_sha256"`
+	ProvisionalEvidenceSHA256 string                    `json:"provisional_evidence_sha256"`
+	Journal                   journal.DurablePrefix     `json:"journal"`
+	AssumedFeeLamports        uint64                    `json:"assumed_fee_lamports,string"`
+	From                      time.Time                 `json:"from"`
+	TrainingThrough           time.Time                 `json:"training_through"`
+	Through                   time.Time                 `json:"through"`
+	TrainingCoverageBPS       uint16                    `json:"training_coverage_bps"`
+	HoldoutCoverageBPS        uint16                    `json:"holdout_coverage_bps"`
+	AdmissionEvidence         bool                      `json:"admission_evidence"`
+	TradingEnabled            bool                      `json:"trading_enabled"`
+	Limitation                string                    `json:"limitation"`
+	Lanes                     []marketPaperCostLane     `json:"lanes"`
+	RecordedQuoteLanes        []marketRecordedQuoteLane `json:"recorded_quote_lanes,omitempty"`
 }
 
 // loadMarketPaperCostEvidence permits expired historical checkpoints only for
@@ -54,6 +55,15 @@ func loadMarketPaperCostEvidence(path string, now time.Time) (marketadmission.Pr
 func writeMarketPaperCostComparison(output io.Writer, policy shadow.Policy,
 	artifact marketadmission.ProvisionalArtifact, points []marketadmission.ProvisionalReplayPoint,
 ) error {
+	return writeMarketPaperCostExperiment(output, policy, artifact, points, shadow.ObservedNativeCostVersion)
+}
+
+func writeMarketPaperCostExperiment(output io.Writer, policy shadow.Policy,
+	artifact marketadmission.ProvisionalArtifact, points []marketadmission.ProvisionalReplayPoint, experiment string,
+) error {
+	if experiment != shadow.ObservedNativeCostVersion && experiment != marketRecordedQuoteVersion {
+		return errors.New("unknown market cost experiment")
+	}
 	if !provisionalPolicyMatchesArtifact(policy, artifact) || policy.Adaptive == nil ||
 		len(points) != int(artifact.ExpectedBuckets) || policy.TickSeconds != uint64(artifact.Thresholds.CadenceSeconds) {
 		return errors.New("cost comparison inputs do not match provisional evidence")
@@ -84,6 +94,11 @@ func writeMarketPaperCostComparison(output io.Writer, policy shadow.Policy,
 		TrainingCoverageBPS: marketPaperCoverageBPS(training), HoldoutCoverageBPS: marketPaperCoverageBPS(holdout),
 		Limitation: "Supplied policy parameters, not the training-search winner. Historical 80/40-minute partitions, not new unseen validation. Recorded SOL/USD changes fee valuation; assumed lamports stay unchanged. Route spreads are modeled, not historical fills. Results are not portfolio income or admission evidence.",
 	}
+	if experiment == marketRecordedQuoteVersion {
+		result.Experiment = "provisional-" + marketRecordedQuoteVersion
+		result.Status = "historical_recorded_quote_comparison"
+		result.Limitation = "Supplied policy parameters, not the training-search winner. Historical 80/40-minute partitions, not unseen validation. Only same-observation, exact-amount recorded quotes are used; no scaling or modeled fallback. A quote is not an executed fill. Missing quotes make the path incomplete, not a strategy loss. Assumed fee lamports stay unchanged. No income or admission claim."
+	}
 	if result.TrainingCoverageBPS < marketadmission.ProvisionalMinimumAvailabilityBPS ||
 		result.HoldoutCoverageBPS < marketadmission.ProvisionalMinimumAvailabilityBPS {
 		result.Status = "insufficient_evidence"
@@ -93,10 +108,20 @@ func writeMarketPaperCostComparison(output io.Writer, policy shadow.Policy,
 		name          string
 		from, through time.Time
 		ticks         []shadow.Tick
+		points        []marketadmission.ProvisionalReplayPoint
 	}{
-		{"training", artifact.From, trainingThrough, training},
-		{"holdout", trainingThrough, artifact.Through, holdout},
+		{"training", artifact.From, trainingThrough, training, trainingPoints},
+		{"holdout", trainingThrough, artifact.Through, holdout, holdoutPoints},
 	} {
+		if experiment == marketRecordedQuoteVersion {
+			lane, err := replayMarketRecordedQuotes(policy, artifact, partition.points, partition.ticks)
+			if err != nil {
+				return err
+			}
+			lane.Partition, lane.From, lane.Through = partition.name, partition.from, partition.through
+			result.RecordedQuoteLanes = append(result.RecordedQuoteLanes, lane)
+			continue
+		}
 		for _, spread := range []uint16{marketPaperCheckSpreadBPS, marketPaperCheckSpreadBPS * 2} {
 			baseline, observed, err := shadow.ReplayObservedNativeObservationComparison(
 				policy, partition.ticks, modelledPool(policy, uint64(spread), policy.SlippageBPS),

@@ -25,6 +25,7 @@ const shadowMarketUsage = `Usage:
   mithril-agent shadow market provisional --journal PATH --out PATH
   mithril-agent shadow market paper-check --policy PATH --provisional-artifact PATH --journal PATH [--dashboard-status PATH] [--result-out PATH] [--candidate-policy-out PATH]
   mithril-agent shadow market paper-check --policy PATH --provisional-artifact PATH --journal PATH --cost-experiment observed-native-cost-v1
+  mithril-agent shadow market paper-check --policy PATH --provisional-artifact PATH --journal PATH --cost-experiment recorded-route-quotes-v1
   mithril-agent shadow market evaluate --journal PATH --out PATH
 
 Collect attempts one immutable, hash-chained observation per minute; missed
@@ -45,6 +46,10 @@ route spreads are modeled at 25/50 bps each way. It prints historical diagnostic
 only, rejects all output-file flags, and never selects or qualifies a candidate.
 Expired checkpoints may be replayed here against their original verified journal;
 ordinary paper-check and trading startup still require current checkpoints.
+The recorded-route-quotes-v1 variant uses original quotes only at their recorded
+observation time and exact input amount. Missing or mismatched quotes are reported
+as incomplete evidence, without scaling or assumed-spread fallback. Quotes are
+not executed fills; this comparison cannot establish income or qualify a market.
 
 These commands are keyless and cannot sign or submit.
 Allowlisted markets: WIF/USDC, JTO/USDC, PYTH/USDC`

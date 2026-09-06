@@ -11,6 +11,119 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 )
 
+func TestTimedRoundTripQuotesUseDecisionAndSettlementObservationTimes(t *testing.T) {
+	policy := roundTripPolicy(t, 100)
+	start := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	prices := []uint64{23_000_000, 23_000_000, 17_000_000, 17_000_000}
+	var ticks []Tick
+	for i, price := range prices {
+		ticks = append(ticks, Tick{At: start.Add(time.Duration(i) * (policy.Settle() + time.Second)), PriceMicros: price, Event: EventWaiting})
+	}
+	var times []time.Time
+	var bounds []time.Time
+	var quotedPrices []uint64
+	quote := tightQuote()
+	got, err := replayRoundTripTicksWithTimedCost(policy, ticks, func(at, notBefore time.Time, price uint64, sell bool, amount uint64) (Quote, error) {
+		times = append(times, at)
+		bounds = append(bounds, notBefore)
+		quotedPrices = append(quotedPrices, price)
+		return quote(price, sell, amount)
+	}, false, policyNativeCost, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(times) != 4 || got.Counts.Sells != 1 || got.Counts.Buys != 1 {
+		t.Fatalf("expected decision and settlement for both legs: times=%v counts=%+v", times, got.Counts)
+	}
+	for i := range times {
+		wantBound := time.Time{}
+		if i%2 == 1 {
+			wantBound = ticks[i-1].At.Add(policy.Settle())
+		}
+		if !bounds[i].Equal(wantBound) {
+			t.Fatalf("quote %d settlement bound = %v, want %v", i, bounds[i], wantBound)
+		}
+		if !times[i].Equal(ticks[i].At) || quotedPrices[i] != prices[i] {
+			t.Fatalf("quote %d used the wrong observation: %v, %d", i, times[i], quotedPrices[i])
+		}
+	}
+	want, err := ReplayRoundTripTicks(policy, ticks, quote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(want)
+	if err != nil || !bytes.Equal(a, b) {
+		t.Fatalf("untimed serialized result changed: %v", err)
+	}
+}
+
+func TestObservedNativeTimedComparisonParityAndMissingQuotes(t *testing.T) {
+	policy := observedCostPolicy(t)
+	ticks := observedCostObservations(t, policy)
+	quote := observedCostQuote(policy)
+	wantBase, wantObserved, err := ReplayObservedNativeObservationComparison(policy, ticks, quote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, observed, err := ReplayObservedNativeTimedObservationComparison(policy, ticks, timedRoundTripQuote(quote), timedRoundTripQuote(quote))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, pair := range [][2]RoundTripResult{{base, wantBase}, {observed, wantObserved}} {
+		a, err := json.Marshal(pair[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := json.Marshal(pair[1])
+		if err != nil || !bytes.Equal(a, b) {
+			t.Fatalf("lane %d serialized result changed: %v", i, err)
+		}
+	}
+	calls := 0
+	base, observed, err = ReplayObservedNativeTimedObservationComparison(policy, ticks, timedRoundTripQuote(quote), func(at, notBefore time.Time, price uint64, sell bool, amount uint64) (Quote, error) {
+		calls++
+		found := false
+		for _, tick := range ticks {
+			if tick.At.Equal(at) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("quote uses unknown observation time: %v", at)
+		}
+		return Quote{}, errors.New("recorded amount unavailable")
+	})
+	if err != nil || calls == 0 || observed.Counts.Missed == 0 || observed.Counts.Buys != 0 || observed.Counts.Sells != 0 || !reflect.DeepEqual(base, wantBase) {
+		t.Fatalf("missing evidence fabricated a fill or changed baseline: calls=%d counts=%+v err=%v", calls, observed.Counts, err)
+	}
+	if _, _, err := ReplayObservedNativeTimedObservationComparison(policy, ticks, timedRoundTripQuote(quote), nil); err == nil {
+		t.Fatal("nil observed callback accepted")
+	}
+	calls = 0
+	var decisionAt, settlementAt time.Time
+	_, observed, err = ReplayObservedNativeTimedObservationComparison(policy, ticks, timedRoundTripQuote(quote), func(at, notBefore time.Time, price uint64, sell bool, amount uint64) (Quote, error) {
+		calls++
+		if calls == 1 {
+			decisionAt = at
+			return quote(price, sell, amount)
+		}
+		if calls == 2 {
+			settlementAt = at
+			if !notBefore.Equal(decisionAt.Add(policy.Settle())) {
+				t.Fatalf("settlement bound = %v, want decision plus delay", notBefore)
+			}
+		}
+		return Quote{}, errors.New("settlement amount unavailable")
+	})
+	if err != nil || calls < 2 || settlementAt.Before(decisionAt.Add(policy.Settle())) || observed.Counts.Missed == 0 || observed.Counts.Buys != 0 || observed.Counts.Sells != 0 {
+		t.Fatalf("missing settlement fabricated a fill: decision=%v settlement=%v counts=%+v err=%v", decisionAt, settlementAt, observed.Counts, err)
+	}
+}
+
 func observedCostPolicy(t *testing.T) Policy {
 	t.Helper()
 	p := jupBuyPolicy(t)
