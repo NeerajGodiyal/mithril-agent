@@ -55,22 +55,26 @@ func replayMarketRecordedQuotes(policy shadow.Policy, artifact marketadmission.P
 	if err != nil {
 		return marketRecordedQuoteLane{}, err
 	}
-	finish := func(output *marketRecordedQuoteReplay, replay shadow.RoundTripResult) {
-		output.Counts, output.FilteredReasons = replay.Counts, replay.FilteredReasons
-		output.Status = "matched_requested_quotes"
-		if len(output.QuoteChecks) == 0 {
-			output.Status = "no_quote_requests"
-		}
-		for _, check := range output.QuoteChecks {
-			if check.Status != "matched" {
-				output.Status = "incomplete_quote_evidence"
-				break
-			}
+	finishMarketRecordedQuoteReplay(&lane.Baseline, baseline)
+	finishMarketRecordedQuoteReplay(&lane.ObservedNative, observed)
+	return lane, nil
+}
+
+func finishMarketRecordedQuoteReplay(output *marketRecordedQuoteReplay, replay shadow.RoundTripResult) {
+	output.Counts, output.FilteredReasons = replay.Counts, replay.FilteredReasons
+	output.Status = "matched_requested_quotes"
+	if len(output.QuoteChecks) == 0 {
+		output.Status = "no_quote_requests"
+	}
+	if replay.Counts.Missed > 0 {
+		output.Status = "missed_replay_steps"
+	}
+	for _, check := range output.QuoteChecks {
+		if check.Status != "matched" {
+			output.Status = "incomplete_quote_evidence"
+			break
 		}
 	}
-	finish(&lane.Baseline, baseline)
-	finish(&lane.ObservedNative, observed)
-	return lane, nil
 }
 
 // marketRecordedQuoteLookup uses only the verified observation's exact quote.

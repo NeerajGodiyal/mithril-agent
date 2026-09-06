@@ -11,7 +11,31 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/marketadmission"
+	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
+
+func TestMarketRecordedQuoteSummaryRetainsMissedSteps(t *testing.T) {
+	for _, test := range []struct {
+		quoteStatus string
+		missed      uint64
+		want        string
+	}{
+		{"", 0, "no_quote_requests"},
+		{"matched", 0, "matched_requested_quotes"},
+		{"matched", 1, "missed_replay_steps"},
+		{"", 1, "missed_replay_steps"},
+		{"input_amount_not_recorded", 1, "incomplete_quote_evidence"},
+	} {
+		var got marketRecordedQuoteReplay
+		if test.quoteStatus != "" {
+			got.QuoteChecks = []marketRecordedQuoteCheck{{Status: test.quoteStatus}}
+		}
+		finishMarketRecordedQuoteReplay(&got, shadow.RoundTripResult{Counts: shadow.RoundTripCounts{Missed: test.missed}})
+		if got.Status != test.want || got.Counts.Missed != test.missed {
+			t.Fatalf("quote=%q missed=%d: got %+v, want %s", test.quoteStatus, test.missed, got, test.want)
+		}
+	}
+}
 
 func TestMarketRecordedQuoteLookupExactTimeAmountAndEvidence(t *testing.T) {
 	_, artifact, points, _ := marketCostFixture(t)
