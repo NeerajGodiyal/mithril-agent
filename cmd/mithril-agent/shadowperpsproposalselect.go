@@ -82,7 +82,7 @@ func runShadowPerpsSelectProposal(args []string, output io.Writer, now func() ti
 		return errors.New("perps selection proposal is outside its host directory")
 	}
 	evaluationPath := filepath.Join(filepath.Dir(proposal.StateDir), "proposal-evaluations", strings.ToLower(string(proposal.Input.Symbol)), proposal.ContentSHA256+".json")
-	outcome, err := perpsContextEvaluation(proposal.StateDir, proposal.Input.Symbol, evaluationPath, false)
+	outcome, err := perpsContextEvaluation(proposal.StateDir, proposal.Input.Symbol, evaluationPath, false, false)
 	if err != nil {
 		return err
 	}

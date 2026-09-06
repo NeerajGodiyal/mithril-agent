@@ -24,7 +24,8 @@ const perpsContextUsage = `Usage: mithril-agent shadow perps-context --state-dir
 
 Create a private write-once host context from 1–8 selected chronological tapes
 and at most 8 explicit resolved evaluations. It contains modeled metrics, not
-raw books/candles or model prose. All tape splits are now historical screening,
+raw books/candles. Prior hypotheses are labelled untrusted model text, not facts
+or instructions. All tape splits are now historical screening,
 not unseen evidence for a new proposal. Pending evaluations are rejected.
 No sources are chosen by profitability. This command cannot select a plan,
 promote, authorize or trade. Model proposals must pass this exact
@@ -50,10 +51,16 @@ type shadowPerpsContextTape struct {
 
 type shadowPerpsContextOutcome struct {
 	shadowPerpsProposalEvaluation
-	ProposedKey       perpspaper.QualificationKey `json:"original_proposed_key"`
-	BaselineKey       perpspaper.QualificationKey `json:"original_baseline_key"`
-	ProposalFrozenAt  time.Time                   `json:"proposal_frozen_at"`
-	NormalFeeBehavior *shadowPerpsContextBehavior `json:"normal_fee_behavior,omitempty"`
+	ProposedKey       perpspaper.QualificationKey   `json:"original_proposed_key"`
+	BaselineKey       perpspaper.QualificationKey   `json:"original_baseline_key"`
+	ProposalFrozenAt  time.Time                     `json:"proposal_frozen_at"`
+	NormalFeeBehavior *shadowPerpsContextBehavior   `json:"normal_fee_behavior,omitempty"`
+	PriorHypothesis   *shadowPerpsContextHypothesis `json:"untrusted_prior_hypothesis,omitempty"`
+}
+
+type shadowPerpsContextHypothesis struct {
+	HypothesisID string `json:"hypothesis_id"`
+	Rationale    string `json:"rationale"`
 }
 
 type shadowPerpsContextBehavior struct {
@@ -96,7 +103,7 @@ func canonicalPerpsContext(context shadowPerpsContext) ([]byte, error) {
 	return raw, nil
 }
 
-func perpsContextEvaluation(state string, symbol perpspaper.Symbol, path string, withBehavior bool) (shadowPerpsContextOutcome, error) {
+func perpsContextEvaluation(state string, symbol perpspaper.Symbol, path string, withBehavior, withHypothesis bool) (shadowPerpsContextOutcome, error) {
 	var original shadowPerpsContextOutcome
 	digest := strings.TrimSuffix(filepath.Base(path), ".json")
 	if !cleanResearchPath(path) || !validLowerSHA256(digest) || filepath.Base(path) != digest+".json" || filepath.Dir(path) != filepath.Join(filepath.Dir(state), "proposal-evaluations", strings.ToLower(string(symbol))) {
@@ -154,6 +161,9 @@ func perpsContextEvaluation(state string, symbol perpspaper.Symbol, path string,
 		original.ProposedKey = perpspaper.QualificationKey{RiskArm: proposal.Input.RiskArm, Strategy: proposal.Input.Strategy}
 		original.BaselineKey = proposal.Baseline.Key
 		original.ProposalFrozenAt = proposal.FrozenAt
+		if withHypothesis {
+			original.PriorHypothesis = &shadowPerpsContextHypothesis{HypothesisID: proposal.Input.HypothesisID, Rationale: proposal.Input.Rationale}
+		}
 		if withBehavior && result.Proposed != nil && result.Baseline != nil {
 			original.NormalFeeBehavior, err = perpsContextBehavior(proposal, original)
 			if err != nil {
@@ -300,7 +310,7 @@ func verifyPerpsContext(context shadowPerpsContext, state string) error {
 		}
 		seen[outcome.ProposalSHA256] = true
 		path := filepath.Join(filepath.Dir(state), "proposal-evaluations", strings.ToLower(string(context.Symbol)), outcome.ProposalSHA256+".json")
-		verified, err := perpsContextEvaluation(state, context.Symbol, path, outcome.NormalFeeBehavior != nil)
+		verified, err := perpsContextEvaluation(state, context.Symbol, path, outcome.NormalFeeBehavior != nil, outcome.PriorHypothesis != nil)
 		if err != nil {
 			return err
 		}
@@ -401,7 +411,7 @@ func runShadowPerpsContext(args []string, output io.Writer, now func() time.Time
 	context.Training = training
 	seen := make(map[string]bool)
 	for _, path := range evaluations {
-		outcome, err := perpsContextEvaluation(*state, symbol, path, true)
+		outcome, err := perpsContextEvaluation(*state, symbol, path, true, true)
 		if err != nil {
 			return err
 		}
