@@ -1,11 +1,179 @@
 package perpspaper
 
 import (
+	"encoding/json"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
 )
+
+func TestSummarizeFixedPlanDistinguishesFlatFromMinimumLot(t *testing.T) {
+	config := qualificationTestConfig()
+	config.StartingCollateralMicros = 100_000_000 // $100; balanced allocates $25 notional.
+	config.VenueSzDecimals = 0                    // One-token lots; prices are at least $1,000.
+	config.Quantity = 0                           // Use actual arm sizing, not an explicit quantity cap.
+	key := QualificationKey{RiskArm: Balanced, Strategy: StrategyMomentum}
+	var firstNormal, firstStress QualificationEvidence
+	for _, rising := range []bool{false, true} {
+		prices := make([]int, 41)
+		for i := range prices {
+			prices[i] = 1000
+			if rising {
+				prices[i] += i * 10
+			}
+		}
+		frames := tournamentTestFrames(prices)
+		normal, stress, err := EvaluateFixedPlan(config, key, frames)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, score := range []QualificationEvidence{normal, stress} {
+			if !score.Eligible || score.Score == nil || score.Score.FilledOrders != 0 ||
+				score.Score.ClosedPositions != 0 || score.Score.NetPnLMicros != 0 || score.Score.FeesPaidMicros != 0 {
+				t.Fatalf("rising=%t expected eligible zero score, got %+v", rising, score)
+			}
+		}
+		replay, err := ReplaySelected(config.replayConfig(key.RiskArm), frames, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		actions, kinds := make(map[string]uint64), make(map[string]uint64)
+		directional := 0
+		for _, result := range replay.Results {
+			actions[result.Action]++
+			kinds[result.Decision.SignalKind]++
+			if result.Decision.Direction != Flat {
+				directional++
+			}
+			if result.Fill != nil {
+				t.Fatalf("rising=%t unexpectedly filled: %+v", rising, result)
+			}
+		}
+		if len(frames) != 40 || len(replay.Results) != 40 ||
+			!reflect.DeepEqual(kinds, map[string]uint64{SignalHistoryWarmup: 4, SignalMomentum: 36}) {
+			t.Fatalf("unexpected frame/decision denominator: frames=%d results=%d kinds=%v", len(frames), len(replay.Results), kinds)
+		}
+		if rising {
+			if !reflect.DeepEqual(normal, firstNormal) || !reflect.DeepEqual(stress, firstStress) {
+				t.Fatal("the existing reduced evidence unexpectedly distinguishes these zero-fill cases")
+			}
+			if directional != 36 || !reflect.DeepEqual(actions, map[string]uint64{"flat": 4, "below_minimum_lot": 36}) {
+				t.Fatalf("expected directional signals rejected by lot sizing: directional=%d actions=%v", directional, actions)
+			}
+		} else {
+			firstNormal, firstStress = normal, stress
+			if directional != 0 || !reflect.DeepEqual(actions, map[string]uint64{"flat": 40}) {
+				t.Fatalf("expected flat decisions: directional=%d actions=%v", directional, actions)
+			}
+		}
+		behavior, err := SummarizeFixedPlan(config, key, frames)
+		if err != nil || behavior.Frames != uint64(len(frames)) || !reflect.DeepEqual(behavior.ActionCounts, actions) || !reflect.DeepEqual(behavior.SignalKindCounts, kinds) {
+			t.Fatalf("summary differs from actual replay: %+v %v", behavior, err)
+		}
+		t.Logf("rising=%t: zero normal/stress scores; frames=%d directional=%d actions=%v", rising, len(frames), directional, actions)
+	}
+}
+
+func TestSummarizeFixedPlanPreservesLegacyAndScoredEvidence(t *testing.T) {
+	config := qualificationTestConfig()
+	frames := tournamentTestFrames(qualificationWavePrices(3))
+	before := cloneTournamentFrames(frames)
+	for _, arm := range []RiskArm{Conservative, Balanced, Experimental} {
+		for _, strategy := range []Strategy{"", StrategyMomentum, StrategyMeanReversion, StrategyBreakout, StrategyRegime} {
+			key := QualificationKey{RiskArm: arm, Strategy: strategy}
+			normal, stress, err := EvaluateFixedPlan(config, key, frames)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for index, got := range []QualificationEvidence{normal, stress} {
+				replayConfig := config.replayConfig(arm)
+				rule := ""
+				if index == 1 {
+					entryFee, _, _ := armAccounting(arm)
+					replayConfig.AdditionalFeeBPS = entryFee
+					rule = qualificationStressRule
+				}
+				// This is the pre-refactor evaluation route, without replayFixedPlan.
+				causal, err := tournamentCausalFrames(replayConfig, frames)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var replay TapeReplay
+				if strategy == "" {
+					replay, err = replayTape(replayConfig, causal, Decide)
+				} else {
+					replay, err = replayTournamentStrategy(replayConfig, causal, 0, strategy)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				scored, err := scoreTournamentStrategy(replayConfig, causal[len(causal)-1].Book, strategy, replay)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := qualificationEvidence(key, rule, scored)
+				gotJSON, err := json.Marshal(got)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantJSON, err := json.Marshal(want)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(gotJSON) != string(wantJSON) {
+					t.Fatalf("evidence changed for %+v stress=%d", key, index)
+				}
+				if index != 0 {
+					continue
+				}
+				behavior, err := SummarizeFixedPlan(config, key, frames)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantBehavior := ReplayBehavior{Frames: uint64(len(replay.Results)), ActionCounts: make(map[string]uint64), SignalKindCounts: make(map[string]uint64)}
+				for _, result := range replay.Results {
+					wantBehavior.ActionCounts[result.Action]++
+					wantBehavior.SignalKindCounts[result.Decision.SignalKind]++
+				}
+				if !reflect.DeepEqual(behavior, wantBehavior) {
+					t.Fatalf("normal behavior changed for %+v: %+v", key, behavior)
+				}
+				var actions, signals uint64
+				for _, count := range behavior.ActionCounts {
+					actions += count
+				}
+				for _, count := range behavior.SignalKindCounts {
+					signals += count
+				}
+				if actions != uint64(len(frames)) || signals != actions {
+					t.Fatalf("behavior denominator mismatch: %+v", behavior)
+				}
+			}
+		}
+	}
+	if !reflect.DeepEqual(frames, before) {
+		t.Fatal("summarizing mutated the original tape")
+	}
+}
+
+func TestSummarizeFixedPlanRejectsInvalidReplay(t *testing.T) {
+	config := qualificationTestConfig()
+	frames := tournamentTestFrames(qualificationWavePrices(1))
+	for _, test := range []struct {
+		key    QualificationKey
+		frames []TapeFrame
+	}{
+		{QualificationKey{RiskArm: Balanced, Strategy: StrategyMomentum}, nil},
+		{QualificationKey{RiskArm: RiskArm("unknown"), Strategy: StrategyMomentum}, frames},
+		{QualificationKey{RiskArm: Balanced, Strategy: Strategy("model_text")}, frames},
+	} {
+		behavior, err := SummarizeFixedPlan(config, test.key, test.frames)
+		if err == nil || behavior.Frames != 0 || behavior.ActionCounts != nil || behavior.SignalKindCounts != nil {
+			t.Fatalf("invalid replay returned behavior: %+v %v", behavior, err)
+		}
+	}
+}
 
 func TestQualificationRejectsNoTradeTieAndComparesAllPairs(t *testing.T) {
 	frames := tournamentTestFrames(slices.Repeat([]int{10_000}, 33))

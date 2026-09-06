@@ -37,6 +37,24 @@ class PerpsScoutTest(unittest.TestCase):
             "training": [{"tape_sha256": "b" * 64}], "resolved_outcomes": [],
         }).encode() + b"\n"
 
+    def test_behavior_prompt_preserves_legacy_and_exact_context(self):
+        raw = self.context()
+        _, _, legacy = scout.make_prompt(raw, "SOL")
+        self.assertNotIn("normal_fee_behavior", legacy)
+        context = json.loads(raw)
+        context["resolved_outcomes"] = [{"normal_fee_behavior": {
+            "proposed": {"frames": 40, "action_counts": {"flat": 4, "below_minimum_lot": 36},
+                         "signal_kind_counts": {"history_warmup": 4, "momentum": 36}},
+            "baseline": {"frames": 40, "action_counts": {"flat": 40},
+                         "signal_kind_counts": {"history_warmup": 4, "momentum": 36}}}}]
+        changed = json.dumps(context).encode() + b"\n"
+        _, _, prompt = scout.make_prompt(changed, "SOL")
+        self.assertIn("modeled frame decisions, not executed trade counts", prompt)
+        self.assertIn("Do not treat every zero-fill result as the same cause", prompt)
+        self.assertTrue(prompt.endswith(changed.decode().rstrip("\n")))
+        self.assertIn("it cannot activate a strategy", prompt)
+        self.assertEqual(scout.make_prompt(raw, "SOL")[2], legacy)
+
     def reservation(self, reserved=False):
         value = {"version": 1, "status": "reserved" if reserved else "unreserved",
                  "symbol": "SOL", "paper_only": True, "authorized": False,

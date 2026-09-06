@@ -50,9 +50,15 @@ type shadowPerpsContextTape struct {
 
 type shadowPerpsContextOutcome struct {
 	shadowPerpsProposalEvaluation
-	ProposedKey      perpspaper.QualificationKey `json:"original_proposed_key"`
-	BaselineKey      perpspaper.QualificationKey `json:"original_baseline_key"`
-	ProposalFrozenAt time.Time                   `json:"proposal_frozen_at"`
+	ProposedKey       perpspaper.QualificationKey `json:"original_proposed_key"`
+	BaselineKey       perpspaper.QualificationKey `json:"original_baseline_key"`
+	ProposalFrozenAt  time.Time                   `json:"proposal_frozen_at"`
+	NormalFeeBehavior *shadowPerpsContextBehavior `json:"normal_fee_behavior,omitempty"`
+}
+
+type shadowPerpsContextBehavior struct {
+	Proposed perpspaper.ReplayBehavior `json:"proposed"`
+	Baseline perpspaper.ReplayBehavior `json:"baseline"`
 }
 
 type shadowPerpsContext struct {
@@ -90,7 +96,7 @@ func canonicalPerpsContext(context shadowPerpsContext) ([]byte, error) {
 	return raw, nil
 }
 
-func perpsContextEvaluation(state string, symbol perpspaper.Symbol, path string) (shadowPerpsContextOutcome, error) {
+func perpsContextEvaluation(state string, symbol perpspaper.Symbol, path string, withBehavior bool) (shadowPerpsContextOutcome, error) {
 	var original shadowPerpsContextOutcome
 	digest := strings.TrimSuffix(filepath.Base(path), ".json")
 	if !cleanResearchPath(path) || !validLowerSHA256(digest) || filepath.Base(path) != digest+".json" || filepath.Dir(path) != filepath.Join(filepath.Dir(state), "proposal-evaluations", strings.ToLower(string(symbol))) {
@@ -148,11 +154,58 @@ func perpsContextEvaluation(state string, symbol perpspaper.Symbol, path string)
 		original.ProposedKey = perpspaper.QualificationKey{RiskArm: proposal.Input.RiskArm, Strategy: proposal.Input.Strategy}
 		original.BaselineKey = proposal.Baseline.Key
 		original.ProposalFrozenAt = proposal.FrozenAt
+		if withBehavior && result.Proposed != nil && result.Baseline != nil {
+			original.NormalFeeBehavior, err = perpsContextBehavior(proposal, original)
+			if err != nil {
+				return original, err
+			}
+		}
 	}
 	if found {
 		return original, nil
 	}
 	return original, errors.New("perps resolved outcome has no matching frozen proposal")
+}
+
+// perpsContextBehavior derives frame decisions only after exact evaluation
+// verification. It never renews the evaluation or chooses a newer target tape.
+func perpsContextBehavior(proposal shadowPerpsProposal, outcome shadowPerpsContextOutcome) (*shadowPerpsContextBehavior, error) {
+	records, err := journal.ReadDurablePrefix(proposal.EpisodeJournal, outcome.ObservedPrefix)
+	if err != nil {
+		return nil, err
+	}
+	for _, record := range records {
+		if record.Hash != outcome.TerminalSHA256 {
+			continue
+		}
+		var terminal shadowPerpsEpisodeEvent
+		if err := strictjson.Decode(record.Payload, &terminal); err != nil {
+			return nil, err
+		}
+		for _, binding := range terminal.Tapes {
+			if binding.Symbol != proposal.Input.Symbol {
+				continue
+			}
+			path := filepath.Join(shadowPerpsCorpusDir(proposal.StateDir, proposal.Input.Symbol), binding.TapeSHA256+".json")
+			tape, digest, err := readShadowPerpsCorpusTape(path)
+			if err != nil {
+				return nil, err
+			}
+			if digest != binding.TapeSHA256 || len(tape.Frames) != binding.Frames || tape.Config.Environment != proposal.Baseline.Environment || tape.Config.qualificationConfig() != proposal.Baseline.Config || tape.Config.PlanSHA256 != proposal.BaselineSHA256 {
+				return nil, errors.New("perps behavior differs from verified target tape")
+			}
+			proposed, err := perpspaper.SummarizeFixedPlan(proposal.Baseline.Config, outcome.ProposedKey, tape.Frames)
+			if err != nil {
+				return nil, err
+			}
+			baseline, err := perpspaper.SummarizeFixedPlan(proposal.Baseline.Config, outcome.BaselineKey, tape.Frames)
+			if err != nil {
+				return nil, err
+			}
+			return &shadowPerpsContextBehavior{Proposed: proposed, Baseline: baseline}, nil
+		}
+	}
+	return nil, errors.New("perps behavior has no verified target tape")
 }
 
 func perpsContextTraining(state string, symbol perpspaper.Symbol, paths []string) ([]shadowPerpsContextTape, shadowPerpsTapeConfig, error) {
@@ -247,7 +300,7 @@ func verifyPerpsContext(context shadowPerpsContext, state string) error {
 		}
 		seen[outcome.ProposalSHA256] = true
 		path := filepath.Join(filepath.Dir(state), "proposal-evaluations", strings.ToLower(string(context.Symbol)), outcome.ProposalSHA256+".json")
-		verified, err := perpsContextEvaluation(state, context.Symbol, path)
+		verified, err := perpsContextEvaluation(state, context.Symbol, path, outcome.NormalFeeBehavior != nil)
 		if err != nil {
 			return err
 		}
@@ -348,7 +401,7 @@ func runShadowPerpsContext(args []string, output io.Writer, now func() time.Time
 	context.Training = training
 	seen := make(map[string]bool)
 	for _, path := range evaluations {
-		outcome, err := perpsContextEvaluation(*state, symbol, path)
+		outcome, err := perpsContextEvaluation(*state, symbol, path, true)
 		if err != nil {
 			return err
 		}

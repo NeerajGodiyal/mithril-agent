@@ -224,6 +224,11 @@ func TestPerpsSelectProposalRejectsUnscoredIncumbent(t *testing.T) {
 	if outcome.Status != "unevaluable" || outcome.Baseline == nil || outcome.Baseline.Eligible || outcome.Baseline.Score != nil {
 		t.Fatalf("fixture did not produce an unscored incumbent: %+v", outcome)
 	}
+	evaluationPath := filepath.Join(filepath.Dir(state), "proposal-evaluations", "sol", outcome.ProposalSHA256+".json")
+	described, err := perpsContextEvaluation(state, perpspaper.SOL, evaluationPath, true)
+	if err != nil || described.NormalFeeBehavior == nil || described.NormalFeeBehavior.Baseline.Frames == 0 || described.Baseline.Score != nil || described.Status != "unevaluable" {
+		t.Fatalf("unscored target lost frame evidence or gained a score: %+v, %v", described, err)
+	}
 	active := shadowPerpsActivePlanPath(state, perpspaper.SOL)
 	before, err := os.ReadFile(active)
 	if err != nil {

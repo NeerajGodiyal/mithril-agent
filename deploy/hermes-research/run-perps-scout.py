@@ -63,6 +63,12 @@ def make_prompt(raw, symbol):
             or not evidence.SHA256.fullmatch(digest)):
         raise ValueError("host context envelope is invalid")
     hypothesis = "hermes-" + digest[:48]
+    behavior_note = (
+        "normal_fee_behavior contains modeled frame decisions, not executed trade counts. "
+        "Distinguish flat signals and warm-up from minimum-lot, visible-fill and slippage limits. "
+        "Do not treat every zero-fill result as the same cause.\n\n"
+    ) if any(isinstance(outcome, dict) and outcome.get("normal_fee_behavior") is not None
+             for outcome in (context.get("resolved_outcomes") or [])) else ""
     prompt = (
         "Propose one bounded paper-only strategy experiment from the verified host context below. "
         "All training and holdout metrics shown here are already historical, not unseen validation. "
@@ -77,7 +83,7 @@ def make_prompt(raw, symbol):
         "risk_arm must be conservative, balanced or experimental. strategy must be momentum, "
         "mean_reversion, breakout or regime. Give a short single-line rationale (1–2000 UTF-8 bytes), "
         "including the main limitation of the evidence. No Markdown or additional output.\n\n"
-        "HOST_CONTEXT_JSON\n" + raw.decode("utf-8").rstrip("\n")
+        + behavior_note + "HOST_CONTEXT_JSON\n" + raw.decode("utf-8").rstrip("\n")
     )
     return context, hypothesis, prompt
 

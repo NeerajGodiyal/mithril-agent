@@ -142,6 +142,10 @@ func TestPerpsContextReverifiesResolvedZeroTradeOutcomeAndKnownTime(t *testing.T
 	}
 	contextPath := filepath.Join(filepath.Dir(state), "resolved-context.json")
 	evaluationPath := filepath.Join(filepath.Dir(state), "proposal-evaluations", "sol", proposal.ContentSHA256+".json")
+	evaluationBytes, err := os.ReadFile(evaluationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tapePath := filepath.Join(shadowPerpsCorpusDir(state, perpspaper.SOL), proposal.Training[0].TapeSHA256+".json")
 	args := []string{"--state-dir", state, "--symbol", "SOL", "--tape", tapePath, "--evaluation", evaluationPath, "--out", contextPath}
 	var output bytes.Buffer
@@ -151,6 +155,43 @@ func TestPerpsContextReverifiesResolvedZeroTradeOutcomeAndKnownTime(t *testing.T
 	context := createContextForTest(t, args, at)
 	if len(context.Outcomes) != 1 || !reflect.DeepEqual(context.Outcomes[0].shadowPerpsProposalEvaluation, result) || !context.Outcomes[0].ObservedAt.Equal(at) {
 		t.Fatalf("outcomes=%+v", context.Outcomes)
+	}
+	behavior := context.Outcomes[0].NormalFeeBehavior
+	if behavior == nil || behavior.Proposed.Frames == 0 || behavior.Proposed.ActionCounts["flat"] != behavior.Proposed.Frames || behavior.Baseline.ActionCounts["flat"] != behavior.Baseline.Frames {
+		t.Fatalf("zero-trade behavior missing: %+v", behavior)
+	}
+	unchanged, err := os.ReadFile(evaluationPath)
+	if err != nil || !bytes.Equal(evaluationBytes, unchanged) {
+		t.Fatalf("context enrichment changed canonical evaluation: %v", err)
+	}
+	if _, _, err := readPerpsContext(contextPath, state); err != nil {
+		t.Fatal(err)
+	}
+	behavior.Proposed.ActionCounts["flat"]++
+	changed, err := canonicalPerpsContext(context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(contextPath, changed, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := readPerpsContext(contextPath, state); err == nil {
+		t.Fatal("accepted resealed false frame behavior")
+	}
+	context.Outcomes[0].NormalFeeBehavior = nil
+	legacy, err := canonicalPerpsContext(context)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(legacy, []byte("normal_fee_behavior")) {
+		t.Fatal("legacy context gained behavior field")
+	}
+	if err := os.WriteFile(contextPath, legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var retry bytes.Buffer
+	if err := runShadowPerpsContext(args, &retry, func() time.Time { t.Fatal("legacy context renewed time"); return at }); err != nil || !bytes.Equal(legacy, retry.Bytes()) {
+		t.Fatalf("legacy context changed on retry: %v", err)
 	}
 	result.Reason = "fabricated"
 	raw, err := canonicalPerpsEvaluation(result)
@@ -179,7 +220,7 @@ func TestPerpsContextRejectsPendingButRetainsIncompleteOutcome(t *testing.T) {
 	if err := os.WriteFile(evaluationPath, raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := perpsContextEvaluation(state, perpspaper.SOL, evaluationPath); err == nil {
+	if _, err := perpsContextEvaluation(state, perpspaper.SOL, evaluationPath, false); err == nil {
 		t.Fatal("pending result accepted as resolved")
 	}
 	if err := os.Remove(evaluationPath); err != nil {

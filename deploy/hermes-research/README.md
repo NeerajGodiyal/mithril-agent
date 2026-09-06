@@ -670,6 +670,16 @@ Pending results, raw market records, model rationale and local paths are not
 included. Historical training and holdout results are no longer unseen evidence
 for a new proposal. Retrying an output path preserves its original bytes/time.
 
+New contexts also include `normal_fee_behavior` for completed modeled comparisons: bounded
+frame-action and signal-kind counts for the original proposed and baseline
+plans on their exact assigned tape. This distinguishes no signal or warm-up
+from minimum-lot, visible-fill and slippage limits without inventing reasons.
+The counts describe normal-fee modeled frames, not fills or evaluator-only
+terminal closes. Evaluation bytes, timestamps and selection gates are unchanged;
+old contexts without this optional field retain their original encoding. A
+modeled comparison that could not score its terminal position can still report
+frame decisions, but remains unscored and ineligible for selection.
+
 Pass that same bundle to `perps-freeze --context PATH` alongside the original
 host-selected tapes. The freezer checks the baseline under its existing lock,
 rejects a changed selection and binds the context digest into the receipt.

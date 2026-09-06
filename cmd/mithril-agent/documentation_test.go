@@ -1793,6 +1793,8 @@ func TestHermesPacketEnvelopeRetryPreservesPrepublicationBoundary(t *testing.T) 
 	capture = strings.Replace(capture, command, "fake_packet_record", 1)
 	hint := extract(`  if [ -n "$packet_retry_hint" ]; then`, "  created_at=")
 	loop := extract("attempt=1\nwhile :; do", "run_started_epoch=")
+	// Rehearse cleanup using the platform's standard utility path.
+	loop = strings.ReplaceAll(loop, "/usr/bin/rm ", "command -p rm ")
 	for _, mode := range []string{"retry succeeds", "both fail", "first succeeds", "unknown error"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
