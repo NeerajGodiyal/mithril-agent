@@ -125,6 +125,26 @@ class PerpsScoutTest(unittest.TestCase):
             self.assertIn(str(scout.STATE.parent / "tapes/sol" / ("b" * 64 + ".json")), freeze_args)
             self.assertTrue((directory / "invocation.json").is_file())
 
+    def test_freeze_with_go_null_resolved_outcomes_records_zero(self):
+        context = json.loads(self.context())
+        context["resolved_outcomes"] = None
+        frozen = {"context_sha256": "a" * 64, "status": "pending_advisory",
+                  "authorized": False, "promotable": False, "content_sha256": "c" * 64,
+                  "target_episode": "9", "frozen_at": "2026-09-05T20:00:00Z",
+                  "input": {"hypothesis_id": "hermes-" + "a" * 48,
+                            "strategy": "regime", "risk_arm": "conservative"}}
+        with tempfile.TemporaryDirectory() as root, patch.object(scout.os, "chown"), \
+                patch.object(scout, "container"), patch.object(scout, "as_research", side_effect=[
+                    json.dumps(context).encode(), b"{}", json.dumps(frozen).encode()]):
+            directory = Path(root) / "archive"
+            directory.mkdir(mode=0o700)
+            result = scout.run_symbol("SOL", directory, Path(root) / "home",
+                types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid()), "test", {})
+            self.assertEqual(result["status"], "pending_advisory")
+            self.assertEqual(result["resolved_outcomes"], 0)
+            self.assertEqual(result["training_tapes"], 1)
+            self.assertTrue((directory / "invocation.json").is_file())
+
     def test_dashboard_projection_is_private_and_excludes_prose_and_paths(self):
         status = {"version": 1, "paper_only": True, "authorized": False, "promotable": False,
                   "run_id": "d" * 32, "finished_at": "2026-09-05T20:00:00Z",
@@ -183,7 +203,8 @@ class PerpsScoutTest(unittest.TestCase):
 
     def invocation(self, root, number=1, symbol="SOL"):
         directory = Path(root) / f"{number:032x}" / symbol.lower()
-        directory.mkdir(parents=True)
+        directory.parent.mkdir(mode=0o700, exist_ok=True)
+        directory.mkdir(mode=0o700)
         receipt = {"version": 1, "status": "pending_advisory", "symbol": symbol,
                    "paper_only": True, "authorized": False, "promotable": False,
                    "context_sha256": f"{number % 256:02x}" * 32, "proposal_sha256": f"{number + 100:064x}",
@@ -199,6 +220,16 @@ class PerpsScoutTest(unittest.TestCase):
                 "observed_at": "2026-09-05T21:00:00Z", "start_sha256": "b" * 64,
                 "terminal_sha256": "c" * 64,
                 "proposed": {"strategy": "regime", "risk_arm": "conservative"}}
+
+    def test_invocation_fixture_is_private_with_group_writable_umask(self):
+        previous = os.umask(0o002)
+        try:
+            with tempfile.TemporaryDirectory() as root:
+                directory, _ = self.invocation(root)
+                for path in (directory.parent, directory):
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+        finally:
+            os.umask(previous)
 
     def selection(self, receipt, outcome, status="qualified_paper_plan_selected"):
         selected = {"status": status, "symbol": receipt["symbol"], "paper_only": True,

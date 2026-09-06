@@ -219,7 +219,8 @@ def run_symbol(symbol, directory, home, identity, run_id, progress):
     return {"symbol": symbol, "status": "pending_advisory", "target_episode": frozen["target_episode"],
             "context_sha256": context["content_sha256"], "proposal_sha256": frozen["content_sha256"],
             "strategy": frozen["input"]["strategy"], "risk_arm": frozen["input"]["risk_arm"],
-            "training_tapes": len(context["training"]), "resolved_outcomes": len(context["resolved_outcomes"])}
+            "training_tapes": len(context["training"]),
+            "resolved_outcomes": 0 if context["resolved_outcomes"] is None else len(context["resolved_outcomes"])}
 
 
 def private_invocation(path):

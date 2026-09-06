@@ -263,10 +263,10 @@ cd719fafedb55c7e82922f92d230368561b3a2340af1d95061a609f36cc6017e  ./deploy/herme
 7e445d12da43d2b81f7ab7b7b38b445b5f62eb94529bf3954d231ae70f491742  ./deploy/hermes-research/prompts/market-scout.md
 b717518e393e82f00c7b66e35e0248672139d87f2bb321adf80fd5a282754238  ./deploy/hermes-research/run-market-scout.sh
 1877e2159da20e43159a85ef6cf2be855f371865897048f04fdfc4750e9569ed  ./deploy/hermes-research/run-paper-generation.sh
-05014e2767b9847dbe61a25289b4718644afedeeb95ca67f9d6daa4e6c1b256c  ./deploy/hermes-research/run-perps-scout.py
+27488b27cf8775196c8558c90f2b0ef76c650bc6d78240f470f46ac83910ecc0  ./deploy/hermes-research/run-perps-scout.py
 64b257eaf20565cbf1b296ff524d8ac84634910ed370a72f822a7e5de20ad639  ./deploy/hermes-research/test_build_research_evidence.py
 4a94c2f8d39cbc2243fdf0e75a9a7cd1f37693ec281b38dd3f8ce9d720bd6720  ./deploy/hermes-research/test_perps_proposal.py
-03509028cdbe77bf407676ea0566b5682a381c5777e8150fc3ab11f50e480df6  ./deploy/hermes-research/test_run_perps_scout.py
+f57f7da5fea9e92865d92ebba9bbb1dc9191b93b1265a60aeefee2670c5d5674  ./deploy/hermes-research/test_run_perps_scout.py
 43df10ef5192a5bc6fa52796612132de5235c7ea42b068e05ccceb4457ea1dee  ./deploy/prometheus/mithril-agent.rules.test.yml
 7fc42a6028da27674219166fef22a1aa53db0e39f88b0c273b47804b76f6d44f  ./deploy/prometheus/mithril-agent.rules.yml
 9facf6d1cc9e384b5245ea21950323b39405c793914fe355063b4f0cfb1cbd1b  ./deploy/systemd/mithril-agent-demo.service
