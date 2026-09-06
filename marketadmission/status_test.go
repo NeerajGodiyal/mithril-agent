@@ -106,9 +106,17 @@ func TestDashboardPaperCheckAcceptsEveryBoundedOutcome(t *testing.T) {
 			Reasons: []string{"training_coverage_below_95_percent"},
 		},
 		{
-			Market: status.Market, CheckedAt: through.Add(time.Minute), Through: through,
+			Version: DashboardPaperCheckVersion,
+			Market:  status.Market, CheckedAt: through.Add(time.Minute), Through: through,
 			Outcome:             DashboardPaperOutcomeNoTrainingCandidate,
 			TrainingCoverageBPS: 10_000, HoldoutCoverageBPS: 10_000,
+			CandidatesEvaluated: 12,
+			TrainingActivity: &DashboardPaperTrainingActivity{
+				Version: 1, BaseMinimumSignalBPS: 90, CandidatesWithoutEntrySignal: 12,
+			},
+			TrainingRejections: DashboardPaperTrainingRejections{
+				RejectedCandidates: 12, NoRoundTrip: 12,
+			},
 			Reasons: []string{"no_qualified_training_candidate"},
 		},
 		{
@@ -157,6 +165,69 @@ func TestDashboardPaperCheckCurrentMatchesTheProvisionalStartupWindow(t *testing
 	}
 }
 
+func TestDashboardPaperTrainingActivityIsBoundedAndLegacyAbsenceStaysUnknown(t *testing.T) {
+	status := dashboardStatusForPaperCheck(t)
+	check := DashboardPaperCheck{
+		Version: DashboardPaperCheckVersion, Market: status.Market,
+		Through: status.Diagnostic.Through, CheckedAt: status.Diagnostic.Through.Add(time.Minute),
+		Outcome:             DashboardPaperOutcomeNoTrainingCandidate,
+		TrainingCoverageBPS: 10_000, HoldoutCoverageBPS: 10_000, CandidatesEvaluated: 72,
+		TrainingRejections: DashboardPaperTrainingRejections{RejectedCandidates: 72, NoRoundTrip: 72},
+		TrainingActivity:   &DashboardPaperTrainingActivity{Version: 1, BaseMinimumSignalBPS: 90, CandidatesWithoutEntrySignal: 72},
+		Reasons:            []string{"no_qualified_training_candidate"},
+	}
+	for _, count := range []uint64{0, 72} {
+		check.TrainingActivity.CandidatesWithoutEntrySignal = count
+		withCheck, err := status.WithPaperCheck(check)
+		if err != nil || withCheck.PaperCheck.TrainingActivity == nil {
+			t.Fatalf("known activity count %d rejected: %v", count, err)
+		}
+		check.TrainingActivity.CandidatesWithoutEntrySignal++
+		if withCheck.PaperCheck.TrainingActivity.CandidatesWithoutEntrySignal != count {
+			t.Fatal("validated status retained a mutable activity alias")
+		}
+	}
+	check.TrainingActivity.CandidatesWithoutEntrySignal = 72
+	for name, mutate := range map[string]func(*DashboardPaperCheck){
+		"missing":                  func(c *DashboardPaperCheck) { c.TrainingActivity = nil },
+		"unknown version":          func(c *DashboardPaperCheck) { c.TrainingActivity.Version = 2 },
+		"zero hurdle":              func(c *DashboardPaperCheck) { c.TrainingActivity.BaseMinimumSignalBPS = 0 },
+		"large hurdle":             func(c *DashboardPaperCheck) { c.TrainingActivity.BaseMinimumSignalBPS = 2_001 },
+		"count exceeds candidates": func(c *DashboardPaperCheck) { c.TrainingActivity.CandidatesWithoutEntrySignal = 73 },
+		"count exceeds no-trip":    func(c *DashboardPaperCheck) { c.TrainingRejections.NoRoundTrip = 71 },
+		"activity on legacy":       func(c *DashboardPaperCheck) { c.Version = 1 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			changed := check
+			activity := *check.TrainingActivity
+			changed.TrainingActivity = &activity
+			mutate(&changed)
+			if _, err := status.WithPaperCheck(changed); err == nil {
+				t.Fatal("invalid activity accepted")
+			}
+		})
+	}
+	for _, version := range []uint32{0, 1} {
+		legacy := check
+		legacy.Version, legacy.TrainingActivity = version, nil
+		if version == 0 {
+			legacy.CandidatesEvaluated, legacy.TrainingRejections = 0, DashboardPaperTrainingRejections{}
+		}
+		withCheck, err := status.WithPaperCheck(legacy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.Marshal(withCheck)
+		if err != nil || strings.Contains(string(raw), "training_activity") {
+			t.Fatalf("legacy diagnostics were invented: %s, %v", raw, err)
+		}
+		loaded, err := LoadDashboardStatus(raw)
+		if err != nil || loaded.PaperCheck.TrainingActivity != nil {
+			t.Fatalf("legacy activity did not remain unknown: %+v, %v", loaded, err)
+		}
+	}
+}
+
 func TestDashboardPaperCheckRejectsMismatchAndUnknownReasons(t *testing.T) {
 	status := dashboardStatusForPaperCheck(t)
 	valid := DashboardPaperCheck{
@@ -176,6 +247,11 @@ func TestDashboardPaperCheckRejectsMismatchAndUnknownReasons(t *testing.T) {
 		"duplicate reason": func(check *DashboardPaperCheck) {
 			check.Reasons = []string{"holdout_has_failed_execution", "holdout_has_failed_execution"}
 		},
+		"rejections exceed candidates": func(check *DashboardPaperCheck) {
+			check.Version = DashboardPaperCheckVersion
+			check.CandidatesEvaluated = 1
+			check.TrainingRejections.RejectedCandidates = 2
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			check := valid
@@ -191,6 +267,38 @@ func TestDashboardPaperCheckRejectsMismatchAndUnknownReasons(t *testing.T) {
 	invalidInsufficient.Reasons = []string{}
 	if _, err := status.WithPaperCheck(invalidInsufficient); err == nil {
 		t.Fatal("insufficient-evidence outcome with complete coverage was accepted")
+	}
+	missingDiagnostics := DashboardPaperCheck{
+		Version: DashboardPaperCheckVersion,
+		Market:  status.Market, CheckedAt: status.Diagnostic.Through.Add(time.Minute),
+		Through: status.Diagnostic.Through, Outcome: DashboardPaperOutcomeNoTrainingCandidate,
+		TrainingCoverageBPS: 10_000, HoldoutCoverageBPS: 10_000,
+		Reasons: []string{"no_qualified_training_candidate"},
+	}
+	if _, err := status.WithPaperCheck(missingDiagnostics); err == nil {
+		t.Fatal("current no-candidate check omitted candidate diagnostics")
+	}
+	underexplained := missingDiagnostics
+	underexplained.CandidatesEvaluated = 12
+	underexplained.TrainingRejections.RejectedCandidates = 11
+	underexplained.TrainingRejections.NoRoundTrip = 11
+	if _, err := status.WithPaperCheck(underexplained); err == nil {
+		t.Fatal("current no-candidate check omitted one rejected candidate")
+	}
+	tooMany := valid
+	tooMany.Version = DashboardPaperCheckVersion
+	tooMany.CandidatesEvaluated = DashboardPaperCandidateLimit + 1
+	if _, err := status.WithPaperCheck(tooMany); err == nil {
+		t.Fatal("paper check accepted an unbounded public candidate count")
+	}
+	nonePassed := valid
+	nonePassed.Version = DashboardPaperCheckVersion
+	nonePassed.CandidatesEvaluated = 1
+	nonePassed.TrainingRejections = DashboardPaperTrainingRejections{
+		RejectedCandidates: 1, NoRoundTrip: 1,
+	}
+	if _, err := status.WithPaperCheck(nonePassed); err == nil {
+		t.Fatal("selected-candidate outcome accepted an all-rejected training set")
 	}
 }
 

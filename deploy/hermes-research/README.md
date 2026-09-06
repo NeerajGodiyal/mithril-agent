@@ -3,7 +3,7 @@
 This deploys Nous Research Hermes Agent as a scheduled two-phase paper research
 process. The first container may delegate up to three leaf source reviews but
 has no policy, journal, challenger, wallet, or writable trading mount. Mithril
-validates that phase's strict source-cited JSON before a separate
+validates that phase's strict evidence-bound JSON before a separate
 non-delegating session may create one immutable paper challenger through the
 existing bounded MCP gate. The validated packet is hashed, archived, and
 projected to the dashboard. Neither phase can change the champion or live
@@ -17,12 +17,132 @@ Do not replace it with `latest` or a tag without this digest. Hermes
 configuration allowlists are defense in depth; the whole container or VM is
 the security boundary.
 
+### Isolated perps proposals
+
+The optional `mithril-hermes-perps-research.service` runs after a successful
+scheduled web-research service, with separate state, status and failure reporting.
+It does not replace web research. Paper-plan selection is disabled by default;
+the opt-in path is described below. Deploy all inputs before installing the web
+service's `OnSuccess` hook.
+
+For each SOL/BTC/ETH paper market, `perps-context --auto` selects up to eight
+compatible finalized tapes by journal order, resolves previously frozen
+proposals against their assigned attempts, and supplies up to eight terminal
+outcomes by their original observation time. Selection never ranks tapes by
+profit. Missing evidence fails closed; pending and unscored attempts are not
+profitable observations. No new strategy framework or model-weight training is
+introduced: this is bounded, outcome-informed prompting.
+
+Before inference, `shadow perps-reservation --state-dir PATH --symbol SOL`
+reads the verified published episode prefix and canonical proposal receipts.
+If the next target already has a proposal, the scout reports `already_saved`
+with its original save time and skips context, model and invocation creation.
+That proposal may have been saved outside Hermes; no new research counts or
+model provenance are claimed. This read-only snapshot does not reserve a target
+or replace the freeze command's final collision check.
+
+For an unreserved target, `run-perps-scout.py` launches one fresh no-tool Hermes
+session. The container receives only its empty private home, read-only inference auth,
+configuration, launcher and exact host-rendered prompt. It has no Mithril
+executable, corpus, journal, policy, wallet or socket mount. Pinned Hermes requires
+an explicitly registered empty toolset; an unknown `none` name is rejected by
+its one-shot validator. The launcher uses the supported process-local toolset
+API and checks the assembled tools both after initialization and before the
+conversation. Ambient context, memory and background review are disabled in
+this synthesis phase; the earlier web-research profile is unchanged.
+
+The host verifies the exported session's exact user prompt, one completed root
+session, zero tool calls, bounded times and unchanged hypothesis identity. It
+then freezes the proposal with the original context and host-derived tape
+paths. It never retries against a newer target or changed baseline. Private
+invocation receipts bind the context, prompt, session export, model output and
+frozen proposal; they do not prove the model's reasoning or profitability.
+
+State is retained under `/var/lib/mithril-hermes-perps-research`; `latest.json`
+separates new and already-saved advisory proposals from unavailable phases and
+cleanup failures. These are not active trading decisions. Container timeouts and service
+shutdown remove only containers bearing this adapter's fixed ownership label.
+The existing 256-proposal ceiling per market remains a rollout limit.
+
+Install `run-perps-scout.py`, `perps-proposal.py`, `config-perps.yaml`, the updated
+Compose file and compatible extractor/agent before the new systemd service and
+`OnSuccess` hook. Keep scripts/configuration root-owned and preserve the existing
+egress service and pinned image. Run the Python tests, focused Go context and
+proposal tests, and an isolated startup canary before enabling the hook. Offline
+registry/import checks alone do not verify inference authentication, exported
+prompt fidelity or an end-to-end model invocation.
+
+For the reservation preflight upgrade, install the compatible dashboard reader
+and agent with `perps-reservation` before the scout script. The reader accepts
+both old summaries and `already_saved`; older readers reject that new status.
+Keep selection disabled and retain the previous binaries/script for rollback.
+After the new script publishes `already_saved` or the `check_reservation` failure
+phase, retain the compatible reader even if reverting the agent and script.
+Do not rewind receipts or paper history to accommodate an older reader.
+
+### Selecting an evaluated paper proposal
+
+`mithril-agent shadow perps-select-proposal --proposal PATH` considers one exact
+host-frozen proposal. The command rechecks its assigned completed target and
+immutable evaluation, requires the frozen incumbent to remain current, and
+applies the existing normal/doubled-fee, completed-trade, drawdown and comparison
+gates. Three distinct tapes means verified training plus the assigned target;
+it does not mean three unseen trials or a twelve-plan tournament.
+
+A passing selection records `evaluated_proposal_v1` provenance and preserves
+the previous plan for `perps-restore`. It affects the next bounded paper run,
+never a run already in progress or a real wallet.
+
+Before allowing this plan type to run, deploy compatible dashboard, status
+bridge and Telegram readers: older readers reject the new `frozen_proposal`
+source value. Update readers before the writer/selection step. Do not roll a
+reader back to an incompatible version while new-format status is present.
+
+Automatic selection is off by default (`MITHRIL_HERMES_PERPS_SELECT=0`). Enable
+it with a service environment override only after the compatible-reader rollout
+and isolated tests pass. The scout reconciles earlier private invocation
+receipts in chronological order before proposing again; pending targets remain
+discoverable even when `latest.json` is replaced. It does not rank old proposals
+by profit or change their assigned targets.
+
+Each selection records a private attempt marker before calling the host
+selector. If the process or receipt write fails after that point, an unfinished
+marker requires operator reconciliation; it is not automatically retried.
+Completed rejections and retired plans are not submitted again. Keep these
+markers with the invocation archive when backing up or restoring research.
+
+The optional dashboard lifecycle snapshot separates evaluation from selection.
+Once per scout cycle, the host reuses `perps-evaluate` for at most the three most
+recent recorded Hermes proposals per market, ordered by original invocation
+time. This may retain a newly verified immutable evaluation; it never calls the
+selector from the display path. Page refresh only reads the bounded projection.
+All recorded selection markers are checked, including older entries outside
+the display window. An unfinished, mismatched or conflicting marker remains a
+visible review warning, not permission to retry. Historical selections do not
+identify the currently running plan. Counts cover recorded Hermes proposals,
+not every manually frozen proposal or the remaining canonical storage limit.
+
+Evaluated proposals optionally include four independent comparison scores: the
+proposed and previous plans, each at normal and doubled modeled entry/exit fees.
+Net P&L is ending equity minus starting collateral, already including modeled
+fees and funding; do not subtract fees again or add these alternative replays
+to the account balance. Counts and micro-dollar amounts use exact decimal
+strings. A missing lane is unscored, not zero. These figures describe one test,
+not qualification, a selected plan, or expected future returns.
+
+Deploy the compatible dashboard reader before the lifecycle-producing scout.
+Older readers reject the new fields. If reverting the scout, retain the new
+reader while lifecycle fields remain in the saved projection; preserve history.
+Interrupted runs skip further lifecycle work and retain an unavailable-history
+status alongside any completed proposal summary.
+
 All four MCP entries deliberately use `trust: full`. Pinned Hermes has an
 [open read-only annotation bug](https://github.com/NousResearch/hermes-agent/issues/88858):
 it reads the Python MCP annotation by its wire-format name, so read-only tools
 on an untrusted server enter the interactive approval path. That path can wait
 up to 300 seconds in this noninteractive profile. The paper server also has one
-intentional write, bounded challenger creation, which cannot run unattended
+intentional write tool, bounded challenger creation and its latest typed
+replay-rejection receipt, which cannot run unattended
 under `trust: untrusted` even after the annotation bug is fixed.
 
 In this Hermes release, `full` removes the per-call approval gate for a server;
@@ -73,6 +193,42 @@ citation is rejected unless its exact URL appears in a successful
 `web_extract` result. The dashboard deliberately separates cited official pages
 that were actually retrieved from two-source claims labelled by Hermes. Console
 prose is never treated as retrieval evidence.
+
+### Recorded paper observations
+
+The host also computes a bounded observation artifact from the immediately
+preceding complete UTC day's private journal and exact active SOL/USDC or
+JUP/USDC paper policy. It requires verified journal contents, paired market
+sources and at least 95% observable coverage. Coverage, signals, fills, result
+versus holding, and maximum drawdown are measurements of recorded paper data,
+not current prices, web facts, or real wallet results.
+
+A version-2 research packet may reference the artifact's content digest and
+one to five supported metric IDs. Hermes cannot supply the artifact itself.
+`research packet-record` reconstructs it from operator-fixed policy/journal
+paths before attaching and archiving it; the challenger MCP repeats that
+verification. A digest binds content, not provenance. Recreating an artifact
+does not renew its observation day, and a run spanning UTC midnight must use
+the new completed day or fail closed. Version-1 web packets remain compatible.
+
+Recorded-only candidates may have no cited web facts, but this research profile
+still requires a successful web retrieval trace. Any external fact included in
+a candidate retains the existing independent-source and retrieval checks.
+Dashboard web-source counts never include recorded measurements. Its sealed
+projection uses `research packet-project`; that command checks integrity and
+currentness, not journal provenance, and must receive protected host output.
+
+Historical replay after Hermes sees these observations is retrospective
+screening, not untouched validation. Neither recorded evidence nor a replay
+result changes the separate forward-paper selection requirements.
+
+Deploy compatible agent/dashboard readers before enabling the updated research
+wrapper and prompt. Back up the current projections and candidate-pointer
+identities while writers and selectors are idle. Once a pointer references a
+version-2 candidate, a version-1-only binary is not a safe automatic rollback:
+retain compatible readers or stop for an explicit recovery decision. Do not
+rewind trading journals, ledgers, or candidate pointers to make an old reader
+start.
 
 The Compose bind mounts deliberately set `create_host_path: false`. A typo or
 missing source therefore stops startup instead of silently creating a directory
@@ -169,8 +325,15 @@ sudo -u mithril-agent-research /usr/local/libexec/mithril-agent/mithril-agent \
 An empty provisioned directory is not research evidence. The wrapper runs
 official-source research without the index until both `events.jsonl` exists and
 `index doctor --max-record-age 15m` passes.
-Check the doctor's last recorded time as well as its ready result; stale rooted
-evidence must not be presented to Hermes as current market context.
+The wrapper also checks the doctor's JSON source for `mainnet-beta` and its
+exact Mainnet genesis hash. Missing source identity, another cluster, or a
+different genesis withholds the index even when local ingestion is recent.
+The doctor's last recorded time proves recent local ingestion, not that the recorded
+cursor has caught up with the chain. Replaying old records can pass this check.
+The wrapper exposes valid recently ingested records as rooted history and
+explicitly tells Hermes that current chain state has not been verified. The
+dashboard reports the same limit. Comparing an independently observed producer
+root with the ingestion cursor is still required before claiming current data.
 
 For rootful Docker, copy the reviewed deployment inputs into a root-owned
 directory before running Compose. Running root-equivalent Compose from a
@@ -454,6 +617,103 @@ read-only status sockets; no signer or exchange account is configured. They do
 not start a legacy spot journal. Complete
 the optional JUP portfolio setup below, save the dashboard instruction, and use
 the atomic activation procedure before expecting paper observers to run.
+
+Each perps invocation records a host-owned attempt before reading provider data
+in `<state-directory-name>-episodes.jsonl`, beside the state directory. Its
+private `.prefix.json` projection identifies a durable, hash-verified prefix
+that readers can inspect while collection holds the writer lock. An unresolved
+start is not success: the next exclusive runner marks it interrupted before
+starting a new attempt. Ordinary failures remain incomplete. A finished record
+binds only new finalization receipts for that attempt; missing or short tapes
+are not sufficient evidence for a prospective strategy test. Non-archive runs
+are recorded but cannot supply isolated prospective episodes because their
+tapes can span invocations. These records do not select a plan, change scoring,
+or enable Hermes proposals. A prefix is a bounded historical view, not proof
+that no newer attempt or terminal record exists.
+
+`shadow perps-freeze --state-dir PATH --in PATH --tape PATH [--tape PATH ...]`
+records a pending advisory proposal without changing the active paper plan.
+The private input contains only `hypothesis_id`, `symbol`, `risk_arm`, `strategy`
+and `rationale`. The host chooses the paths and verifies 1–64 chronological,
+immutable training tapes, their finalization times, the current baseline and
+the published episode prefix. The model must not own these paths or receipts.
+One proposal per symbol and target attempt is retained under the state parent's
+`proposals` directory; an identical retry returns the original receipt and time.
+The fixed target is the next attempt after that exact prefix. If it had already
+started by the freeze time, a later evaluator must mark it unevaluable rather
+than skip to another attempt. Failed and empty attempts must not be discarded.
+This command does not evaluate results or connect Hermes to the perps runner.
+Its initial limit of 256 receipts per symbol is not a week-long automated loop;
+do not delete receipts to evade the limit. All receipts remain unauthorized and
+nonpromotable, with no signing or order-submission capability.
+
+`shadow perps-evaluate --proposal PATH` verifies only that proposal's assigned
+attempt. A pending result describes the published prefix that was inspected;
+it is not saved as a terminal outcome or proof that newer records do not exist.
+Completed comparisons reuse the frozen baseline and proposed key on the same
+recorded tape, at normal and doubled fees. Zero trades is distinct from missing
+evidence or an unfillable final position. A short, incomplete, already-started
+or differently configured attempt cannot be replaced with a later one.
+Missing or corrupt bound provenance is an error, not a strategy result.
+Terminal outcomes are immutable; retries reverify their original prefix,
+evidence and timestamp. Results are modeled historical comparisons, not actual
+venue fills, qualification, plan selection or proof of profitability. Hermes
+invocation and sanitized feedback wiring are separate from these host commands.
+
+`shadow perps-context --state-dir PATH --symbol SOL --tape PATH --out PATH`
+creates a private, write-once input bundle for a later proposal session. The
+host supplies 1–8 chronological corpus tapes and optionally up to eight
+`--evaluation PATH` results; nothing is selected by profitability. The bundle
+contains reverified historical strategy metrics, the current baseline identity
+and resolved outcomes with their original strategy keys and known-at times.
+Pending results, raw market records, model rationale and local paths are not
+included. Historical training and holdout results are no longer unseen evidence
+for a new proposal. Retrying an output path preserves its original bytes/time.
+
+New contexts also include `normal_fee_behavior` for completed modeled comparisons: bounded
+frame-action and signal-kind counts for the original proposed and baseline
+plans on their exact assigned tape. This distinguishes no signal or warm-up
+from minimum-lot, visible-fill and slippage limits without inventing reasons.
+The counts describe normal-fee modeled frames, not fills or evaluator-only
+terminal closes. Evaluation bytes, timestamps and selection gates are unchanged;
+old contexts without this optional field retain their original encoding. A
+modeled comparison that could not score its terminal position can still report
+frame decisions, but remains unscored and ineligible for selection.
+
+Pass that same bundle to `perps-freeze --context PATH` alongside the original
+host-selected tapes. The freezer checks the baseline under its existing lock,
+rejects a changed selection and binds the context digest into the receipt.
+The five-field model response cannot choose the context, corpus paths or
+baseline. This prepares the host boundary; it does not yet schedule Hermes or
+activate a proposal.
+
+For a separate tool-free proposal session, the existing session reader accepts
+`--extract-output PATH --require-no-tools`. That explicit mode rejects any
+exported tool calls/results and retains session time, lineage and final-JSON
+checks. Normal research extraction and source evidence still require a
+successful page retrieval. This output check does not replace checking the
+actual Hermes tool registry and container isolation before launch.
+
+Each current-format perps final tape and its evaluation are recorded first in
+the symbol's hash-chained, segmented finalization journal. The journal keeps
+every prior receipt, treats an exact repeat as idempotent, and rejects
+conflicting lineage before replacing the displayed result or selecting a paper
+plan. Receipts bind the evaluator, final tape, qualification result, optional
+walk-forward input and result, leader, incumbent, and incumbent replay by
+digest without storing file paths or prose. A walk-forward result reports the
+actual 12 training trials when that search ran, one held-out plan, completed
+trades, and confidence as
+`not_estimated_insufficient_independent_episodes`; it does not claim PBO or DSR.
+When selection is attempted, its receipt reports two compared held-out plans
+after the selector replays the incumbent and the verified finalization-receipt
+count. The separate `one_frame_execution_delay_v1` artifact is a standalone,
+best-effort paper research result, not qualification evidence or network
+latency. It applies the frozen prior-frame decision after the next frame's
+funding and mark, ignores the final queued signal, and cannot change
+qualification, selection, promotion, or live/paper decisions.
+Verified legacy v3 tapes remain readable for offline research, but only a
+current-format final tape can receive the exact finalization receipt required
+to select a new paper plan.
 
 The hourly bootstrap remains a no-op until the prior two UTC journals are both
 complete and replayable. It then searches those exact chronological days and
@@ -1213,8 +1473,32 @@ deleting or resetting either observer.
 
 The auto-selector keeps a local, hash-chained SOL or JUP outcome journal. An
 operator can inspect its bounded read-only summary with `shadow
-research-outcomes --journal PATH --limit 16`. This local evidence is not added
-to the Hermes scout prompt and grants no authorization or execution capability.
+research-outcomes --journal PATH --limit 16`. Outcome feedback to the next
+Hermes scout is disabled by default. After direct operator approval, add a
+systemd service override containing
+`Environment=MITHRIL_HERMES_OUTCOME_FEEDBACK=1`; the wrapper then adds only each
+journal's `--prompt-safe --limit 8 --policy CURRENT --max-age 168h` projection.
+The command strictly loads and fingerprints the current market policy, verifies
+and folds the complete journal, filters out other policy fingerprints, markets,
+and older outcomes, and only then applies the limit. Only a journal with no
+active, staged `.next`, `.lock`, or `.seg-*` artifact is omitted; any artifact
+invokes the strict verifier, so incomplete, invalid, or future-dated state stops
+the run. These hints are internal advisory evidence: they do not count as
+external sources and cannot authorize, activate, select, promote, or execute
+anything. The shipped unit does not enable this option, and JUP outcomes are
+ignored when the current allocation has no JUP policy.
+
+The same opt-in also includes a separate `shadow research-rejection --receipt
+PATH --policy CURRENT --max-age 168h` projection. The candidate tool retains at
+most one `<challenger-pointer>.replay-rejection.json` beside each pointer when
+an exact packet-bound candidate reaches the typed training round-trip failure.
+It records the validated input journals, not a claim that every fold ran. A
+repeat of the same experiment does not renew its timestamp. Missing receipts
+are omitted; malformed, unsafe or future-dated receipts stop the scout. Old
+policy, other-market and expired receipts yield no hint. This private latest
+receipt is not an immutable history, a forward outcome, a trading instruction,
+or a permanent ban on its parameters. No raw model error prose enters the hint,
+and no champion/challenger pointer is changed by recording a rejection.
 
 Malformed replies and pre-publication validation failures keep the last
 validated research packet and dashboard research projection unchanged. The

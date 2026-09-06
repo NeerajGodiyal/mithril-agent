@@ -16,14 +16,48 @@ func TestTournamentStrategiesAreIndependent(t *testing.T) {
 		StrategyBreakout:      Flat,
 		StrategyRegime:        Direction(Short),
 	}
+	wantSignal := map[Strategy]string{
+		StrategyMomentum: SignalMomentum, StrategyMeanReversion: SignalMeanReversion,
+		StrategyBreakout: SignalBreakoutRange, StrategyRegime: SignalRegimeMeanReversion,
+	}
 	for strategy, direction := range want {
 		decision, err := tournamentDecision(strategy, SOL, Balanced, candles)
 		if err != nil {
 			t.Fatalf("%s decision: %v", strategy, err)
 		}
-		if decision.Direction != direction {
-			t.Errorf("%s direction = %s, want %s", strategy, decision.Direction, direction)
+		if decision.Direction != direction || decision.SignalKind != wantSignal[strategy] ||
+			decision.ThresholdBPS != 50 {
+			t.Errorf("%s decision = %+v, want direction %s signal %s threshold 50", strategy, decision, direction, wantSignal[strategy])
 		}
+	}
+}
+
+func TestTournamentDecisionExplainsWarmupBreakoutAndRegimeSignals(t *testing.T) {
+	warmup, err := tournamentDecision(StrategyMomentum, SOL, Balanced, tournamentTestCandles("100", "101", "102", "103", "104"))
+	if err != nil || warmup.Direction != Flat || warmup.SignalKind != SignalHistoryWarmup ||
+		warmup.ChangeBPS != 0 || warmup.ThresholdBPS != 0 {
+		t.Fatalf("warmup decision = %+v, %v", warmup, err)
+	}
+	for name, prices := range map[string][]string{
+		"above high": {"100", "100", "100", "100", "100", "100.4"},
+		"below low":  {"100", "100", "100", "100", "100", "99.6"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			decision, err := tournamentDecision(StrategyBreakout, SOL, Balanced, tournamentTestCandles(prices...))
+			wantKind, wantChange := SignalBreakoutHigh, int64(40)
+			if name == "below low" {
+				wantKind, wantChange = SignalBreakoutLow, -40
+			}
+			if err != nil || decision.Direction != Flat || decision.SignalKind != wantKind ||
+				decision.ChangeBPS != wantChange || decision.ThresholdBPS != 50 {
+				t.Fatalf("breakout decision = %+v, %v", decision, err)
+			}
+		})
+	}
+	regime, err := tournamentDecision(StrategyRegime, SOL, Balanced, tournamentTestCandles("100", "102", "103", "104", "105", "101.5"))
+	if err != nil || regime.Direction != Direction(Long) || regime.SignalKind != SignalRegimeMomentum ||
+		regime.ChangeBPS != 150 || regime.ThresholdBPS != 100 {
+		t.Fatalf("regime momentum decision = %+v, %v", regime, err)
 	}
 }
 

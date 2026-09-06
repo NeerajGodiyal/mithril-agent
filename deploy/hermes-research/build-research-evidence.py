@@ -165,7 +165,11 @@ def rfc3339nano_epoch(timestamp: float) -> str:
     return f"{whole}.{fraction}Z" if fraction else f"{whole}Z"
 
 
-def session_trace(sessions_data: bytes, run_started: float, run_finished: float) -> dict:
+def session_trace(sessions_data: bytes, run_started: float, run_finished: float,
+                  *, require_no_tools: bool = False) -> dict:
+    if (not math.isfinite(run_started) or not math.isfinite(run_finished) or
+            run_started > run_finished):
+        raise ValueError("research run time bounds are invalid")
     sessions = []
     for line in sessions_data.splitlines():
         if line.strip():
@@ -209,9 +213,13 @@ def session_trace(sessions_data: bytes, run_started: float, run_finished: float)
                     message_at > ended_at):
                 raise ValueError("session message time is invalid")
             messages.append((session_id, message))
-            calls = message.get("tool_calls") or []
+            calls = message.get("tool_calls")
+            if calls is None:
+                calls = []
             if not isinstance(calls, list):
                 raise ValueError("session tool calls are invalid")
+            if require_no_tools and (calls or message.get("role") == "tool"):
+                raise ValueError("no-tool extraction contains tool activity")
             for call in calls:
                 function = call.get("function") if isinstance(call, dict) else None
                 name = function.get("name") if isinstance(function, dict) else None
@@ -259,7 +267,7 @@ def session_trace(sessions_data: bytes, run_started: float, run_finished: float)
             if len(retrieved) > MAX_URLS:
                 raise ValueError("session export contains too many retrieved URLs")
 
-    if not tool_counts or not retrieved:
+    if not require_no_tools and (not tool_counts or not retrieved):
         raise ValueError("Hermes did not leave a successful page retrieval trace")
 
     return {
@@ -273,8 +281,9 @@ def session_trace(sessions_data: bytes, run_started: float, run_finished: float)
     }
 
 
-def extract_packet(sessions_data: bytes, run_started: float, run_finished: float) -> bytes:
-    session_trace(sessions_data, run_started, run_finished)
+def extract_packet(sessions_data: bytes, run_started: float, run_finished: float,
+                   *, require_no_tools: bool = False) -> bytes:
+    session_trace(sessions_data, run_started, run_finished, require_no_tools=require_no_tools)
     sessions = [strict_json_object(line) for line in sessions_data.splitlines() if line.strip()]
     roots = [
         session for session in sessions
@@ -441,15 +450,19 @@ def main() -> None:
     destination.add_argument("--output", type=Path)
     destination.add_argument("--bind-output", type=Path)
     destination.add_argument("--extract-output", type=Path)
+    parser.add_argument("--require-no-tools", action="store_true")
     parser.add_argument("--run-started", type=float, required=True)
     parser.add_argument("--run-finished", type=float, required=True)
     args = parser.parse_args()
+    if args.require_no_tools and not args.extract_output:
+        parser.error("--require-no-tools requires --extract-output")
     sessions = read_private(args.sessions, MAX_EXPORT_BYTES)
     if args.extract_output:
         if args.packet:
             parser.error("--packet cannot be used with --extract-output")
         replace_private(args.extract_output, extract_packet(
             sessions, args.run_started, args.run_finished,
+            require_no_tools=args.require_no_tools,
         ))
         return
     if not args.packet:

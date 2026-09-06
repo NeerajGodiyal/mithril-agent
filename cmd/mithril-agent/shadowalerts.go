@@ -198,6 +198,7 @@ func (s *shadowRun) updatePaperCurrent(tick shadow.Tick, nextSell bool) error {
 			}
 			addPaperSettings(summary, s.policy)
 			addPaperFeeBudget(summary, s.policy, ledger)
+			addPaperBalances(summary, s.policy, ledger)
 			summary.DecisionReason = paperDecisionReason(tick,
 				summary.FeeBudgetTracked && summary.EstimatedFillsRemaining == 0)
 		}
@@ -258,6 +259,19 @@ func addPaperFeeBudget(summary *paperstatus.CurrentSummary, policy shadow.Policy
 	summary.FeeBudgetTracked = true
 	summary.RemainingFeeReserveLamports = remaining
 	summary.EstimatedFillsRemaining = fills
+}
+
+func addPaperBalances(summary *paperstatus.CurrentSummary, policy shadow.Policy, ledger shadow.Ledger) {
+	base, quote := shadowAssets(policy, true)
+	summary.BalancesTracked = true
+	summary.BaseUnits = ledger.BaseUnits
+	summary.BaseDecimals = uint8(base.decimals)
+	summary.BaseAsset = base.name
+	summary.QuoteUnits = ledger.QuoteUnits
+	summary.QuoteDecimals = uint8(quote.decimals)
+	summary.QuoteAsset = quote.name
+	summary.LiquidFeeReserveLamports = ledger.FeeReserveLamports
+	summary.LockedSetupRentLamports = ledger.LockedRentLamports
 }
 
 func paperFeeBudget(policy shadow.Policy, ledger shadow.Ledger) (uint64, uint64, bool) {
@@ -465,6 +479,10 @@ func (s *shadowRun) alertReport(report shadow.Report) error {
 		State: "completed", Strategy: paperStrategyName(s.policy), DecisionReason: "watching",
 	}
 	addPaperSettings(summary, s.policy)
+	addPaperBalances(summary, s.policy, shadow.Ledger{
+		BaseUnits: report.BaseUnits, QuoteUnits: report.QuoteUnits,
+		FeeReserveLamports: report.FeeReserveLamports, LockedRentLamports: report.LockedRentLamports,
+	})
 	if s.runner != nil {
 		addPaperFeeBudget(summary, s.policy, s.runner.Ledger())
 	}

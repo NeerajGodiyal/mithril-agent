@@ -2,6 +2,7 @@ package shadow
 
 import (
 	"errors"
+	"math"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
@@ -61,12 +62,15 @@ type RoundTripResult struct {
 	Ledger Ledger
 	// LiquidationLedger values every observation and fill at the same
 	// conservative sell mark. It is populated only by
-	// ReplayRoundTripTicksWithLiquidationMarks.
+	// ReplayRoundTripTicksWithLiquidationMarks or the observation-only comparison.
 	LiquidationLedger            Ledger
 	Counts                       RoundTripCounts
 	ClosingPrice                 uint64
 	LiquidationMaxDrawdownMicros uint64
 	LiquidationMaxDrawdownBPS    uint16
+	// FilteredReasons is populated only by the explicit offline cost comparison.
+	// It explains modeled quote refusals, not real venue execution outcomes.
+	FilteredReasons map[string]uint64 `json:"filtered_reasons,omitempty"`
 }
 
 // ReplayRoundTrip scores a price series against both legs on one book.
@@ -109,6 +113,102 @@ func ReplayRoundTripTicks(
 	return replayRoundTripTicks(policy, ticks, quoteFor, false)
 }
 
+// ObservedNativeCostVersion is an offline-only experiment, not a policy version.
+const ObservedNativeCostVersion = "observed-native-cost-v1"
+
+type roundTripCostModel uint8
+
+const (
+	policyNativeCost roundTripCostModel = iota
+	observedNativeCost
+)
+
+// ReplayObservedNativeCost strictly verifies the unchanged source journal before
+// rerunning it with observed SOL fee valuation. Quotes supplied by the caller
+// are counterfactual models, not historical venue evidence or admission evidence.
+func ReplayObservedNativeCost(policy Policy, ticks []Tick, quoteFor func(uint64, bool, uint64) (Quote, error)) (RoundTripResult, error) {
+	if err := validateObservedNativeCostHistory(policy, ticks); err != nil {
+		return RoundTripResult{}, err
+	}
+	return replayRoundTripTicksWithCost(policy, ticks, quoteFor, false, observedNativeCost, nil)
+}
+
+// ReplayObservedNativeCostComparison explains filtered signals in both modeled
+// lanes without changing ordinary replay output or the source policy/journal.
+func ReplayObservedNativeCostComparison(policy Policy, ticks []Tick, quoteFor func(uint64, bool, uint64) (Quote, error)) (baseline, observed RoundTripResult, err error) {
+	if err := validateObservedNativeCostHistory(policy, ticks); err != nil {
+		return RoundTripResult{}, RoundTripResult{}, err
+	}
+	return replayObservedNativeComparison(policy, ticks, quoteFor, false)
+}
+
+// ReplayObservedNativeObservationComparison compares counterfactual cost models
+// on observation points, including verified provisional admission observations.
+// It validates policy, times and paired price evidence through the round-trip
+// engine, but does not authenticate journal events or confer market admission.
+// Both lanes use liquidation marks; supplied quotes remain caller models, not
+// historical execution evidence. Use ReplayObservedNativeCostComparison when
+// the input claims to be an ordinary journal requiring strict Replay validation.
+func ReplayObservedNativeObservationComparison(policy Policy, ticks []Tick, quoteFor func(uint64, bool, uint64) (Quote, error)) (baseline, observed RoundTripResult, err error) {
+	if err := validateObservedNativeCostPolicy(policy); err != nil {
+		return RoundTripResult{}, RoundTripResult{}, err
+	}
+	return replayObservedNativeComparison(policy, ticks, quoteFor, true)
+}
+
+// ReplayObservedNativeTimedObservationComparison supplies the current observation
+// time to independent counterfactual quote models, including settlement quotes.
+// The second time is zero for decisions and the exact settlement cutoff for
+// settlement requests; recorded quote models must enforce this receipt bound.
+// Like ReplayObservedNativeObservationComparison, it does not authenticate
+// journals or confer admission. Both lanes retain liquidation marks.
+func ReplayObservedNativeTimedObservationComparison(policy Policy, ticks []Tick,
+	baselineQuote, observedQuote func(at, notBefore time.Time, price uint64, sell bool, amount uint64) (Quote, error),
+) (baseline, observed RoundTripResult, err error) {
+	if err := validateObservedNativeCostPolicy(policy); err != nil {
+		return RoundTripResult{}, RoundTripResult{}, err
+	}
+	return replayObservedNativeTimedComparison(policy, ticks, baselineQuote, observedQuote, true)
+}
+
+func replayObservedNativeComparison(policy Policy, ticks []Tick, quoteFor func(uint64, bool, uint64) (Quote, error), liquidationMarks bool) (baseline, observed RoundTripResult, err error) {
+	quote := timedRoundTripQuote(quoteFor)
+	return replayObservedNativeTimedComparison(policy, ticks, quote, quote, liquidationMarks)
+}
+
+func replayObservedNativeTimedComparison(policy Policy, ticks []Tick,
+	baselineQuote, observedQuote func(time.Time, time.Time, uint64, bool, uint64) (Quote, error), liquidationMarks bool,
+) (baseline, observed RoundTripResult, err error) {
+	baselineReasons, observedReasons := make(map[string]uint64), make(map[string]uint64)
+	baseline, err = replayRoundTripTicksWithTimedCost(policy, ticks, baselineQuote, liquidationMarks, policyNativeCost, baselineReasons)
+	if err != nil {
+		return RoundTripResult{}, RoundTripResult{}, err
+	}
+	observed, err = replayRoundTripTicksWithTimedCost(policy, ticks, observedQuote, liquidationMarks, observedNativeCost, observedReasons)
+	if err != nil {
+		return RoundTripResult{}, RoundTripResult{}, err
+	}
+	baseline.FilteredReasons, observed.FilteredReasons = baselineReasons, observedReasons
+	return baseline, observed, nil
+}
+
+func validateObservedNativeCostPolicy(policy Policy) error {
+	if policy.Cluster != Mainnet || policy.Adaptive == nil ||
+		(policy.Adaptive.Version != adaptiveVersionTwo && policy.Adaptive.Version != AdaptiveVersion) ||
+		policy.NativeFeePrice == nil || policy.IsSell() {
+		return errors.New("observed native cost experiment requires a v2 or v3 non-SOL Mainnet adaptive buy policy")
+	}
+	return nil
+}
+
+func validateObservedNativeCostHistory(policy Policy, ticks []Tick) error {
+	if err := validateObservedNativeCostPolicy(policy); err != nil {
+		return err
+	}
+	_, err := Replay(policy, ticks)
+	return err
+}
+
 // ReplayRoundTripTicksWithLiquidationMarks keeps strategy and quote prices
 // direction-aware while valuing every book at the same conservative sell mark.
 // It is intended for comparisons whose lanes can hold different inventory.
@@ -125,6 +225,18 @@ func replayRoundTripTicks(
 	ticks []Tick,
 	quoteFor func(priceMicros uint64, sell bool, inputAmount uint64) (Quote, error),
 	liquidationMarks bool,
+) (RoundTripResult, error) {
+	return replayRoundTripTicksWithCost(policy, ticks, quoteFor, liquidationMarks, policyNativeCost, nil)
+}
+
+func replayRoundTripTicksWithCost(policy Policy, ticks []Tick,
+	quoteFor func(uint64, bool, uint64) (Quote, error), liquidationMarks bool, costModel roundTripCostModel, filteredReasons map[string]uint64,
+) (RoundTripResult, error) {
+	return replayRoundTripTicksWithTimedCost(policy, ticks, timedRoundTripQuote(quoteFor), liquidationMarks, costModel, filteredReasons)
+}
+
+func replayRoundTripTicksWithTimedCost(policy Policy, ticks []Tick,
+	quoteFor func(time.Time, time.Time, uint64, bool, uint64) (Quote, error), liquidationMarks bool, costModel roundTripCostModel, filteredReasons map[string]uint64,
 ) (RoundTripResult, error) {
 	if err := policy.Validate(); err != nil {
 		return RoundTripResult{}, err
@@ -163,7 +275,7 @@ func replayRoundTripTicks(
 			nativePrimary:     tick.NativeFeePrimary, nativeSecondary: tick.NativeFeeSecondary,
 		})
 	}
-	return replayRoundTrip(policy, observations, quoteFor, liquidationMarks)
+	return replayRoundTripWithTimedCost(policy, observations, quoteFor, liquidationMarks, costModel, filteredReasons)
 }
 
 type roundTripObservation struct {
@@ -191,6 +303,27 @@ func replayRoundTrip(
 	observations []roundTripObservation,
 	quoteFor func(priceMicros uint64, sell bool, inputAmount uint64) (Quote, error),
 	liquidationMarks bool,
+) (RoundTripResult, error) {
+	return replayRoundTripWithCost(policy, observations, quoteFor, liquidationMarks, policyNativeCost, nil)
+}
+
+func replayRoundTripWithCost(policy Policy, observations []roundTripObservation,
+	quoteFor func(uint64, bool, uint64) (Quote, error), liquidationMarks bool, costModel roundTripCostModel, filteredReasons map[string]uint64,
+) (RoundTripResult, error) {
+	return replayRoundTripWithTimedCost(policy, observations, timedRoundTripQuote(quoteFor), liquidationMarks, costModel, filteredReasons)
+}
+
+func timedRoundTripQuote(quote func(uint64, bool, uint64) (Quote, error)) func(time.Time, time.Time, uint64, bool, uint64) (Quote, error) {
+	if quote == nil {
+		return nil
+	}
+	return func(_, _ time.Time, price uint64, sell bool, amount uint64) (Quote, error) {
+		return quote(price, sell, amount)
+	}
+}
+
+func replayRoundTripWithTimedCost(policy Policy, observations []roundTripObservation,
+	quoteFor func(time.Time, time.Time, uint64, bool, uint64) (Quote, error), liquidationMarks bool, costModel roundTripCostModel, filteredReasons map[string]uint64,
 ) (RoundTripResult, error) {
 	if !policy.RoundTrip() {
 		return RoundTripResult{}, errors.New("policy has no return trigger; use Replay for one direction")
@@ -314,14 +447,31 @@ func replayRoundTrip(
 		triggered := thresholdMet(rule, price)
 		var decision *AdaptiveDecision
 		if strategy != nil {
-			adaptiveDecision, adaptiveTriggered, decisionErr := strategy.decide(
-				observation.at, price, sell, result.Ledger,
+			minimum := strategy.policy.MinimumSignalBPS
+			costUnavailable := false
+			if costModel == observedNativeCost {
+				amount, _ := paperAttempt(policy, result.Ledger, sell, nextAmount, price, nil)
+				// An unfundable ordinary lot must not suppress a drawdown exit.
+				minimum = math.MaxUint16
+				costUnavailable = true
+				if amount != 0 {
+					hurdle, err := observedNativeCostHurdle(policy, nativePrice[0], price, amount, sell)
+					if err == nil {
+						minimum, costUnavailable = uint16(hurdle), false
+					}
+				}
+			}
+			adaptiveDecision, adaptiveTriggered, decisionErr := strategy.decideWithHurdle(
+				observation.at, price, sell, result.Ledger, minimum,
 			)
 			if decisionErr != nil {
 				return RoundTripResult{}, decisionErr
 			}
 			decision = &adaptiveDecision
 			triggered = adaptiveTriggered
+			if costUnavailable && decision.Strategy != StrategyRiskExit {
+				triggered = false
+			}
 		}
 		if triggered {
 			if sell {
@@ -337,7 +487,7 @@ func replayRoundTrip(
 			}
 			settling := *pending
 			pending = nil
-			settlementQuote, err := quoteFor(price, settling.sell, settling.quote.InputAmount)
+			settlementQuote, err := quoteFor(observation.at, settling.settleAfter, price, settling.sell, settling.quote.InputAmount)
 			if err != nil {
 				if strategy != nil {
 					result.Counts.Missed++
@@ -439,7 +589,7 @@ func replayRoundTrip(
 			result.Counts.Missed++
 			continue
 		}
-		decisionQuote, err := quoteFor(price, sell, attemptAmount)
+		decisionQuote, err := quoteFor(observation.at, time.Time{}, price, sell, attemptAmount)
 		if err != nil {
 			if strategy != nil {
 				result.Counts.Missed++
@@ -461,15 +611,25 @@ func replayRoundTrip(
 			}
 			return RoundTripResult{}, errors.New("round-trip quote changed the requested input amount")
 		}
-		passes, guardErr := adaptiveQuotePasses(
-			policy, decision, decisionQuote, price, sell,
+		var hurdle uint32
+		if costModel == observedNativeCost && decision.Strategy != StrategyRiskExit {
+			hurdle, err = observedNativeCostHurdle(policy, nativePrice[0], price, decisionQuote.InputAmount, sell)
+			if err != nil {
+				return RoundTripResult{}, err
+			}
+		}
+		reason, guardErr := adaptiveQuoteRejection(
+			policy, decision, decisionQuote, price, sell, hurdle,
 		)
 		if guardErr != nil {
 			result.Counts.Missed++
 			continue
 		}
-		if !passes {
+		if reason != "" {
 			result.Counts.Filtered++
+			if filteredReasons != nil {
+				filteredReasons[reason]++
+			}
 			continue
 		}
 		pending = &roundTripPending{

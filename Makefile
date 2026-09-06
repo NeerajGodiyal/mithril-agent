@@ -145,6 +145,7 @@ verify-source:
 	      -o -name 'go.mod' -o -name 'go.sum' -o -name 'Cargo.toml' \
 	      -o -name 'Cargo.lock' -o -name '.gitignore' -o -name 'LICENSE*' -o -name 'NOTICE*' \) \
 	    -not -path './.git/*' -not -path './bin/*' \
+	    -not -path './.playwright-cli/*' \
 	    -not -path '*/node_modules/*' -not -path '*/target/*' \
 	    -not -path './deploy/hermes-research/state/*' \
 	    -not -path './deploy/hermes-research/secrets/*' \
@@ -183,6 +184,7 @@ manifest:
 	     -o -name 'go.mod' -o -name 'go.sum' -o -name 'Cargo.toml' \
 	     -o -name 'Cargo.lock' -o -name '.gitignore' -o -name 'LICENSE*' -o -name 'NOTICE*' \) \
 	   -not -path './.git/*' -not -path './bin/*' \
+	   -not -path './.playwright-cli/*' \
 	   -not -path '*/node_modules/*' -not -path '*/target/*' \
 	   -not -path './deploy/hermes-research/state/*' \
 	   -not -path './deploy/hermes-research/secrets/*' \

@@ -18,6 +18,7 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - run: make verify-source
+      - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/hermes-research -p 'test_*.py'
       - run: make test
       - run: make test-route-guard
       - run: make build

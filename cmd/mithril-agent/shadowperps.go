@@ -24,7 +24,7 @@ import (
 
 const (
 	shadowPerpsTapeVersion     uint32 = 4
-	shadowPerpsStatusVersion   uint32 = 4
+	shadowPerpsStatusVersion   uint32 = 5
 	shadowPerpsMaxFrames              = 1_500
 	shadowPerpsMaxFileBytes    int64  = 16 << 20
 	shadowPerpsModel                  = "hyperliquid_causal_sampled_context_stress_v4"
@@ -168,6 +168,17 @@ func runShadowPerpsPaperWith(
 	}
 	runCtx, cancel := context.WithTimeout(ctx, *duration)
 	defer cancel()
+	episode, err := beginShadowPerpsEpisode(*stateDir, shadowPerpsEpisodeConfig{
+		Environment: environment, Symbols: symbols, RiskArm: arm, Collateral: collateral,
+		Cadence: *cadence, Duration: *duration, Archived: *archiveDir != "", Once: *once,
+	}, now().UTC())
+	if err != nil {
+		return err
+	}
+	publishQualification := false
+	defer func() {
+		returnErr = errors.Join(returnErr, episode.finish(*stateDir, now().UTC(), publishQualification && returnErr == nil))
+	}()
 	reader, err := newReader(environment)
 	if err != nil {
 		return err
@@ -193,7 +204,6 @@ func runShadowPerpsPaperWith(
 	}
 
 	startedAt := now().UTC()
-	publishQualification := false
 	if *archiveDir != "" {
 		if err := prepareShadowPerpsRun(*stateDir, *archiveDir, startedAt); err != nil {
 			return err
@@ -331,6 +341,9 @@ func prepareShadowPerpsRun(stateDir, archiveDir string, startedAt time.Time) err
 	if err := preserveCompletedShadowPerpsTapes(stateDir); err != nil {
 		return err
 	}
+	if err := recoverCompletedShadowPerpsStatuses(stateDir, publishedDir); err != nil {
+		return err
+	}
 	target := filepath.Join(archiveDir, startedAt.Format("20060102T150405.000000000Z"))
 	if err := securefile.RenameNoReplace(stateDir, target); err != nil {
 		return fmt.Errorf("archive previous perps paper run: %w", err)
@@ -365,10 +378,32 @@ func publishShadowPerpsStatuses(stateDir, publishedDir string, symbols []perpspa
 			return fmt.Errorf("read %s published paper status: %w", symbol, err)
 		}
 		var snapshot paperstatus.Snapshot
-		if err := strictjson.Decode(raw, &snapshot); err != nil || paperstatus.ValidateSnapshot(snapshot) != nil {
+		if err := strictjson.Decode(raw, &snapshot); err != nil || paperstatus.ValidateSnapshot(snapshot) != nil ||
+			!shadowPerpsSnapshotMatchesSymbol(snapshot, symbol) {
 			return fmt.Errorf("validate %s published paper status", symbol)
 		}
-		statuses[symbol] = raw
+		publishedPath := filepath.Join(publishedDir, name)
+		previousRaw, err := securefile.ReadPrivate(publishedPath, shadowPerpsMaxFileBytes)
+		if err == nil {
+			var previous paperstatus.Snapshot
+			if strictjson.Decode(previousRaw, &previous) != nil || paperstatus.ValidateSnapshot(previous) != nil ||
+				!shadowPerpsSnapshotMatchesSymbol(previous, symbol) {
+				// A self-contained terminal snapshot can safely replace a corrupt
+				// prior projection; a live snapshot cannot discard unknown evidence.
+				if _, complete := paperstatus.LatestCompletedSnapshot(snapshot); !complete {
+					return fmt.Errorf("preserve %s completed paper status", symbol)
+				}
+			} else if paperstatus.PreserveLatestCompleted(&snapshot, previous) != nil {
+				return fmt.Errorf("preserve %s completed paper status", symbol)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("read previous %s published paper status: %w", symbol, err)
+		}
+		encoded, err := paperstatus.EncodeSnapshot(snapshot)
+		if err != nil {
+			return fmt.Errorf("encode %s published paper status", symbol)
+		}
+		statuses[symbol] = encoded
 	}
 	for _, symbol := range symbols {
 		name := strings.ToLower(string(symbol)) + "-paper-status.json"
@@ -378,6 +413,97 @@ func publishShadowPerpsStatuses(stateDir, publishedDir string, symbols []perpspa
 		}
 	}
 	return nil
+}
+
+func shadowPerpsSnapshotMatchesSymbol(snapshot paperstatus.Snapshot, symbol perpspaper.Symbol) bool {
+	expectedMarket := string(symbol) + "-PERP"
+	if snapshot.Summary != nil && snapshot.Summary.Market != expectedMarket {
+		return false
+	}
+	completed, ok := paperstatus.LatestCompletedSnapshot(snapshot)
+	return !ok || completed.Summary.Market == expectedMarket
+}
+
+func recoverCompletedShadowPerpsStatuses(stateDir, publishedDir string) error {
+	symbols := make([]perpspaper.Symbol, 0, 3)
+	for _, symbol := range [...]perpspaper.Symbol{perpspaper.SOL, perpspaper.BTC, perpspaper.ETH} {
+		name := strings.ToLower(string(symbol)) + "-paper-status.json"
+		raw, err := securefile.ReadPrivate(filepath.Join(stateDir, name), shadowPerpsMaxFileBytes)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read previous %s completed paper status: %w", symbol, err)
+		}
+		var current paperstatus.Snapshot
+		if strictjson.Decode(raw, &current) != nil || paperstatus.ValidateSnapshot(current) != nil {
+			continue
+		}
+		if !shadowPerpsSnapshotMatchesSymbol(current, symbol) {
+			return fmt.Errorf("validate previous %s completed paper status", symbol)
+		}
+		completed, ok := recoverableCompletedShadowPerpsStatus(current)
+		if !ok {
+			continue
+		}
+
+		previousRaw, err := securefile.ReadPrivate(filepath.Join(publishedDir, name), shadowPerpsMaxFileBytes)
+		if errors.Is(err, os.ErrNotExist) {
+			symbols = append(symbols, symbol)
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read published %s completed paper status: %w", symbol, err)
+		}
+		var previous paperstatus.Snapshot
+		if strictjson.Decode(previousRaw, &previous) != nil || paperstatus.ValidateSnapshot(previous) != nil ||
+			!shadowPerpsSnapshotMatchesSymbol(previous, symbol) {
+			symbols = append(symbols, symbol)
+			continue
+		}
+		prior, ok := paperstatus.LatestCompletedSnapshot(previous)
+		if !ok || prior.ObservedAt.Before(completed.ObservedAt) {
+			symbols = append(symbols, symbol)
+			continue
+		}
+		if prior.ObservedAt.Equal(completed.ObservedAt) {
+			priorDigest, priorErr := paperstatus.CompletedSnapshotSHA256(prior)
+			completedDigest, completedErr := paperstatus.CompletedSnapshotSHA256(completed)
+			if priorErr != nil || completedErr != nil || priorDigest != completedDigest {
+				return fmt.Errorf("recover %s completed paper status: conflicting receipts", symbol)
+			}
+		}
+	}
+	if len(symbols) == 0 {
+		return nil
+	}
+	if err := publishShadowPerpsStatuses(stateDir, publishedDir, symbols); err != nil {
+		return fmt.Errorf("recover completed paper statuses: %w", err)
+	}
+	return nil
+}
+
+func recoverableCompletedShadowPerpsStatus(snapshot paperstatus.Snapshot) (paperstatus.CompletedSnapshot, bool) {
+	completed, ok := paperstatus.LatestCompletedSnapshot(snapshot)
+	if !ok || snapshot.Summary == nil || len(snapshot.Events) == 0 ||
+		!snapshot.ObservedAt.Equal(completed.ObservedAt) {
+		return paperstatus.CompletedSnapshot{}, false
+	}
+	event := snapshot.Events[len(snapshot.Events)-1]
+	if event.Kind != paperstatus.KindExperimentDone || event.ID != completed.EventID {
+		return paperstatus.CompletedSnapshot{}, false
+	}
+	candidate := paperstatus.CompletedSnapshot{
+		ObservedAt: snapshot.ObservedAt,
+		EventID:    event.ID,
+		Summary:    *snapshot.Summary,
+	}
+	candidateDigest, candidateErr := paperstatus.CompletedSnapshotSHA256(candidate)
+	completedDigest, completedErr := paperstatus.CompletedSnapshotSHA256(completed)
+	if candidateErr != nil || completedErr != nil || candidateDigest != completedDigest {
+		return paperstatus.CompletedSnapshot{}, false
+	}
+	return completed, true
 }
 
 func pruneShadowPerpsArchives(archiveDir string, keep int) error {
@@ -435,34 +561,71 @@ func finalizeShadowPerpsRun(stateDir string, symbols []perpspaper.Symbol, endedA
 		var walkForward *perpspaper.WalkForwardQualification
 		var selection *shadowPerpsPlanReceipt
 		var outcomeTapeSHA256 string
+		var finalTapeSHA256 string
+		if tape.Version == shadowPerpsTapeVersion {
+			_, finalTapeSHA256, err = canonicalShadowPerpsTape(tape)
+			if err != nil {
+				result = errors.Join(result, fmt.Errorf("hash %s final paper tape: %w", symbol, err))
+				continue
+			}
+		}
 		if qualification.Frames >= qualification.MinimumFrames {
 			sealedPath, sealErr := sealShadowPerpsTape(stateDir, tape)
 			if sealErr != nil {
-				researchResult = errors.Join(researchResult, fmt.Errorf("preserve %s paper tape: %w", symbol, sealErr))
+				preserveErr := fmt.Errorf("preserve %s paper tape: %w", symbol, sealErr)
+				if tape.Version == shadowPerpsTapeVersion {
+					result = errors.Join(result, preserveErr)
+					continue
+				}
+				researchResult = errors.Join(researchResult, preserveErr)
 			} else {
-				walkForward, err = qualifyShadowPerpsCorpus(stateDir, tape.Config)
-				if err != nil {
-					researchResult = errors.Join(researchResult, fmt.Errorf("multi-tape qualify %s paper corpus: %w", symbol, err))
-					walkForward = nil
-				} else if walkForward != nil {
-					outcomeTapeSHA256 = shadowPerpsOutcomeTapeSHA256(
-						tape.Config, strings.TrimSuffix(filepath.Base(sealedPath), ".json"), walkForward,
+				finalTapeSHA256 = strings.TrimSuffix(filepath.Base(sealedPath), ".json")
+			}
+		}
+		if tape.Version == shadowPerpsTapeVersion {
+			walkForward, _, _, err = evaluateAndRecordShadowPerpsFinalization(
+				stateDir, tape, finalTapeSHA256, replay, qualification, endedAt.UTC(),
+			)
+			if err != nil {
+				result = errors.Join(result, fmt.Errorf("evaluate and record %s finalization: %w", symbol, err))
+				continue
+			}
+		} else if qualification.Frames >= qualification.MinimumFrames && finalTapeSHA256 != "" {
+			walkForward, err = qualifyShadowPerpsCorpus(stateDir, tape.Config)
+			if err != nil {
+				qualifyErr := fmt.Errorf("multi-tape qualify %s paper corpus: %w", symbol, err)
+				researchResult = errors.Join(researchResult, qualifyErr)
+				walkForward = nil
+			}
+		}
+		if walkForward != nil {
+			outcomeTapeSHA256 = shadowPerpsOutcomeTapeSHA256(tape.Config, finalTapeSHA256, walkForward)
+			if err := writeShadowPerpsJSON(filepath.Join(stateDir, name+"-walk-forward.json"), walkForward); err != nil {
+				researchResult = errors.Join(researchResult, err)
+				walkForward = nil
+			} else {
+				if walkForward.EligibleForPaperExperiment && walkForward.Candidate != nil {
+					receipt, selectErr := selectQualifiedShadowPerpsPlan(
+						stateDir, tape.Config.Environment, tape.Config.PlanSHA256, *walkForward, endedAt,
 					)
-					if err := writeShadowPerpsJSON(filepath.Join(stateDir, name+"-walk-forward.json"), walkForward); err != nil {
-						researchResult = errors.Join(researchResult, err)
-						walkForward = nil
-					} else if walkForward.EligibleForPaperExperiment && walkForward.Candidate != nil {
-						receipt, selectErr := selectQualifiedShadowPerpsPlan(
-							stateDir, tape.Config.Environment, tape.Config.PlanSHA256, *walkForward, endedAt,
-						)
-						if selectErr != nil {
-							researchResult = errors.Join(researchResult, fmt.Errorf("select %s next paper plan: %w", symbol, selectErr))
-						} else {
-							selection = &receipt
-							if err := writeShadowPerpsJSON(filepath.Join(stateDir, name+"-plan-selection.json"), receipt); err != nil {
-								researchResult = errors.Join(researchResult, err)
-							}
+					if selectErr != nil {
+						researchResult = errors.Join(researchResult, fmt.Errorf("select %s next paper plan: %w", symbol, selectErr))
+					} else {
+						selection = &receipt
+						if err := writeShadowPerpsJSON(filepath.Join(stateDir, name+"-plan-selection.json"), receipt); err != nil {
+							researchResult = errors.Join(researchResult, err)
 						}
+					}
+				}
+				if walkForward.TrainingLeader != nil {
+					advisory, advisoryErr := perpspaper.EvaluateOneFrameExecutionDelay(
+						walkForward.Config, tape.Frames, walkForward.InputSHA256,
+						finalTapeSHA256, *walkForward.TrainingLeader,
+					)
+					if advisoryErr == nil {
+						_, _ = writeShadowPerpsExecutionDelayAdvisory(
+							stateDir, symbol, *walkForward.TrainingLeader, advisory,
+						)
 					}
 				}
 			}
@@ -892,6 +1055,23 @@ func shadowPerpsCurrent(
 	if state.Position != nil {
 		leverageBPS = state.Position.LeverageBPS
 	}
+	priceMicros := replay.LastMarkPriceMicros
+	decisionReason := "watching"
+	decisionSignalKind := ""
+	decisionSignalBPS, decisionThresholdBPS := int64(0), int64(0)
+	minimumResearchFrames := uint64(0)
+	if len(replay.Results) > 0 {
+		last := replay.Results[len(replay.Results)-1]
+		reason, err := shadowPerpsDecisionReason(last)
+		if err != nil {
+			return "", paperstatus.CurrentSummary{}, err
+		}
+		decisionReason = reason
+		decisionSignalKind = last.Decision.SignalKind
+		decisionSignalBPS = last.Decision.ChangeBPS
+		decisionThresholdBPS = last.Decision.ThresholdBPS
+		minimumResearchFrames = perpspaper.QualificationMinimumFrames
+	}
 	current := fmt.Sprintf(
 		"PAPER · %s perpetuals · %s\nTotal paper value now: %s\nResult this run: %s\nFunding: %s · Fees: %s",
 		config.Symbol, position, formatPerpsUSD(projectedEquity),
@@ -901,7 +1081,7 @@ func shadowPerpsCurrent(
 	if insolvent {
 		current += "\nSimulated deficit after liquidation: " + formatPerpsUSD(state.EquityMicros)
 	}
-	stateName, decisionReason := "watching", "watching"
+	stateName := "watching"
 	if insolvent {
 		stateName, decisionReason = "paused", "risk_halt"
 	}
@@ -916,16 +1096,47 @@ func shadowPerpsCurrent(
 		RealizedMicros:      state.BalanceMicros - int64(state.StartingCollateralMicros),
 		UnrealizedMicros:    state.UnrealizedPnLMicros, FeesMicros: int64(state.FeesPaidMicros),
 		FundingTracked: true, FundingMicros: state.FundingPnLMicros,
-		TurnoverMicros: turnover, Checks: checks, Signals: signals, Trades: trades, PriceMicros: state.LastMarkPriceMicros,
+		TurnoverMicros: turnover, Checks: checks, Signals: signals, Trades: trades, PriceMicros: priceMicros,
 		State: stateName, Strategy: shadowPerpsCurrentStrategy(config),
 		DecisionSource: shadowPerpsDecisionSource(config), ProposalSource: shadowPerpsProposalSource(config),
 		RunPlanSHA256:  config.PlanSHA256,
-		DecisionReason: decisionReason, RiskHalted: insolvent,
+		DecisionReason: decisionReason, DecisionSignalKind: decisionSignalKind,
+		DecisionSignalBPS: decisionSignalBPS, DecisionThresholdBPS: decisionThresholdBPS,
+		MinimumResearchFrames: minimumResearchFrames,
+		RiskHalted:            insolvent,
 	}, nil
 }
 
+func shadowPerpsDecisionReason(result perpspaper.TapeResult) (string, error) {
+	switch result.Action {
+	case "flat":
+		switch result.Decision.SignalKind {
+		case perpspaper.SignalHistoryWarmup:
+			return "collecting_history", nil
+		case perpspaper.SignalBreakoutRange:
+			return "inside_breakout_range", nil
+		default:
+			return "action_level_not_met", nil
+		}
+	case "marked":
+		return "watching", nil
+	case "below_minimum_lot":
+		return "minimum_order_size", nil
+	case "no_visible_fill", "waiting_for_full_close":
+		return "visible_liquidity_limit", nil
+	case "slippage_limit":
+		return "slippage_limit", nil
+	case "opened", "closed":
+		return "order_filled", nil
+	case "liquidated":
+		return "liquidation", nil
+	default:
+		return "", fmt.Errorf("unsupported perps paper action %q", result.Action)
+	}
+}
+
 func shadowPerpsCurrentStrategy(config shadowPerpsTapeConfig) string {
-	if config.DecisionMode == shadowPerpsDecisionSelected {
+	if config.DecisionMode == shadowPerpsDecisionSelected || config.DecisionMode == shadowPerpsDecisionProposal {
 		return string(config.Strategy)
 	}
 	return "fixed"
@@ -935,7 +1146,7 @@ func shadowPerpsDecisionSource(config shadowPerpsTapeConfig) string {
 	if !validLowerSHA256(config.PlanSHA256) {
 		return ""
 	}
-	if config.DecisionMode == shadowPerpsDecisionSelected {
+	if config.DecisionMode == shadowPerpsDecisionSelected || config.DecisionMode == shadowPerpsDecisionProposal {
 		return "selected_paper_plan"
 	}
 	return "legacy_fixed_policy"
@@ -947,6 +1158,9 @@ func shadowPerpsProposalSource(config shadowPerpsTapeConfig) string {
 	}
 	if config.DecisionMode == shadowPerpsDecisionSelected {
 		return "deterministic_search"
+	}
+	if config.DecisionMode == shadowPerpsDecisionProposal {
+		return "frozen_proposal"
 	}
 	return "built_in"
 }
@@ -967,6 +1181,9 @@ func shadowPerpsOutcomeTapeSHA256(
 	sealedSHA256 string,
 	walkForward *perpspaper.WalkForwardQualification,
 ) string {
+	if config.DecisionMode == shadowPerpsDecisionProposal && validLowerSHA256(sealedSHA256) {
+		return sealedSHA256
+	}
 	if config.DecisionMode != shadowPerpsDecisionSelected || !validLowerSHA256(sealedSHA256) ||
 		walkForward == nil || len(walkForward.Tapes) < 2 ||
 		walkForward.Tapes[len(walkForward.Tapes)-1].ContentSHA256 != sealedSHA256 {
@@ -1062,7 +1279,7 @@ func readShadowPerpsTape(path string, config shadowPerpsTapeConfig) (shadowPerps
 		stored.Config.PlanSHA256 == "" && stored.Config.QualificationInputSHA256 == ""
 	current := stored.Version == want.Version && stored.AccountingModel == want.AccountingModel &&
 		(stored.Config.DecisionMode == shadowPerpsDecisionLegacy ||
-			stored.Config.DecisionMode == shadowPerpsDecisionSelected) &&
+			stored.Config.DecisionMode == shadowPerpsDecisionSelected || stored.Config.DecisionMode == shadowPerpsDecisionProposal) &&
 		validLowerSHA256(stored.Config.PlanSHA256)
 	if (!legacy && !current) || !stored.PaperOnly || stored.ExecutionEnabled ||
 		stored.Config != config || len(stored.Frames) == 0 || len(stored.Frames) > shadowPerpsMaxFrames {
@@ -1079,7 +1296,7 @@ func replayShadowPerpsTape(config shadowPerpsTapeConfig, frames []perpspaper.Tap
 	switch config.DecisionMode {
 	case "", shadowPerpsDecisionLegacy:
 		return perpspaper.ReplayTape(config.replayConfig(), frames)
-	case shadowPerpsDecisionSelected:
+	case shadowPerpsDecisionSelected, shadowPerpsDecisionProposal:
 		return perpspaper.ReplaySelected(config.replayConfig(), frames, perpspaper.QualificationKey{
 			RiskArm: config.RiskArm, Strategy: config.Strategy,
 		})

@@ -1,0 +1,37 @@
+_config_version: 39
+
+model:
+  provider: openai-codex
+  default: gpt-5.6-terra
+
+# This phase receives host-verified context in its one prompt, not global memory.
+memory:
+  memory_enabled: false
+  user_profile_enabled: false
+  write_approval: true
+  nudge_interval: 0
+skills:
+  creation_nudge_interval: 0
+  guard_agent_created: true
+  write_approval: true
+auxiliary:
+  background_review:
+    enabled: false
+agent:
+  reasoning_effort: high
+security:
+  allow_private_urls: false
+  redact_secrets: true
+  allow_lazy_installs: false
+  tirith_enabled: false
+  tirith_fail_open: false
+cron:
+  allow_agent_scheduling: false
+platform_toolsets:
+  cli: [none]
+mcp_servers: {}
+plugins:
+  enabled: []
+telemetry:
+  shared_metrics:
+    enabled: false

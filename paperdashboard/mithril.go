@@ -12,10 +12,12 @@ import (
 const mithrilEvidenceVersion = uint32(1)
 
 type MithrilEvidence struct {
-	Version             uint32    `json:"version"`
-	CheckedAt           time.Time `json:"checked_at"`
-	AvailableAtCheck    bool      `json:"available_at_check"`
-	MaxRecordAgeSeconds uint64    `json:"max_record_age_seconds"`
+	Version   uint32    `json:"version"`
+	CheckedAt time.Time `json:"checked_at"`
+	// AvailableAtCheck covers integrity and recent local ingestion, not parity
+	// between the recorded cursor and the current chain root.
+	AvailableAtCheck    bool   `json:"available_at_check"`
+	MaxRecordAgeSeconds uint64 `json:"max_record_age_seconds"`
 }
 
 func (s *Server) EnableMithrilEvidence(path string) error {

@@ -41,26 +41,33 @@ type MarketResearch struct {
 	AvailabilityBPS          uint16            `json:"availability_bps"`
 	MedianRouteCostBPS       uint16            `json:"median_route_cost_bps,omitempty"`
 	P95RouteCostBPS          uint16            `json:"p95_route_cost_bps,omitempty"`
+	MedianRouteCostLimitBPS  uint16            `json:"median_route_cost_limit_bps"`
+	P95RouteCostLimitBPS     uint16            `json:"p95_route_cost_limit_bps"`
 	MedianQuoteLatencyMillis uint32            `json:"median_quote_latency_millis,omitempty"`
 	P95QuoteLatencyMillis    uint32            `json:"p95_quote_latency_millis,omitempty"`
 	FailureCounts            map[string]uint64 `json:"failure_counts"`
 	ReadyForPaperCheck       bool              `json:"ready_for_paper_check"`
+	PaperCheckGateReasons    []string          `json:"paper_check_gate_reasons,omitempty"`
 	PaperCheck               *MarketPaperCheck `json:"paper_check,omitempty"`
 	PaperCheckCurrent        bool              `json:"paper_check_current,omitempty"`
 }
 
 // MarketPaperCheck is the public, precision-safe view of one short replay.
 type MarketPaperCheck struct {
-	CheckedAt                        time.Time `json:"checked_at"`
-	Through                          time.Time `json:"through"`
-	Outcome                          string    `json:"outcome"`
-	TrainingCoverageBPS              uint16    `json:"training_coverage_bps"`
-	HoldoutCoverageBPS               uint16    `json:"holdout_coverage_bps"`
-	HoldoutAfterCostNetReturnMicros  int64     `json:"holdout_after_cost_net_return_micros,string"`
-	HoldoutAfterCostVersusHoldMicros int64     `json:"holdout_after_cost_versus_hold_micros,string"`
-	StressAfterCostNetReturnMicros   int64     `json:"stress_after_cost_net_return_micros,string"`
-	StressAfterCostVersusHoldMicros  int64     `json:"stress_after_cost_versus_hold_micros,string"`
-	Reasons                          []string  `json:"reasons"`
+	Version                          uint32                                           `json:"version,omitempty"`
+	CheckedAt                        time.Time                                        `json:"checked_at"`
+	Through                          time.Time                                        `json:"through"`
+	Outcome                          string                                           `json:"outcome"`
+	TrainingCoverageBPS              uint16                                           `json:"training_coverage_bps"`
+	HoldoutCoverageBPS               uint16                                           `json:"holdout_coverage_bps"`
+	HoldoutAfterCostNetReturnMicros  int64                                            `json:"holdout_after_cost_net_return_micros,string"`
+	HoldoutAfterCostVersusHoldMicros int64                                            `json:"holdout_after_cost_versus_hold_micros,string"`
+	StressAfterCostNetReturnMicros   int64                                            `json:"stress_after_cost_net_return_micros,string"`
+	StressAfterCostVersusHoldMicros  int64                                            `json:"stress_after_cost_versus_hold_micros,string"`
+	CandidatesEvaluated              uint64                                           `json:"candidates_evaluated,omitempty"`
+	TrainingRejections               marketadmission.DashboardPaperTrainingRejections `json:"training_rejections,omitzero"`
+	TrainingActivity                 *marketadmission.DashboardPaperTrainingActivity  `json:"training_activity,omitempty"`
+	Reasons                          []string                                         `json:"reasons"`
 }
 
 type marketAdmissionProjection struct {
@@ -139,8 +146,10 @@ func readMarketAdmission(path string, now time.Time) ([]MarketResearch, error) {
 		return nil, errors.New("market admission projection is invalid")
 	}
 	result := make([]MarketResearch, 0, len(projection.Markets))
+	thresholds := marketadmission.DefaultThresholds()
 	for _, status := range projection.Markets {
 		diagnostic := status.Diagnostic
+		gateReasons := diagnostic.ProvisionalPaperCheckReasons()
 		fresh := !status.UpdatedAt.After(now.UTC().Add(2*time.Minute)) &&
 			!status.UpdatedAt.Before(now.UTC().Add(-marketAdmissionFreshness))
 		failures := make(map[string]uint64, len(diagnostic.FailureCounts))
@@ -150,6 +159,7 @@ func readMarketAdmission(path string, now time.Time) ([]MarketResearch, error) {
 		var check *MarketPaperCheck
 		if status.PaperCheck != nil {
 			check = &MarketPaperCheck{
+				Version:   status.PaperCheck.Version,
 				CheckedAt: status.PaperCheck.CheckedAt, Through: status.PaperCheck.Through,
 				Outcome:                          status.PaperCheck.Outcome,
 				TrainingCoverageBPS:              status.PaperCheck.TrainingCoverageBPS,
@@ -158,6 +168,9 @@ func readMarketAdmission(path string, now time.Time) ([]MarketResearch, error) {
 				HoldoutAfterCostVersusHoldMicros: status.PaperCheck.HoldoutAfterCostVersusHoldMicros,
 				StressAfterCostNetReturnMicros:   status.PaperCheck.StressAfterCostNetReturnMicros,
 				StressAfterCostVersusHoldMicros:  status.PaperCheck.StressAfterCostVersusHoldMicros,
+				CandidatesEvaluated:              status.PaperCheck.CandidatesEvaluated,
+				TrainingRejections:               status.PaperCheck.TrainingRejections,
+				TrainingActivity:                 status.PaperCheck.TrainingActivity,
 				Reasons:                          append([]string(nil), status.PaperCheck.Reasons...),
 			}
 		}
@@ -167,10 +180,13 @@ func readMarketAdmission(path string, now time.Time) ([]MarketResearch, error) {
 			ExpectedBuckets: diagnostic.ExpectedBuckets, ObservedBuckets: diagnostic.ObservedBuckets,
 			AvailableBuckets: diagnostic.AvailableBuckets, AvailabilityBPS: diagnostic.AvailabilityBPS,
 			MedianRouteCostBPS: diagnostic.MedianRouteCostBPS, P95RouteCostBPS: diagnostic.P95RouteCostBPS,
+			MedianRouteCostLimitBPS:  thresholds.MedianRouteCostBPS,
+			P95RouteCostLimitBPS:     thresholds.P95RouteCostBPS,
 			MedianQuoteLatencyMillis: diagnostic.MedianQuoteLatencyMillis,
 			P95QuoteLatencyMillis:    diagnostic.P95QuoteLatencyMillis,
 			FailureCounts:            failures,
-			ReadyForPaperCheck:       fresh && diagnostic.ReadyForProvisionalPaperCheck(),
+			ReadyForPaperCheck:       fresh && len(gateReasons) == 0,
+			PaperCheckGateReasons:    append([]string(nil), gateReasons...),
 			PaperCheck:               check,
 			PaperCheckCurrent:        status.PaperCheck != nil && status.PaperCheck.Current(now),
 		})

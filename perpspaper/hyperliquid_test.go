@@ -170,11 +170,13 @@ func TestDecisionAndVisibleBookReplayAreDeterministic(t *testing.T) {
 		t.Fatal(err)
 	}
 	second, err := Decide(SOL, Balanced, tape)
-	if err != nil || first != second || first.Direction != Direction(Long) || first.ChangeBPS != 100 {
+	if err != nil || first != second || first.Direction != Direction(Long) ||
+		first.SignalKind != SignalTwoCandleMove || first.ChangeBPS != 100 || first.ThresholdBPS != 50 {
 		t.Fatalf("decisions first=%+v second=%+v err=%v", first, second, err)
 	}
 	flat, err := Decide(SOL, Conservative, []Candle{{OpenTime: 1, CloseTime: 1, Symbol: SOL, Close: "100"}, {OpenTime: 2, CloseTime: 2, Symbol: SOL, Close: "100.50"}})
-	if err != nil || flat.Direction != Flat {
+	if err != nil || flat.Direction != Flat || flat.SignalKind != SignalTwoCandleMove ||
+		flat.ChangeBPS != 50 || flat.ThresholdBPS != 100 {
 		t.Fatalf("flat decision = %+v, %v", flat, err)
 	}
 
@@ -208,7 +210,10 @@ func TestDecisionAndVisibleBookReplayAreDeterministic(t *testing.T) {
 		t.Fatal(err)
 	}
 	replayB, err := ReplayTape(config, frames)
-	if err != nil || !reflect.DeepEqual(replayA, replayB) || replayA.Results[0].Fill == nil || replayA.Results[0].Fill.Complete || replayA.State.Position == nil || replayA.State.Position.Quantity != 1_500_000_000 {
+	if err != nil || !reflect.DeepEqual(replayA, replayB) || replayA.Results[0].Fill == nil ||
+		replayA.Results[0].Fill.Complete || replayA.Results[0].MarkPriceMicros != 101_000_000 ||
+		replayA.LastMarkPriceMicros != 101_000_000 || replayA.State.Position == nil ||
+		replayA.State.Position.Quantity != 1_500_000_000 {
 		t.Fatalf("replays A=%+v B=%+v err=%v", replayA, replayB, err)
 	}
 	if _, err := Replay(replayA.Records); err != nil {

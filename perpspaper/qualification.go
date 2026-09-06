@@ -11,6 +11,8 @@ import (
 const (
 	QualificationVersion        uint32 = 1
 	QualificationMinimumFrames         = 24
+	QualificationConfidence            = "not_estimated_insufficient_independent_episodes"
+	QualificationExecutionDelay        = "one_frame_execution_delay_v1"
 	qualificationMaxDrawdownBPS        = 2_000
 	qualificationStressRule            = "double_fees_v1"
 )
@@ -63,6 +65,29 @@ type QualificationEvidence struct {
 	Eligible         bool             `json:"eligible"`
 	IneligibleReason string           `json:"ineligible_reason,omitempty"`
 	Score            *TournamentScore `json:"score,omitempty"`
+}
+
+// ReplayBehavior counts actual engine decisions and actions on recorded frames.
+// It does not count evaluator-only terminal closes or imply real venue fills.
+type ReplayBehavior struct {
+	Frames           uint64            `json:"frames"`
+	ActionCounts     map[string]uint64 `json:"action_counts"`
+	SignalKindCounts map[string]uint64 `json:"signal_kind_counts"`
+}
+
+// SummarizeFixedPlan describes the same normal-fee fixed-plan replay used by
+// EvaluateFixedPlan. An empty strategy uses the legacy fixed decision rule.
+func SummarizeFixedPlan(config QualificationConfig, key QualificationKey, frames []TapeFrame) (ReplayBehavior, error) {
+	replay, err := replayFixedPlan(config.replayConfig(key.RiskArm), frames, key)
+	if err != nil {
+		return ReplayBehavior{}, err
+	}
+	behavior := ReplayBehavior{Frames: uint64(len(replay.Results)), ActionCounts: make(map[string]uint64), SignalKindCounts: make(map[string]uint64)}
+	for _, result := range replay.Results {
+		behavior.ActionCounts[result.Action]++
+		behavior.SignalKindCounts[result.Decision.SignalKind]++
+	}
+	return behavior, nil
 }
 
 // EvaluateFixedPlan scores one frozen paper decision plan on the whole tape,
@@ -215,24 +240,39 @@ func evaluateTournamentStrategy(config ReplayConfig, frames []TapeFrame, strateg
 	return scoreTournamentStrategy(config, frames[len(frames)-1].Book, strategy, replay)
 }
 
-func evaluateFixedPlan(config ReplayConfig, frames []TapeFrame, key QualificationKey) (TournamentResult, error) {
-	if config.RiskArm != key.RiskArm {
-		return TournamentResult{}, errors.New("fixed plan risk arm does not match replay configuration")
-	}
+func evaluateTournamentStrategyOneFrameDelay(config ReplayConfig, frames []TapeFrame, strategy Strategy) (TournamentResult, error) {
 	causal, err := tournamentCausalFrames(config, frames)
 	if err != nil {
 		return TournamentResult{}, err
 	}
-	var replay TapeReplay
-	if key.Strategy == "" {
-		replay, err = replayTape(config, causal, Decide)
-	} else {
-		replay, err = replayTournamentStrategy(config, causal, 0, key.Strategy)
-	}
+	replay, err := replayTournamentStrategyOneFrameDelay(config, causal, 0, strategy)
 	if err != nil {
 		return TournamentResult{}, err
 	}
-	return scoreTournamentStrategy(config, causal[len(causal)-1].Book, key.Strategy, replay)
+	return scoreTournamentStrategy(config, frames[len(frames)-1].Book, strategy, replay)
+}
+
+func evaluateFixedPlan(config ReplayConfig, frames []TapeFrame, key QualificationKey) (TournamentResult, error) {
+	replay, err := replayFixedPlan(config, frames, key)
+	if err != nil {
+		return TournamentResult{}, err
+	}
+	// Causal expansion changes only candle prefixes, never the terminal book.
+	return scoreTournamentStrategy(config, frames[len(frames)-1].Book, key.Strategy, replay)
+}
+
+func replayFixedPlan(config ReplayConfig, frames []TapeFrame, key QualificationKey) (TapeReplay, error) {
+	if config.RiskArm != key.RiskArm {
+		return TapeReplay{}, errors.New("fixed plan risk arm does not match replay configuration")
+	}
+	causal, err := tournamentCausalFrames(config, frames)
+	if err != nil {
+		return TapeReplay{}, err
+	}
+	if key.Strategy == "" {
+		return replayTape(config, causal, Decide)
+	}
+	return replayTournamentStrategy(config, causal, 0, key.Strategy)
 }
 
 func evaluateQualificationHoldout(config ReplayConfig, causal []TapeFrame, split int, strategy Strategy) (TournamentResult, error) {
@@ -256,6 +296,35 @@ func replayTournamentStrategy(config ReplayConfig, causal []TapeFrame, flatPrefi
 			decision.Direction, decision.ChangeBPS = Flat, 0
 		}
 		return decision, err
+	})
+}
+
+// replayTournamentStrategyOneFrameDelay is advisory-only. The authoritative
+// replay remains unchanged: this freezes frame i's decision and lets
+// the existing replay apply funding and marking at frame i+1 before executing
+// that decision against frame i+1's visible book. The last queued decision is
+// intentionally ignored; scoreTournamentStrategy may still close an existing
+// position at the final book as an evaluator-only terminal close.
+func replayTournamentStrategyOneFrameDelay(config ReplayConfig, causal []TapeFrame, flatPrefix int, strategy Strategy) (TapeReplay, error) {
+	frame := 0
+	var pending Decision
+	return replayTape(config, causal, func(symbol Symbol, arm RiskArm, candles []Candle) (Decision, error) {
+		current := frame
+		frame++
+		decision, err := tournamentDecision(strategy, symbol, arm, candles)
+		if err != nil {
+			return Decision{}, err
+		}
+		if current < flatPrefix {
+			decision.Direction, decision.ChangeBPS = Flat, 0
+		}
+		execute := pending
+		pending = decision
+		if current == 0 {
+			execute = decision
+			execute.Direction, execute.ChangeBPS = Flat, 0
+		}
+		return execute, nil
 	})
 }
 

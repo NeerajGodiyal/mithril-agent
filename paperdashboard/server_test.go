@@ -1,6 +1,7 @@
 package paperdashboard
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -43,7 +44,7 @@ func (s *sourceStub) readCount() int {
 func TestAutomationListsOnlyOptionalExperiments(t *testing.T) {
 	if !strings.Contains(appJS, "completedPerps=perpsMarkets.filter") ||
 		!strings.Contains(appJS, "additionalSpots=current.markets.filter(market=>market.optional&&!isPerps(market))") ||
-		!strings.Contains(appJS, "perps recordings are completed") {
+		!strings.Contains(appJS, "perps markets have a saved result") {
 		t.Fatal("paper engine status must separate optional spot observers from perps experiments")
 	}
 	if !strings.Contains(appJS, "retained in the final packet") || strings.Contains(appJS, "unique source'+(packet.sources_checked===1?'':'s')+' checked") {
@@ -83,6 +84,144 @@ func TestOptionalStoppedSpotIsCompletedRatherThanLiveOrPerps(t *testing.T) {
 		!view.Markets[1].Optional || !view.Markets[1].Completed ||
 		view.Markets[1].Ready || view.Markets[1].Fresh {
 		t.Fatalf("stopped optional spot views = %+v", view.Markets)
+	}
+}
+
+func TestPerpsViewKeepsLiveStateSeparateFromLatestCompletedEvidence(t *testing.T) {
+	now := time.Date(2026, 9, 4, 17, 0, 0, 0, time.UTC)
+	completedAt := now.Add(-time.Hour)
+	completed := paperstatus.CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "experimental",
+		PositionDirection: "flat", LeverageBPS: 30_000, FundingTracked: true,
+		ValueUnit: "USD", Day: completedAt.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 101_000_000,
+		HoldBenchmarkMicros: 100_000_000, AccountingTracked: true, RealizedMicros: 1_000_000,
+		Checks: 60, Signals: 2, Trades: 2, State: "watching", Strategy: "fixed",
+		PriceMicros: 99_000_000, DecisionReason: "action_level_not_met",
+		DecisionSignalKind: "two_candle_move", DecisionSignalBPS: 10,
+		DecisionThresholdBPS: 50, MinimumResearchFrames: 24,
+		DecisionSource: "legacy_fixed_policy", ProposalSource: "built_in",
+		RunPlanSHA256: strings.Repeat("b", 64), QualificationTracked: true,
+		QualificationOutcome: "candidate_ready_for_more_paper_testing",
+		QualificationSHA256:  strings.Repeat("c", 64), QualificationTapes: 1,
+		QualificationFrames: 60, QualificationMinimumFrames: 24,
+		QualificationTrainingFrames: 40, QualificationHoldoutFrames: 20,
+		QualificationStrategy: "momentum", QualificationRiskProfile: "balanced",
+		QualificationHoldoutEvaluated: true, QualificationStressEvaluated: true,
+		QualificationHoldoutScored: true, QualificationStressScored: true,
+		QualificationHoldoutMicros: 100_000, QualificationStressMicros: 50_000,
+		QualificationAttempts: []paperstatus.QualificationAttempt{{
+			RiskProfile: "balanced", Strategy: "momentum", NetPnLMicros: 90_000,
+			FeesMicros: 10_000, MaxDrawdownMicros: 25_000, FilledOrders: 2, ClosedPositions: 2,
+		}},
+	}
+	live := &paperstatus.CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "long", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 200_000_000, EquityMicros: 205_000_000,
+		HoldBenchmarkMicros: 201_000_000, Checks: 7, Signals: 1, Trades: 1,
+		State: "watching", Strategy: "fixed", PriceMicros: 105_000_000,
+		DecisionReason: "watching", DecisionSignalKind: "momentum",
+		DecisionSignalBPS: 60, DecisionThresholdBPS: 40, MinimumResearchFrames: 24,
+	}
+	source := &sourceStub{label: "SOL-PERP", snapshot: paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now, Current: "PAPER · Recording", Summary: live,
+		Events: []paperstatus.Event{{
+			ID: strings.Repeat("a", 64), At: completedAt,
+			Kind: paperstatus.KindExperimentDone, Message: "PAPER · Completed",
+		}},
+		LatestCompleted: &paperstatus.CompletedSnapshot{
+			ObservedAt: completedAt, EventID: strings.Repeat("a", 64), Summary: completed,
+		},
+	}}
+	server, err := New([]Source{Optional(source)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return now }
+	view := server.snapshotWithRefresh(true)
+	if len(view.Markets) != 1 {
+		t.Fatalf("markets = %+v", view.Markets)
+	}
+	market := view.Markets[0]
+	if !market.Available || !market.Ready || !market.Fresh || market.Completed ||
+		market.EquityMicros != live.EquityMicros || market.Checks != live.Checks ||
+		market.PriceMicros != live.PriceMicros ||
+		market.DecisionSignalKind != live.DecisionSignalKind ||
+		market.DecisionSignalBPS != live.DecisionSignalBPS ||
+		market.DecisionThresholdBPS != live.DecisionThresholdBPS ||
+		market.MinimumResearchFrames != live.MinimumResearchFrames ||
+		market.QualificationTracked || market.LatestCompleted == nil {
+		t.Fatalf("live market projection = %+v", market)
+	}
+	latest := market.LatestCompleted
+	if latest.ObservedAt == nil || !latest.Completed || latest.Fresh || latest.State != "completed" ||
+		!latest.ObservedAt.Equal(completedAt) || latest.EquityMicros != completed.EquityMicros ||
+		latest.PriceMicros != completed.PriceMicros ||
+		latest.DecisionSignalKind != completed.DecisionSignalKind ||
+		latest.DecisionSignalBPS != completed.DecisionSignalBPS ||
+		latest.DecisionThresholdBPS != completed.DecisionThresholdBPS ||
+		latest.MinimumResearchFrames != completed.MinimumResearchFrames ||
+		!latest.QualificationTracked || latest.QualificationFrames != completed.QualificationFrames ||
+		latest.InstructionSHA256 != "" || latest.LatestCompleted != nil || len(latest.History) != 0 {
+		t.Fatalf("latest completed projection = %+v", latest)
+	}
+	encoded, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)} {
+		if bytes.Contains(encoded, []byte(forbidden)) {
+			t.Fatalf("dashboard exposed private receipt binding %q", forbidden)
+		}
+	}
+	if view.Overview.EquityMicros != 0 {
+		t.Fatalf("optional perps changed spot overview: %+v", view.Overview)
+	}
+
+	source.snapshot.ObservedAt = completedAt
+	source.snapshot.Current = "PAPER · Completed"
+	source.snapshot.Summary = &completed
+	view = server.snapshotWithRefresh(true)
+	if len(view.Markets) != 1 || !view.Markets[0].Completed {
+		t.Fatalf("terminal current result is not completed = %+v", view.Markets)
+	}
+}
+
+func TestPerpsViewRejectsMislabeledCompletedOnlyReceipt(t *testing.T) {
+	now := time.Date(2026, 9, 4, 17, 0, 0, 0, time.UTC)
+	completed := paperstatus.CurrentSummary{
+		Market: "BTC-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+		HoldBenchmarkMicros: 100_000_000, Checks: 10, State: "watching", Strategy: "fixed",
+		QualificationTracked: true, QualificationOutcome: "insufficient_evidence",
+		QualificationSHA256: strings.Repeat("d", 64), QualificationTapes: 1,
+		QualificationFrames: 10, QualificationMinimumFrames: 24,
+	}
+	source := &sourceStub{label: "SOL-PERP", snapshot: paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now, Current: paperstatus.UnconfiguredCurrent,
+		LatestCompleted: &paperstatus.CompletedSnapshot{
+			ObservedAt: now, EventID: strings.Repeat("e", 64), Summary: completed,
+		},
+	}}
+	server, err := New([]Source{Optional(source)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return now }
+	view := server.snapshotWithRefresh(true)
+	if len(view.Markets) != 1 || view.Markets[0].Available || view.Markets[0].LatestCompleted != nil {
+		t.Fatalf("mislabeled completed receipt was exposed: %+v", view.Markets)
+	}
+
+	completed.Market = "SOL-PERP"
+	source.snapshot.LatestCompleted.Summary = completed
+	view = server.snapshotWithRefresh(true)
+	if !view.Markets[0].Available || view.Markets[0].Ready || view.Markets[0].LatestCompleted == nil {
+		t.Fatalf("valid completed-only receipt disappeared: %+v", view.Markets)
 	}
 }
 
@@ -132,6 +271,15 @@ func TestStatusCombinesMarketsWithoutExposingIDsOrHTML(t *testing.T) {
 		}}
 	}
 	sol := build("SOL/USDC", 100, 0, 100_000_000, 101_000_000, 100_500_000)
+	sol.snapshot.Summary.BalancesTracked = true
+	sol.snapshot.Summary.BaseUnits = 750_000_000
+	sol.snapshot.Summary.BaseDecimals = 9
+	sol.snapshot.Summary.BaseAsset = "SOL"
+	sol.snapshot.Summary.QuoteUnits = 20_000_000
+	sol.snapshot.Summary.QuoteDecimals = 6
+	sol.snapshot.Summary.QuoteAsset = "USDC"
+	sol.snapshot.Summary.LiquidFeeReserveLamports = 29_000_000
+	sol.snapshot.Summary.LockedSetupRentLamports = 3_000_000
 	sol.snapshot.DroppedEvents = 3
 	server, err := New([]Source{
 		sol, build("JUP/USDC", 10, 5, 50_000_000, 49_000_000, 48_000_000),
@@ -168,7 +316,12 @@ func TestStatusCombinesMarketsWithoutExposingIDsOrHTML(t *testing.T) {
 		!view.Markets[0].FeeBudgetTracked ||
 		view.Markets[0].RemainingFeeReserveLamports != 29_000_000 ||
 		view.Markets[0].EstimatedFillsRemaining != 290 ||
-		view.Markets[0].DecisionReason != "signal_below_cost_hurdle" {
+		view.Markets[0].DecisionReason != "signal_below_cost_hurdle" ||
+		!view.Markets[0].BalancesTracked || view.Markets[0].BaseUnits != 750_000_000 ||
+		view.Markets[0].QuoteUnits != 20_000_000 || view.Markets[0].BaseAsset != "SOL" ||
+		view.Markets[0].QuoteAsset != "USDC" ||
+		view.Markets[0].LiquidFeeReserveLamports != 29_000_000 ||
+		view.Markets[0].LockedSetupRentLamports != 3_000_000 {
 		t.Fatalf("paper limits = %+v", view.Markets[0])
 	}
 	if view.InstructionsEnabled {
@@ -672,13 +825,13 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for path, wants := range map[string][]string{
-		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "class=\"overview-workspace\"", "id=\"market-switcher\"", "aria-label=\"Live spot markets\"", "id=\"perps-research-title\"", "id=\"perps-research-list\"", "class=\"activity-table\"", "id=\"help-dialog\"", "Quick explanation", "strategy-brief", "/vendor/overclock.svg", "Automation setup", "Markets being checked", "id=\"market-research\"", "Reviewed scope", "WIF, JTO, and PYTH", "Recorded replay and doubled-fee checks run in minutes", "short live checkpoints", "None proves profitability", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Total paper budget", "Smallest order", "Largest order", "Paper loss stop", "saving never restarts Mithril", "About this paper account", "bot's UTC day", "/vendor/lightweight-charts-5.2.1.js", "TradingView Lightweight Charts™"},
+		"/": {"Paper order activity", "Live updates: On", "id=\"refresh-status\"", "role=\"tabpanel\"", "tabindex=\"0\"", "class=\"overview-workspace\"", "id=\"market-switcher\"", "aria-label=\"Live spot markets\"", "id=\"perps-research-title\"", "id=\"perps-research-list\"", "class=\"activity-table\"", "id=\"help-dialog\"", "Quick explanation", "strategy-brief", "/vendor/overclock.svg", "Automation setup", "Markets being checked", "id=\"market-research\"", "Reviewed scope", "WIF, JTO, and PYTH", "Recorded replay and doubled-fee checks run in minutes", "short live checkpoints", "None proves profitability", "Paper money · No real orders", "View recent paper orders", "Plan the next paper experiment", "Paper capital ceiling", "Smallest order", "Largest order", "Paper loss stop", "saving never restarts Mithril", "About this paper account", "bot's UTC day", "/vendor/lightweight-charts-5.2.1.js", "TradingView Lightweight Charts™"},
 		"/app.css": {
 			"@font-face", "/vendor/space-grotesk-latin.woff2", "--canvas: #000", "--green: #86efac", "--line-strong: #353535", "--text: #e7e7e7", "--subtle: #7f7f7f",
 			".tabs {", "position: fixed", ".tab.active", ".brand-logo", ".panel:focus-visible",
 			".metrics {", ".metric:first-child .metric-value", ".help-dialog::backdrop", ".activity-table .activity-list-head", "scrollbar-gutter: stable", ".button.loading::before", "@keyframes spin",
 			"height: calc(100vh - 120px)", ".overview-workspace", "grid-template-columns: minmax(0, 3fr) minmax(330px, 2fr)", "grid-template-columns: minmax(110px, 1fr) 82px max-content", ".market-list-head", ".market-choice.active::before", ".market-chart-stage",
-			".chart-toggle.active", ".chart-canvas { width: 100%; height: 390px", ".chart-data table",
+			".chart-toggle.active", ".chart-canvas { width: 100%; height: 390px", ".chart-data table", ".balance-strip {",
 			".activity-list-head", ".strategy-market-row", ".automation-list-head", "@keyframes view-enter",
 			".market-research-grid", ".market-research-card", ".research-progress::-webkit-progress-value",
 			"@media (max-width: 1023px)", "@media (max-width: 767px)", "@media (max-width: 430px)", "prefers-reduced-motion",
@@ -686,7 +839,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 		"/app.js": {
 			"Live spot account", "Spot account start", "Spot result", "Spot versus holding", "Spot executions",
 			"Completed experiment", "Not selected", "Best completed training attempts", "Training candidate",
-			"Final untouched recording", "separate recordings",
+			"Final held-out recording", "separate recordings",
 			"<button class=\"help\"", "data-help-copy=", "helpDialog.showModal()", "Waiting for fresh prices",
 			"?fresh=1", "Refreshing…", "Updated ✓",
 			"Checked ✓", "Data delayed", "requestSequence",
@@ -695,6 +848,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"Order status", "Placed", "Filled", "Data status", "Delayed", "Restored",
 			"Plan tried to trade once",
 			"Performance", "marketStatus(m,feeBudgetUsed)",
+			"paperBalanceStrip", "Paper cash", "Trading holdings", "Separate SOL for fees", "SOL in setup deposits", "Balance breakdown unavailable", "No fills this run", "Last recorded balances. Waiting for fresh status.",
 			"integer(micros)>0n&&integer(micros)<10000n?'<$0.01'",
 			"amount>=1000000n?2:amount>=10000n?4:6",
 			"marketPriceChart", "LightweightCharts.createChart", "chartSegments", "View exact chart values", "data-chart-action=\"zoom-in\"", "activeChart.remove()", "Bot strategy", "If simply held", "Ahead by ", "Behind by ", "older events omitted", "Proposal ready", "Nous Hermes",
@@ -714,7 +868,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"selectedMarketName", "market-choice", "aria-controls=\"markets\"", "spotMarkets.find(market=>market.name===selectedMarketName)",
 			"if(changed)window.scrollTo(0,0)",
 			"activity-more", "strategy-list-head", "automation-list-head",
-			"renderMarketResearch", "Ready for short check", "Usable in window", "Round-trip cost", "Round-trip time",
+			"renderMarketResearch", "Ready for short check", "Usable in window", "Buy-and-sell cost", "Round-trip time",
 			"Not enough data", "Plan did not pass", "Ready for paper test", "Untouched replay", "Higher-cost replay",
 		},
 	} {
@@ -733,6 +887,9 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 	if strings.Contains(appJS, "chartPaths") || strings.Contains(appJS, "chartDots") ||
 		strings.Contains(appJS, "<polyline") || strings.Contains(appJS, "<svg viewBox=\"0 0 100 56\"") {
 		t.Fatal("custom chart SVG remains in /app.js")
+	}
+	if strings.Contains(appJS, "fraction.length>9") {
+		t.Fatal("asset balances are truncated to zero below nine decimal places")
 	}
 	css := dashboardCSS
 	for _, obsolete := range []string{".chart svg", ".chart-grid", ".chart-paper", ".chart-hold", ".chart-market", ".chart-hit", ".coverage-ring", ".has-visual"} {

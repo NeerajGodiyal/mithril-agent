@@ -104,6 +104,11 @@ Other supported tools:
   mithril-agent shadow perps-tournament --tape PATH
   mithril-agent shadow perps-qualify --tape PATH
   mithril-agent shadow perps-walk-forward --tape PATH --tape PATH
+  mithril-agent shadow perps-reservation --state-dir PATH --symbol SOL
+  mithril-agent shadow perps-context --state-dir PATH --symbol SOL --tape PATH --out PATH
+  mithril-agent shadow perps-freeze --state-dir PATH --in PATH --tape PATH
+  mithril-agent shadow perps-evaluate --proposal PATH
+  mithril-agent shadow perps-select-proposal --proposal PATH
   mithril-agent shadow perps-restore --state-dir PATH --symbol SOL
   mithril-agent shadow report --policy PATH --dir PATH
   mithril-agent shadow review --policy PATH --dir PATH --days N
@@ -111,7 +116,8 @@ Other supported tools:
   mithril-agent shadow select --policy PATH --candidate PATH --pointer PATH --lifecycle-lock PATH
   mithril-agent shadow challenge --policy PATH --champion-pointer PATH --challenger PATH --champion-dir PATH --challenger-dir PATH --days N
   mithril-agent shadow auto-select --policy PATH --champion-pointer PATH --challenger-pointer PATH --champion-dir PATH --challenger-dir PATH --days N --rollback-pointer PATH --lifecycle-lock PATH [--outcome-journal PATH]
-  mithril-agent shadow research-outcomes --journal PATH [--limit 16] [--prompt-safe]
+  mithril-agent shadow research-outcomes --journal PATH [--limit 16] [--prompt-safe --policy PATH --max-age DURATION]
+  mithril-agent shadow research-context --policy PATH
   mithril-agent shadow restore --policy PATH --champion-pointer PATH --rollback-pointer PATH --challenger-pointer PATH --challenger-candidate-dir PATH --lifecycle-lock PATH
   mithril-agent shadow research-mcp --policy PATH --journal-dir PATH ...
   mithril-agent research packet-record --in PATH --latest PATH [--archive-dir DIR]
@@ -349,6 +355,21 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		if len(args) > 1 && args[1] == "perps-walk-forward" {
 			return runShadowPerpsWalkForward(args[2:], output)
 		}
+		if len(args) > 1 && args[1] == "perps-reservation" {
+			return runShadowPerpsReservation(args[2:], output, time.Now)
+		}
+		if len(args) > 1 && args[1] == "perps-context" {
+			return runShadowPerpsContext(args[2:], output, time.Now)
+		}
+		if len(args) > 1 && args[1] == "perps-freeze" {
+			return runShadowPerpsFreeze(args[2:], output, time.Now)
+		}
+		if len(args) > 1 && args[1] == "perps-evaluate" {
+			return runShadowPerpsEvaluate(args[2:], output, time.Now)
+		}
+		if len(args) > 1 && args[1] == "perps-select-proposal" {
+			return runShadowPerpsSelectProposal(args[2:], output, time.Now)
+		}
 		if len(args) > 1 && args[1] == "perps-restore" {
 			return runShadowPerpsRestore(args[2:], output)
 		}
@@ -381,6 +402,12 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		}
 		if len(args) > 1 && args[1] == "research-outcomes" {
 			return runShadowResearchOutcomeSummary(args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "research-rejection" {
+			return runShadowResearchRejection(args[2:], output)
+		}
+		if len(args) > 1 && args[1] == "research-context" {
+			return runShadowResearchContext(args[2:], output)
 		}
 		if len(args) > 1 && args[1] == "restore" {
 			return runShadowRestore(args[2:], output)
@@ -1839,6 +1866,20 @@ func runShadow(args []string, output io.Writer) error {
   mithril-agent shadow perps-walk-forward --tape PATH --tape PATH
                                        choose on earlier sealed tapes, then test
                                        the fixed leader on the held-out tape; JSON only
+  mithril-agent shadow perps-reservation --state-dir PATH --symbol SOL
+    Read-only next-target reservation snapshot before inference; freeze still checks races.
+  mithril-agent shadow perps-context --state-dir PATH --symbol SOL --tape PATH --out PATH
+                                       prepare verified historical model context;
+                                       no raw market records or plan selection
+  mithril-agent shadow perps-freeze --state-dir PATH --in PATH --tape PATH
+                                       freeze a pending advisory proposal;
+                                       never evaluate, select, promote or trade
+  mithril-agent shadow perps-evaluate --proposal PATH
+                                       compare only the frozen target attempt;
+                                       modeled advisory results, never selection
+  mithril-agent shadow perps-select-proposal --proposal PATH
+                                       select one verified evaluated proposal for
+                                       the next paper run; never real trading
   mithril-agent shadow perps-restore --state-dir PATH --symbol SOL
                                        restore the previous paper-only perps plan
   mithril-agent shadow market collect --market NAME --observe ADDR --journal PATH
@@ -1877,9 +1918,12 @@ func runShadow(args []string, output io.Writer) error {
                                    --lifecycle-lock PATH
                                        select only a forward-qualified paper
                                        challenger and preserve rollback
-  mithril-agent shadow research-outcomes --journal PATH [--limit 16] [--prompt-safe]
+  mithril-agent shadow research-outcomes --journal PATH [--limit 16] [--prompt-safe --policy PATH --max-age DURATION]
                                        read bounded advisory outcomes from
                                        Hermes-backed paper candidates
+  mithril-agent shadow research-context --policy PATH
+                                       print only the exact current adaptive
+                                       values needed by paper research
   mithril-agent shadow restore --policy PATH --champion-pointer PATH
                                --rollback-pointer PATH --challenger-pointer PATH
                                --challenger-candidate-dir PATH --lifecycle-lock PATH

@@ -1,6 +1,7 @@
 package perpspaper
 
 import (
+	"encoding/json"
 	"reflect"
 	"slices"
 	"strings"
@@ -45,8 +46,139 @@ func TestWalkForwardFreezesTrainingLeaderBeforeFinalTape(t *testing.T) {
 		t.Fatalf("final tape changed selection: left=%+v right=%+v", left.TrainingLeader, right.TrainingLeader)
 	}
 	if left.Status != "research_only" || !left.PaperOnly || left.Authorized || left.Promotable ||
-		len(left.Tapes) != 2 || len(left.Training) != 12 || left.Forward == nil || left.Stress == nil {
+		len(left.Tapes) != 2 || len(left.Training) != 12 || left.TrainingTrials != 12 ||
+		left.HoldoutPlansCompared != 1 || left.Forward == nil || left.Stress == nil ||
+		left.StatisticalConfidence != QualificationConfidence {
 		t.Fatalf("walk-forward boundary = %+v", left)
+	}
+}
+
+func TestWalkForwardExecutionDelayUsesNextBookAndIgnoresFinalSignal(t *testing.T) {
+	config := qualificationTestConfig().replayConfig(Balanced)
+	frames := tournamentTestFrames([]int{10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 11_000, 9_000})
+	causal, err := tournamentCausalFrames(config, frames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	normal, err := replayTournamentStrategy(config, causal, 0, StrategyMomentum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delayed, err := replayTournamentStrategyOneFrameDelay(config, causal, 0, StrategyMomentum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decisionIndex := len(frames) - 2
+	executionIndex := len(frames) - 1
+	finalSignal, err := tournamentDecision(StrategyMomentum, SOL, Balanced, causal[executionIndex].Candles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normal.Results[decisionIndex].Decision.Direction != Direction(Long) ||
+		delayed.Results[decisionIndex].Decision.Direction != Flat ||
+		delayed.Results[executionIndex].Decision.Direction != Direction(Long) ||
+		finalSignal.Direction != Direction(Short) || delayed.Results[executionIndex].Fill == nil {
+		t.Fatalf("normal=%+v delayed=%+v final=%+v", normal.Results, delayed.Results, finalSignal)
+	}
+	want, err := decimalMicros(frames[executionIndex].Book.Levels[1][0].Price)
+	if err != nil || delayed.Results[executionIndex].Fill.AveragePriceMicros != want {
+		t.Fatalf("delayed fill = %+v, next-book ask = %d, %v", delayed.Results[executionIndex].Fill, want, err)
+	}
+	fills, closes := 0, 0
+	for _, result := range delayed.Results {
+		if result.Fill != nil {
+			fills++
+		}
+		if result.Action == "closed" {
+			closes++
+		}
+	}
+	if fills != 1 || closes != 0 {
+		t.Fatalf("final queued short signal executed: fills=%d closes=%d results=%+v", fills, closes, delayed.Results)
+	}
+}
+
+func TestWalkForwardExecutionDelayAppliesFundingAndLiquidationBeforeQueuedDecision(t *testing.T) {
+	config := qualificationTestConfig().replayConfig(Experimental)
+	frames := tournamentTestFrames([]int{10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 10_000, 9_000, 9_000, 50_000})
+	last := len(frames) - 1
+	frames[last].Funding = []Funding{{
+		Symbol: SOL, Rate: "-0.001", Time: frames[last].Book.Time - 1,
+	}}
+	causal, err := tournamentCausalFrames(config, frames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := replayTournamentStrategyOneFrameDelay(config, causal, 0, StrategyMomentum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := replay.Results[last]
+	if result.Action != "liquidated" || result.Fill != nil || len(result.Records) < 2 ||
+		result.Records[0].Command.Type != FundingApplied || result.Records[1].Command.Type != Marked ||
+		replay.State.Position != nil || replay.State.Liquidations != 1 {
+		t.Fatalf("funding/mark/liquidation order = %+v, state=%+v", result, replay.State)
+	}
+}
+
+func TestWalkForwardAdvisoryInputIsSeparateAndEachTamperFails(t *testing.T) {
+	training := shiftedWalkForwardFrames(tournamentTestFrames(qualificationWavePrices(4)), 0)
+	forward := shiftedWalkForwardFrames(tournamentTestFrames(qualificationWavePrices(3)), 10_000_000)
+	result, err := QualifyWalkForward(qualificationTestConfig(), []WalkForwardTape{
+		{ContentSHA256: strings.Repeat("1", 64), Frames: training},
+		{ContentSHA256: strings.Repeat("2", 64), Frames: forward},
+	})
+	if err != nil || result.TrainingLeader == nil {
+		t.Fatalf("qualification = %+v, %v", result, err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil || strings.Contains(string(encoded), "execution_delay") {
+		t.Fatalf("walk-forward qualification contains advisory: %s, %v", encoded, err)
+	}
+	advisory, err := EvaluateOneFrameExecutionDelay(
+		result.Config, forward, result.InputSHA256, strings.Repeat("2", 64), *result.TrainingLeader,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := walkForwardInputSHA256(result.Config, result.Tapes)
+	if err != nil || input != result.InputSHA256 || input == advisory.InputSHA256 {
+		t.Fatalf("input digests = qualification %q advisory %q, %v", result.InputSHA256, advisory.InputSHA256, err)
+	}
+	for name, mutate := range map[string]func(*ExecutionDelayAdvisory){
+		"authority": func(advisory *ExecutionDelayAdvisory) { advisory.Authorized = true },
+		"evidence":  func(advisory *ExecutionDelayAdvisory) { advisory.Evidence.Eligible = !advisory.Evidence.Eligible },
+		"digest":    func(advisory *ExecutionDelayAdvisory) { advisory.InputSHA256 = strings.Repeat("f", 64) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := advisory
+			mutate(&candidate)
+			if candidate.Validate(result.InputSHA256, strings.Repeat("2", 64), *result.TrainingLeader) == nil {
+				t.Fatal("tampered advisory still validated")
+			}
+		})
+	}
+	malformedHash := advisory
+	malformedHash.QualificationInputSHA256 = strings.Repeat("g", 64)
+	malformedHash.InputSHA256, _ = executionDelayInputSHA256(
+		malformedHash.QualificationInputSHA256, malformedHash.FinalTapeSHA256, *result.TrainingLeader,
+	)
+	if malformedHash.Validate(
+		malformedHash.QualificationInputSHA256, malformedHash.FinalTapeSHA256, *result.TrainingLeader,
+	) == nil {
+		t.Fatal("self-consistent malformed lineage hash validated")
+	}
+	malformedLeader := QualificationKey{RiskArm: RiskArm("reckless"), Strategy: StrategyMomentum}
+	malformedKey := advisory
+	malformedKey.Evidence.QualificationKey = malformedLeader
+	malformedKey.InputSHA256, _ = executionDelayInputSHA256(
+		malformedKey.QualificationInputSHA256, malformedKey.FinalTapeSHA256, malformedLeader,
+	)
+	malformedKey.ResultSHA256, _ = executionDelayResultSHA256(malformedKey.Evidence)
+	if malformedKey.Validate(
+		malformedKey.QualificationInputSHA256, malformedKey.FinalTapeSHA256, malformedLeader,
+	) == nil {
+		t.Fatal("self-consistent malformed leader validated")
 	}
 }
 

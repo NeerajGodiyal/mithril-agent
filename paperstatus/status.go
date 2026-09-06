@@ -19,23 +19,27 @@ import (
 )
 
 const (
-	legacyVersion        = 1
-	settingsVersion      = 2
-	accountingVersion    = 3
-	qualificationVersion = 4
-	multiTapeVersion     = 5
-	perpsPlanVersion     = 6
-	Version              = 7
-	MaxEvents            = 64
-	MaxHistoryPoints     = 144
-	MaxMessageBytes      = 3000
-	maxCurrentBytes      = 512
-	maxSnapshotBytes     = 256 << 10
-	historyInterval      = 10 * time.Minute
-	messagePrefix        = "PAPER ·"
-	legacyMessagePrefix  = "PAPER SIMULATION —"
-	legacyDisclaimer     = "No transaction was signed or submitted."
-	UnconfiguredCurrent  = "PAPER · NOT ENABLED"
+	legacyVersion           = 1
+	settingsVersion         = 2
+	accountingVersion       = 3
+	qualificationVersion    = 4
+	multiTapeVersion        = 5
+	perpsPlanVersion        = 6
+	decisionSourceVersion   = 7
+	latestCompletedVersion  = 8
+	decisionEvidenceVersion = 9
+	balanceEvidenceVersion  = 10
+	Version                 = balanceEvidenceVersion
+	MaxEvents               = 64
+	MaxHistoryPoints        = 144
+	MaxMessageBytes         = 3000
+	maxCurrentBytes         = 512
+	maxSnapshotBytes        = 256 << 10
+	historyInterval         = 10 * time.Minute
+	messagePrefix           = "PAPER ·"
+	legacyMessagePrefix     = "PAPER SIMULATION —"
+	legacyDisclaimer        = "No transaction was signed or submitted."
+	UnconfiguredCurrent     = "PAPER · NOT ENABLED"
 )
 
 const (
@@ -77,6 +81,18 @@ type Snapshot struct {
 	// History is a bounded, current-day performance projection for operator
 	// charts. It contains no journal records, provider details, or authority.
 	History []PerformancePoint `json:"history,omitempty"`
+	// LatestCompleted keeps the most recent terminal perps result visible while
+	// a new bounded recording is collecting. It is a compact receipt, not a
+	// recursive copy of the live snapshot or an execution authority.
+	LatestCompleted *CompletedSnapshot `json:"latest_completed,omitempty"`
+}
+
+// CompletedSnapshot binds one terminal event to the numeric perps summary it
+// finalized. It deliberately excludes current prose, history, and nested state.
+type CompletedSnapshot struct {
+	ObservedAt time.Time      `json:"observed_at"`
+	EventID    string         `json:"event_id"`
+	Summary    CurrentSummary `json:"summary"`
 }
 
 type CurrentSummary struct {
@@ -95,30 +111,47 @@ type CurrentSummary struct {
 	HoldBenchmarkMicros uint64 `json:"hold_benchmark_micros"`
 	// Realized is the result from inventory already sold, after modeled fees.
 	// Unrealized is the mark-to-market result still held in open inventory.
-	AccountingTracked bool              `json:"accounting_tracked,omitempty"`
-	RealizedMicros    int64             `json:"realized_micros,omitempty"`
-	UnrealizedMicros  int64             `json:"unrealized_micros,omitempty"`
-	FeesMicros        int64             `json:"fees_micros,omitempty"`
-	FundingTracked    bool              `json:"funding_tracked,omitempty"`
-	FundingMicros     int64             `json:"funding_micros,omitempty"`
-	TurnoverMicros    uint64            `json:"turnover_micros,omitempty"`
-	DrawdownMicros    uint64            `json:"drawdown_micros,omitempty"`
-	MaxDrawdownMicros uint64            `json:"max_drawdown_micros,omitempty"`
-	Checks            uint64            `json:"checks"`
-	Signals           uint64            `json:"signals"`
-	Trades            uint64            `json:"trades"`
-	Unobservable      uint64            `json:"unobservable,omitempty"`
-	Missed            uint64            `json:"missed,omitempty"`
-	PriceMicros       uint64            `json:"price_micros,omitempty"`
-	State             string            `json:"state,omitempty"`
-	Strategy          string            `json:"strategy,omitempty"`
-	DecisionSource    string            `json:"decision_source,omitempty"`
-	ProposalSource    string            `json:"proposal_source,omitempty"`
-	RunPlanSHA256     string            `json:"run_plan_sha256,omitempty"`
-	PerpsPlanOutcome  *PerpsPlanOutcome `json:"perps_plan_outcome,omitempty"`
-	NextAction        string            `json:"next_action,omitempty"`
-	DecisionReason    string            `json:"decision_reason,omitempty"`
-	RiskHalted        bool              `json:"risk_halted,omitempty"`
+	AccountingTracked bool  `json:"accounting_tracked,omitempty"`
+	RealizedMicros    int64 `json:"realized_micros,omitempty"`
+	UnrealizedMicros  int64 `json:"unrealized_micros,omitempty"`
+	FeesMicros        int64 `json:"fees_micros,omitempty"`
+
+	// BalancesTracked distinguishes a known zero balance from an older status
+	// that did not project the ledger's current inventory.
+	BalancesTracked          bool   `json:"balances_tracked,omitempty"`
+	BaseUnits                uint64 `json:"base_units,omitempty"`
+	BaseDecimals             uint8  `json:"base_decimals,omitempty"`
+	BaseAsset                string `json:"base_asset,omitempty"`
+	QuoteUnits               uint64 `json:"quote_units,omitempty"`
+	QuoteDecimals            uint8  `json:"quote_decimals,omitempty"`
+	QuoteAsset               string `json:"quote_asset,omitempty"`
+	LiquidFeeReserveLamports uint64 `json:"liquid_fee_reserve_lamports,omitempty"`
+	LockedSetupRentLamports  uint64 `json:"locked_setup_rent_lamports,omitempty"`
+
+	FundingTracked        bool              `json:"funding_tracked,omitempty"`
+	FundingMicros         int64             `json:"funding_micros,omitempty"`
+	TurnoverMicros        uint64            `json:"turnover_micros,omitempty"`
+	DrawdownMicros        uint64            `json:"drawdown_micros,omitempty"`
+	MaxDrawdownMicros     uint64            `json:"max_drawdown_micros,omitempty"`
+	Checks                uint64            `json:"checks"`
+	Signals               uint64            `json:"signals"`
+	Trades                uint64            `json:"trades"`
+	Unobservable          uint64            `json:"unobservable,omitempty"`
+	Missed                uint64            `json:"missed,omitempty"`
+	PriceMicros           uint64            `json:"price_micros,omitempty"`
+	State                 string            `json:"state,omitempty"`
+	Strategy              string            `json:"strategy,omitempty"`
+	DecisionSource        string            `json:"decision_source,omitempty"`
+	ProposalSource        string            `json:"proposal_source,omitempty"`
+	RunPlanSHA256         string            `json:"run_plan_sha256,omitempty"`
+	PerpsPlanOutcome      *PerpsPlanOutcome `json:"perps_plan_outcome,omitempty"`
+	NextAction            string            `json:"next_action,omitempty"`
+	DecisionReason        string            `json:"decision_reason,omitempty"`
+	DecisionSignalKind    string            `json:"decision_signal_kind,omitempty"`
+	DecisionSignalBPS     int64             `json:"decision_signal_bps,omitempty"`
+	DecisionThresholdBPS  int64             `json:"decision_threshold_bps,omitempty"`
+	MinimumResearchFrames uint64            `json:"minimum_research_frames,omitempty"`
+	RiskHalted            bool              `json:"risk_halted,omitempty"`
 	// InitialLot is the configured first paper leg. Later legs use the
 	// simulated proceeds, so it is deliberately not described as a fixed order
 	// size. These fields expose no address, provider, policy path, or key.
@@ -264,6 +297,7 @@ func (w *Writer) updateCurrentSummary(
 			}
 			return errors.New("paper current status is not chronological")
 		}
+		upgradeSnapshot(&snapshot)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.New("read paper alert status")
 	}
@@ -271,6 +305,11 @@ func (w *Writer) updateCurrentSummary(
 	snapshot.ObservedAt, snapshot.Current, snapshot.Summary = at, current, summary
 	if summary != nil {
 		snapshot.History = updateHistory(snapshot.History, at, *summary)
+	}
+	if completed, ok := inferredCompleted(snapshot); ok {
+		if err := setLatestCompleted(&snapshot, completed); err != nil {
+			return err
+		}
 	}
 	return w.write(snapshot)
 }
@@ -292,6 +331,7 @@ func (w *Writer) append(at time.Time, kind, key, message string, reconcile bool)
 		if ValidateSnapshot(snapshot) != nil {
 			return errors.New("existing paper alert status is invalid")
 		}
+		upgradeSnapshot(&snapshot)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.New("read paper alert status")
 	}
@@ -331,14 +371,26 @@ func (w *Writer) append(at time.Time, kind, key, message string, reconcile bool)
 }
 
 func (w *Writer) write(snapshot Snapshot) error {
-	encoded, err := json.Marshal(snapshot)
-	if err != nil || len(encoded) > maxSnapshotBytes {
-		return errors.New("encode paper alert status")
+	encoded, err := EncodeSnapshot(snapshot)
+	if err != nil {
+		return err
 	}
-	if err := securefile.ReplacePrivate(w.path, append(encoded, '\n'), maxSnapshotBytes); err != nil {
+	if err := securefile.ReplacePrivate(w.path, encoded, maxSnapshotBytes); err != nil {
 		return errors.New("write paper alert status")
 	}
 	return nil
+}
+
+// EncodeSnapshot validates and encodes one bounded private status projection.
+func EncodeSnapshot(snapshot Snapshot) ([]byte, error) {
+	if ValidateSnapshot(snapshot) != nil {
+		return nil, errors.New("encode paper alert status")
+	}
+	encoded, err := json.Marshal(snapshot)
+	if err != nil || len(encoded)+1 > maxSnapshotBytes {
+		return nil, errors.New("encode paper alert status")
+	}
+	return append(encoded, '\n'), nil
 }
 
 // TruncationEvent warns a consumer that the bounded projection no longer
@@ -363,6 +415,9 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		snapshot.Version != qualificationVersion &&
 		snapshot.Version != multiTapeVersion &&
 		snapshot.Version != perpsPlanVersion &&
+		snapshot.Version != decisionSourceVersion &&
+		snapshot.Version != latestCompletedVersion &&
+		snapshot.Version != decisionEvidenceVersion &&
 		snapshot.Version != Version ||
 		snapshot.ObservedAt.IsZero() ||
 		!snapshot.ObservedAt.Equal(snapshot.ObservedAt.UTC()) ||
@@ -373,13 +428,23 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		(snapshot.Current == "" && snapshot.Summary != nil) ||
 		(snapshot.Version < perpsPlanVersion && snapshot.Summary != nil &&
 			len(snapshot.Summary.QualificationAttempts) != 0) ||
-		(snapshot.Version < Version && snapshot.Summary != nil &&
+		(snapshot.Version < decisionSourceVersion && snapshot.Summary != nil &&
 			(validQualificationStrategy(snapshot.Summary.Strategy) ||
 				snapshot.Summary.DecisionSource != "" || snapshot.Summary.ProposalSource != "" ||
 				snapshot.Summary.RunPlanSHA256 != "" ||
 				snapshot.Summary.PerpsPlanOutcome != nil)) ||
+		(snapshot.Version < latestCompletedVersion && snapshot.LatestCompleted != nil) ||
+		(snapshot.Version < decisionEvidenceVersion &&
+			(hasDecisionEvidence(snapshot.Summary) ||
+				snapshot.LatestCompleted != nil && hasDecisionEvidence(&snapshot.LatestCompleted.Summary))) ||
+		(snapshot.Version < balanceEvidenceVersion &&
+			(hasBalanceEvidence(snapshot.Summary) ||
+				snapshot.LatestCompleted != nil && hasBalanceEvidence(&snapshot.LatestCompleted.Summary))) ||
 		len(snapshot.History) > MaxHistoryPoints ||
-		validateCurrentSummary(snapshot.Summary) != nil {
+		validateCurrentSummary(snapshot.Summary) != nil ||
+		(snapshot.Summary != nil && snapshot.LatestCompleted != nil &&
+			snapshot.Summary.Market != snapshot.LatestCompleted.Summary.Market) ||
+		validateCompletedSnapshot(snapshot.LatestCompleted, snapshot.ObservedAt) != nil {
 		return errors.New("paper alert snapshot is invalid")
 	}
 	if snapshot.Summary != nil && !summaryDayMatchesObservation(*snapshot.Summary, snapshot.ObservedAt) {
@@ -416,11 +481,16 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		seen[event.ID] = struct{}{}
 		previous = event.At
 	}
+	if snapshot.Version >= decisionEvidenceVersion && snapshot.LatestCompleted == nil {
+		if _, terminal := inferredCompleted(snapshot); terminal {
+			return errors.New("paper alert snapshot is invalid")
+		}
+	}
 	return nil
 }
 
 func normalizeLegacySnapshot(snapshot *Snapshot) {
-	if snapshot == nil || snapshot.Version >= Version || snapshot.Summary == nil {
+	if snapshot == nil || snapshot.Version >= decisionSourceVersion || snapshot.Summary == nil {
 		return
 	}
 	summary := snapshot.Summary
@@ -444,6 +514,141 @@ func normalizeLegacySnapshot(snapshot *Snapshot) {
 	summary.QualificationStressScored = summary.QualificationStressMicros != 0
 }
 
+func upgradeSnapshot(snapshot *Snapshot) {
+	if snapshot == nil || snapshot.Version >= Version {
+		return
+	}
+	if snapshot.Version == decisionSourceVersion && snapshot.LatestCompleted == nil {
+		if completed, ok := inferredCompleted(*snapshot); ok {
+			snapshot.LatestCompleted = &completed
+		}
+	}
+	snapshot.Version = Version
+}
+
+func inferredCompleted(snapshot Snapshot) (CompletedSnapshot, bool) {
+	if snapshot.Summary == nil || !snapshot.Summary.QualificationTracked ||
+		snapshot.Summary.Instrument != "perpetual" || len(snapshot.Events) == 0 {
+		return CompletedSnapshot{}, false
+	}
+	event := snapshot.Events[len(snapshot.Events)-1]
+	if event.Kind != KindExperimentDone || event.At.After(snapshot.ObservedAt) {
+		return CompletedSnapshot{}, false
+	}
+	return CompletedSnapshot{
+		ObservedAt: snapshot.ObservedAt,
+		EventID:    event.ID,
+		Summary:    cloneCurrentSummary(*snapshot.Summary),
+	}, true
+}
+
+func cloneCurrentSummary(summary CurrentSummary) CurrentSummary {
+	cloned := summary
+	cloned.QualificationAttempts = append([]QualificationAttempt(nil), summary.QualificationAttempts...)
+	if summary.PerpsPlanOutcome != nil {
+		outcome := *summary.PerpsPlanOutcome
+		cloned.PerpsPlanOutcome = &outcome
+	}
+	return cloned
+}
+
+func validateCompletedSnapshot(completed *CompletedSnapshot, outerObservedAt time.Time) error {
+	if completed == nil {
+		return nil
+	}
+	if completed.ObservedAt.IsZero() || completed.ObservedAt.Location() != time.UTC ||
+		completed.ObservedAt.After(outerObservedAt) || completed.EventID == "" ||
+		validateCurrentSummary(&completed.Summary) != nil ||
+		!completed.Summary.QualificationTracked || completed.Summary.Instrument != "perpetual" ||
+		!summaryDayMatchesObservation(completed.Summary, completed.ObservedAt) {
+		return errors.New("paper completed snapshot is invalid")
+	}
+	decoded, err := hex.DecodeString(completed.EventID)
+	if err != nil || len(decoded) != sha256.Size || completed.EventID != strings.ToLower(completed.EventID) {
+		return errors.New("paper completed snapshot is invalid")
+	}
+	return nil
+}
+
+// LatestCompletedSnapshot returns a detached, validated terminal perps receipt.
+// Legacy version-seven terminal snapshots are projected during the transition.
+func LatestCompletedSnapshot(snapshot Snapshot) (CompletedSnapshot, bool) {
+	if ValidateSnapshot(snapshot) != nil {
+		return CompletedSnapshot{}, false
+	}
+	if snapshot.LatestCompleted != nil {
+		completed := *snapshot.LatestCompleted
+		completed.Summary = cloneCurrentSummary(completed.Summary)
+		return completed, true
+	}
+	if snapshot.Version != decisionSourceVersion {
+		return CompletedSnapshot{}, false
+	}
+	completed, ok := inferredCompleted(snapshot)
+	if !ok || validateCompletedSnapshot(&completed, snapshot.ObservedAt) != nil {
+		return CompletedSnapshot{}, false
+	}
+	return completed, true
+}
+
+func setLatestCompleted(snapshot *Snapshot, completed CompletedSnapshot) error {
+	if snapshot == nil || validateCompletedSnapshot(&completed, snapshot.ObservedAt) != nil {
+		return errors.New("paper completed snapshot is invalid")
+	}
+	if snapshot.LatestCompleted != nil {
+		active := *snapshot.LatestCompleted
+		if active.ObservedAt.After(completed.ObservedAt) {
+			return nil
+		}
+		if active.ObservedAt.Equal(completed.ObservedAt) {
+			activeDigest, activeErr := CompletedSnapshotSHA256(active)
+			completedDigest, completedErr := CompletedSnapshotSHA256(completed)
+			if activeErr != nil || completedErr != nil || activeDigest != completedDigest {
+				return errors.New("paper completed snapshot collision")
+			}
+			return nil
+		}
+	}
+	completed.Summary = cloneCurrentSummary(completed.Summary)
+	snapshot.LatestCompleted = &completed
+	return nil
+}
+
+// PreserveLatestCompleted carries the newest validated terminal receipt into a
+// current live projection without changing its live summary, events, or clock.
+func PreserveLatestCompleted(current *Snapshot, previous Snapshot) error {
+	if current == nil || current.Version != Version || ValidateSnapshot(*current) != nil ||
+		ValidateSnapshot(previous) != nil {
+		return errors.New("paper snapshot carry-forward input is invalid")
+	}
+	prior, ok := LatestCompletedSnapshot(previous)
+	if !ok {
+		return nil
+	}
+	next := *current
+	if err := setLatestCompleted(&next, prior); err != nil {
+		return err
+	}
+	if ValidateSnapshot(next) != nil {
+		return errors.New("paper completed snapshot does not match the live projection")
+	}
+	*current = next
+	return nil
+}
+
+// CompletedSnapshotSHA256 returns the canonical digest of one validated receipt.
+func CompletedSnapshotSHA256(completed CompletedSnapshot) (string, error) {
+	if validateCompletedSnapshot(&completed, completed.ObservedAt) != nil {
+		return "", errors.New("paper completed snapshot is invalid")
+	}
+	encoded, err := json.Marshal(completed)
+	if err != nil {
+		return "", errors.New("encode paper completed snapshot")
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
 func validateCurrentSummary(summary *CurrentSummary) error {
 	if summary == nil {
 		return nil
@@ -459,9 +664,11 @@ func validateCurrentSummary(summary *CurrentSummary) error {
 		!validValueUnit(summary.ValueUnit) ||
 		!validInstrument(*summary) ||
 		!validAccounting(*summary) ||
+		!validBalances(*summary) ||
 		!validCurrentState(summary.State) || !validCurrentStrategy(*summary) ||
 		!validPerpsPlanOutcome(*summary) ||
 		!validNextAction(summary.NextAction) || !validDecisionReason(summary.DecisionReason) ||
+		!validDecisionEvidence(*summary) ||
 		!validQualification(*summary) ||
 		!validPaperSettings(*summary) {
 		return errors.New("paper current summary is invalid")
@@ -497,7 +704,7 @@ func validPerpsPlanOutcome(summary CurrentSummary) bool {
 		return summary.ProposalSource == "built_in" && summary.Strategy == "fixed" &&
 			summary.PerpsPlanOutcome == nil
 	case "selected_paper_plan":
-		if summary.ProposalSource != "deterministic_search" || !validQualificationStrategy(summary.Strategy) {
+		if (summary.ProposalSource != "deterministic_search" && summary.ProposalSource != "frozen_proposal") || !validQualificationStrategy(summary.Strategy) {
 			return false
 		}
 	default:
@@ -657,6 +864,27 @@ func validAccounting(summary CurrentSummary) bool {
 	return summary.RealizedMicros+summary.UnrealizedMicros == result
 }
 
+func validBalances(summary CurrentSummary) bool {
+	if !summary.BalancesTracked {
+		return !hasBalanceEvidence(&summary)
+	}
+	return (summary.Instrument == "" || summary.Instrument == "spot") &&
+		summary.AccountingTracked && validAsset(summary.BaseAsset) &&
+		validAsset(summary.QuoteAsset) && summary.BaseAsset != summary.QuoteAsset &&
+		summary.BaseDecimals <= 18 && summary.QuoteDecimals <= 18 &&
+		summary.Market == summary.BaseAsset+"/"+summary.QuoteAsset
+}
+
+func hasBalanceEvidence(summary *CurrentSummary) bool {
+	if summary == nil {
+		return false
+	}
+	return summary.BalancesTracked || summary.BaseUnits != 0 || summary.BaseDecimals != 0 ||
+		summary.BaseAsset != "" || summary.QuoteUnits != 0 || summary.QuoteDecimals != 0 ||
+		summary.QuoteAsset != "" || summary.LiquidFeeReserveLamports != 0 ||
+		summary.LockedSetupRentLamports != 0
+}
+
 func currentResultMicros(summary CurrentSummary) (int64, bool) {
 	if summary.OpeningEquityMicros > math.MaxInt64 || summary.EquityMicros > math.MaxInt64 ||
 		summary.DeficitMicros > math.MaxInt64 {
@@ -676,7 +904,71 @@ func validDecisionReason(reason string) bool {
 		"sell_leg_waiting", "trend_aligned_sell", "buy_leg_waiting",
 		"range_high_sell", "range_low_buy", "signal_below_cost_hurdle",
 		"data_unavailable", "fee_budget_used", "route_cost_limit",
-		"order_pending", "order_filled", "fill_limit", "trade_unavailable":
+		"order_pending", "order_filled", "fill_limit", "trade_unavailable",
+		"action_level_not_met", "inside_breakout_range", "minimum_order_size",
+		"visible_liquidity_limit", "slippage_limit", "liquidation":
+		return true
+	default:
+		return false
+	}
+}
+
+func validDecisionEvidence(summary CurrentSummary) bool {
+	decisionPresent := hasDecisionEvidence(&summary)
+	if summary.MinimumResearchFrames != 0 &&
+		(summary.Instrument != "perpetual" || summary.MinimumResearchFrames < 2 ||
+			summary.MinimumResearchFrames > 1_500) {
+		return false
+	}
+	if !decisionPresent {
+		return true
+	}
+	if summary.Instrument != "perpetual" || summary.PriceMicros == 0 ||
+		summary.MinimumResearchFrames == 0 || !validDecisionSignalKind(summary.DecisionSignalKind) ||
+		summary.DecisionThresholdBPS < 0 || summary.DecisionThresholdBPS > 10_000 {
+		return false
+	}
+	switch summary.DecisionSignalKind {
+	case "history_warmup":
+		return summary.DecisionSignalBPS == 0 && summary.DecisionThresholdBPS == 0 &&
+			summary.DecisionReason == "collecting_history"
+	case "breakout_range":
+		return summary.DecisionSignalBPS == 0 && summary.DecisionThresholdBPS > 0 &&
+			summary.DecisionReason == "inside_breakout_range"
+	default:
+		if summary.DecisionThresholdBPS == 0 {
+			return false
+		}
+		return summary.DecisionReason != "action_level_not_met" ||
+			summary.DecisionSignalBPS > -summary.DecisionThresholdBPS &&
+				summary.DecisionSignalBPS < summary.DecisionThresholdBPS
+	}
+}
+
+func hasDecisionEvidence(summary *CurrentSummary) bool {
+	if summary == nil {
+		return false
+	}
+	return summary.DecisionSignalKind != "" || summary.DecisionSignalBPS != 0 ||
+		summary.DecisionThresholdBPS != 0 || summary.MinimumResearchFrames != 0 ||
+		perpsDecisionEvidenceReason(summary.DecisionReason)
+}
+
+func perpsDecisionEvidenceReason(reason string) bool {
+	switch reason {
+	case "action_level_not_met", "inside_breakout_range", "minimum_order_size",
+		"visible_liquidity_limit", "slippage_limit", "liquidation":
+		return true
+	default:
+		return false
+	}
+}
+
+func validDecisionSignalKind(kind string) bool {
+	switch kind {
+	case "two_candle_move", "history_warmup", "momentum", "mean_reversion",
+		"breakout_high", "breakout_low", "breakout_range", "regime_momentum",
+		"regime_mean_reversion", "regime_breakout_high", "regime_breakout_low":
 		return true
 	default:
 		return false

@@ -44,33 +44,37 @@ type researchEvidence struct {
 }
 
 type Research struct {
-	HypothesisID          string                           `json:"hypothesis_id"`
-	Market                string                           `json:"market"`
-	Disposition           string                           `json:"disposition"`
-	CreatedAt             time.Time                        `json:"created_at"`
-	ValidUntil            time.Time                        `json:"valid_until"`
-	Current               bool                             `json:"current"`
-	Actionable            bool                             `json:"actionable"`
-	TwoSourceClaims       int                              `json:"two_source_claims"`
-	RetrievedCitations    int                              `json:"retrieved_citations"`
-	SourcesChecked        int                              `json:"sources_checked"`
-	OfficialPagesChecked  uint64                           `json:"official_pages_checked"`
-	RetrievedPages        uint64                           `json:"retrieved_pages"`
-	ResearchSessions      uint64                           `json:"research_sessions"`
-	ResearchToolCalls     []ResearchToolCount              `json:"research_tool_calls,omitempty"`
-	SuccessfulWebSearches uint64                           `json:"successful_web_searches"`
-	SingleSource          int                              `json:"single_source_facts"`
-	Contradicted          int                              `json:"contradicted_facts"`
-	Unverified            int                              `json:"unverified_facts"`
-	RiskDecision          string                           `json:"risk_decision"`
-	RiskReason            string                           `json:"risk_reason"`
-	ProposedChanges       []researchpacket.ParameterChange `json:"proposed_changes,omitempty"`
-	ContentSHA256         string                           `json:"content_sha256"`
+	EvidenceBasis          string                           `json:"evidence_basis"`
+	ObservationDay         string                           `json:"observation_day,omitempty"`
+	ObservationMetricIDs   []string                         `json:"observation_metric_ids,omitempty"`
+	RetrospectiveScreening bool                             `json:"retrospective_screening"`
+	HypothesisID           string                           `json:"hypothesis_id"`
+	Market                 string                           `json:"market"`
+	Disposition            string                           `json:"disposition"`
+	CreatedAt              time.Time                        `json:"created_at"`
+	ValidUntil             time.Time                        `json:"valid_until"`
+	Current                bool                             `json:"current"`
+	Actionable             bool                             `json:"actionable"`
+	TwoSourceClaims        int                              `json:"two_source_claims"`
+	RetrievedCitations     int                              `json:"retrieved_citations"`
+	SourcesChecked         int                              `json:"sources_checked"`
+	OfficialPagesChecked   uint64                           `json:"official_pages_checked"`
+	RetrievedPages         uint64                           `json:"retrieved_pages"`
+	ResearchSessions       uint64                           `json:"research_sessions"`
+	ResearchToolCalls      []ResearchToolCount              `json:"research_tool_calls,omitempty"`
+	SuccessfulWebSearches  uint64                           `json:"successful_web_searches"`
+	SingleSource           int                              `json:"single_source_facts"`
+	Contradicted           int                              `json:"contradicted_facts"`
+	Unverified             int                              `json:"unverified_facts"`
+	RiskDecision           string                           `json:"risk_decision"`
+	RiskReason             string                           `json:"risk_reason"`
+	ProposedChanges        []researchpacket.ParameterChange `json:"proposed_changes,omitempty"`
+	ContentSHA256          string                           `json:"content_sha256"`
 }
 
 type perpsResearchMarket struct {
 	Market                        string                             `json:"market"`
-	PaperStatusSHA256             string                             `json:"paper_status_sha256"`
+	CompletedSnapshotSHA256       string                             `json:"completed_snapshot_sha256"`
 	DecisionSource                string                             `json:"decision_source,omitempty"`
 	ProposalSource                string                             `json:"proposal_source,omitempty"`
 	RunStrategy                   string                             `json:"run_strategy,omitempty"`
@@ -115,7 +119,7 @@ func RenderPerpsResearch(paths map[string]string) ([]byte, error) {
 		return nil, errors.New("perps research requires exactly three paper status paths")
 	}
 	result := perpsResearchSummary{
-		Version: 2, PaperOnly: true, AdvisoryOnly: true,
+		Version: 3, PaperOnly: true, AdvisoryOnly: true,
 		Markets: make([]perpsResearchMarket, 0, len(expected)),
 	}
 	for _, market := range expected {
@@ -128,18 +132,23 @@ func RenderPerpsResearch(paths map[string]string) ([]byte, error) {
 			return nil, errors.New("read perps research paper status")
 		}
 		var snapshot paperstatus.Snapshot
-		if strictjson.Decode(raw, &snapshot) != nil || paperstatus.ValidateSnapshot(snapshot) != nil ||
-			snapshot.Summary == nil || snapshot.Summary.Market != market ||
-			snapshot.Summary.Instrument != "perpetual" || !snapshot.Summary.QualificationTracked {
+		if strictjson.Decode(raw, &snapshot) != nil || paperstatus.ValidateSnapshot(snapshot) != nil {
+			return nil, errors.New("perps research paper status is invalid")
+		}
+		completed, ok := paperstatus.LatestCompletedSnapshot(snapshot)
+		if !ok || completed.Summary.Market != market {
 			return nil, errors.New("perps research paper status is invalid")
 		}
 		if result.ObservedAt.IsZero() {
-			result.ObservedAt = snapshot.ObservedAt
-		} else if !result.ObservedAt.Equal(snapshot.ObservedAt) {
+			result.ObservedAt = completed.ObservedAt
+		} else if !result.ObservedAt.Equal(completed.ObservedAt) {
 			return nil, errors.New("perps research paper statuses are from different runs")
 		}
-		summary := snapshot.Summary
-		sourceDigest := sha256.Sum256(raw)
+		summary := &completed.Summary
+		completedDigest, err := paperstatus.CompletedSnapshotSHA256(completed)
+		if err != nil {
+			return nil, errors.New("perps research paper status is invalid")
+		}
 		var outcome *paperstatus.PerpsPlanOutcome
 		if summary.PerpsPlanOutcome != nil {
 			copy := *summary.PerpsPlanOutcome
@@ -147,7 +156,7 @@ func RenderPerpsResearch(paths map[string]string) ([]byte, error) {
 		}
 		result.Markets = append(result.Markets, perpsResearchMarket{
 			Market:                        market,
-			PaperStatusSHA256:             hex.EncodeToString(sourceDigest[:]),
+			CompletedSnapshotSHA256:       completedDigest,
 			DecisionSource:                summary.DecisionSource,
 			ProposalSource:                summary.ProposalSource,
 			RunStrategy:                   summary.Strategy,
@@ -235,8 +244,9 @@ func readResearch(path string, now time.Time) (*Research, error) {
 			unverified++
 		}
 	}
-	return &Research{
-		HypothesisID: packet.HypothesisID, Market: packet.Market,
+	result := &Research{
+		EvidenceBasis: "web_sources",
+		HypothesisID:  packet.HypothesisID, Market: packet.Market,
 		Disposition: packet.Disposition, CreatedAt: packet.CreatedAt,
 		ValidUntil: packet.ValidUntil, Current: status.Current,
 		Actionable: status.Actionable, TwoSourceClaims: status.VerifiedFacts,
@@ -252,7 +262,14 @@ func readResearch(path string, now time.Time) (*Research, error) {
 		ProposedChanges: append([]researchpacket.ParameterChange(nil),
 			packet.CandidateParameterDiff...),
 		ContentSHA256: packet.ContentSHA256,
-	}, nil
+	}
+	if packet.RecordedObservations != nil {
+		result.EvidenceBasis = "recorded_paper_observations"
+		result.ObservationDay = packet.RecordedObservations.Journal.Day
+		result.ObservationMetricIDs = append([]string(nil), packet.RecordedEvidence.MetricIDs...)
+		result.RetrospectiveScreening = true
+	}
+	return result, nil
 }
 
 func readResearchEvidence(path string, packet researchpacket.Packet) (researchEvidence, error) {
@@ -266,7 +283,7 @@ func readResearchEvidence(path string, packet researchpacket.Packet) (researchEv
 		!evidence.CreatedAt.Equal(packet.CreatedAt) || evidence.PacketSHA256 != packet.ContentSHA256 ||
 		!validSHA256(evidence.SessionExportSHA256) || evidence.SessionCount == 0 ||
 		evidence.SessionCount > 64 || len(evidence.ToolCalls) == 0 ||
-		len(evidence.ToolCalls) > 128 || len(evidence.RetrievedURLs) == 0 ||
+		len(evidence.ToolCalls) > 128 || (len(evidence.RetrievedURLs) == 0 && packet.Version != researchpacket.RecordedVersion) ||
 		len(evidence.RetrievedURLs) > 1_024 || evidence.OfficialPagesChecked > uint64(len(evidence.RetrievedURLs)) {
 		return researchEvidence{}, errors.New("research session evidence is invalid")
 	}

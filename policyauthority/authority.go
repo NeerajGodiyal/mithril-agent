@@ -154,6 +154,10 @@ func PrepareJupiterRequest(
 	if err != nil {
 		return signer.Request{}, err
 	}
+	return requestFromJupiterCheck(policy, candidate, checked, scheduleWindowStartUnix, now)
+}
+
+func requestFromJupiterCheck(policy Policy, candidate proposalcheck.Candidate, checked proposalcheck.Result, scheduleWindowStartUnix int64, now time.Time) (signer.Request, error) {
 	request, err := signer.RequestFromJupiterRecheck(
 		policy.TransactionPolicy, *policy.JupiterProviders, candidate, checked,
 		scheduleWindowStartUnix,

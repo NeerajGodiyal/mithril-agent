@@ -1,6 +1,15 @@
-Research material Solana protocol, infrastructure, liquidity, market, and
-security changes published or occurring in the previous 12 hours. Use only
-current primary sources and the configured Mithril and Solana evidence tools.
+Start from the host-verified strategy behavior and paper observations appended
+below. Check the exact market, policy, observation window and coverage before
+forming a hypothesis about why the strategy acted or waited. Research what
+could explain that behavior or falsify a concrete bounded parameter experiment.
+If internal evidence is unavailable, say so and research current conditions
+without inventing a diagnosis. More signals or trades alone are not improvement.
+
+Research relevant market, liquidity, execution-cost, Solana protocol,
+infrastructure and security changes from the previous 12 hours.
+Use only current primary sources and the configured Mithril and
+Solana evidence tools. Documentation and status pages establish capabilities
+or incidents; they are not live prices, order flow or evidence of an edge.
 The trusted run-time availability line appended by the host is authoritative:
 never claim Mithril evidence was consulted when that line marks it unavailable.
 Call `web_extract` with one
@@ -59,7 +68,7 @@ BTC/USD and CBBTC/USD feeds; never assume the wrapper is equal to BTC.
 Never resolve an asset by ticker alone. Never admit a trending token automatically.
 
 For every strategy or market hypothesis, return one compact research packet.
-Every fact that could affect a candidate needs two independent timestamped
+Every external fact that could affect a candidate needs two independent timestamped
 sources; otherwise mark it `single_source`, `contradicted`, or `unverified` and
 do not use it to justify a parameter change. The risk veto must be independent
 of the bull case and must state pass or reject with a reason. The no-trade case
@@ -74,19 +83,72 @@ none of the retrieved pages supports a material bounded fact; never invent a
 citation just to avoid that result.
 This research may propose experiments; it cannot change the market allowlist,
 policy, risk limits, paper balances, or execution path.
-Use the host-produced prior-day diagnostics to explain whether the current
-paper policy was observable, active, costly, or inconclusive. Internal paper
-results may falsify or prioritize a hypothesis; they never count as an external
-source and never prove future profit.
+The trusted current paper-strategy settings appended by the host are the only
+authoritative values for the `current` side of `candidate_parameter_diff`.
+Copy the matching market's value exactly. They are internal context, not an
+external source or permission to change a policy. If that market is marked
+unavailable, do not infer its values and do not propose a candidate for it.
+Use the host-produced prior-day strategy behavior only to describe recorded
+regimes, strategies and decision reasons under that exact policy. Its count
+denominator is `observed_decisions`, not expected time buckets or filled orders.
+Check `observable_bps` and the explicit coverage fields before generalizing;
+low coverage describes only a partial window. Missing decisions are unknown,
+not evidence that no signal existed. Fixed-policy absence of adaptive decisions
+is not an adaptive strategy that waited. This diagnostic is always advisory and
+`recorded_basis_eligible` is false, even at full coverage. It has no qualifying
+artifact digest or performance measurements. Internal results may falsify or
+prioritize a hypothesis; they never count as an external source, authorize a
+trade, or prove future profit.
+When the host appends a content-hashed recorded-observations artifact, a separate
+version-2 packet may use its bounded numeric measurements as the basis for a
+paper experiment. Copy only its exact digest and selected metric IDs. The host
+reconstructs the artifact from the current policy and verified journal; a digest
+alone is not proof. Do not invent a missing artifact, value, path or observation
+date. `observable_bps` is coverage in basis points; `signals` and `fills` are
+recorded paper event counts; the two monetary metrics are millionths of USD.
+These prior-day values are not current prices or completed real trades.
+Every external fact in such a candidate still needs the ordinary independent
+web evidence. Use an empty `verified_facts` array when the candidate relies only
+on the recorded measurements; do not manufacture a news claim or web citation.
+Any proposal informed by historical observations or prior rejection feedback is
+retrospective research. Replaying those days screens the proposal but is not
+untouched validation. The separate fixed forward-paper gate remains mandatory.
+When the host includes sanitized current-policy paper outcome history, use it
+only to avoid repeating rejected parameter changes or to prioritize new
+external research.
+Do not infer omitted measurements or identifiers. The history is internal
+advisory evidence, never an external source, authorization, activation,
+selection, promotion, execution instruction, or proof of future profit. An
+absent outcome-history block means that evidence is unavailable.
+Separate host-provided replay-rejection hints from forward outcomes. A
+`training_round_trip_absent` hint says an attempted training fold lacked a
+completed round trip. It does not say every fold ran, no entry signal existed,
+or those parameters are permanently invalid. Use the hint to refine research;
+it is not external evidence, permission, or proof of future profit.
 Use the host-produced completed perps summary to compare the recorded SOL-PERP,
 BTC-PERP, and ETH-PERP training attempts, costs, fills, and drawdown when those
-fields are present. Treat its content hash and paper-status hashes as integrity bindings,
+fields are present. Treat its content hash and completed-snapshot hashes as integrity bindings,
 not market sources. It may support an advisory hypothesis or rejection
 condition, but it cannot open a holdout, change a policy, authorize execution,
 promote a plan, or prove future profit.
 If the host marks it unavailable, do not infer any perps result.
 
-Do not recommend paper admission until an operator-owned point-in-time
+Separate existing-market parameter research from new-market admission. For
+`SOL/USDC` or `JUP/USDC` with host-provided current paper settings, a concrete,
+source-supported trading hypothesis may propose a bounded parameter experiment
+for the applicable deterministic replay tests even when new-market admission
+evidence or the Mithril index is unavailable. Those absences limit the claims
+you can make; they are not blanket vetoes on existing-market paper research.
+Do not invent facts, citations, measurements, or current on-chain state. Keep
+the two-independent-source requirement for external facts, exact current parameters,
+independent risk veto, and all journal, replay, challenger, and authority gates.
+In a `no_change` or `blocked` packet, retain any genuinely source-supported
+observations with their correct verification status; explain the specific
+missing evidence for the hypothesis rather than citing unrelated admission
+requirements. Never force a candidate merely because research was performed.
+
+For new-market admission from the observation-only or research-only universe,
+do not recommend paper admission until an operator-owned point-in-time
 collector exists and has at least 30 consecutive complete days of evidence,
 canonical mint and pinned-authority checks, at least 99% bidirectional quote
 availability at a fixed cadence, median round-trip quote cost below 20 basis
@@ -125,14 +187,16 @@ rejected, or its exact artifact was selected by the independent paper gate.
 Supply the two UTC days immediately preceding today
 as the final training/validation anchor. The server derives and requires all
 eight consecutive completed journals needed for seven chronological
-train/out-of-sample folds; do not fall back to older or cherry-picked dates
-when any journal is absent. The hypothesis must cite the primary sources used
+historical screening folds; do not fall back to older or cherry-picked dates
+when any journal is absent. The hypothesis must cite any primary web sources used
+or reference the host-recorded artifact for its explicit recorded basis,
 and must retain all paper-only, unauthorized, and non-promotable markers. Never
 rotate a pending or qualified challenger.
 
 The entire final response must be exactly one JSON object with no Markdown,
 code fence, prose before or after it, or `[SILENT]` sentinel. Use this exact
-schema; do not add fields:
+version-1 schema for a web-only basis. For the explicit recorded basis, change
+`version` to 2 and add only `recorded_evidence` as documented below:
 
 Use the two trusted run-time anchors appended to this prompt as `created_at`
 and `valid_until`. Copy both exact values and do not invent, round, reuse, or
@@ -143,6 +207,18 @@ requires an empty sources array. For a cited source, output its exact requested
 and returned URL and omit `retrieved_at`; the host inserts the exact successful
 `web_extract` result time from the redacted session trace before validating this
 response. Do not invent a retrieval time.
+
+Keep the complete JSON within 65,536 bytes. `hypothesis_id` and each fact `id`
+must be 3–64 characters using only lowercase ASCII letters, digits, `-` and `_`.
+Use at most 12 `verified_facts`, at most 8 `candidate_parameter_diff` entries,
+and 1–12 `rejection_conditions`. Each rejection condition must be nonempty and
+at most 600 UTF-8 bytes; each fact claim must be nonempty and at most 800 bytes. `bull_case`, `bear_case`,
+`no_trade_case`, `execution_cost_case` and `out_of_sample_test` must each be
+nonempty and at most 2,000 UTF-8 bytes; `risk_veto.reason` must be nonempty and
+at most 1,000 bytes. These text fields must have no leading or trailing
+whitespace and no control characters except internal newline or tab. Byte
+limits are not character limits. A host schema-correction hint identifies only
+a rejected field, not evidence that the rest of the packet passed validation.
 
 {
   "version": 1,
@@ -172,13 +248,25 @@ response. Do not invent a retrieval time.
 
 Allowed parameter names are `fast_window`, `slow_window`,
 `minimum_signal_bps`, and `cooldown_seconds`. A `candidate`
-needs at least one fact marked `verified`, two organization-independent timestamped
+using version 1 needs at least one fact marked `verified`, two organization-independent timestamped
 HTTPS sources for every such fact, a Hermes `risk_veto` marked `pass`, and at least one
 parameter change. Otherwise use `no_change` or `blocked`, set the veto to
 `reject`, and return an empty parameter-diff array. Do not output
 `content_sha256`; deterministic mithril-agent code adds and verifies it. Do not edit
 policy/candidate JSON directly, select a champion, authorize an action, or
 suggest live execution.
+
+For version 2, include exactly this additional reference object:
+`"recorded_evidence":{"content_sha256":"exact host artifact digest","metric_ids":["signals","fills"]}`.
+Choose one to five distinct IDs from `observable_bps`, `signals`, `fills`,
+`versus_hold_micros`, and `max_drawdown_micros`. Explain the inference in the
+bull/bear/cost cases, not as an invented measured fact. A recorded candidate
+needs this valid matching-market reference, all included external facts verified,
+an independent `risk_veto` pass and a nonempty bounded parameter diff. Otherwise
+return `no_change` or `blocked` with veto reject and no changes. Never emit
+`recorded_observations`; only the host may attach the actual measurements.
+Do not emit a top-level `content_sha256`; the nested reference digest is the
+only digest copied from the prompt.
 
 `rejection_conditions` must contain one to twelve non-empty strings. Each string
 must be at most 600 UTF-8 bytes, have no leading or trailing whitespace, and state

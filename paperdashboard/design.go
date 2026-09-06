@@ -39,7 +39,7 @@ const dashboardCSS = `@font-face {
 }
 
 * { box-sizing: border-box; }
-html { min-width: 320px; color-scheme: dark; background: var(--canvas); }
+html { min-width: 320px; color-scheme: dark; background: var(--canvas); scroll-padding-top: 88px; }
 body {
   min-width: 320px;
   min-height: 100vh;
@@ -582,6 +582,24 @@ footer.shell {
 .badge.neutral { color: var(--muted); }
 
 .market-chart-stage { position: relative; min-width: 0; }
+.balance-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  margin-top: 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-small);
+  background: var(--line);
+}
+.balance-strip > span { display: grid; min-width: 0; gap: 4px; padding: 14px 16px; background: #0b0b0b; }
+.balance-strip small { color: var(--subtle); font-size: .6rem; }
+.balance-strip strong { color: var(--secondary); font-size: .73rem; font-weight: 570; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.balance-note { grid-column: 1 / -1; margin: 0; padding: 10px 16px; color: var(--muted); background: #0b0b0b; font-size: .65rem; }
+.balance-strip.unavailable { display: flex; align-items: center; gap: 12px; padding: 14px 16px; color: var(--muted); background: #0b0b0b; }
+.balance-strip.unavailable > span { display: grid; width: 34px; height: 34px; flex: 0 0 auto; padding: 0; place-items: center; border-radius: 50%; color: var(--subtle); background: var(--surface-hover); }
+.balance-strip.unavailable p { display: grid; gap: 3px; margin: 0; }
+.balance-strip.unavailable strong { color: var(--secondary); }
 .chart-switch {
   position: absolute;
   z-index: 3;
@@ -739,6 +757,9 @@ footer.shell {
 .attempt-meter.positive::-moz-progress-bar { background: var(--green); }
 .attempt-meter.negative::-moz-progress-bar { background: var(--red); }
 .attempt-card p, .perps-empty { margin: 8px 0 0; color: var(--subtle); font-size: .75rem; line-height: 1.5; }
+.perps-current-evidence { margin-top: 14px; }
+.perps-progress-head { margin-top: 14px; }
+.perps-current-reason { margin: 11px 0 0; color: var(--muted); font-size: .7rem; line-height: 1.5; }
 .attempt-kicker { display: flex; min-height: 26px; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: .75rem; font-weight: 600; }
 .attempt-kicker .help { flex: 0 0 auto; }
 .attempt-more { margin-top: 2px; }
@@ -1084,21 +1105,35 @@ footer.shell {
   font-weight: 700;
 }
 .research-market-name h3 { margin: 0; font-size: .86rem; font-weight: 620; }
-.research-market-name small { display: block; margin-top: 2px; color: var(--subtle); font-size: .61rem; }
-.research-progress-head { margin-top: 22px; color: var(--muted); font-size: .66rem; }
-.research-progress-head strong { color: var(--secondary); font-size: .72rem; font-variant-numeric: tabular-nums; }
+.research-market-name small { display: block; margin-top: 2px; color: var(--subtle); font-size: .7rem; }
+.research-progress-head { margin-top: 22px; color: var(--muted); font-size: .72rem; }
+.research-progress-head strong { color: var(--secondary); font-size: .76rem; font-variant-numeric: tabular-nums; }
 .research-progress { display: block; width: 100%; height: 6px; margin-top: 9px; overflow: hidden; border: 0; border-radius: 999px; appearance: none; background: #222; }
 .research-progress::-webkit-progress-bar { border-radius: inherit; background: #222; }
 .research-progress::-webkit-progress-value { border-radius: inherit; background: linear-gradient(90deg, #2d8d61, var(--green)); transition: width 400ms var(--ease-out); }
 .research-progress::-moz-progress-bar { border-radius: inherit; background: linear-gradient(90deg, #2d8d61, var(--green)); }
 .research-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 18px; }
+.proposal-history { display: grid; gap: 12px; list-style: none; margin: 18px 0 0; padding: 0; }
+.proposal-history > li { min-width: 0; padding-top: 12px; border-top: 1px solid var(--line); }
+.proposal-history-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.proposal-history-heading strong { font-size: .78rem; }
+.proposal-history-heading small { color: var(--subtle); font-size: .68rem; }
+.proposal-stages { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.proposal-stages > span { min-width: 0; padding: 10px; border-radius: 10px; background: var(--surface-raised); }
+.proposal-stages small { display: block; color: var(--subtle); font-size: .68rem; line-height: 1.4; }
+.proposal-stages strong { display: block; margin-top: 4px; font-size: .75rem; line-height: 1.4; overflow-wrap: anywhere; }
+.proposal-scores strong { margin-bottom: 4px; font-size: 1rem; font-variant-numeric: tabular-nums; }
+.proposal-result-note { display: block; margin: 8px 0 0; color: var(--subtle); font-size: .68rem; line-height: 1.5; }
+.proposal-stress { margin-top: 10px; color: var(--muted); font-size: .7rem; }
+.proposal-stress summary { width: fit-content; padding: 6px 0; cursor: pointer; }
+.proposal-stress > small { display: block; margin-top: 4px; color: var(--subtle); }
 .research-stats > span { min-width: 0; padding: 10px; border-radius: 10px; background: var(--surface-raised); }
 .research-stats small,
 .research-stats strong,
 .research-stats em { display: block; }
-.research-stats small { color: var(--subtle); font-size: .63rem; line-height: 1.35; }
-.research-stats strong { margin-top: 5px; color: var(--text); font-size: .78rem; font-variant-numeric: tabular-nums; }
-.research-stats em { margin-top: 3px; color: var(--muted); font-size: .61rem; font-style: normal; line-height: 1.35; }
+.research-stats small { color: var(--subtle); font-size: .7rem; line-height: 1.35; }
+.research-stats strong { margin-top: 5px; color: var(--text); font-size: .82rem; font-variant-numeric: tabular-nums; }
+.research-stats em { margin-top: 3px; color: var(--muted); font-size: .7rem; font-style: normal; line-height: 1.35; }
 .research-check {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1112,11 +1147,11 @@ footer.shell {
 .research-check > span { min-width: 0; padding: 10px; background: var(--surface-raised); }
 .research-check small,
 .research-check strong { display: block; }
-.research-check small { color: var(--subtle); font-size: .62rem; line-height: 1.35; }
-.research-check strong { margin-top: 5px; color: var(--text); font-size: .7rem; font-variant-numeric: tabular-nums; }
+.research-check small { color: var(--subtle); font-size: .7rem; line-height: 1.35; }
+.research-check strong { margin-top: 5px; color: var(--text); font-size: .78rem; font-variant-numeric: tabular-nums; }
 .research-check strong.positive { color: var(--green); }
 .research-check strong.negative { color: var(--red); }
-.market-research-card > p { min-height: 2.8em; margin: 16px 0 0; color: var(--muted); font-size: .66rem; line-height: 1.45; }
+.market-research-card > p { min-height: 2.8em; margin: 16px 0 0; color: var(--muted); font-size: .72rem; line-height: 1.45; }
 .market-research-card > p.research-history { min-height: 0; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--subtle); }
 .market-research-empty { grid-column: 1 / -1; padding: 24px; border-radius: var(--radius); color: var(--muted); background: var(--surface); font-size: .74rem; }
 .market-research-empty.error { color: var(--red); }
@@ -1170,6 +1205,7 @@ footer.shell {
 }
 
 @media (max-width: 1023px) {
+  html { scroll-padding-top: 148px; }
   .app-header, .topbar { height: 64px; }
   .app-header { background: rgba(0, 0, 0, .88); }
   .topbar { padding: 0 16px; }
@@ -1215,6 +1251,7 @@ footer.shell {
 	.agent-now-grid { grid-template-columns: 1fr; }
   .metric:first-child { grid-column: 1 / -1; }
   .market { padding: 18px; }
+	.balance-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .market-head { min-height: 84px; }
   .market-status { align-items: flex-end; flex-direction: column-reverse; }
   .chart-switch { position: static; width: max-content; margin: 0 0 6px auto; }
@@ -1297,6 +1334,7 @@ footer.shell {
   .nav-icon { display: none; }
   main.shell { padding-right: 10px; padding-left: 10px; }
   .market { padding: 16px 13px; }
+	.balance-strip { grid-template-columns: 1fr; }
   .chart-switch { max-width: 100%; }
   .chart-toggle { padding: 0 9px; font-size: .61rem; }
   .chart-canvas, .chart-empty { height: 280px; }

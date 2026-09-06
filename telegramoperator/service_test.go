@@ -126,6 +126,65 @@ func TestPaperAnnouncementsAreCompactPersistentAndReadOnly(t *testing.T) {
 	}
 }
 
+func TestLatestCompletedReceiptDoesNotCreateATelegramEvent(t *testing.T) {
+	now := time.Date(2026, time.September, 4, 18, 0, 0, 0, time.UTC)
+	completed := paperstatus.CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+		HoldBenchmarkMicros: 100_000_000, Checks: 1, State: "watching", Strategy: "fixed",
+		QualificationTracked: true, QualificationOutcome: "insufficient_evidence",
+		QualificationSHA256: strings.Repeat("a", 64), QualificationTapes: 1,
+		QualificationFrames: 1, QualificationMinimumFrames: 2,
+	}
+	live := &paperstatus.CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+		HoldBenchmarkMicros: 100_000_000, State: "watching", Strategy: "fixed",
+	}
+	reader := &paperStatusStub{label: "SOL-PERP", snapshot: paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now, Current: "PAPER · Recording", Summary: live,
+		LatestCompleted: &paperstatus.CompletedSnapshot{
+			ObservedAt: now, EventID: strings.Repeat("b", 64), Summary: completed,
+		},
+	}}
+	bot := &botStub{}
+	service, err := New(Config{
+		Bot: bot, Cursor: &cursorStub{}, Sources: []StatusReader{&statusStub{}},
+		PaperSources: []PaperStatusReader{reader}, AllowedChatIDs: []int64{123},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.announce(t.Context())
+	if len(bot.sent) != 0 {
+		t.Fatalf("saved receipt created a Telegram alert: %+v", bot.sent)
+	}
+	reader.snapshot.ObservedAt = now.Add(time.Second)
+	reader.snapshot.Events = []paperstatus.Event{{
+		ID: strings.Repeat("c", 64), At: now.Add(time.Second), Kind: paperstatus.KindOrderFilled,
+		Message: "PAPER · 🔵 SOLD\nSold 1 SOL\nReceived 100 USDC\nTotal paper account: $100",
+	}}
+	service.announce(t.Context())
+	if len(bot.sent) != 1 || !strings.Contains(bot.sent[0].Text, "SOLD") {
+		t.Fatalf("live event delivery = %+v", bot.sent)
+	}
+
+	mismatched := paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now, Current: paperstatus.UnconfiguredCurrent,
+		LatestCompleted: &paperstatus.CompletedSnapshot{
+			ObservedAt: now, EventID: strings.Repeat("d", 64), Summary: completed,
+		},
+	}
+	mismatched.LatestCompleted.Summary.Market = "BTC-PERP"
+	if paperSnapshotMatchesReader(reader, mismatched) {
+		t.Fatal("mislabeled saved receipt matched the SOL source")
+	}
+}
+
 func TestPaperAnnouncementRetriesOnlyWhenNobodyWasTold(t *testing.T) {
 	now := time.Date(2026, time.August, 30, 1, 2, 3, 0, time.UTC)
 	reader := &paperStatusStub{snapshot: paperstatus.Snapshot{
@@ -464,25 +523,30 @@ func TestMarketFillExplainsEstimatedAndActualUnitPrices(t *testing.T) {
 		Message: "PAPER · 🟢 BOUGHT\nBought 320 JUP\nPaid 69 USDC\n" +
 			"Price when order opened: $0.214878\nPrice when filled: $0.214826\n" +
 			"Paper cash left: 26 USDC\nJUP held now: 320 JUP\n" +
+			"Total paper value now: $95\n" +
 			"This completed trade cycle: up $2.14",
 	}
 	message := paperAnnouncement(event, "JUP/USDC")
 	for _, want := range []string{
 		"🟢 BOUGHT 320 JUP",
-		"Paid: 69 USDC",
-		"Filled price: $0.214826 per JUP\nEstimate when opened: $0.214878 per JUP",
-		"Trade result: 🟢 ▲ $2.14 (profit)",
+		"Paid: 69 USDC\n" +
+			"Filled price: $0.214826 per JUP\n" +
+			"Estimate when opened: $0.214878 per JUP\n" +
+			"Market cash: 26 USDC\n" +
+			"Market holdings: 320 JUP\n" +
+			"Market total: $95.00\n" +
+			"Trade result: 🟢 ▲ $2.14 (profit)",
 	} {
 		if !strings.Contains(message, want) {
 			t.Errorf("paper fill omits %q: %q", want, message)
 		}
 	}
-	for _, omitted := range []string{"Paper cash left:", "JUP held now:", "Market value:"} {
+	for _, omitted := range []string{"Paper cash left:", "JUP held now:", "Trading position:"} {
 		if strings.Contains(message, omitted) {
 			t.Errorf("compact paper fill retained %q: %q", omitted, message)
 		}
 	}
-	if lines := strings.Split(message, "\n"); len(lines) > 8 {
+	if lines := strings.Split(message, "\n"); len(lines) > 11 {
 		t.Fatalf("compact paper fill grew to %d lines: %q", len(lines), message)
 	}
 	legacy := event
@@ -501,6 +565,27 @@ func TestMarketFillExplainsEstimatedAndActualUnitPrices(t *testing.T) {
 	} {
 		if !strings.Contains(unlabeled, want) {
 			t.Errorf("single-market fill omits %q: %q", want, unlabeled)
+		}
+	}
+}
+
+func TestMarketFillKeepsThePendingTradeResult(t *testing.T) {
+	event := paperstatus.Event{
+		ID: strings.Repeat("b", 64), At: time.Date(2026, 8, 30, 1, 2, 3, 0, time.UTC),
+		Kind: paperstatus.KindOrderFilled,
+		Message: "PAPER · 🟢 BOUGHT\nBought 1 JUP\nPaid 1 USDC\n" +
+			"Paper cash left: 24 USDC\nTrading position: 1 JUP\n" +
+			"Total paper value now: $25\nTrade result: waiting for the next matching order",
+	}
+	message := paperAnnouncement(event, "JUP/USDC")
+	for _, want := range []string{
+		"Market cash: 24 USDC",
+		"Market holdings: 1 JUP",
+		"Market total: $25.00",
+		"Trade result: waiting for a matching sell",
+	} {
+		if !strings.Contains(message, want) {
+			t.Errorf("pending paper fill omits %q: %q", want, message)
 		}
 	}
 }
@@ -526,6 +611,7 @@ func TestFilledMarketAnnouncementIncludesOnlyACompletePortfolioTotal(t *testing.
 	event := &paperstatus.Event{
 		ID: strings.Repeat("8", 64), At: now, Kind: paperstatus.KindOrderFilled,
 		Message: "PAPER · 🔵 SOLD\nSold 0.24 SOL\nReceived 25 USDC\n" +
+			"Paper cash left: 25.17 USDC\nTrading position: 0 SOL\n" +
 			"Total paper account: $25.17\nGain/loss today: down $0.52",
 	}
 	first := build("/run/sol.sock", "SOL/USDC", 25_687_500, 25_168_365, event)
@@ -545,14 +631,17 @@ func TestFilledMarketAnnouncementIncludesOnlyACompletePortfolioTotal(t *testing.
 	}
 	for _, want := range []string{
 		"PAPER\n\n🔵 SOLD 0.24 SOL\nMarket: SOL/USDC",
-		"Account value: $278.20",
-		"Total result: 🟢 ▲ $2.11 (profit)",
+		"Market cash: 25.17 USDC",
+		"Market holdings: 0 SOL",
+		"Spot account value: $278.20",
+		"Spot result this run: 🟢 ▲ $2.11 (profit)",
 	} {
 		if !strings.Contains(bot.sent[0].Text, want) {
 			t.Errorf("portfolio fill alert omits %q:\n%s", want, bot.sent[0].Text)
 		}
 	}
-	if strings.Contains(bot.sent[0].Text, "Market value:") ||
+	if strings.Contains(bot.sent[0].Text, "Market total:") ||
+		strings.Contains(bot.sent[0].Text, "Market value:") ||
 		strings.Contains(bot.sent[0].Text, "Paper cash + current value of paper holdings") {
 		t.Fatalf("portfolio fill alert retained a confusing local account total:\n%s", bot.sent[0].Text)
 	}
@@ -562,8 +651,11 @@ func TestFilledMarketAnnouncementIncludesOnlyACompletePortfolioTotal(t *testing.
 	first.snapshot.Events = []paperstatus.Event{*event}
 	bot.sent = nil
 	service.announce(t.Context())
-	if len(bot.sent) != 1 || strings.Contains(bot.sent[0].Text, "Account value:") ||
-		strings.Contains(bot.sent[0].Text, "Total result:") {
+	if len(bot.sent) != 1 || strings.Contains(bot.sent[0].Text, "Spot account value:") ||
+		strings.Contains(bot.sent[0].Text, "Spot result this run:") ||
+		!strings.Contains(bot.sent[0].Text, "Market total: $25.17") ||
+		!strings.Contains(bot.sent[0].Text, "Market cash: 25.17 USDC") ||
+		!strings.Contains(bot.sent[0].Text, "Market holdings: 0 SOL") {
 		t.Fatalf("partial portfolio was labeled as complete: %+v", bot.sent)
 	}
 }
@@ -921,7 +1013,7 @@ func TestOptionalExperimentCannotChangeRequiredAccountTotals(t *testing.T) {
 				t.Fatalf("optional source erased /paper aggregate:\n%s", report)
 			}
 			service.announce(t.Context())
-			if len(bot.sent) != 1 || !strings.Contains(bot.sent[0].Text, "Account value: $200.00") {
+			if len(bot.sent) != 1 || !strings.Contains(bot.sent[0].Text, "Spot account value: $200.00") {
 				t.Fatalf("optional source erased alert footer: %+v", bot.sent)
 			}
 		})
@@ -944,7 +1036,7 @@ func TestPaperPortfolioShowsLiquidationDeficit(t *testing.T) {
 		paperPortfolioSummary(summaries, time.Time{}),
 		paperPortfolioAlertSummary(summaries),
 	} {
-		if !strings.Contains(report, "Spot paper value: $98.00") && !strings.Contains(report, "Account value: $98.00") ||
+		if !strings.Contains(report, "Spot paper value: $98.00") && !strings.Contains(report, "Spot account value: $98.00") ||
 			!strings.Contains(report, "$2.00") ||
 			!strings.Contains(report, "🔴 ▼ $102.00 (loss)") ||
 			!strings.Contains(report, "Liquidation deficit: $2.00") {

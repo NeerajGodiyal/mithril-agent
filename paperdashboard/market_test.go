@@ -28,14 +28,35 @@ func TestMarketAdmissionProjectionIsFixedMinimalAndAtomic(t *testing.T) {
 		if item.market == marketadmission.MarketWIFUSDC {
 			var err error
 			status, err = status.WithPaperCheck(marketadmission.DashboardPaperCheck{
-				Market: item.market, CheckedAt: now, Through: status.Diagnostic.Through,
+				Version: marketadmission.DashboardPaperCheckVersion,
+				Market:  item.market, CheckedAt: now, Through: status.Diagnostic.Through,
 				Outcome:             marketadmission.DashboardPaperOutcomeCandidateRejected,
 				TrainingCoverageBPS: 9_800, HoldoutCoverageBPS: 9_700,
 				HoldoutAfterCostNetReturnMicros:  -25_000,
 				HoldoutAfterCostVersusHoldMicros: -10_000,
 				StressAfterCostNetReturnMicros:   -40_000,
 				StressAfterCostVersusHoldMicros:  -30_000,
-				Reasons:                          []string{"holdout_net_return_not_positive"},
+				CandidatesEvaluated:              12,
+				TrainingActivity: &marketadmission.DashboardPaperTrainingActivity{
+					Version: 1, BaseMinimumSignalBPS: 90, CandidatesWithoutEntrySignal: 7,
+				},
+				TrainingRejections: marketadmission.DashboardPaperTrainingRejections{
+					RejectedCandidates: 11, NoRoundTrip: 7, DidNotBeatHolding: 5,
+				},
+				Reasons: []string{"holdout_net_return_not_positive"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if item.market == marketadmission.MarketJTOUSDC {
+			var err error
+			status, err = status.WithPaperCheck(marketadmission.DashboardPaperCheck{
+				Version: 1, Market: item.market, CheckedAt: now, Through: status.Diagnostic.Through,
+				Outcome:             marketadmission.DashboardPaperOutcomeNoTrainingCandidate,
+				TrainingCoverageBPS: 10_000, HoldoutCoverageBPS: 10_000, CandidatesEvaluated: 12,
+				TrainingRejections: marketadmission.DashboardPaperTrainingRejections{RejectedCandidates: 12, NoRoundTrip: 12},
+				Reasons:            []string{"no_qualified_training_candidate"},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -54,7 +75,14 @@ func TestMarketAdmissionProjectionIsFixedMinimalAndAtomic(t *testing.T) {
 		!markets[0].Fresh || markets[0].AvailableBuckets != 9 || markets[0].ObservedBuckets != 10 ||
 		markets[0].PaperCheck == nil ||
 		markets[0].PaperCheck.Outcome != marketadmission.DashboardPaperOutcomeCandidateRejected ||
-		markets[0].PaperCheck.HoldoutAfterCostNetReturnMicros != -25_000 {
+		markets[0].PaperCheck.HoldoutAfterCostNetReturnMicros != -25_000 ||
+		markets[0].PaperCheck.CandidatesEvaluated != 12 ||
+		markets[0].PaperCheck.TrainingRejections.RejectedCandidates != 11 ||
+		markets[0].PaperCheck.TrainingRejections.NoRoundTrip != 7 ||
+		markets[0].PaperCheck.TrainingActivity == nil ||
+		*markets[0].PaperCheck.TrainingActivity != (marketadmission.DashboardPaperTrainingActivity{
+			Version: 1, BaseMinimumSignalBPS: 90, CandidatesWithoutEntrySignal: 7,
+		}) || markets[1].PaperCheck == nil || markets[1].PaperCheck.TrainingActivity != nil {
 		t.Fatalf("market projection = %+v", markets)
 	}
 	raw, err := os.ReadFile(output)
@@ -141,6 +169,42 @@ func TestMarketAdmissionFreshnessIsPerCollectorAndDoesNotAffectHealth(t *testing
 	view = server.readSnapshot(now)
 	if !view.Complete || !view.MarketResearchError || view.Overview.EquityMicros != 1_000_000 {
 		t.Fatalf("invalid research status damaged active paper health: %+v", view)
+	}
+}
+
+func TestMarketAdmissionExplainsACompleteWindowThatDidNotPass(t *testing.T) {
+	root := protectedTestDirectory(t)
+	credentials := filepath.Join(root, "credentials")
+	output := filepath.Join(root, "market-admission.json")
+	if err := os.MkdirAll(credentials, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 4, 8, 0, 30, 0, time.UTC)
+	for _, item := range marketAdmissionCredentials {
+		status := dashboardStatus(item.market, now)
+		if item.market == marketadmission.MarketJTOUSDC {
+			status.Diagnostic.ObservedBuckets = status.Diagnostic.ExpectedBuckets
+			status.Diagnostic.AvailableBuckets = status.Diagnostic.ExpectedBuckets
+			status.Diagnostic.AvailabilityBPS = 10_000
+			status.Diagnostic.MedianRouteCostBPS = marketadmission.DefaultThresholds().MedianRouteCostBPS + 7
+			status.Diagnostic.P95RouteCostBPS = marketadmission.DefaultThresholds().P95RouteCostBPS
+			status.Diagnostic.FailureCounts = map[string]uint64{}
+		}
+		writeMarketCredential(t, credentials, item.credential, status)
+	}
+	if err := RecordMarketAdmission(output, credentials, now); err != nil {
+		t.Fatal(err)
+	}
+	markets, err := readMarketAdmission(output, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jto := markets[1]
+	if jto.ReadyForPaperCheck || len(jto.PaperCheckGateReasons) != 1 ||
+		jto.PaperCheckGateReasons[0] != "median round-trip route cost exceeds the limit" ||
+		jto.MedianRouteCostLimitBPS != marketadmission.DefaultThresholds().MedianRouteCostBPS ||
+		jto.P95RouteCostLimitBPS != marketadmission.DefaultThresholds().P95RouteCostBPS {
+		t.Fatalf("JTO research = %+v", jto)
 	}
 }
 

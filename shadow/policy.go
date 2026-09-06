@@ -276,6 +276,19 @@ func (p Policy) Fingerprint() (string, error) {
 // RoundTrip reports whether this policy scores both legs on one book.
 func (p Policy) RoundTrip() bool { return p.ReturnTrigger != nil }
 
+// ValidateForRun retains historical policy reads while refusing new evidence
+// under the legacy non-SOL quote rule when the two assets use different units.
+func (p Policy) ValidateForRun() error {
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	if p.Adaptive != nil && p.Adaptive.Version < AdaptiveVersion &&
+		p.NativeFeePrice != nil && p.InputDecimals != p.OutputDecimals {
+		return errors.New("legacy adaptive quote units require a new v3 policy before recording or qualifying paper evidence")
+	}
+	return nil
+}
+
 const (
 	minTickSeconds   = uint64(5)
 	maxTickSeconds   = uint64(3600)

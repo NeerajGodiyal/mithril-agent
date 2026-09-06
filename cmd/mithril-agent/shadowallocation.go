@@ -137,7 +137,7 @@ func runShadowAllocation(args []string, output io.Writer) error {
 }
 
 func validatePaperPolicySources(policy shadow.Policy) error {
-	if err := policy.Validate(); err != nil {
+	if err := policy.ValidateForRun(); err != nil {
 		return err
 	}
 	marketPrimary, marketSecondary := "", ""

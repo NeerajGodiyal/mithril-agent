@@ -20,7 +20,8 @@ import (
 )
 
 const (
-	marketPaperCheckVersion         = uint32(2)
+	marketPaperCheckLegacyVersion   = uint32(3)
+	marketPaperCheckVersion         = uint32(4)
 	marketPaperCheckTrainingMinutes = 80
 	marketPaperCheckHoldoutMinutes  = 40
 	// Two baseline legs equal the code-owned 50 bps p95 round-trip admission
@@ -45,38 +46,52 @@ type marketPaperCheckScore struct {
 	MaxDrawdownBPS      uint16 `json:"max_drawdown_bps"`
 }
 
+type marketPaperTrainingRejections struct {
+	RejectedCandidates   uint64 `json:"rejected_candidates"`
+	NoRoundTrip          uint64 `json:"no_round_trip"`
+	UnmatchedFilledLeg   uint64 `json:"unmatched_filled_leg"`
+	PendingDecision      uint64 `json:"pending_decision"`
+	FailedExecution      uint64 `json:"failed_execution"`
+	NetReturnNotPositive uint64 `json:"net_return_not_positive"`
+	DidNotBeatHolding    uint64 `json:"did_not_beat_holding"`
+	DrawdownAboveLimit   uint64 `json:"drawdown_above_limit"`
+}
+
 // marketPaperCheckResult is deliberately incompatible with admission and
 // selectable-candidate artifacts. It can report only research evidence.
 type marketPaperCheckResult struct {
-	Version                   uint32                 `json:"version"`
-	Status                    string                 `json:"status"`
-	Outcome                   string                 `json:"outcome"`
-	PaperOnly                 bool                   `json:"paper_only"`
-	Authorized                bool                   `json:"authorized"`
-	Promotable                bool                   `json:"promotable"`
-	Market                    string                 `json:"market"`
-	InputSHA256               string                 `json:"input_sha256"`
-	ProvisionalEvidenceSHA256 string                 `json:"provisional_evidence_sha256"`
-	PolicySHA256              string                 `json:"policy_sha256"`
-	CandidatePolicySHA256     string                 `json:"candidate_policy_sha256,omitempty"`
-	Journal                   journal.DurablePrefix  `json:"journal"`
-	From                      time.Time              `json:"from"`
-	Through                   time.Time              `json:"through"`
-	TrainingThrough           time.Time              `json:"training_through"`
-	TrainingCoverageBPS       uint16                 `json:"training_coverage_bps"`
-	HoldoutCoverageBPS        uint16                 `json:"holdout_coverage_bps"`
-	ModelledSpreadBPS         uint16                 `json:"modelled_spread_bps_each_way"`
-	StressModelledSpreadBPS   uint16                 `json:"stress_modelled_spread_bps_each_way"`
-	CostModelRule             string                 `json:"cost_model_rule"`
-	StressRule                string                 `json:"stress_rule"`
-	CandidatesEvaluated       uint64                 `json:"candidates_evaluated"`
-	BasePolicy                shadow.Policy          `json:"base_policy"`
-	Candidate                 *shadowSearchCandidate `json:"candidate,omitempty"`
-	Training                  *marketPaperCheckScore `json:"training,omitempty"`
-	Holdout                   *marketPaperCheckScore `json:"holdout,omitempty"`
-	Stress                    *marketPaperCheckScore `json:"stress,omitempty"`
-	Reasons                   []string               `json:"reasons"`
-	ContentSHA256             string                 `json:"content_sha256"`
+	Version                   uint32                        `json:"version"`
+	Status                    string                        `json:"status"`
+	Outcome                   string                        `json:"outcome"`
+	PaperOnly                 bool                          `json:"paper_only"`
+	Authorized                bool                          `json:"authorized"`
+	Promotable                bool                          `json:"promotable"`
+	Market                    string                        `json:"market"`
+	InputSHA256               string                        `json:"input_sha256"`
+	ProvisionalEvidenceSHA256 string                        `json:"provisional_evidence_sha256"`
+	PolicySHA256              string                        `json:"policy_sha256"`
+	CandidatePolicySHA256     string                        `json:"candidate_policy_sha256,omitempty"`
+	Journal                   journal.DurablePrefix         `json:"journal"`
+	From                      time.Time                     `json:"from"`
+	Through                   time.Time                     `json:"through"`
+	TrainingThrough           time.Time                     `json:"training_through"`
+	TrainingCoverageBPS       uint16                        `json:"training_coverage_bps"`
+	HoldoutCoverageBPS        uint16                        `json:"holdout_coverage_bps"`
+	ModelledSpreadBPS         uint16                        `json:"modelled_spread_bps_each_way"`
+	StressModelledSpreadBPS   uint16                        `json:"stress_modelled_spread_bps_each_way"`
+	CostModelRule             string                        `json:"cost_model_rule"`
+	StressRule                string                        `json:"stress_rule"`
+	CandidatesEvaluated       uint64                        `json:"candidates_evaluated"`
+	TrainingRejections        marketPaperTrainingRejections `json:"training_rejections"`
+	BasePolicy                shadow.Policy                 `json:"base_policy"`
+	Candidate                 *shadowSearchCandidate        `json:"candidate,omitempty"`
+	Training                  *marketPaperCheckScore        `json:"training,omitempty"`
+	Holdout                   *marketPaperCheckScore        `json:"holdout,omitempty"`
+	Stress                    *marketPaperCheckScore        `json:"stress,omitempty"`
+	Reasons                   []string                      `json:"reasons"`
+	ContentSHA256             string                        `json:"content_sha256"`
+
+	TrainingActivity *marketadmission.DashboardPaperTrainingActivity `json:"training_activity,omitempty"`
 }
 
 func runShadowMarketPaperCheck(args []string, output io.Writer) error {
@@ -88,6 +103,7 @@ func runShadowMarketPaperCheck(args []string, output io.Writer) error {
 	dashboardStatusPath := flags.String("dashboard-status", "", "optional sibling dashboard-status.json")
 	candidatePolicyOut := flags.String("candidate-policy-out", "", "optional immutable checked paper policy")
 	resultOut := flags.String("result-out", "", "optional immutable paper-check result")
+	costExperiment := flags.String("cost-experiment", "", "stdout-only cost or recorded-route quote comparison")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, shadowMarketUsage)
@@ -97,6 +113,10 @@ func runShadowMarketPaperCheck(args []string, output io.Writer) error {
 	}
 	if flags.NArg() != 0 || *policyPath == "" || *artifactPath == "" || *journalPath == "" {
 		return errors.New("shadow market paper-check requires --policy, --provisional-artifact, and --journal")
+	}
+	if *costExperiment != "" && ((*costExperiment != shadow.ObservedNativeCostVersion && *costExperiment != marketRecordedQuoteVersion) ||
+		*dashboardStatusPath != "" || *candidatePolicyOut != "" || *resultOut != "") {
+		return errors.New("paper-check cost experiment requires observed-native-cost-v1 or recorded-route-quotes-v1 without output files")
 	}
 	for _, item := range []struct{ name, path string }{
 		{"--policy", *policyPath}, {"--provisional-artifact", *artifactPath}, {"--journal", *journalPath},
@@ -121,7 +141,13 @@ func runShadowMarketPaperCheck(args []string, output io.Writer) error {
 	if *candidatePolicyOut != "" && *resultOut == "" {
 		return errors.New("--candidate-policy-out requires --result-out")
 	}
-	artifact, err := loadProvisionalMarketAdmission(*artifactPath, *journalPath, time.Now())
+	var artifact marketadmission.ProvisionalArtifact
+	var err error
+	if *costExperiment != "" {
+		artifact, err = loadMarketPaperCostEvidence(*artifactPath, time.Now())
+	} else {
+		artifact, err = loadProvisionalMarketAdmission(*artifactPath, *journalPath, time.Now())
+	}
 	if err != nil {
 		return err
 	}
@@ -135,6 +161,9 @@ func runShadowMarketPaperCheck(args []string, output io.Writer) error {
 	points, err := artifact.ReplayPoints(*journalPath)
 	if err != nil {
 		return err
+	}
+	if *costExperiment != "" {
+		return writeMarketPaperCostExperiment(output, policy, artifact, points, *costExperiment)
 	}
 	result, err := checkProvisionalMarketPaper(policy, artifact, points)
 	if err != nil {
@@ -212,7 +241,7 @@ func loadMarketPaperCheckResult(
 	if err != nil {
 		return marketPaperCheckResult{}, errors.New("paper-check artifact journal is invalid")
 	}
-	want, err := checkProvisionalMarketPaper(result.BasePolicy, artifact, points)
+	want, err := checkProvisionalMarketPaperVersion(result.BasePolicy, artifact, points, result.Version)
 	if err != nil {
 		return marketPaperCheckResult{}, errors.New("paper-check artifact cannot be reproduced")
 	}
@@ -312,10 +341,26 @@ func dashboardPaperCheckFromResult(
 	checkedAt time.Time,
 ) (marketadmission.DashboardPaperCheck, error) {
 	check := marketadmission.DashboardPaperCheck{
-		Market: result.Market, CheckedAt: checkedAt.UTC(), Through: result.Through,
+		Version: marketadmission.DashboardPaperCheckVersion,
+		Market:  result.Market, CheckedAt: checkedAt.UTC(), Through: result.Through,
 		Outcome: result.Outcome, TrainingCoverageBPS: result.TrainingCoverageBPS,
-		HoldoutCoverageBPS: result.HoldoutCoverageBPS,
-		Reasons:            append([]string{}, result.Reasons...),
+		HoldoutCoverageBPS:  result.HoldoutCoverageBPS,
+		CandidatesEvaluated: result.CandidatesEvaluated,
+		TrainingActivity:    result.TrainingActivity,
+		TrainingRejections: marketadmission.DashboardPaperTrainingRejections{
+			RejectedCandidates:   result.TrainingRejections.RejectedCandidates,
+			NoRoundTrip:          result.TrainingRejections.NoRoundTrip,
+			UnmatchedFilledLeg:   result.TrainingRejections.UnmatchedFilledLeg,
+			PendingDecision:      result.TrainingRejections.PendingDecision,
+			FailedExecution:      result.TrainingRejections.FailedExecution,
+			NetReturnNotPositive: result.TrainingRejections.NetReturnNotPositive,
+			DidNotBeatHolding:    result.TrainingRejections.DidNotBeatHolding,
+			DrawdownAboveLimit:   result.TrainingRejections.DrawdownAboveLimit,
+		},
+		Reasons: append([]string{}, result.Reasons...),
+	}
+	if result.Version == marketPaperCheckLegacyVersion {
+		check.Version = 1
 	}
 	scored := result.Holdout != nil || result.Stress != nil
 	switch result.Outcome {
@@ -344,6 +389,20 @@ func checkProvisionalMarketPaper(
 	artifact marketadmission.ProvisionalArtifact,
 	points []marketadmission.ProvisionalReplayPoint,
 ) (marketPaperCheckResult, error) {
+	return checkProvisionalMarketPaperVersion(policy, artifact, points, marketPaperCheckVersion)
+}
+
+// Reproduce legacy receipts with their original version and omitted diagnostics;
+// their input digest and full-result fingerprint must remain unchanged.
+func checkProvisionalMarketPaperVersion(
+	policy shadow.Policy,
+	artifact marketadmission.ProvisionalArtifact,
+	points []marketadmission.ProvisionalReplayPoint,
+	version uint32,
+) (marketPaperCheckResult, error) {
+	if version != marketPaperCheckLegacyVersion && version != marketPaperCheckVersion {
+		return marketPaperCheckResult{}, errors.New("paper-check version is unsupported")
+	}
 	policySHA256, err := policy.Fingerprint()
 	if err != nil {
 		return marketPaperCheckResult{}, err
@@ -361,7 +420,7 @@ func checkProvisionalMarketPaper(
 	spreadBPS := marketPaperCheckSpreadBPS
 	stress := spreadBPS * 2
 	result := marketPaperCheckResult{
-		Version: marketPaperCheckVersion, Status: "research_only", Outcome: "candidate_rejected",
+		Version: version, Status: "research_only", Outcome: "candidate_rejected",
 		PaperOnly: true, Market: artifact.Candidate.Market,
 		ProvisionalEvidenceSHA256: artifact.ContentSHA256, PolicySHA256: policySHA256,
 		Journal: artifact.Journal, From: artifact.From, Through: artifact.Through,
@@ -403,16 +462,33 @@ func checkProvisionalMarketPaper(
 		return result, nil
 	}
 	var searchedHoldout scoredMarketPaperCandidate
+	var candidatesEvaluated uint64
 	search, err := searchShadowCandidateScored(
 		policy, observedPrices(training), observedPrices(holdout), uint64(spreadBPS), nil,
 		func(candidate shadow.Policy) (shadowSearchScore, error) {
 			score, err := scoreMarketPaperCandidate(candidate, training, uint64(spreadBPS))
-			if err == nil && len(marketPaperScoreReasons(
+			if err != nil {
+				return shadowSearchScore{}, err
+			}
+			candidatesEvaluated++
+			if version == marketPaperCheckVersion {
+				if result.TrainingActivity == nil {
+					result.TrainingActivity = &marketadmission.DashboardPaperTrainingActivity{
+						Version: 1, BaseMinimumSignalBPS: policy.Adaptive.MinimumSignalBPS,
+					}
+				}
+				if score.NoEntrySignal {
+					result.TrainingActivity.CandidatesWithoutEntrySignal++
+				}
+			}
+			reasons := marketPaperScoreReasons(
 				"training", score.Paper, 1, policy.Adaptive.MaxDrawdownBPS,
-			)) != 0 {
+			)
+			addMarketPaperTrainingRejections(&result.TrainingRejections, reasons)
+			if len(reasons) != 0 {
 				score.Search.FullRoundTrips = 0
 			}
-			return score.Search, err
+			return score.Search, nil
 		},
 		func(candidate shadow.Policy) (shadowSearchScore, error) {
 			score, err := scoreMarketPaperCandidate(candidate, holdout, uint64(spreadBPS))
@@ -420,6 +496,7 @@ func checkProvisionalMarketPaper(
 			return score.Search, err
 		},
 	)
+	result.CandidatesEvaluated = candidatesEvaluated
 	if errors.Is(err, errNoAdaptiveTrainingRoundTrip) {
 		result.Outcome = "no_training_candidate"
 		result.Reasons = append(result.Reasons, "no_qualified_training_candidate")
@@ -441,7 +518,9 @@ func checkProvisionalMarketPaper(
 	if err != nil {
 		return marketPaperCheckResult{}, err
 	}
-	result.CandidatesEvaluated = search.CandidatesEvaluated
+	if search.CandidatesEvaluated != candidatesEvaluated {
+		return marketPaperCheckResult{}, errors.New("paper-check candidate count is inconsistent")
+	}
 	result.CandidatePolicySHA256, err = candidate.Fingerprint()
 	if err != nil {
 		return marketPaperCheckResult{}, err
@@ -470,9 +549,37 @@ func checkProvisionalMarketPaper(
 	return result, nil
 }
 
+func addMarketPaperTrainingRejections(
+	counts *marketPaperTrainingRejections,
+	reasons []string,
+) {
+	if len(reasons) != 0 {
+		counts.RejectedCandidates++
+	}
+	for _, reason := range reasons {
+		switch reason {
+		case "training_completed_fewer_than_1_round_trips":
+			counts.NoRoundTrip++
+		case "training_has_unmatched_filled_leg":
+			counts.UnmatchedFilledLeg++
+		case "training_has_pending_decision":
+			counts.PendingDecision++
+		case "training_has_failed_execution":
+			counts.FailedExecution++
+		case "training_net_return_not_positive":
+			counts.NetReturnNotPositive++
+		case "training_did_not_beat_holding":
+			counts.DidNotBeatHolding++
+		case "training_drawdown_above_policy_limit":
+			counts.DrawdownAboveLimit++
+		}
+	}
+}
+
 type scoredMarketPaperCandidate struct {
-	Search shadowSearchScore
-	Paper  marketPaperCheckScore
+	Search        shadowSearchScore
+	Paper         marketPaperCheckScore
+	NoEntrySignal bool
 }
 
 func scoreMarketPaperCandidate(
@@ -498,7 +605,8 @@ func scoreMarketPaperCandidate(
 		return scoredMarketPaperCandidate{}, errors.New("paper-check equity is too large to compare")
 	}
 	return scoredMarketPaperCandidate{
-		Search: score,
+		Search:        score,
+		NoEntrySignal: replay.Counts.BuySignals == 0 && replay.Counts.SellSignals == 0,
 		Paper: marketPaperCheckScore{
 			FullRoundTrips: score.FullRoundTrips,
 			Sells:          replay.Counts.Sells, Buys: replay.Counts.Buys,

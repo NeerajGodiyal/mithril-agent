@@ -222,6 +222,11 @@ func TestJupiterRecoveryPersistsAndReconcilesExactV0Evidence(t *testing.T) {
 	if err := PrepareJupiterRecovery(policy, privateKey, request, response); err != nil {
 		t.Fatalf("exact Jupiter recovery retry was not idempotent: %v", err)
 	}
+	unsigned := request
+	unsigned.RiskGrant = riskgrant.Grant{}
+	if got, err := ReadJupiterFinalizedEvidence(policy, unsigned); err == nil || got != (JupiterFinalizedEvidence{}) {
+		t.Fatalf("pending preparation exposed finality: %+v, %v", got, err)
+	}
 	transaction, err := sealedtx.OpenConfidential(privateKey, response.SealedTransaction)
 	if err != nil {
 		t.Fatal(err)
@@ -289,6 +294,9 @@ func TestJupiterRecoveryPersistsAndReconcilesExactV0Evidence(t *testing.T) {
 		statusResult.FinalizedVerdict != txflow.VerdictFinalized {
 		t.Fatalf("finalized recovery status = %+v, %v", statusResult, err)
 	}
+	t.Run("read-only finalized projection", func(t *testing.T) {
+		checkJupiterFinalizedProjection(t, policy, unsigned, response, active)
+	})
 	if err := prepareJupiterRecovery(policy, request, response, transaction); err == nil {
 		t.Fatal("finalized Jupiter action was reopened for submission")
 	}
@@ -297,6 +305,96 @@ func TestJupiterRecoveryPersistsAndReconcilesExactV0Evidence(t *testing.T) {
 	}
 	if err := prepareJupiterRecovery(policy, request, response, transaction); err == nil {
 		t.Fatal("archived finalized Jupiter action was reopened for submission")
+	}
+}
+
+func checkJupiterFinalizedProjection(t *testing.T, policy Policy, request signer.Request, response signer.Response, original []byte) {
+	t.Helper()
+	got, err := ReadJupiterFinalizedEvidence(policy, request)
+	if err != nil || got.ActionID != request.ActionID || got.RequestSHA256 != response.RequestSHA256 ||
+		got.TransactionSHA256 != response.TransactionSHA256 || got.Verdict != txflow.VerdictFinalized ||
+		got.FinalizedSlot != 150 || got.PrimaryEffectSlot != 150 || got.SecondaryEffectSlot != 150 ||
+		got.InputMint != policy.Jupiter.InputMint || got.OutputMint != policy.Jupiter.OutputMint ||
+		got.InputSpent != request.JupiterCandidate.Request.InputAmount || got.OutputReceived != 20 ||
+		got.FeeLamports != response.FeeLamports {
+		t.Fatalf("finalized projection = %+v, %v", got, err)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil || bytes.Contains(encoded, []byte("transaction_base64")) || bytes.Contains(encoded, []byte("signature")) ||
+		!bytes.Contains(encoded, []byte(`"input_spent":"`)) || !bytes.Contains(encoded, []byte(`"fee_lamports":"`)) {
+		t.Fatalf("projection exposed material or lossy amounts: %s, %v", encoded, err)
+	}
+	requestBytes, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"action", "window", "fee context", "amount", "provider", "grant"} {
+		t.Run(name, func(t *testing.T) {
+			var changed signer.Request
+			if err := json.Unmarshal(requestBytes, &changed); err != nil {
+				t.Fatal(err)
+			}
+			switch name {
+			case "action":
+				changed.ActionID = strings.Repeat("a", 64)
+			case "window":
+				changed.ScheduleWindowEndUnix++
+			case "fee context":
+				changed.PrimaryFeeContextSlot++
+			case "amount":
+				changed.JupiterCandidate.Request.InputAmount++
+			case "provider":
+				changed.JupiterProviders.PrimaryTrustDomain = "different-provider"
+			case "grant":
+				changed.RiskGrant.Claims.Version = riskgrant.Version
+			}
+			if got, err := ReadJupiterFinalizedEvidence(policy, changed); err == nil || got != (JupiterFinalizedEvidence{}) {
+				t.Fatalf("changed unsigned request exposed evidence: %+v, %v", got, err)
+			}
+		})
+	}
+	for _, name := range []string{"legacy", "pending", "unresolved"} {
+		t.Run(name, func(t *testing.T) {
+			var record recoveryRecord
+			if err := json.Unmarshal(original, &record); err != nil {
+				t.Fatal(err)
+			}
+			switch name {
+			case "legacy":
+				record.Version = legacyJupiterRecoveryVersion
+				record.Reconciliation = nil
+			case "pending":
+				record.Finalized = false
+				record.Reconciliation = nil
+			case "unresolved":
+				record.Reconciliation.Verdict = txflow.VerdictUnresolved
+			}
+			data, err := json.Marshal(record)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := securefile.ReplacePrivate(recoveryPath(policy), data, maxRecoveryBytes); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := ReadJupiterFinalizedEvidence(policy, request); err == nil || got != (JupiterFinalizedEvidence{}) {
+				t.Fatalf("nonterminal/legacy record exposed evidence: %+v, %v", got, err)
+			}
+			after, err := securefile.ReadPrivate(recoveryPath(policy), maxRecoveryBytes)
+			if err != nil || !bytes.Equal(data, after) {
+				t.Fatalf("projection changed recovery: %v", err)
+			}
+		})
+	}
+	if err := securefile.ReplacePrivate(recoveryPath(policy), original, maxRecoveryBytes); err != nil {
+		t.Fatal(err)
+	}
+	again, err := ReadJupiterFinalizedEvidence(policy, request)
+	if err != nil || again != got {
+		t.Fatalf("reopened projection changed: %+v, %v", again, err)
+	}
+	after, err := securefile.ReadPrivate(recoveryPath(policy), maxRecoveryBytes)
+	if err != nil || !bytes.Equal(original, after) {
+		t.Fatalf("projection rewrote recovered record: %v", err)
 	}
 }
 
@@ -371,6 +469,10 @@ func TestJupiterRecoveryRejectsTamperedDurableFinality(t *testing.T) {
 			if _, _, _, err := readRecovery(policy); err == nil {
 				t.Fatal("tampered finalized recovery evidence was accepted")
 			}
+			request.RiskGrant = riskgrant.Grant{}
+			if got, err := ReadJupiterFinalizedEvidence(policy, request); err == nil || got != (JupiterFinalizedEvidence{}) {
+				t.Fatalf("tampered effects exposed finality: %+v, %v", got, err)
+			}
 		})
 	}
 }
@@ -424,6 +526,12 @@ func TestJupiterRecoveryPersistsFinalizedFailureEvidence(t *testing.T) {
 		record.Reconciliation.JupiterEffects == nil ||
 		record.Reconciliation.JupiterEffects.OutputAmount != 0 {
 		t.Fatalf("durable failed recovery = %+v, %v", record, err)
+	}
+	request.RiskGrant = riskgrant.Grant{}
+	projected, err := ReadJupiterFinalizedEvidence(policy, request)
+	if err != nil || projected.Verdict != txflow.VerdictFailed || projected.InputSpent != 0 ||
+		projected.OutputReceived != 0 || projected.OutputAccountRent != 0 || projected.FeeLamports != response.FeeLamports {
+		t.Fatalf("finalized failure reported a traded input/output or wrong fee: %+v, %v", projected, err)
 	}
 	record.Reconciliation.PrimaryErrorFingerprint = ""
 	record.Reconciliation.SecondaryErrorFingerprint = ""

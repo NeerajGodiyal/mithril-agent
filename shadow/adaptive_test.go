@@ -2,12 +2,137 @@ package shadow
 
 import (
 	"errors"
+	"math"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 )
+
+func TestObservedNativeCostHurdlePreservesPremiumAndBounds(t *testing.T) {
+	p := observedCostPolicy(t)
+	for _, test := range []struct {
+		native, amount uint64
+		want           uint32
+	}{
+		{1_000_000_000, 25_000_000, 90}, {100_000_000, 25_000_000, 18},
+		{100_000_001, 25_000_000, 20}, {100_000_000, 12_500_000, 26},
+	} {
+		got, err := observedNativeCostHurdle(p, test.native, 2_000_000, test.amount, false)
+		if err != nil || got != test.want {
+			t.Fatalf("hurdle(%d,%d)=%d,%v want %d", test.native, test.amount, got, err, test.want)
+		}
+	}
+	p.Adaptive.MinimumSignalBPS += 17
+	if got, err := observedNativeCostHurdle(p, 100_000_000, 2_000_000, 25_000_000, false); err != nil || got != 35 {
+		t.Fatalf("premium lost: %d,%v", got, err)
+	}
+	for _, native := range []uint64{0, 1_000_000_001, ^uint64(0)} {
+		if _, err := observedNativeCostHurdle(p, native, 2_000_000, 25_000_000, false); err == nil {
+			t.Fatal("invalid native price accepted")
+		}
+	}
+	if _, err := observedNativeCostHurdle(p, 100_000_000, 2_000_000, 0, false); err == nil {
+		t.Fatal("zero amount accepted")
+	}
+	if _, err := observedNativeCostHurdle(p, 100_000_000, ^uint64(0), ^uint64(0), true); err == nil {
+		t.Fatal("overflowing sell value accepted")
+	}
+	previous := uint32(0)
+	for native := uint64(10_000_000); native <= 1_000_000_000; native += 10_000_000 {
+		got, err := observedNativeCostHurdle(p, native, 2_000_000, 25_000_000, false)
+		if err != nil || got < previous || got < 27 {
+			t.Fatalf("non-monotone or missing safety/premium: %d,%v", got, err)
+		}
+		previous = got
+	}
+}
+
+func TestObservedNativeCostKeepsQuoteAndRiskGuards(t *testing.T) {
+	p := observedCostPolicy(t)
+	quote, err := observedCostQuote(p)(2_000_000, false, p.InputAmount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := AdaptiveDecision{Strategy: StrategyMomentum, SignalBPS: 100}
+	if ok, err := adaptiveQuotePassesWithHurdle(p, &decision, quote, 2_000_000, false, 18); err != nil || !ok {
+		t.Fatalf("valid observed-cost quote refused: %v,%v", ok, err)
+	}
+	bad := quote
+	bad.MinimumOutput--
+	if ok, _ := adaptiveQuotePassesWithHurdle(p, &decision, bad, 2_000_000, false, 18); ok {
+		t.Fatal("slippage floor weakened")
+	}
+	bad = quote
+	bad.EstimatedOutput /= 2
+	bad.MinimumOutput /= 2
+	if ok, _ := adaptiveQuotePassesWithHurdle(p, &decision, bad, 2_000_000, false, 18); ok {
+		t.Fatal("quote impact guard bypassed")
+	}
+	decision.SignalBPS = 18
+	if ok, _ := adaptiveQuotePassesWithHurdle(p, &decision, quote, 2_000_000, false, 18); ok {
+		t.Fatal("adverse quote impact omitted from hurdle")
+	}
+	p.StartingOutputUnits = 1_000_000
+	p.Adaptive.MaxDrawdownBPS = 1
+	ledger, err := NewLedger(p, 2_000_000, 100_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err = ledger.Mark(1_000_000, 100_000_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strategy, err := newAdaptiveStrategy(p.Adaptive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exit, triggered, err := strategy.decideWithHurdle(time.Now().UTC(), 1_000_000, true, ledger, math.MaxUint16)
+	if err != nil || !triggered || exit.Strategy != StrategyRiskExit {
+		t.Fatalf("unfundable ordinary hurdle suppressed risk exit: %+v,%v", exit, err)
+	}
+}
+
+func TestAdaptiveQuoteRejectionNamesExistingBranches(t *testing.T) {
+	for _, name := range []string{"pass", "slippage_mismatch", "quote_impact_limit", "trade_cost_floor_unavailable", "signal_below_cost_hurdle", "guard error", "risk exit"} {
+		t.Run(name, func(t *testing.T) {
+			p := observedCostPolicy(t)
+			quote, err := observedCostQuote(p)(2_000_000, false, p.InputAmount)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision := AdaptiveDecision{Strategy: StrategyMomentum, SignalBPS: 100}
+			price, hurdle := uint64(2_000_000), uint32(18)
+			want := name
+			switch name {
+			case "pass":
+				want = ""
+			case "slippage_mismatch":
+				quote.MinimumOutput--
+			case "quote_impact_limit":
+				quote.EstimatedOutput /= 2
+				quote.MinimumOutput = quote.EstimatedOutput
+			case "trade_cost_floor_unavailable":
+				p.FeeLamports, hurdle = math.MaxUint64, 0
+			case "signal_below_cost_hurdle":
+				decision.SignalBPS = 18 // adverse impact is added to the 18 bps hurdle
+			case "guard error":
+				price, want = 0, ""
+			case "risk exit":
+				decision.Strategy, decision.SignalBPS, want = StrategyRiskExit, 0, ""
+			}
+			reason, err := adaptiveQuoteRejection(p, &decision, quote, price, false, hurdle)
+			if reason != want || (err != nil) != (name == "guard error") {
+				t.Fatalf("reason=%q error=%v, want %q", reason, err, want)
+			}
+			passes, wrapperErr := adaptiveQuotePassesWithHurdle(p, &decision, quote, price, false, hurdle)
+			if passes != (reason == "" && err == nil) || (wrapperErr != nil) != (err != nil) {
+				t.Fatal("existing guard wrapper changed the verdict")
+			}
+		})
+	}
+}
 
 func adaptiveTestPolicy() Policy {
 	policy := sellPolicy()
@@ -433,6 +558,7 @@ func TestAdaptiveVersionOneRetainsItsHistoricalCostFloor(t *testing.T) {
 
 func TestAdaptiveVersionTwoCanResearchAMoveBelowTheExecutionTolerance(t *testing.T) {
 	base := adaptiveTestPolicy()
+	base.Adaptive.Version = adaptiveVersionTwo
 	base.Adaptive.MinimumSignalBPS = 20
 	base.Adaptive.MaxDrawdownBPS = 5_000
 	legacy := base
@@ -690,6 +816,84 @@ func TestAdaptiveQuoteGateRecomputesFeesForTheCurrentPosition(t *testing.T) {
 	shrunkBuy := Quote{InputAmount: 1_000, EstimatedOutput: 10_000, MinimumOutput: 9_960}
 	if passes, err := adaptiveQuotePasses(policy, buyDecision, shrunkBuy, 100_000_000, false); err != nil || passes {
 		t.Fatalf("shrunk buy ignored its larger fee burden: passes=%v err=%v", passes, err)
+	}
+}
+
+func adaptiveJTOCostPolicy(t *testing.T) Policy {
+	t.Helper()
+	jto := observedCostPolicy(t)
+	jto.Version, jto.Market = AdmittedVersion, MarketJTOUSDC
+	jto.MarketEvidenceClass = MarketEvidenceDevelopmentProvisional
+	jto.MarketEvidenceSHA256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	jto.OutputDecimals = 9
+	jto.QuoteRoute = MainnetMarketQuoteRoute(MarketJTOUSDC, false)
+	jto.Trigger.Version, jto.Trigger.Feed = pricetrigger.AdmittedFeedVersion, "JTO/USD"
+	returnTrigger := *jto.ReturnTrigger
+	returnTrigger.Version, returnTrigger.Feed = pricetrigger.AdmittedFeedVersion, "JTO/USD"
+	jto.ReturnTrigger = &returnTrigger
+	if err := jto.Validate(); err != nil {
+		t.Fatalf("nine-decimal buy-first policy fixture invalid: %v", err)
+	}
+	return jto
+}
+
+func TestAdaptiveTradeCostFloorUsesNineDecimalReverseSellUnits(t *testing.T) {
+	jup, jto := observedCostPolicy(t), adaptiveJTOCostPolicy(t)
+	// Both assets are priced at $2 and each attempted leg is worth exactly $2.
+	// The assumed native fee is 100000 lamports at $1000/SOL = $0.10.
+	// Two 500 bps fees plus the unchanged 10 bps margin require 1010 bps,
+	// independently of base-token denomination or first/return direction.
+	for _, test := range []struct {
+		name   string
+		policy Policy
+		sell   bool
+		quote  Quote
+	}{
+		{"six-decimal initial buy", jup, false, Quote{InputAmount: 2_000_000, EstimatedOutput: 1_000_000, MinimumOutput: 1_000_000}},
+		{"nine-decimal initial buy", jto, false, Quote{InputAmount: 2_000_000, EstimatedOutput: 1_000_000_000, MinimumOutput: 1_000_000_000}},
+		{"six-decimal reverse sell", jup, true, Quote{InputAmount: 1_000_000, EstimatedOutput: 2_000_000, MinimumOutput: 2_000_000}},
+		{"nine-decimal reverse sell", jto, true, Quote{InputAmount: 1_000_000_000, EstimatedOutput: 2_000_000, MinimumOutput: 2_000_000}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			floor, err := adaptiveTradeCostFloorBPS(test.policy, test.quote, 2_000_000, test.sell)
+			if err != nil || floor != 1010 {
+				t.Errorf("$2 leg fee floor = %d, %v; want 1010 bps", floor, err)
+			}
+			decision := &AdaptiveDecision{Strategy: StrategyMomentum, SignalBPS: 100}
+			passes, err := adaptiveQuotePasses(test.policy, decision, test.quote, 2_000_000, test.sell)
+			if err != nil || passes {
+				t.Errorf("100 bps signal passed $2 leg requiring 1010 bps: passes=%t, err=%v", passes, err)
+			}
+		})
+	}
+}
+
+func TestAdaptiveLegacyJTOCostFloorRemainsHistorical(t *testing.T) {
+	for _, test := range []struct {
+		version uint32
+		floor   uint32
+		passes  bool
+	}{
+		{adaptiveLegacyVersion, 212, false},
+		{adaptiveVersionTwo, 12, true},
+	} {
+		p := adaptiveJTOCostPolicy(t)
+		p.Adaptive.Version = test.version
+		if test.version == adaptiveLegacyVersion {
+			p.Adaptive.MinimumSignalBPS = 290
+		}
+		if err := p.Validate(); err != nil {
+			t.Fatalf("historical v%d policy no longer valid: %v", test.version, err)
+		}
+		quote := Quote{InputAmount: 1_000_000_000, EstimatedOutput: 2_000_000, MinimumOutput: 2_000_000}
+		floor, err := adaptiveTradeCostFloorBPS(p, quote, 2_000_000, true)
+		if err != nil || floor != test.floor {
+			t.Errorf("historical v%d floor = %d, %v; want %d", test.version, floor, err, test.floor)
+		}
+		passes, err := adaptiveQuotePasses(p, &AdaptiveDecision{Strategy: StrategyMomentum, SignalBPS: 100}, quote, 2_000_000, true)
+		if err != nil || passes != test.passes {
+			t.Errorf("historical v%d verdict changed: passes=%t, err=%v", test.version, passes, err)
+		}
 	}
 }
 

@@ -63,6 +63,8 @@ func TestDashboardDoesNotPresentHermesAsTradingAuthority(t *testing.T) {
 		`Hermes risk review (advisory)`,
 		`Deterministic replay gates alone decide whether any paper plan may change.`,
 		`Individual source publication freshness is unavailable in this bounded view; packet age is not source age.`,
+		`Recorded history available`,
+		`Whether they include the latest chain activity has not been verified.`,
 	} {
 		if !strings.Contains(appJS, want) {
 			t.Errorf("Hermes boundary copy omits %q", want)
@@ -70,6 +72,24 @@ func TestDashboardDoesNotPresentHermesAsTradingAuthority(t *testing.T) {
 	}
 	if strings.Contains(appJS, `?'Vetoed'`) {
 		t.Fatal("dashboard still presents Hermes as a veto authority")
+	}
+}
+
+func TestDashboardExplainsWhyCandidateMarketTrainingFoundNoPlan(t *testing.T) {
+	for _, want := range []string{
+		`check.training_rejections||{}`,
+		`Tested '+tested+' paper plans. Most often,`,
+		`A plan can fail more than one check.`,
+		`activity.candidates_without_entry_signal===tested`,
+		`this search never lowers it.`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Errorf("candidate-market training explanation omits %q", want)
+		}
+	}
+	if !strings.Contains(indexHTML, `aria-describedby="instruction-preference-help"`) ||
+		!strings.Contains(indexHTML, `It does not lower the minimum move needed to cover the plan's cost allowance.`) {
+		t.Fatal("research preference omits its entry-hurdle limit")
 	}
 }
 
@@ -103,7 +123,7 @@ func TestPerpsTrainingAttemptsStayCompactAndUnapproved(t *testing.T) {
 		`Not selected`,
 		`Training candidate`,
 		`attempt-meter`,
-		`Boolean(m.qualification_tracked)`,
+		`completed?.qualification_attempts`,
 		`trade fees · `,
 		`Funding: `,
 		`fundingAdjustment`,
@@ -120,10 +140,25 @@ func TestPerpsTrainingAttemptsStayCompactAndUnapproved(t *testing.T) {
 		`Compare '+others.length+' other risk level`,
 		`Perps test terms`,
 		`perpsRecordingInProgress`,
+		`m.latest_completed`,
 		`'Recording in progress'`,
-		`'Current recording uses'`,
+		`'Completed result saved'`,
+		`'Current status is delayed'`,
+		`'Latest completed run · '`,
+		`View completed result`,
+		`aria-label="View '+safe(m.name)+' completed result"`,
+		`'Completed perps experiment flow'`,
+		`hasCompleted?'<small>'+safe(perpsPlanSource(completed))+'</small>'`,
+		`hasCompleted&&!m.ready?'No current recording'`,
+		`saved?'Completed accounting and boundaries':'Current accounting and boundaries'`,
+		`saved?'Final paper value':'Paper value now'`,
+		`saved?'Completed-run result':'Result this run'`,
+		`saved?'Final open result':'Open result'`,
+		`data-perps-research-market`,
+		`openAttemptMarkets`,
+		`focusedAttemptMarket`,
 		`market checks saved`,
-		`Waiting for first market check`,
+		`Waiting for first current market check`,
 		`recording now`,
 		`!m.available?'Unavailable'`,
 		`'Needs attention'`,
@@ -142,6 +177,53 @@ func TestPerpsTrainingAttemptsStayCompactAndUnapproved(t *testing.T) {
 		if !strings.Contains(dashboardCSS, want) {
 			t.Errorf("design CSS omits %q", want)
 		}
+	}
+}
+
+func TestDashboardExplainsCurrentPerpsDecisionWithoutImplyingAnOrder(t *testing.T) {
+	for _, want := range []string{
+		`recording?perpsCurrentEvidence(m):''`,
+		`Latest sampled mark`,
+		`Latest plan reading`,
+		`Action level`,
+		`Research checkpoint`,
+		`completed one-minute market snapshots`,
+		`decisionReason(m.decision_reason)`,
+		`No real order has been sent.`,
+		`Not a resting exchange order`,
+		`latest sampled mark values an open paper position`,
+		`breakout_range`,
+		`regime_breakout_high`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Errorf("current perps explanation omits %q", want)
+		}
+	}
+	for _, want := range []string{".perps-current-evidence", ".perps-progress-head", ".perps-current-reason"} {
+		if !strings.Contains(dashboardCSS, want) {
+			t.Errorf("current perps design omits %q", want)
+		}
+	}
+}
+
+func TestDashboardExplainsCompletedMarketResearchThatDidNotPass(t *testing.T) {
+	for _, want := range []string{
+		`const complete=expected>0&&observed>=expected`,
+		`Array.isArray(m.paper_check_gate_reasons)`,
+		`complete?{label:'Not ready',tone:'amber'}`,
+		`complete&&gateReasons.length?gateReasons.map(paperCheckGateReason).join(' ')`,
+		`Typical buy-and-sell cost is above the paper-testing limit.`,
+		`percent(m.median_route_cost_limit_bps)`,
+		`percent(m.p95_route_cost_limit_bps)`,
+		`const recorded=m.fresh?'':'Last recorded '`,
+		`safe(recorded+'Buy-and-sell cost')`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Errorf("market research UI omits %q", want)
+		}
+	}
+	if strings.Contains(appJS, `median_route_cost_bps>20`) {
+		t.Fatal("market research UI duplicates the code-owned route-cost threshold")
 	}
 }
 

@@ -229,7 +229,7 @@ func TestVersionSevenBindsPerpsDecisionSourceAndLaterOutcome(t *testing.T) {
 		RunPlanSHA256:    strings.Repeat("a", 64),
 		PerpsPlanOutcome: &PerpsPlanOutcome{TapeSHA256: strings.Repeat("b", 64), Result: "loss"},
 	}
-	snapshot := Snapshot{Version: Version, ObservedAt: now, Current: "PAPER · checkpoint", Summary: summary}
+	snapshot := Snapshot{Version: decisionSourceVersion, ObservedAt: now, Current: "PAPER · checkpoint", Summary: summary}
 	if err := ValidateSnapshot(snapshot); err != nil {
 		t.Fatalf("version seven selected-plan outcome: %v", err)
 	}
@@ -274,6 +274,354 @@ func TestVersionSevenBindsPerpsDecisionSourceAndLaterOutcome(t *testing.T) {
 	if err := validateCurrentSummary(&missingAttribution); err == nil {
 		t.Fatal("version seven selected perps strategy omitted its run attribution")
 	}
+}
+
+func TestVersionNineBindsCurrentPerpsDecisionEvidence(t *testing.T) {
+	now := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
+	summary := CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+		HoldBenchmarkMicros: 100_000_000, Checks: 1, State: "watching", Strategy: "fixed",
+		PriceMicros: 101_250_000, DecisionReason: "action_level_not_met",
+		DecisionSignalKind: "two_candle_move", DecisionSignalBPS: 20,
+		DecisionThresholdBPS: 50, MinimumResearchFrames: 24,
+	}
+	snapshot := Snapshot{
+		Version: decisionEvidenceVersion, ObservedAt: now, Current: "PAPER · Watching",
+		Summary: &summary,
+	}
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("version nine decision evidence: %v", err)
+	}
+	legacy := snapshot
+	legacy.Version = latestCompletedVersion
+	if err := ValidateSnapshot(legacy); err == nil {
+		t.Fatal("version eight snapshot accepted version nine decision evidence")
+	}
+	for name, mutate := range map[string]func(*CurrentSummary){
+		"no mark":          func(value *CurrentSummary) { value.PriceMicros = 0 },
+		"no research gate": func(value *CurrentSummary) { value.MinimumResearchFrames = 0 },
+		"unknown reading":  func(value *CurrentSummary) { value.DecisionSignalKind = "oracle" },
+		"level reached":    func(value *CurrentSummary) { value.DecisionSignalBPS = 50 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := summary
+			mutate(&candidate)
+			if err := validateCurrentSummary(&candidate); err == nil {
+				t.Fatal("invalid perps decision evidence was accepted")
+			}
+		})
+	}
+	warmup := summary
+	warmup.DecisionSignalKind, warmup.DecisionSignalBPS = "history_warmup", 0
+	warmup.DecisionThresholdBPS, warmup.DecisionReason = 0, "collecting_history"
+	if err := validateCurrentSummary(&warmup); err != nil {
+		t.Fatalf("valid warmup evidence: %v", err)
+	}
+	warmup.DecisionThresholdBPS = 1
+	if err := validateCurrentSummary(&warmup); err == nil {
+		t.Fatal("warmup accepted an active action level")
+	}
+}
+
+func TestVersionTenBalanceEvidenceIsSpotOnlyAndBackwardCompatible(t *testing.T) {
+	now := time.Date(2026, 9, 5, 11, 0, 0, 0, time.UTC)
+	summary := CurrentSummary{
+		Market: "SOL/USDC", Instrument: "spot", ValueUnit: "USD",
+		Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+		HoldBenchmarkMicros: 100_000_000, AccountingTracked: true,
+		Checks: 1, State: "watching", Strategy: "fixed",
+		BalancesTracked: true, BaseAsset: "SOL", BaseDecimals: 9,
+		QuoteAsset: "USDC", QuoteDecimals: 6,
+		LiquidFeeReserveLamports: 29_000_000, LockedSetupRentLamports: 3_000_000,
+	}
+	snapshot := Snapshot{
+		Version: Version, ObservedAt: now, Current: "PAPER · Watching", Summary: &summary,
+	}
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("valid zero spot balances: %v", err)
+	}
+	legacy := snapshot
+	legacy.Version = decisionEvidenceVersion
+	if err := ValidateSnapshot(legacy); err == nil {
+		t.Fatal("version nine snapshot accepted version ten balance evidence")
+	}
+	withoutBalances := summary
+	withoutBalances.BalancesTracked = false
+	withoutBalances.BaseAsset, withoutBalances.QuoteAsset = "", ""
+	withoutBalances.BaseDecimals, withoutBalances.QuoteDecimals = 0, 0
+	withoutBalances.LiquidFeeReserveLamports, withoutBalances.LockedSetupRentLamports = 0, 0
+	legacy.Summary = &withoutBalances
+	if err := ValidateSnapshot(legacy); err != nil {
+		t.Fatalf("version nine snapshot without balance evidence: %v", err)
+	}
+	upgradeSnapshot(&legacy)
+	if legacy.Version != Version || legacy.Summary.BalancesTracked || ValidateSnapshot(legacy) != nil {
+		t.Fatalf("upgraded version nine snapshot = %+v", legacy)
+	}
+	for name, mutate := range map[string]func(*CurrentSummary){
+		"untracked field": func(value *CurrentSummary) { value.BalancesTracked = false },
+		"perpetual": func(value *CurrentSummary) {
+			value.Instrument, value.RiskProfile = "perpetual", "balanced"
+			value.PositionDirection, value.LeverageBPS, value.FundingTracked = "flat", 20_000, true
+		},
+		"market mismatch": func(value *CurrentSummary) { value.BaseAsset = "JUP" },
+		"same asset":      func(value *CurrentSummary) { value.QuoteAsset = "SOL" },
+		"decimals":        func(value *CurrentSummary) { value.BaseDecimals = 19 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := summary
+			mutate(&candidate)
+			if err := validateCurrentSummary(&candidate); err == nil {
+				t.Fatal("invalid balance evidence was accepted")
+			}
+		})
+	}
+}
+
+func TestVersionEightLatestCompletedReceiptRemainsReadable(t *testing.T) {
+	now := time.Date(2026, 9, 5, 10, 30, 0, 0, time.UTC)
+	receipt := CompletedSnapshot{
+		ObservedAt: now, EventID: strings.Repeat("a", 64),
+		Summary: completedPerpsTestSummary(now, "SOL-PERP"),
+	}
+	snapshot := Snapshot{Version: latestCompletedVersion, ObservedAt: now, LatestCompleted: &receipt}
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("version eight receipt: %v", err)
+	}
+	if got, ok := LatestCompletedSnapshot(snapshot); !ok || got.EventID != receipt.EventID {
+		t.Fatalf("version eight latest receipt = %+v, %v", got, ok)
+	}
+}
+
+func TestLatestCompletedReceiptSurvivesRetryAndTheNextLiveRun(t *testing.T) {
+	directory, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "status.json")
+	writer, err := OpenWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedAt := time.Date(2026, 9, 4, 14, 0, 0, 0, time.UTC)
+	const key = "perps-qualification/SOL/test"
+	if err := writer.Append(completedAt, KindExperimentDone, key, "PAPER · Completed replay"); err != nil {
+		t.Fatal(err)
+	}
+	// A restart may replay the durable event before rebuilding the terminal
+	// numeric summary at a later clock tick.
+	if err := writer.Append(completedAt.Add(time.Second), KindExperimentDone, key, "PAPER · Completed replay"); err != nil {
+		t.Fatal(err)
+	}
+	completed := completedPerpsTestSummary(completedAt.Add(time.Second), "SOL-PERP")
+	if err := writer.UpdateCurrentSummary(completedAt.Add(time.Second), "PAPER · Completed replay", &completed); err != nil {
+		t.Fatal(err)
+	}
+	terminal := readTestSnapshot(t, path)
+	receipt, ok := LatestCompletedSnapshot(terminal)
+	if !ok || receipt.EventID != eventID(KindExperimentDone, key) ||
+		!receipt.ObservedAt.Equal(completedAt.Add(time.Second)) || receipt.Summary.QualificationFrames != 60 {
+		t.Fatalf("terminal receipt = %+v, %v", receipt, ok)
+	}
+
+	liveAt := completedAt.Add(2 * time.Second)
+	live := CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: liveAt.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+		HoldBenchmarkMicros: 100_000_000, State: "watching", Strategy: "fixed",
+	}
+	if err := writer.UpdateCurrentSummary(liveAt, "PAPER · Recording next run", &live); err != nil {
+		t.Fatal(err)
+	}
+	next := readTestSnapshot(t, path)
+	kept, ok := LatestCompletedSnapshot(next)
+	if !ok || next.Summary == nil || next.Summary.QualificationTracked ||
+		kept.EventID != receipt.EventID || !kept.ObservedAt.Equal(receipt.ObservedAt) {
+		t.Fatalf("live snapshot lost completed receipt: %+v", next)
+	}
+}
+
+func TestLatestCompletedReceiptIsValidatedAndMonotonic(t *testing.T) {
+	now := time.Date(2026, 9, 4, 15, 0, 0, 0, time.UTC)
+	live := CurrentSummary{
+		Market: "SOL-PERP", Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: now.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
+		HoldBenchmarkMicros: 100_000_000, State: "watching", Strategy: "fixed",
+	}
+	current := Snapshot{Version: Version, ObservedAt: now, Current: "PAPER · Recording", Summary: &live}
+	completedAt := now.Add(-time.Minute)
+	receipt := CompletedSnapshot{
+		ObservedAt: completedAt, EventID: strings.Repeat("a", 64),
+		Summary: completedPerpsTestSummary(completedAt, "SOL-PERP"),
+	}
+	previous := Snapshot{Version: Version, ObservedAt: now, LatestCompleted: &receipt}
+	if err := PreserveLatestCompleted(&current, previous); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := CompletedSnapshotSHA256(*current.LatestCompleted)
+	if err != nil || len(digest) != 64 {
+		t.Fatalf("receipt digest = %q, %v", digest, err)
+	}
+	for name, nonCanonical := range map[string]CompletedSnapshot{
+		"offset timestamp": func() CompletedSnapshot {
+			value := receipt
+			value.ObservedAt = value.ObservedAt.In(time.FixedZone("test", 5*60*60+30*60))
+			return value
+		}(),
+		"uppercase event id": func() CompletedSnapshot {
+			value := receipt
+			value.EventID = strings.ToUpper(value.EventID)
+			return value
+		}(),
+	} {
+		t.Run("non-canonical "+name, func(t *testing.T) {
+			if _, err := CompletedSnapshotSHA256(nonCanonical); err == nil {
+				t.Fatalf("non-canonical receipt has a digest: %+v", nonCanonical)
+			}
+		})
+	}
+
+	older := receipt
+	older.ObservedAt = completedAt.Add(-time.Minute)
+	older.Summary.Day = older.ObservedAt.Format("2006-01-02")
+	older.EventID = strings.Repeat("b", 64)
+	if err := PreserveLatestCompleted(&current, Snapshot{Version: Version, ObservedAt: now, LatestCompleted: &older}); err != nil ||
+		!current.LatestCompleted.ObservedAt.Equal(completedAt) {
+		t.Fatalf("older receipt replaced current one: %+v, %v", current.LatestCompleted, err)
+	}
+
+	collision := receipt
+	collision.Summary.QualificationHoldoutMicros++
+	before := *current.LatestCompleted
+	if err := PreserveLatestCompleted(&current, Snapshot{Version: Version, ObservedAt: now, LatestCompleted: &collision}); err == nil ||
+		current.LatestCompleted.ObservedAt != before.ObservedAt || current.LatestCompleted.EventID != before.EventID {
+		t.Fatalf("same-time collision was accepted: %+v, %v", current.LatestCompleted, err)
+	}
+
+	for name, mutate := range map[string]func(*CompletedSnapshot){
+		"future": func(value *CompletedSnapshot) {
+			value.ObservedAt = now.Add(time.Second)
+			value.Summary.Day = now.Format("2006-01-02")
+		},
+		"bad event id": func(value *CompletedSnapshot) { value.EventID = "bad" },
+		"uppercase event id": func(value *CompletedSnapshot) {
+			value.EventID = strings.ToUpper(value.EventID)
+		},
+		"offset timestamp": func(value *CompletedSnapshot) {
+			value.ObservedAt = value.ObservedAt.In(time.FixedZone("test", 5*60*60+30*60))
+		},
+		"spot":        func(value *CompletedSnapshot) { value.Summary.Instrument = "spot" },
+		"unqualified": func(value *CompletedSnapshot) { value.Summary.QualificationTracked = false },
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := receipt
+			bad.Summary = cloneCurrentSummary(receipt.Summary)
+			mutate(&bad)
+			candidate := Snapshot{Version: Version, ObservedAt: now, LatestCompleted: &bad}
+			if ValidateSnapshot(candidate) == nil {
+				t.Fatalf("invalid receipt accepted: %+v", bad)
+			}
+		})
+	}
+}
+
+func TestVersionSevenTerminalReceiptMigratesWithoutFabricatingOne(t *testing.T) {
+	now := time.Date(2026, 9, 4, 16, 0, 0, 0, time.UTC)
+	summary := completedPerpsTestSummary(now, "SOL-PERP")
+	terminal := Snapshot{
+		Version: decisionSourceVersion, ObservedAt: now, Current: "PAPER · Completed",
+		Summary: &summary, Events: []Event{{
+			ID: strings.Repeat("c", 64), At: now, Kind: KindExperimentDone, Message: "PAPER · Completed",
+		}},
+	}
+	if err := ValidateSnapshot(terminal); err != nil {
+		t.Fatal(err)
+	}
+	if completed, ok := LatestCompletedSnapshot(terminal); !ok || completed.EventID != terminal.Events[0].ID {
+		t.Fatalf("v7 terminal receipt = %+v, %v", completed, ok)
+	}
+	uppercase := terminal
+	uppercase.Events = append([]Event(nil), terminal.Events...)
+	uppercase.Events[0].ID = strings.ToUpper(uppercase.Events[0].ID)
+	if _, ok := LatestCompletedSnapshot(uppercase); ok {
+		t.Fatal("v7 uppercase event id produced a non-canonical receipt")
+	}
+	active := terminal
+	active.Events = nil
+	if _, ok := LatestCompletedSnapshot(active); ok {
+		t.Fatal("v7 active snapshot fabricated a completed receipt")
+	}
+	terminal.LatestCompleted = &CompletedSnapshot{
+		ObservedAt: now, EventID: terminal.Events[0].ID, Summary: summary,
+	}
+	if ValidateSnapshot(terminal) == nil {
+		t.Fatal("v7 snapshot accepted the v8 receipt field")
+	}
+}
+
+func TestFrozenProposalSelectedPaperSource(t *testing.T) {
+	summary := completedPerpsTestSummary(time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC), "SOL-PERP")
+	summary.DecisionSource, summary.ProposalSource, summary.Strategy = "selected_paper_plan", "frozen_proposal", "momentum"
+	if !validPerpsPlanOutcome(summary) {
+		t.Fatal("valid frozen-proposal selected plan was rejected")
+	}
+	summary.DecisionSource = "legacy_fixed_policy"
+	if validPerpsPlanOutcome(summary) {
+		t.Fatal("frozen proposal was mislabeled as a legacy fixed policy")
+	}
+	summary.DecisionSource, summary.Strategy = "selected_paper_plan", "fixed"
+	if validPerpsPlanOutcome(summary) {
+		t.Fatal("selected frozen proposal accepted a non-adaptive strategy")
+	}
+}
+
+func completedPerpsTestSummary(at time.Time, market string) CurrentSummary {
+	return CurrentSummary{
+		Market: market, Instrument: "perpetual", RiskProfile: "balanced",
+		PositionDirection: "flat", LeverageBPS: 20_000, FundingTracked: true,
+		ValueUnit: "USD", Day: at.Format("2006-01-02"), TickSeconds: 60,
+		OpeningEquityMicros: 100_000_000, EquityMicros: 101_000_000,
+		HoldBenchmarkMicros: 100_000_000, AccountingTracked: true, RealizedMicros: 1_000_000,
+		Checks: 60, Signals: 2, Trades: 2, State: "watching", Strategy: "fixed",
+		DecisionSource: "legacy_fixed_policy", ProposalSource: "built_in",
+		RunPlanSHA256: strings.Repeat("d", 64), QualificationTracked: true,
+		QualificationOutcome: "candidate_ready_for_more_paper_testing",
+		QualificationSHA256:  strings.Repeat("e", 64), QualificationTapes: 1,
+		QualificationFrames: 60, QualificationMinimumFrames: 24,
+		QualificationTrainingFrames: 40, QualificationHoldoutFrames: 20,
+		QualificationStrategy: "momentum", QualificationRiskProfile: "balanced",
+		QualificationHoldoutEvaluated: true, QualificationStressEvaluated: true,
+		QualificationHoldoutScored: true, QualificationStressScored: true,
+		QualificationHoldoutMicros: 100_000, QualificationStressMicros: 50_000,
+		QualificationAttempts: []QualificationAttempt{{
+			RiskProfile: "balanced", Strategy: "momentum", NetPnLMicros: 90_000,
+			FeesMicros: 10_000, MaxDrawdownMicros: 25_000, FilledOrders: 2, ClosedPositions: 2,
+		}},
+	}
+}
+
+func readTestSnapshot(t *testing.T, path string) Snapshot {
+	t.Helper()
+	data, err := securefile.ReadPrivate(path, maxSnapshotBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot Snapshot
+	if err := strictjson.Decode(data, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
 }
 
 func TestVersionFiveZeroResultCandidateKeepsExplicitScores(t *testing.T) {
@@ -694,13 +1042,15 @@ func TestWriterKeepsBoundedCurrentDayPerformanceHistory(t *testing.T) {
 
 func TestMaximumProjectionFitsThePrivateStatusLimit(t *testing.T) {
 	day := time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)
+	observedAt := day.Add(24*time.Hour - time.Second)
+	summary := completedPerpsTestSummary(observedAt, "SOL-PERP")
 	snapshot := Snapshot{
-		Version: Version, ObservedAt: day.Add(24*time.Hour - time.Second),
+		Version: Version, ObservedAt: observedAt,
 		Current: "PAPER · Watching",
-		Summary: &CurrentSummary{
-			Market: "SOL/USDC", ValueUnit: "USD", Day: "2026-08-31", TickSeconds: 60,
-			OpeningEquityMicros: 100_000_000, EquityMicros: 100_000_000,
-			HoldBenchmarkMicros: 100_000_000,
+		Summary: &summary,
+		LatestCompleted: &CompletedSnapshot{
+			ObservedAt: observedAt, EventID: strings.Repeat("f", 64),
+			Summary: cloneCurrentSummary(summary),
 		},
 	}
 	message := "PAPER · " + strings.Repeat("x", MaxMessageBytes-len("PAPER · "))

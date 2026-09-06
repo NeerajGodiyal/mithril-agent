@@ -241,14 +241,19 @@ func TestDiagnosticProvisionalReadinessUsesTheSharedCoverageAndCostGates(t *test
 	if !diagnostic.ReadyForProvisionalPaperCheck() {
 		t.Fatal("the exact provisional thresholds were rejected")
 	}
+	if reasons := diagnostic.ProvisionalPaperCheckReasons(); len(reasons) != 0 {
+		t.Fatalf("exact provisional thresholds have reasons %q", reasons)
+	}
 	diagnostic.P95RouteCostBPS++
-	if diagnostic.ReadyForProvisionalPaperCheck() {
-		t.Fatal("an over-cost diagnostic was presented as ready")
+	if reasons := diagnostic.ProvisionalPaperCheckReasons(); diagnostic.ReadyForProvisionalPaperCheck() ||
+		len(reasons) != 1 || reasons[0] != "p95 round-trip route cost exceeds the limit" {
+		t.Fatalf("over-cost diagnostic reasons = %q", reasons)
 	}
 	diagnostic.P95RouteCostBPS = DefaultThresholds().P95RouteCostBPS
 	diagnostic.AvailabilityBPS--
-	if diagnostic.ReadyForProvisionalPaperCheck() {
-		t.Fatal("an under-covered diagnostic was presented as ready")
+	if reasons := diagnostic.ProvisionalPaperCheckReasons(); diagnostic.ReadyForProvisionalPaperCheck() ||
+		len(reasons) != 1 || reasons[0] != "two-hour bidirectional availability is below the paper-testing minimum" {
+		t.Fatalf("under-covered diagnostic reasons = %q", reasons)
 	}
 }
 
@@ -290,6 +295,10 @@ func TestProvisionalReplayPointsBindTheExactPrefixAndPreserveGaps(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	before, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
 	points, err := artifact.ReplayPoints(path)
 	if err != nil {
 		t.Fatal(err)
@@ -304,6 +313,31 @@ func TestProvisionalReplayPointsBindTheExactPrefixAndPreserveGaps(t *testing.T) 
 		points[3].MarketPrimary.PriceMicros == 0 || points[3].NativePrimary.PriceMicros == 0 {
 		t.Fatalf("replay points = %+v", points[:4])
 	}
+	for index, point := range points {
+		if point.Available {
+			if point.Buy != observations[index].Buy || point.Sell != observations[index].Sell {
+				t.Fatalf("original quote amounts, hashes or timestamps changed at %d", index)
+			}
+			continue
+		}
+		if point.Buy != (Quote{}) || point.Sell != (Quote{}) {
+			t.Fatalf("unavailable observation retained quotes at %d", index)
+		}
+		encoded, err := json.Marshal(point)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if _, present := fields["buy"]; present {
+			t.Fatal("unavailable buy quote was serialized")
+		}
+		if _, present := fields["sell"]; present {
+			t.Fatal("unavailable sell quote was serialized")
+		}
+	}
 	if _, err := store.Append(
 		through, "market_admission.unsupported", "tail", map[string]string{"invalid": "tail"},
 	); err != nil {
@@ -315,6 +349,13 @@ func TestProvisionalReplayPointsBindTheExactPrefixAndPreserveGaps(t *testing.T) 
 	again, err := artifact.ReplayPoints(path)
 	if err != nil || !reflect.DeepEqual(points, again) {
 		t.Fatal("an appended journal tail changed the exact-prefix replay")
+	}
+	after, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) || artifact.Validate() != nil {
+		t.Fatal("quote projection changed immutable artifact bytes or digest")
 	}
 	tampered := artifact
 	tampered.Journal.ChainHeadSHA256 = strings.Repeat("f", 64)

@@ -17,8 +17,8 @@ func TestShadowPerpsCurrentProjectsNetAccounting(t *testing.T) {
 	config := shadowPerpsTapeConfig{Symbol: perpspaper.SOL, RiskArm: perpspaper.Balanced, StartingCollateralMicros: 100_000_000, VenueMaxLeverage: 20}
 	replay := perpspaper.TapeReplay{
 		Results: []perpspaper.TapeResult{
-			{Decision: perpspaper.Decision{Direction: perpspaper.Direction(perpspaper.Long), LeverageBPS: 20_000}, Action: "opened", Fill: &perpspaper.Fill{FilledQuantity: 100_000_000, AveragePriceMicros: 100_000_000}},
-			{Decision: perpspaper.Decision{Direction: perpspaper.Direction(perpspaper.Long), LeverageBPS: 20_000}, Action: "marked"},
+			{Decision: perpspaper.Decision{Direction: perpspaper.Direction(perpspaper.Long), SignalKind: perpspaper.SignalTwoCandleMove, ChangeBPS: 100, ThresholdBPS: 50, LeverageBPS: 20_000}, Action: "opened", Fill: &perpspaper.Fill{FilledQuantity: 100_000_000, AveragePriceMicros: 100_000_000}},
+			{Decision: perpspaper.Decision{Direction: perpspaper.Direction(perpspaper.Long), SignalKind: perpspaper.SignalTwoCandleMove, ChangeBPS: 100, ThresholdBPS: 50, LeverageBPS: 20_000}, Action: "marked"},
 		},
 		State: perpspaper.State{
 			Initialized: true, StartingCollateralMicros: 100_000_000,
@@ -28,6 +28,7 @@ func TestShadowPerpsCurrentProjectsNetAccounting(t *testing.T) {
 			FeesPaidMicros: 2_000_000, LastMarkPriceMicros: 105_000_000,
 			Position: &perpspaper.Position{Side: perpspaper.Long, LeverageBPS: 20_000},
 		},
+		LastMarkPriceMicros: 105_500_000,
 	}
 	current, summary, err := shadowPerpsCurrent(config, replay, now)
 	if err != nil {
@@ -35,6 +36,7 @@ func TestShadowPerpsCurrentProjectsNetAccounting(t *testing.T) {
 	}
 	if summary.RealizedMicros != 7_000_000 || summary.UnrealizedMicros != 5_000_000 ||
 		summary.FeesMicros != 2_000_000 || summary.EquityMicros != 112_000_000 ||
+		summary.PriceMicros != 105_500_000 ||
 		summary.Signals != 1 || summary.Trades != 1 || summary.TurnoverMicros != 10_000_000 ||
 		summary.Instrument != "perpetual" || summary.RiskProfile != "balanced" ||
 		summary.PositionDirection != "long" || summary.LeverageBPS != 20_000 ||
@@ -49,6 +51,76 @@ func TestShadowPerpsCurrentProjectsNetAccounting(t *testing.T) {
 	}
 	if err := paperstatus.ValidateSnapshot(snapshot); err != nil {
 		t.Fatalf("projected snapshot is invalid: %v", err)
+	}
+}
+
+func TestShadowPerpsCurrentProjectsFlatMarkAndDecisionEvidence(t *testing.T) {
+	now := time.Date(2026, 9, 5, 9, 0, 0, 0, time.UTC)
+	config := shadowPerpsTapeConfig{
+		Symbol: perpspaper.SOL, RiskArm: perpspaper.Balanced,
+		StartingCollateralMicros: 100_000_000, VenueMaxLeverage: 20,
+	}
+	replay := perpspaper.TapeReplay{
+		Results: []perpspaper.TapeResult{{
+			Decision: perpspaper.Decision{
+				Direction: perpspaper.Flat, SignalKind: perpspaper.SignalTwoCandleMove,
+				ChangeBPS: 20, ThresholdBPS: 50, LeverageBPS: 20_000,
+			},
+			Action: "flat", MarkPriceMicros: 101_250_000,
+		}},
+		State: perpspaper.State{
+			Initialized: true, StartingCollateralMicros: 100_000_000,
+			BalanceMicros: 100_000_000, EquityMicros: 100_000_000,
+		},
+		LastMarkPriceMicros: 101_250_000,
+	}
+	_, summary, err := shadowPerpsCurrent(config, replay, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.PriceMicros != 101_250_000 || summary.DecisionReason != "action_level_not_met" ||
+		summary.DecisionSignalKind != perpspaper.SignalTwoCandleMove ||
+		summary.DecisionSignalBPS != 20 || summary.DecisionThresholdBPS != 50 ||
+		summary.MinimumResearchFrames != perpspaper.QualificationMinimumFrames {
+		t.Fatalf("decision evidence = %+v", summary)
+	}
+	if err := paperstatus.ValidateSnapshot(paperstatus.Snapshot{
+		Version: paperstatus.Version, ObservedAt: now, Events: []paperstatus.Event{},
+		Current: "PAPER · Watching", Summary: &summary,
+	}); err != nil {
+		t.Fatalf("decision snapshot is invalid: %v", err)
+	}
+}
+
+func TestShadowPerpsDecisionReasonExplainsEveryReplayAction(t *testing.T) {
+	for _, test := range []struct {
+		action string
+		kind   string
+		want   string
+	}{
+		{action: "flat", kind: perpspaper.SignalHistoryWarmup, want: "collecting_history"},
+		{action: "flat", kind: perpspaper.SignalBreakoutRange, want: "inside_breakout_range"},
+		{action: "flat", kind: perpspaper.SignalMomentum, want: "action_level_not_met"},
+		{action: "marked", want: "watching"},
+		{action: "below_minimum_lot", want: "minimum_order_size"},
+		{action: "no_visible_fill", want: "visible_liquidity_limit"},
+		{action: "waiting_for_full_close", want: "visible_liquidity_limit"},
+		{action: "slippage_limit", want: "slippage_limit"},
+		{action: "opened", want: "order_filled"},
+		{action: "closed", want: "order_filled"},
+		{action: "liquidated", want: "liquidation"},
+	} {
+		t.Run(test.action+"/"+test.kind, func(t *testing.T) {
+			got, err := shadowPerpsDecisionReason(perpspaper.TapeResult{
+				Action: test.action, Decision: perpspaper.Decision{SignalKind: test.kind},
+			})
+			if err != nil || got != test.want {
+				t.Fatalf("reason = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+	if _, err := shadowPerpsDecisionReason(perpspaper.TapeResult{Action: "invented"}); err == nil {
+		t.Fatal("unknown replay action was accepted")
 	}
 }
 
@@ -98,7 +170,7 @@ func TestShadowPerpsCurrentCapsPostLiquidationDeficitWithoutStoppingStatus(t *te
 	config := shadowPerpsTapeConfig{Symbol: perpspaper.SOL, RiskArm: perpspaper.Experimental, StartingCollateralMicros: 100_000_000, VenueMaxLeverage: 20}
 	replay := perpspaper.TapeReplay{
 		Results: []perpspaper.TapeResult{{
-			Decision: perpspaper.Decision{Direction: perpspaper.Direction(perpspaper.Short), LeverageBPS: 50_000},
+			Decision: perpspaper.Decision{Direction: perpspaper.Direction(perpspaper.Short), SignalKind: perpspaper.SignalTwoCandleMove, ChangeBPS: -100, ThresholdBPS: 50, LeverageBPS: 50_000},
 			Action:   "liquidated",
 		}},
 		State: perpspaper.State{
@@ -107,6 +179,7 @@ func TestShadowPerpsCurrentCapsPostLiquidationDeficitWithoutStoppingStatus(t *te
 			RealizedPnLMicros: -100_000_000, FeesPaidMicros: 2_000_000,
 			LastMarkPriceMicros: 120_000_000,
 		},
+		LastMarkPriceMicros: 120_000_000,
 	}
 	current, summary, err := shadowPerpsCurrent(config, replay, now)
 	if err != nil {
@@ -152,13 +225,14 @@ func TestShadowPerpsCycleEmitsOnlyIdempotentPositionTransitions(t *testing.T) {
 			}
 			replay := perpspaper.TapeReplay{
 				Results: []perpspaper.TapeResult{{
-					Decision: perpspaper.Decision{Direction: perpspaper.Direction(perpspaper.Long), LeverageBPS: 20_000},
+					Decision: perpspaper.Decision{Direction: perpspaper.Direction(perpspaper.Long), SignalKind: perpspaper.SignalTwoCandleMove, ChangeBPS: 100, ThresholdBPS: 50, LeverageBPS: 20_000},
 					Action:   test.action, Fill: fill,
 				}},
 				State: perpspaper.State{
 					Initialized: true, StartingCollateralMicros: 100_000_000,
 					BalanceMicros: 100_000_000, EquityMicros: 100_000_000,
 				},
+				LastMarkPriceMicros: 100_000_000,
 			}
 			statusPath := filepath.Join(directory, "sol-status.json")
 			paperPath := filepath.Join(directory, "sol-paper-status.json")
@@ -191,8 +265,9 @@ func TestShadowPerpsCycleEmitsOnlyIdempotentPositionTransitions(t *testing.T) {
 
 	directory := t.TempDir()
 	replay := perpspaper.TapeReplay{
-		Results: []perpspaper.TapeResult{{Decision: perpspaper.Decision{Direction: perpspaper.Flat, LeverageBPS: 20_000}, Action: "flat"}},
-		State:   perpspaper.State{Initialized: true, StartingCollateralMicros: 100_000_000, BalanceMicros: 100_000_000, EquityMicros: 100_000_000},
+		Results:             []perpspaper.TapeResult{{Decision: perpspaper.Decision{Direction: perpspaper.Flat, SignalKind: perpspaper.SignalTwoCandleMove, ThresholdBPS: 50, LeverageBPS: 20_000}, Action: "flat"}},
+		State:               perpspaper.State{Initialized: true, StartingCollateralMicros: 100_000_000, BalanceMicros: 100_000_000, EquityMicros: 100_000_000},
+		LastMarkPriceMicros: 100_000_000,
 	}
 	if err := writeShadowPerpsCycle(
 		filepath.Join(directory, "sol-status.json"), filepath.Join(directory, "sol-paper-status.json"),
@@ -228,10 +303,10 @@ func TestShadowPerpsCycleReportsTheCompletedPositionResult(t *testing.T) {
 	}
 	replay := perpspaper.TapeReplay{
 		Results: []perpspaper.TapeResult{{
-			Decision: perpspaper.Decision{Direction: perpspaper.Direction(perpspaper.Long), LeverageBPS: 20_000},
+			Decision: perpspaper.Decision{Direction: perpspaper.Direction(perpspaper.Long), SignalKind: perpspaper.SignalTwoCandleMove, ChangeBPS: 100, ThresholdBPS: 50, LeverageBPS: 20_000},
 			Action:   "closed", Fill: &perpspaper.Fill{FilledQuantity: 100_000_000, AveragePriceMicros: 110_000_000},
 		}},
-		Records: book.Records(), State: book.State(),
+		Records: book.Records(), State: book.State(), LastMarkPriceMicros: 110_000_000,
 	}
 	directory := t.TempDir()
 	statusPath, paperPath := filepath.Join(directory, "sol-status.json"), filepath.Join(directory, "sol-paper-status.json")

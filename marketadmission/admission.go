@@ -369,10 +369,16 @@ type Diagnostic struct {
 // ReadyForProvisionalPaperCheck applies the same availability and route-cost
 // gates as a two-hour provisional artifact. It grants no activation authority.
 func (diagnostic Diagnostic) ReadyForProvisionalPaperCheck() bool {
-	return len(provisionalMetricReasons(
+	return len(diagnostic.ProvisionalPaperCheckReasons()) == 0
+}
+
+// ProvisionalPaperCheckReasons explains which shared two-hour gates did not
+// pass. It grants no activation authority.
+func (diagnostic Diagnostic) ProvisionalPaperCheckReasons() []string {
+	return provisionalMetricReasons(
 		diagnostic.AvailabilityBPS, diagnostic.AvailableBuckets,
 		diagnostic.MedianRouteCostBPS, diagnostic.P95RouteCostBPS, DefaultThresholds(),
-	)) == 0
+	)
 }
 
 // ProvisionalArtifact is a short, current paper-testing checkpoint. It is
@@ -418,6 +424,10 @@ type ProvisionalReplayPoint struct {
 	MarketSecondary            pricetrigger.Sample `json:"market_secondary,omitzero"`
 	NativePrimary              pricetrigger.Sample `json:"native_primary,omitzero"`
 	NativeSecondary            pricetrigger.Sample `json:"native_secondary,omitzero"`
+	// Buy and Sell are original usable quotes, not historical executions.
+	// Their input amounts must match hypothetical inventory; do not scale them.
+	Buy  Quote `json:"buy,omitzero"`
+	Sell Quote `json:"sell,omitzero"`
 }
 
 // EvaluateProvisionalJournal derives the most recent two complete hours from
@@ -611,6 +621,8 @@ func (artifact ProvisionalArtifact) ReplayPoints(path string) ([]ProvisionalRepl
 				point.MarketSecondary = observation.MarketSecondary
 				point.NativePrimary = observation.SOLPrimary.Sample
 				point.NativeSecondary = observation.SOLSecondary
+				point.Buy = observation.Buy
+				point.Sell = observation.Sell
 			}
 		}
 		points = append(points, point)
