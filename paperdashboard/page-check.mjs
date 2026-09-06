@@ -71,17 +71,23 @@ const savedProposal = { symbol: 'SOL', status: 'pending_advisory', strategy: 'br
   training_tapes: 8, resolved_outcomes: 0, target_episode: '6' };
 const proposalHTML = proposals({ markets: [savedProposal], finished_at: '2026-09-05T21:45:52Z' }, false);
 for (const expected of ['Proposal saved', 'Breakout', 'Balanced risk', '8 recorded runs', '0 earlier results',
-  'Paper run #6', 'Not an active order', 'does not confirm a test result or a strategy change', 'Updated 2h ago']) {
+  'Paper run #6', 'Not an active order', 'does not confirm a test result or a strategy change', 'Last attempt · 2h ago']) {
   assert(proposalHTML.includes(expected), `proposal omitted ${expected}`);
 }
 assert.doesNotMatch(proposalHTML, /Running|Selected|Profit|Learning complete/);
+const existingHTML = proposals({markets: [{symbol:'SOL', status:'already_saved', strategy:'breakout',
+  risk_arm:'balanced', target_episode:'6', frozen_at:'2026-09-05T20:00:00Z'}],
+  finished_at:'2026-09-05T21:45:52Z'}, false);
+for (const expected of ['Already saved', 'Last checked', 'Saved earlier', 'No new model call',
+  'Paper run #6', 'Research was not repeated']) assert(existingHTML.includes(expected), expected);
+assert.doesNotMatch(existingHTML, /Data reviewed|recorded runs|earlier results|undefined|Selected/);
 for (const status of ['unavailable', 'cleanup_required', 'interrupted']) {
   const html = proposals({ markets: [{ symbol: 'BTC', status }] }, false);
   assert.match(html, /A saved proposal, if any, has not been confirmed here/);
   assert.doesNotMatch(html, /Paper run #|Suggested plan|recorded runs/);
 }
 assert(!proposals({ markets: [{ ...savedProposal, symbol: '<script>' }] }, false).includes('<script>'));
-console.log('Hermes proposals: missing, invalid, saved, stale, failure and escaping cases passed.');
+console.log('Hermes proposals: missing, invalid, saved, repeated, stale, failure and escaping cases passed.');
 const recordingFailure = proposals({ markets: [{ symbol: 'SOL', status: 'unavailable', phase: 'record_invocation' }] }, false);
 assert.doesNotMatch(recordingFailure, /No usable proposal|No proposal was saved/);
 assert.match(recordingFailure, /has not been confirmed here/);

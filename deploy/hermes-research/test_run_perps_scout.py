@@ -37,6 +37,48 @@ class PerpsScoutTest(unittest.TestCase):
             "training": [{"tape_sha256": "b" * 64}], "resolved_outcomes": [],
         }).encode() + b"\n"
 
+    def reservation(self, reserved=False):
+        value = {"version": 1, "status": "reserved" if reserved else "unreserved",
+                 "symbol": "SOL", "paper_only": True, "authorized": False,
+                 "promotable": False, "target_episode": "9",
+                 "observed_at": "2026-09-05T21:00:00Z", "episode_prefix_sha256": "d" * 64}
+        if reserved:
+            value.update(proposal_sha256="c" * 64, context_sha256="a" * 64,
+                         strategy="regime", risk_arm="conservative", frozen_at="2026-09-05T20:00:00Z")
+        return json.dumps(value).encode()
+
+    def test_reserved_target_skips_context_model_and_invocation(self):
+        for context in ("a" * 64, ""):
+            reservation = json.loads(self.reservation(True))
+            reservation["context_sha256"] = context
+            with self.subTest(context=context), tempfile.TemporaryDirectory() as root, \
+                    patch.object(scout, "as_research", return_value=json.dumps(reservation).encode()) as host, \
+                    patch.object(scout, "container") as model:
+                directory, home = Path(root) / "archive", Path(root) / "home"
+                directory.mkdir(mode=0o700)
+                result = scout.run_symbol("SOL", directory, home, None, "test", {})
+                self.assertEqual(result["status"], "already_saved")
+                self.assertEqual(result["frozen_at"], reservation["frozen_at"])
+                self.assertNotIn("training_tapes", result)
+                self.assertNotIn("resolved_outcomes", result)
+                self.assertFalse(home.exists())
+                self.assertEqual(list(directory.iterdir()), [])
+                self.assertEqual(host.call_count, 1)
+                self.assertIn("perps-reservation", host.call_args.args)
+                model.assert_not_called()
+
+    def test_invalid_reservation_stops_before_model(self):
+        for key, value in (("version", True), ("symbol", "BTC"), ("authorized", True),
+                           ("target_episode", "09"), ("proposal_sha256", "invalid"),
+                           ("strategy", "invented"), ("frozen_at", "2099-01-01T00:00:00Z")):
+            reservation = json.loads(self.reservation(True))
+            reservation[key] = value
+            with self.subTest(key=key), patch.object(scout, "as_research", return_value=json.dumps(reservation).encode()), \
+                    patch.object(scout, "container") as model:
+                with self.assertRaises(ValueError):
+                    scout.run_symbol("SOL", None, None, None, "test", {})
+                model.assert_not_called()
+
     def session(self):
         _, hypothesis, prompt = scout.make_prompt(self.context(), "SOL")
         return {
@@ -91,7 +133,7 @@ class PerpsScoutTest(unittest.TestCase):
 
     def test_model_failure_never_calls_freeze(self):
         with tempfile.TemporaryDirectory() as root, patch.object(scout.os, "chown"), \
-                patch.object(scout, "as_research", return_value=self.context()) as host, \
+                patch.object(scout, "as_research", side_effect=[self.reservation(), self.context()]) as host, \
                 patch.object(scout, "container", side_effect=subprocess.TimeoutExpired("model", 150)):
             directory = Path(root) / "archive"
             directory.mkdir()
@@ -99,7 +141,7 @@ class PerpsScoutTest(unittest.TestCase):
             with self.assertRaises(subprocess.TimeoutExpired):
                 scout.run_symbol("SOL", directory, Path(root) / "home",
                     types.SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid()), "test", progress)
-            self.assertEqual(host.call_count, 1)
+            self.assertEqual(host.call_count, 2)
             self.assertNotIn("perps-freeze", host.call_args.args)
             self.assertEqual(progress["phase"], "model_proposal")
 
@@ -110,7 +152,7 @@ class PerpsScoutTest(unittest.TestCase):
             "target_episode": "9", "frozen_at": "2026-09-05T20:00:00Z"}).encode()
         with tempfile.TemporaryDirectory() as root, patch.object(scout.os, "chown"), \
                 patch.object(scout, "container"), \
-                patch.object(scout, "as_research", side_effect=[self.context(), b"{}", frozen]) as host:
+                patch.object(scout, "as_research", side_effect=[self.reservation(), self.context(), b"{}", frozen]) as host:
             directory = Path(root) / "archive"
             directory.mkdir(mode=0o700)
             result = scout.run_symbol("SOL", directory, Path(root) / "home",
@@ -135,7 +177,7 @@ class PerpsScoutTest(unittest.TestCase):
                             "strategy": "regime", "risk_arm": "conservative"}}
         with tempfile.TemporaryDirectory() as root, patch.object(scout.os, "chown"), \
                 patch.object(scout, "container"), patch.object(scout, "as_research", side_effect=[
-                    json.dumps(context).encode(), b"{}", json.dumps(frozen).encode()]):
+                    self.reservation(), json.dumps(context).encode(), b"{}", json.dumps(frozen).encode()]):
             directory = Path(root) / "archive"
             directory.mkdir(mode=0o700)
             result = scout.run_symbol("SOL", directory, Path(root) / "home",
@@ -200,6 +242,21 @@ class PerpsScoutTest(unittest.TestCase):
             self.assertEqual(json.loads(output.getvalue())["markets"], [row])
             self.assertIn("private receipt retained", error.getvalue())
             self.assertNotIn("private failure detail", error.getvalue())
+
+    def test_already_saved_batch_is_success_without_new_invocation(self):
+        row = {"symbol": "SOL", "status": "already_saved", "proposal_sha256": "a" * 64}
+        with tempfile.TemporaryDirectory() as root, \
+                patch.object(scout, "ROOT", Path(root)), patch.object(scout, "RUNTIME", Path(root)), \
+                patch.object(scout, "SYMBOLS", ("SOL",)), patch.object(scout.os, "geteuid", return_value=0), \
+                patch.object(scout.pwd, "getpwnam"), \
+                patch.object(Path, "lstat", return_value=types.SimpleNamespace(st_uid=0, st_mode=stat.S_IFDIR | 0o711)), \
+                patch.object(scout.shutil, "disk_usage", return_value=types.SimpleNamespace(free=2 << 30)), \
+                patch.object(scout, "run_symbol", return_value=row), \
+                patch.object(scout, "publish_dashboard") as publish, \
+                patch.object(scout.sys, "stdout", new_callable=io.StringIO):
+            scout.run()
+            self.assertEqual(publish.call_args.args[0]["markets"], [row])
+            self.assertEqual(list(Path(root).rglob("invocation.json")), [])
 
     def invocation(self, root, number=1, symbol="SOL"):
         directory = Path(root) / f"{number:032x}" / symbol.lower()

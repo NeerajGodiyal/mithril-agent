@@ -58,6 +58,49 @@ func TestHermesPerpsProjectsOnlyLastRecordedAttempt(t *testing.T) {
 	}
 }
 
+func TestHermesPerpsExistingProposalDoesNotClaimFreshResearch(t *testing.T) {
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "perps-proposals.json")
+	fixture := func() (map[string]any, map[string]any) {
+		value := hermesPerpsFixture(now)
+		market := value["markets"].([]any)[0].(map[string]any)
+		market["status"] = "already_saved"
+		market["frozen_at"] = now.Add(-time.Hour).Format(time.RFC3339Nano)
+		delete(market, "training_tapes")
+		delete(market, "resolved_outcomes")
+		return value, market
+	}
+	for _, withContext := range []bool{true, false} {
+		value, market := fixture()
+		if !withContext {
+			delete(market, "context_sha256")
+		}
+		writeHermesPerpsFixture(t, path, value)
+		view, err := readHermesPerps(path, now)
+		if err != nil || view.Markets[0].Status != "already_saved" || view.Markets[0].FrozenAt == nil {
+			t.Fatalf("existing receipt rejected: %+v %v", view, err)
+		}
+	}
+	for field, invalid := range map[string]any{
+		"frozen_at":      now.Add(time.Second).Format(time.RFC3339Nano),
+		"training_tapes": 1, "resolved_outcomes": 0, "context_sha256": "invalid",
+		"phase": "model_proposal", "proposal_sha256": "", "risk_arm": "unlimited",
+	} {
+		value, market := fixture()
+		market[field] = invalid
+		writeHermesPerpsFixture(t, path, value)
+		if _, err := readHermesPerps(path, now); err == nil {
+			t.Fatalf("existing receipt accepted invalid %s", field)
+		}
+	}
+	value, market := fixture()
+	delete(market, "frozen_at")
+	writeHermesPerpsFixture(t, path, value)
+	if _, err := readHermesPerps(path, now); err == nil {
+		t.Fatal("existing receipt lost original save time")
+	}
+}
+
 func TestHermesPerpsRejectsMalformedProjection(t *testing.T) {
 	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 	for name, mutate := range map[string]func(map[string]any, map[string]any){
@@ -106,7 +149,7 @@ func TestHermesPerpsFailurePhasesCannotClaimProposal(t *testing.T) {
 	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 	path := filepath.Join(t.TempDir(), "perps-proposals.json")
 	for _, status := range []string{"unavailable", "cleanup_required", "interrupted"} {
-		for _, phase := range []string{"prepare_directories", "prepare_context", "model_proposal", "export_session", "verify_model_output", "freeze_proposal", "record_invocation"} {
+		for _, phase := range []string{"prepare_directories", "check_reservation", "prepare_context", "model_proposal", "export_session", "verify_model_output", "freeze_proposal", "record_invocation"} {
 			value := hermesPerpsFixture(now)
 			market := map[string]any{"symbol": "ETH", "status": status, "phase": phase}
 			value["markets"] = []any{market}

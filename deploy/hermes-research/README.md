@@ -33,8 +33,16 @@ profit. Missing evidence fails closed; pending and unscored attempts are not
 profitable observations. No new strategy framework or model-weight training is
 introduced: this is bounded, outcome-informed prompting.
 
-`run-perps-scout.py` launches one fresh no-tool Hermes session per market. The
-container receives only its empty private home, read-only inference auth,
+Before inference, `shadow perps-reservation --state-dir PATH --symbol SOL`
+reads the verified published episode prefix and canonical proposal receipts.
+If the next target already has a proposal, the scout reports `already_saved`
+with its original save time and skips context, model and invocation creation.
+That proposal may have been saved outside Hermes; no new research counts or
+model provenance are claimed. This read-only snapshot does not reserve a target
+or replace the freeze command's final collision check.
+
+For an unreserved target, `run-perps-scout.py` launches one fresh no-tool Hermes
+session. The container receives only its empty private home, read-only inference auth,
 configuration, launcher and exact host-rendered prompt. It has no Mithril
 executable, corpus, journal, policy, wallet or socket mount. Pinned Hermes requires
 an explicitly registered empty toolset; an unknown `none` name is rejected by
@@ -51,8 +59,8 @@ invocation receipts bind the context, prompt, session export, model output and
 frozen proposal; they do not prove the model's reasoning or profitability.
 
 State is retained under `/var/lib/mithril-hermes-perps-research`; `latest.json`
-separates pending advisory proposals from unavailable phases and cleanup
-failures. These are not active trading decisions. Container timeouts and service
+separates new and already-saved advisory proposals from unavailable phases and
+cleanup failures. These are not active trading decisions. Container timeouts and service
 shutdown remove only containers bearing this adapter's fixed ownership label.
 The existing 256-proposal ceiling per market remains a rollout limit.
 
@@ -63,6 +71,14 @@ egress service and pinned image. Run the Python tests, focused Go context and
 proposal tests, and an isolated startup canary before enabling the hook. Offline
 registry/import checks alone do not verify inference authentication, exported
 prompt fidelity or an end-to-end model invocation.
+
+For the reservation preflight upgrade, install the compatible dashboard reader
+and agent with `perps-reservation` before the scout script. The reader accepts
+both old summaries and `already_saved`; older readers reject that new status.
+Keep selection disabled and retain the previous binaries/script for rollback.
+After the new script publishes `already_saved` or the `check_reservation` failure
+phase, retain the compatible reader even if reverting the agent and script.
+Do not rewind receipts or paper history to accommodate an older reader.
 
 ### Selecting an evaluated paper proposal
 

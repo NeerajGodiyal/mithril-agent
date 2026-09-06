@@ -168,6 +168,38 @@ def cleanup_containers():
 
 
 def run_symbol(symbol, directory, home, identity, run_id, progress):
+    progress["phase"] = "check_reservation"
+    raw = as_research(AGENT, "shadow", "perps-reservation", "--state-dir", STATE,
+                      "--symbol", symbol, timeout=30)
+    if len(raw) > 16 << 10:
+        raise ValueError("paper reservation output exceeds bound")
+    reservation = evidence.strict_json_object(raw)
+    target = reservation.get("target_episode")
+    if (type(reservation.get("version")) is not int or reservation["version"] != 1
+            or reservation.get("status") not in ("reserved", "unreserved")
+            or reservation.get("symbol") != symbol or reservation.get("paper_only") is not True
+            or reservation.get("authorized") is not False or reservation.get("promotable") is not False
+            or not isinstance(target, str) or not target.isascii() or not target.isdecimal()
+            or str(int(target)) != target or not 0 < int(target) < 1 << 64):
+        raise ValueError("paper reservation envelope is invalid")
+    if reservation["status"] == "reserved":
+        digest = reservation.get("proposal_sha256")
+        context = reservation.get("context_sha256", "")
+        frozen = reservation.get("frozen_at")
+        observed = reservation.get("observed_at")
+        if (not isinstance(digest, str) or not evidence.SHA256.fullmatch(digest)
+                or not isinstance(context, str) or (context and not evidence.SHA256.fullmatch(context))
+                or reservation.get("strategy") not in ("momentum", "mean_reversion", "breakout", "regime")
+                or reservation.get("risk_arm") not in ("conservative", "balanced", "experimental")
+                or not isinstance(frozen, str) or not frozen.endswith("Z")
+                or not isinstance(observed, str) or not observed.endswith("Z")
+                or not 0 < evidence.iso_epoch(frozen) <= evidence.iso_epoch(observed) <= time.time()):
+            raise ValueError("saved paper proposal identity is invalid")
+        # This is a verified old receipt, not a new model invocation or result.
+        return {"symbol": symbol, "status": "already_saved", "target_episode": target,
+                "proposal_sha256": digest, "context_sha256": context,
+                "strategy": reservation["strategy"], "risk_arm": reservation["risk_arm"],
+                "frozen_at": frozen}
     data = directory / "evidence"
     data.mkdir(mode=0o700)
     os.chown(data, identity.pw_uid, identity.pw_gid)
@@ -381,7 +413,7 @@ def reconcile_proposals(enabled):
 def publish_dashboard(status):
     identity = pwd.getpwnam("mithril-agent-dashboard")
     fields = ("symbol", "status", "phase", "target_episode", "context_sha256", "proposal_sha256",
-              "strategy", "risk_arm", "training_tapes", "resolved_outcomes")
+              "strategy", "risk_arm", "training_tapes", "resolved_outcomes", "frozen_at")
     projection = {key: status[key] for key in
                   ("version", "paper_only", "authorized", "promotable", "run_id", "finished_at")}
     projection["markets"] = [{key: row[key] for key in fields if key in row} for row in status["markets"]]
@@ -468,7 +500,7 @@ def run():
         except (ValueError, OSError, KeyError):
             print("perps proposal dashboard publication failed; private receipt retained", file=sys.stderr)
             raise
-        if any(result["status"] != "pending_advisory" for result in results):
+        if any(result["status"] not in ("pending_advisory", "already_saved") for result in results):
             raise ValueError("one or more paper proposal phases were unavailable")
 
 
