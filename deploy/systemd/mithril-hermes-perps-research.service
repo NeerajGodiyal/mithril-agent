@@ -1,0 +1,26 @@
+[Unit]
+Description=Mithril isolated Hermes perps paper proposals
+Requires=docker.service mithril-hermes-research-egress.service
+BindsTo=docker.service mithril-hermes-research-egress.service
+After=docker.service mithril-hermes-research-egress.service network-online.target mithril-hermes-research.service
+Wants=network-online.target
+PartOf=docker.service
+ConditionPathExists=/opt/mithril-hermes-research/state/auth.json
+ConditionPathExists=/var/lib/mithril-agent-perps-paper/current-episodes.jsonl.prefix.json
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mithril-hermes-research
+UMask=0077
+Environment=MITHRIL_HERMES_PERPS_SELECT=0
+StateDirectory=mithril-hermes-perps-research
+StateDirectoryMode=0711
+RuntimeDirectory=mithril-hermes-perps-research
+RuntimeDirectoryMode=0711
+ExecStartPre=/opt/mithril-hermes-research/check-network.sh
+ExecStartPre=/usr/sbin/iptables -C DOCKER-USER -s 172.30.77.0/28 -j MITHRIL_HERMES
+ExecStartPre=/usr/sbin/iptables -C INPUT -s 172.30.77.0/28 -j REJECT
+ExecStart=/usr/bin/python3 /opt/mithril-hermes-research/run-perps-scout.py run
+ExecStopPost=/usr/bin/python3 /opt/mithril-hermes-research/run-perps-scout.py cleanup
+TimeoutStartSec=20min
+TimeoutStopSec=2min

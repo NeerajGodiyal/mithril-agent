@@ -17,6 +17,84 @@ Do not replace it with `latest` or a tag without this digest. Hermes
 configuration allowlists are defense in depth; the whole container or VM is
 the security boundary.
 
+### Isolated perps proposals
+
+The optional `mithril-hermes-perps-research.service` runs after a successful
+scheduled web-research service, with separate state, status and failure reporting.
+It does not replace web research. Paper-plan selection is disabled by default;
+the opt-in path is described below. Deploy all inputs before installing the web
+service's `OnSuccess` hook.
+
+For each SOL/BTC/ETH paper market, `perps-context --auto` selects up to eight
+compatible finalized tapes by journal order, resolves previously frozen
+proposals against their assigned attempts, and supplies up to eight terminal
+outcomes by their original observation time. Selection never ranks tapes by
+profit. Missing evidence fails closed; pending and unscored attempts are not
+profitable observations. No new strategy framework or model-weight training is
+introduced: this is bounded, outcome-informed prompting.
+
+`run-perps-scout.py` launches one fresh no-tool Hermes session per market. The
+container receives only its empty private home, read-only inference auth,
+configuration, launcher and exact host-rendered prompt. It has no Mithril
+executable, corpus, journal, policy, wallet or socket mount. Pinned Hermes requires
+an explicitly registered empty toolset; an unknown `none` name is rejected by
+its one-shot validator. The launcher uses the supported process-local toolset
+API and checks the assembled tools both after initialization and before the
+conversation. Ambient context, memory and background review are disabled in
+this synthesis phase; the earlier web-research profile is unchanged.
+
+The host verifies the exported session's exact user prompt, one completed root
+session, zero tool calls, bounded times and unchanged hypothesis identity. It
+then freezes the proposal with the original context and host-derived tape
+paths. It never retries against a newer target or changed baseline. Private
+invocation receipts bind the context, prompt, session export, model output and
+frozen proposal; they do not prove the model's reasoning or profitability.
+
+State is retained under `/var/lib/mithril-hermes-perps-research`; `latest.json`
+separates pending advisory proposals from unavailable phases and cleanup
+failures. These are not active trading decisions. Container timeouts and service
+shutdown remove only containers bearing this adapter's fixed ownership label.
+The existing 256-proposal ceiling per market remains a rollout limit.
+
+Install `run-perps-scout.py`, `perps-proposal.py`, `config-perps.yaml`, the updated
+Compose file and compatible extractor/agent before the new systemd service and
+`OnSuccess` hook. Keep scripts/configuration root-owned and preserve the existing
+egress service and pinned image. Run the Python tests, focused Go context and
+proposal tests, and an isolated startup canary before enabling the hook. Offline
+registry/import checks alone do not verify inference authentication, exported
+prompt fidelity or an end-to-end model invocation.
+
+### Selecting an evaluated paper proposal
+
+`mithril-agent shadow perps-select-proposal --proposal PATH` considers one exact
+host-frozen proposal. The command rechecks its assigned completed target and
+immutable evaluation, requires the frozen incumbent to remain current, and
+applies the existing normal/doubled-fee, completed-trade, drawdown and comparison
+gates. Three distinct tapes means verified training plus the assigned target;
+it does not mean three unseen trials or a twelve-plan tournament.
+
+A passing selection records `evaluated_proposal_v1` provenance and preserves
+the previous plan for `perps-restore`. It affects the next bounded paper run,
+never a run already in progress or a real wallet.
+
+Before allowing this plan type to run, deploy compatible dashboard, status
+bridge and Telegram readers: older readers reject the new `frozen_proposal`
+source value. Update readers before the writer/selection step. Do not roll a
+reader back to an incompatible version while new-format status is present.
+
+Automatic selection is off by default (`MITHRIL_HERMES_PERPS_SELECT=0`). Enable
+it with a service environment override only after the compatible-reader rollout
+and isolated tests pass. The scout reconciles earlier private invocation
+receipts in chronological order before proposing again; pending targets remain
+discoverable even when `latest.json` is replaced. It does not rank old proposals
+by profit or change their assigned targets.
+
+Each selection records a private attempt marker before calling the host
+selector. If the process or receipt write fails after that point, an unfinished
+marker requires operator reconciliation; it is not automatically retried.
+Completed rejections and retired plans are not submitted again. Keep these
+markers with the invocation archive when backing up or restoring research.
+
 All four MCP entries deliberately use `trust: full`. Pinned Hermes has an
 [open read-only annotation bug](https://github.com/NousResearch/hermes-agent/issues/88858):
 it reads the Python MCP annotation by its wire-format name, so read-only tools

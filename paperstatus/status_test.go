@@ -570,6 +570,22 @@ func TestVersionSevenTerminalReceiptMigratesWithoutFabricatingOne(t *testing.T) 
 	}
 }
 
+func TestFrozenProposalSelectedPaperSource(t *testing.T) {
+	summary := completedPerpsTestSummary(time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC), "SOL-PERP")
+	summary.DecisionSource, summary.ProposalSource, summary.Strategy = "selected_paper_plan", "frozen_proposal", "momentum"
+	if !validPerpsPlanOutcome(summary) {
+		t.Fatal("valid frozen-proposal selected plan was rejected")
+	}
+	summary.DecisionSource = "legacy_fixed_policy"
+	if validPerpsPlanOutcome(summary) {
+		t.Fatal("frozen proposal was mislabeled as a legacy fixed policy")
+	}
+	summary.DecisionSource, summary.Strategy = "selected_paper_plan", "fixed"
+	if validPerpsPlanOutcome(summary) {
+		t.Fatal("selected frozen proposal accepted a non-adaptive strategy")
+	}
+}
+
 func completedPerpsTestSummary(at time.Time, market string) CurrentSummary {
 	return CurrentSummary{
 		Market: market, Instrument: "perpetual", RiskProfile: "balanced",

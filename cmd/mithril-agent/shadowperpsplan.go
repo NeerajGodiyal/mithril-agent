@@ -25,6 +25,7 @@ const (
 	shadowPerpsPlanMaxBytes             = 64 << 10
 	shadowPerpsDecisionLegacy           = "legacy_fixed_v1"
 	shadowPerpsDecisionSelected         = "qualified_tournament_v1"
+	shadowPerpsDecisionProposal         = "evaluated_proposal_v1"
 )
 
 type shadowPerpsPlan struct {
@@ -40,6 +41,7 @@ type shadowPerpsPlan struct {
 	Key                      perpspaper.QualificationKey    `json:"key"`
 	QualificationInputSHA256 string                         `json:"qualification_input_sha256,omitempty"`
 	Comparison               *shadowPerpsPlanComparison     `json:"comparison,omitempty"`
+	EvaluatedProposal        *shadowPerpsPlanProposal       `json:"evaluated_proposal,omitempty"`
 }
 
 type shadowPerpsPlanComparison struct {
@@ -97,6 +99,7 @@ type shadowPerpsPlanReceipt struct {
 	Effective                string                     `json:"effective,omitempty"`
 	Reasons                  []string                   `json:"reasons,omitempty"`
 	Comparison               *shadowPerpsPlanComparison `json:"comparison,omitempty"`
+	EvaluatedProposal        *shadowPerpsPlanProposal   `json:"evaluated_proposal,omitempty"`
 }
 
 const shadowPerpsRestoreUsage = `Usage: mithril-agent shadow perps-restore --state-dir PATH --symbol SOL|BTC|ETH
@@ -191,14 +194,20 @@ func validateShadowPerpsPlan(plan shadowPerpsPlan) error {
 	switch plan.DecisionMode {
 	case shadowPerpsDecisionLegacy:
 		if plan.Status != "configured_paper_baseline" || plan.Key.Strategy != "" ||
-			plan.QualificationInputSHA256 != "" || plan.Comparison != nil {
+			plan.QualificationInputSHA256 != "" || plan.Comparison != nil || plan.EvaluatedProposal != nil {
 			return errors.New("perps paper baseline plan is invalid")
 		}
 	case shadowPerpsDecisionSelected:
 		if plan.Status != "qualified_paper_plan" || !validShadowPerpsStrategy(plan.Key.Strategy) ||
-			!validLowerSHA256(plan.QualificationInputSHA256) ||
+			!validLowerSHA256(plan.QualificationInputSHA256) || plan.EvaluatedProposal != nil ||
 			!validShadowPerpsPlanComparison(plan, plan.Comparison) {
 			return errors.New("qualified perps paper plan is invalid")
+		}
+	case shadowPerpsDecisionProposal:
+		if plan.Status != "qualified_paper_plan" || !validShadowPerpsStrategy(plan.Key.Strategy) || plan.QualificationInputSHA256 != "" ||
+			!validShadowPerpsPlanProposal(plan.EvaluatedProposal) || !validShadowPerpsPlanComparison(plan, plan.Comparison) ||
+			!validShadowPerpsSelectionEconomics(plan.Config, plan.Key, plan.Comparison.ChallengerForward, plan.Comparison.ChallengerStress) {
+			return errors.New("evaluated proposal paper plan is invalid")
 		}
 	default:
 		return errors.New("perps paper decision mode is invalid")
@@ -239,7 +248,7 @@ func validShadowPerpsComparisonKey(mode string, key perpspaper.QualificationKey)
 	switch mode {
 	case shadowPerpsDecisionLegacy:
 		return key.Strategy == "" && validShadowPerpsRiskArm(key.RiskArm)
-	case shadowPerpsDecisionSelected:
+	case shadowPerpsDecisionSelected, shadowPerpsDecisionProposal:
 		return validShadowPerpsRiskArm(key.RiskArm) && validShadowPerpsStrategy(key.Strategy)
 	default:
 		return false
@@ -346,7 +355,7 @@ func selectQualifiedShadowPerpsPlan(
 		result.Reasons = []string{"collect_at_least_three_separate_tapes"}
 		return result, nil
 	}
-	root, artifacts, active, previous, lock := shadowPerpsPlanPaths(stateDir, qualification.Config.Symbol)
+	root, artifacts, active, _, lock := shadowPerpsPlanPaths(stateDir, qualification.Config.Symbol)
 	for _, directory := range []string{filepath.Dir(root), root, artifacts} {
 		if err := ensureShadowPerpsPrivateDirectory(directory); err != nil {
 			return result, err
@@ -424,46 +433,7 @@ func selectQualifiedShadowPerpsPlan(
 			Environment: current.Environment, Config: qualification.Config, Key: key,
 			QualificationInputSHA256: qualification.InputSHA256, Comparison: &comparison,
 		}
-		encoded, digest, err := canonicalShadowPerpsPlan(plan)
-		if err != nil {
-			return err
-		}
-		result.RiskArm, result.Strategy, result.PlanSHA256 = key.RiskArm, key.Strategy, digest
-		if digest == currentDigest {
-			result.Status = "qualified_paper_plan_already_selected"
-			result.Effective = "current_or_next_bounded_invocation"
-			return nil
-		}
-		if currentPointer.RestoredFromSHA256 == digest {
-			result.Status = "qualified_paper_plan_retired"
-			result.Reasons = []string{"same_plan_was_restored_from"}
-			return nil
-		}
-		path := filepath.Join(artifacts, "plan-"+digest+".json")
-		if err := ensureShadowPerpsPlanArtifact(path, encoded); err != nil {
-			return err
-		}
-		rollback := shadowPerpsPlanRollbackRecord{
-			Version: shadowPerpsPlanVersion, ReplacedByPlanSHA256: digest, PreviousPlan: currentPointer,
-		}
-		rollbackRaw, err := json.MarshalIndent(rollback, "", "  ")
-		if err != nil {
-			return err
-		}
-		if err := securefile.ReplacePrivate(previous, append(rollbackRaw, '\n'), shadowPerpsPlanMaxBytes); err != nil {
-			return errors.New("could not preserve the previous perps paper plan")
-		}
-		next := shadowPerpsPlanPointer{
-			Version: shadowPerpsPlanVersion, PlanPath: path, PlanSHA256: digest,
-			QualificationInputSHA256: qualification.InputSHA256, SelectedAt: now.UTC(),
-		}
-		if err := replaceShadowPerpsPlanPointer(active, next); err != nil {
-			return errors.New("could not select the qualified perps paper plan")
-		}
-		result.Status = "qualified_paper_plan_selected"
-		result.PointerUpdated, result.RollbackUpdated = true, true
-		result.Effective = "next_bounded_invocation"
-		return nil
+		return installShadowPerpsPlan(stateDir, plan, currentPointer, now, &result)
 	})
 	return result, err
 }
@@ -492,14 +462,8 @@ func validateShadowPerpsWalkForwardCandidate(result perpspaper.WalkForwardQualif
 		seen[tape.ContentSHA256] = true
 		previousLast = tape.LastTime
 	}
-	for _, evidence := range []*perpspaper.QualificationEvidence{result.Forward, result.Stress} {
-		if evidence.QualificationKey != *result.Candidate || !evidence.Eligible || evidence.Score == nil ||
-			evidence.Score.NetPnLMicros <= 0 || evidence.Score.FilledOrders == 0 ||
-			evidence.Score.ClosedPositions != evidence.Score.FilledOrders ||
-			evidence.Score.FeesPaidMicros == 0 || evidence.Score.Liquidations != 0 ||
-			evidence.Score.MaxDrawdownMicros > result.Config.StartingCollateralMicros/5 {
-			return errors.New("walk-forward result lacks passing forward evidence")
-		}
+	if !validShadowPerpsSelectionEconomics(result.Config, *result.Candidate, *result.Forward, *result.Stress) {
+		return errors.New("walk-forward result lacks passing forward evidence")
 	}
 	if result.HoldoutCompletedTrades != result.Forward.Score.ClosedPositions {
 		return errors.New("walk-forward result has inconsistent completed trade metadata")

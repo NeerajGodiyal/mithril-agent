@@ -1,5 +1,6 @@
 [Unit]
 Description=Mithril bounded Hermes market research
+OnSuccess=mithril-hermes-perps-research.service
 Requires=docker.service mithril-hermes-research-egress.service
 BindsTo=docker.service mithril-hermes-research-egress.service
 After=docker.service mithril-hermes-research-egress.service network-online.target

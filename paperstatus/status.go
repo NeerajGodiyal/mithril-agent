@@ -704,7 +704,7 @@ func validPerpsPlanOutcome(summary CurrentSummary) bool {
 		return summary.ProposalSource == "built_in" && summary.Strategy == "fixed" &&
 			summary.PerpsPlanOutcome == nil
 	case "selected_paper_plan":
-		if summary.ProposalSource != "deterministic_search" || !validQualificationStrategy(summary.Strategy) {
+		if (summary.ProposalSource != "deterministic_search" && summary.ProposalSource != "frozen_proposal") || !validQualificationStrategy(summary.Strategy) {
 			return false
 		}
 	default:

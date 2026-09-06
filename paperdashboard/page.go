@@ -156,6 +156,8 @@ const indexHTML = `<!doctype html>
     <section id="system" class="panel" role="tabpanel" aria-labelledby="tab-system" tabindex="0" hidden>
       <div class="section-title"><div><p class="eyebrow">Agent workspace</p><h2 id="system-title">Automation setup</h2><p>Every service, its current role, and the boundary it cannot cross.</p></div></div>
       <div id="automation" class="automation-grid" aria-label="Automation roles"></div>
+      <div class="section-title compact"><div><p class="eyebrow">Research, not execution</p><h2>Hermes proposals</h2><p>Last recorded attempt. Saving a proposal does not change the running strategy.</p></div></div>
+      <div id="hermes-perps" class="market-research-grid" aria-label="Last Hermes paper proposals"></div>
       <div class="section-title compact"><div><p class="eyebrow">Paper market expansion</p><h2>Markets being checked</h2><p>Collection checks are separate from paper results. A market appears in Markets only while a bounded paper experiment is available.</p></div></div>
       <div id="market-research" class="market-research-grid" aria-label="Candidate market collection status"></div>
       <div class="section-title compact"><div><p class="eyebrow">Live status</p><h2>Market observers</h2></div></div>
@@ -496,6 +498,7 @@ function qualificationView(m){
 }
 function perpsPlanSource(m){
   if(m.decision_source==='selected_paper_plan'&&m.proposal_source==='deterministic_search')return 'Selected paper plan proposed by deterministic search';
+  if(m.decision_source==='selected_paper_plan'&&m.proposal_source==='frozen_proposal')return 'Selected paper plan from an evaluated proposal';
   if(m.decision_source==='legacy_fixed_policy'&&m.proposal_source==='built_in')return 'Built-in fixed paper plan';
   return 'Paper plan source unavailable';
 }
@@ -914,7 +917,19 @@ function renderMarketResearch(){
   const markets=current.market_research||[];
   target.innerHTML=markets.length?markets.map(researchMarketCard).join(''):'<div class="market-research-empty">Waiting for the first collector summary.</div>';
 }
+function hermesPerpsCards(packet,invalid){
+  if(invalid)return '<div class="market-research-empty error">The last proposal summary could not be verified. Paper trading is unaffected.</div>';
+  if(!packet?.markets?.length)return '<div class="market-research-empty">No Hermes perps proposal summary is connected yet.</div>';
+  const strategies={momentum:'Momentum',mean_reversion:'Mean reversion',breakout:'Breakout',regime:'Market regime'},risks={conservative:'Conservative',balanced:'Balanced',experimental:'Aggressive'};
+  const statuses={pending_advisory:'Proposal saved',unavailable:'Check incomplete',cleanup_required:'Cleanup needed',interrupted:'Attempt stopped'};
+  return packet.markets.map(m=>{
+    const saved=m.status==='pending_advisory';
+    return '<article class="market-research-card"><div class="research-market-head"><div class="research-market-name"><div><h3>'+safe(m.symbol)+' · Perps</h3><small>Last attempt · '+safe(age(packet.finished_at))+'</small></div></div><span class="badge '+(saved?'blue':'amber')+'">'+safe(statuses[m.status]||'Unknown')+'</span></div>'+
+      (saved?'<div class="research-stats"><span><small>Suggested plan</small><strong>'+safe(strategies[m.strategy]||'Unknown')+'</strong><em>'+safe(risks[m.risk_arm]||'Unknown')+' risk</em></span><span><small>Data reviewed</small><strong>'+safe(m.training_tapes)+' recorded runs</strong><em>'+safe(m.resolved_outcomes)+' earlier results</em></span><span><small>Reserved test</small><strong>Paper run #'+safe(m.target_episode)+'</strong><em>Not an active order</em></span></div><p>This receipt does not confirm a test result or a strategy change.</p>':'<p>This attempt did not complete. A saved proposal, if any, has not been confirmed here.</p>')+'</article>';
+  }).join('');
+}
 function renderSystem(){
+  $('hermes-perps').innerHTML=hermesPerpsCards(current.hermes_perps,current.hermes_perps_error);
   const required=current.markets.filter(market=>!market.optional),healthy=required.filter(marketDataHealthy).length,total=required.length;
   const additionalSpots=current.markets.filter(market=>market.optional&&!isPerps(market)),healthyAdditionalSpots=additionalSpots.filter(marketDataHealthy).length,completedAdditionalSpots=additionalSpots.filter(market=>market.completed).length;
 	const perpsMarkets=current.markets.filter(isPerps),completedPerps=perpsMarkets.filter(market=>latestCompletedPerps(market)).length,recordingPerps=perpsMarkets.filter(perpsRecordingInProgress).length;

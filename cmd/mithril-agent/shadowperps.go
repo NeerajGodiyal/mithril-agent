@@ -1136,7 +1136,7 @@ func shadowPerpsDecisionReason(result perpspaper.TapeResult) (string, error) {
 }
 
 func shadowPerpsCurrentStrategy(config shadowPerpsTapeConfig) string {
-	if config.DecisionMode == shadowPerpsDecisionSelected {
+	if config.DecisionMode == shadowPerpsDecisionSelected || config.DecisionMode == shadowPerpsDecisionProposal {
 		return string(config.Strategy)
 	}
 	return "fixed"
@@ -1146,7 +1146,7 @@ func shadowPerpsDecisionSource(config shadowPerpsTapeConfig) string {
 	if !validLowerSHA256(config.PlanSHA256) {
 		return ""
 	}
-	if config.DecisionMode == shadowPerpsDecisionSelected {
+	if config.DecisionMode == shadowPerpsDecisionSelected || config.DecisionMode == shadowPerpsDecisionProposal {
 		return "selected_paper_plan"
 	}
 	return "legacy_fixed_policy"
@@ -1158,6 +1158,9 @@ func shadowPerpsProposalSource(config shadowPerpsTapeConfig) string {
 	}
 	if config.DecisionMode == shadowPerpsDecisionSelected {
 		return "deterministic_search"
+	}
+	if config.DecisionMode == shadowPerpsDecisionProposal {
+		return "frozen_proposal"
 	}
 	return "built_in"
 }
@@ -1178,6 +1181,9 @@ func shadowPerpsOutcomeTapeSHA256(
 	sealedSHA256 string,
 	walkForward *perpspaper.WalkForwardQualification,
 ) string {
+	if config.DecisionMode == shadowPerpsDecisionProposal && validLowerSHA256(sealedSHA256) {
+		return sealedSHA256
+	}
 	if config.DecisionMode != shadowPerpsDecisionSelected || !validLowerSHA256(sealedSHA256) ||
 		walkForward == nil || len(walkForward.Tapes) < 2 ||
 		walkForward.Tapes[len(walkForward.Tapes)-1].ContentSHA256 != sealedSHA256 {
@@ -1273,7 +1279,7 @@ func readShadowPerpsTape(path string, config shadowPerpsTapeConfig) (shadowPerps
 		stored.Config.PlanSHA256 == "" && stored.Config.QualificationInputSHA256 == ""
 	current := stored.Version == want.Version && stored.AccountingModel == want.AccountingModel &&
 		(stored.Config.DecisionMode == shadowPerpsDecisionLegacy ||
-			stored.Config.DecisionMode == shadowPerpsDecisionSelected) &&
+			stored.Config.DecisionMode == shadowPerpsDecisionSelected || stored.Config.DecisionMode == shadowPerpsDecisionProposal) &&
 		validLowerSHA256(stored.Config.PlanSHA256)
 	if (!legacy && !current) || !stored.PaperOnly || stored.ExecutionEnabled ||
 		stored.Config != config || len(stored.Frames) == 0 || len(stored.Frames) > shadowPerpsMaxFrames {
@@ -1290,7 +1296,7 @@ func replayShadowPerpsTape(config shadowPerpsTapeConfig, frames []perpspaper.Tap
 	switch config.DecisionMode {
 	case "", shadowPerpsDecisionLegacy:
 		return perpspaper.ReplayTape(config.replayConfig(), frames)
-	case shadowPerpsDecisionSelected:
+	case shadowPerpsDecisionSelected, shadowPerpsDecisionProposal:
 		return perpspaper.ReplaySelected(config.replayConfig(), frames, perpspaper.QualificationKey{
 			RiskArm: config.RiskArm, Strategy: config.Strategy,
 		})

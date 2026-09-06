@@ -57,3 +57,41 @@ for (const current of [true, false]) {
 }
 assert.doesNotMatch(research({ ...web, evidence_basis: 'future_unknown', retrospective_screening: true }).detail, /Uses recorded/);
 console.log('Research renderer: legacy, web, recorded, expired and unknown evidence bases passed.');
+
+const proposalStart = source.indexOf('function hermesPerpsCards(');
+const proposalEnd = source.indexOf('function renderSystem(', proposalStart);
+assert(proposalStart > 0 && proposalEnd > proposalStart, 'proposal renderer boundaries missing');
+const proposals = runInNewContext(source.slice(proposalStart, proposalEnd) + '\nhermesPerpsCards', {
+  safe: value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;'),
+  age: () => 'Updated 2h ago',
+});
+assert.match(proposals(null, false), /No Hermes perps proposal summary is connected/);
+assert.match(proposals(null, true), /could not be verified/);
+const savedProposal = { symbol: 'SOL', status: 'pending_advisory', strategy: 'breakout', risk_arm: 'balanced',
+  training_tapes: 8, resolved_outcomes: 0, target_episode: '6' };
+const proposalHTML = proposals({ markets: [savedProposal], finished_at: '2026-09-05T21:45:52Z' }, false);
+for (const expected of ['Proposal saved', 'Breakout', 'Balanced risk', '8 recorded runs', '0 earlier results',
+  'Paper run #6', 'Not an active order', 'does not confirm a test result or a strategy change', 'Updated 2h ago']) {
+  assert(proposalHTML.includes(expected), `proposal omitted ${expected}`);
+}
+assert.doesNotMatch(proposalHTML, /Running|Selected|Profit|Learning complete/);
+for (const status of ['unavailable', 'cleanup_required', 'interrupted']) {
+  const html = proposals({ markets: [{ symbol: 'BTC', status }] }, false);
+  assert.match(html, /A saved proposal, if any, has not been confirmed here/);
+  assert.doesNotMatch(html, /Paper run #|Suggested plan|recorded runs/);
+}
+assert(!proposals({ markets: [{ ...savedProposal, symbol: '<script>' }] }, false).includes('<script>'));
+console.log('Hermes proposals: missing, invalid, saved, stale, failure and escaping cases passed.');
+const recordingFailure = proposals({ markets: [{ symbol: 'SOL', status: 'unavailable', phase: 'record_invocation' }] }, false);
+assert.doesNotMatch(recordingFailure, /No usable proposal|No proposal was saved/);
+assert.match(recordingFailure, /has not been confirmed here/);
+
+const planStart = source.indexOf('function perpsPlanSource(');
+const planEnd = source.indexOf('function perpsLaterOutcome(', planStart);
+assert(planStart > 0 && planEnd > planStart);
+const planSource = runInNewContext(source.slice(planStart, planEnd) + '\nperpsPlanSource');
+assert.equal(planSource({ decision_source: 'selected_paper_plan', proposal_source: 'frozen_proposal' }), 'Selected paper plan from an evaluated proposal');
+assert.equal(planSource({ decision_source: 'selected_paper_plan', proposal_source: 'deterministic_search' }), 'Selected paper plan proposed by deterministic search');
+assert.equal(planSource({ decision_source: 'legacy_fixed_policy', proposal_source: 'built_in' }), 'Built-in fixed paper plan');
+assert.equal(planSource({ decision_source: 'legacy_fixed_policy', proposal_source: 'frozen_proposal' }), 'Paper plan source unavailable');
+console.log('Paper plan source labels preserve provenance and legacy behavior.');

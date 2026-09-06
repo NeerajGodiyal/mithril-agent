@@ -51,6 +51,11 @@ func evaluateForTest(t *testing.T, path string, at time.Time) (shadowPerpsPropos
 func completedProposalTarget(t *testing.T, prices []int, changes ...func(*shadowPerpsTape)) (string, string, shadowPerpsTape, time.Time) {
 	t.Helper()
 	path, state, first, at := evalFreezeFixture(t)
+	return finishFrozenProposalTarget(t, path, state, first, at, prices, changes...)
+}
+
+func finishFrozenProposalTarget(t *testing.T, path, state string, first *shadowPerpsEpisode, at time.Time, prices []int, changes ...func(*shadowPerpsTape)) (string, string, shadowPerpsTape, time.Time) {
+	t.Helper()
 	if err := first.finish(state, at.Add(time.Second), false); err != nil {
 		t.Fatal(err)
 	}

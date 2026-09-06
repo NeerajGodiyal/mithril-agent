@@ -39,7 +39,7 @@ const dashboardCSS = `@font-face {
 }
 
 * { box-sizing: border-box; }
-html { min-width: 320px; color-scheme: dark; background: var(--canvas); }
+html { min-width: 320px; color-scheme: dark; background: var(--canvas); scroll-padding-top: 88px; }
 body {
   min-width: 320px;
   min-height: 100vh;
@@ -1191,6 +1191,7 @@ footer.shell {
 }
 
 @media (max-width: 1023px) {
+  html { scroll-padding-top: 148px; }
   .app-header, .topbar { height: 64px; }
   .app-header { background: rgba(0, 0, 0, .88); }
   .topbar { padding: 0 16px; }

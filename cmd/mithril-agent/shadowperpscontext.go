@@ -27,8 +27,15 @@ and at most 8 explicit resolved evaluations. It contains modeled metrics, not
 raw books/candles or model prose. All tape splits are now historical screening,
 not unseen evidence for a new proposal. Pending evaluations are rejected.
 No sources are chosen by profitability. This command cannot select a plan,
-promote, authorize or trade. A future model integration must pass this exact
-host-controlled context to perps-freeze --context PATH.`
+promote, authorize or trade. Model proposals must pass this exact
+host-controlled context to perps-freeze --context PATH.
+
+Alternatively use --auto instead of all --tape/--evaluation flags. It selects
+the latest up to 8 compatible finalized tapes in journal order, resolves up to
+256 existing proposals against their original targets, and includes the latest
+up to 8 terminal outcomes by original observation time. Pending is not saved.
+It keeps losing and zero-trade evidence. An existing --out never refreshes its
+selection or resolves newer proposals. Concurrent finalization may require retry.`
 
 type shadowPerpsContextTape struct {
 	shadowPerpsProposalTraining
@@ -276,6 +283,7 @@ func runShadowPerpsContext(args []string, output io.Writer, now func() time.Time
 	state := flags.String("state-dir", "", "host state directory")
 	symbolText := flags.String("symbol", "", "SOL, BTC or ETH")
 	out := flags.String("out", "", "private write-once host context")
+	auto := flags.Bool("auto", false, "host selection and resolution without profitability filtering")
 	var paths, evaluations repeatedPathFlag
 	flags.Var(&paths, "tape", "selected chronological immutable tape")
 	flags.Var(&evaluations, "evaluation", "selected resolved outcome")
@@ -286,15 +294,19 @@ func runShadowPerpsContext(args []string, output io.Writer, now func() time.Time
 		return err
 	}
 	symbol := perpspaper.Symbol(*symbolText)
-	if flags.NArg() != 0 || !cleanResearchPath(*state) || !cleanResearchPath(*out) || (symbol != perpspaper.SOL && symbol != perpspaper.BTC && symbol != perpspaper.ETH) || len(paths) < 1 || len(paths) > 8 || len(evaluations) > 8 {
+	if flags.NArg() != 0 || !cleanResearchPath(*state) || !cleanResearchPath(*out) || (symbol != perpspaper.SOL && symbol != perpspaper.BTC && symbol != perpspaper.ETH) || (*auto && (len(paths) != 0 || len(evaluations) != 0)) || (!*auto && (len(paths) < 1 || len(paths) > 8 || len(evaluations) > 8)) {
 		return errors.New("perps context arguments are invalid")
 	}
-	ids, err := proposalTapeIDs(paths, *state, symbol)
-	if err != nil {
-		return err
+	var ids []string
+	if !*auto {
+		var err error
+		ids, err = proposalTapeIDs(paths, *state, symbol)
+		if err != nil {
+			return err
+		}
 	}
 	if existing, raw, err := readPerpsContext(*out, *state); err == nil {
-		if existing.Symbol != symbol || len(existing.Training) != len(ids) || len(existing.Outcomes) != len(evaluations) {
+		if existing.Symbol != symbol || (!*auto && (len(existing.Training) != len(ids) || len(existing.Outcomes) != len(evaluations))) {
 			return errors.New("context output already has different selections")
 		}
 		for i, id := range ids {
@@ -312,6 +324,17 @@ func runShadowPerpsContext(args []string, output io.Writer, now func() time.Time
 		return err
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
+	} else if _, statErr := os.Lstat(*out); !errors.Is(statErr, os.ErrNotExist) {
+		// Missing backing evidence must not turn an existing immutable output
+		// into a new selection or trigger resolution of newer proposals.
+		return err
+	}
+	if *auto {
+		var err error
+		paths, evaluations, err = autoPerpsContextPaths(*state, symbol, now)
+		if err != nil {
+			return err
+		}
 	}
 	stateDigest, err := shadowPerpsJSONSHA256(*state)
 	if err != nil {

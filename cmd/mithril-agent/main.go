@@ -107,6 +107,7 @@ Other supported tools:
   mithril-agent shadow perps-context --state-dir PATH --symbol SOL --tape PATH --out PATH
   mithril-agent shadow perps-freeze --state-dir PATH --in PATH --tape PATH
   mithril-agent shadow perps-evaluate --proposal PATH
+  mithril-agent shadow perps-select-proposal --proposal PATH
   mithril-agent shadow perps-restore --state-dir PATH --symbol SOL
   mithril-agent shadow report --policy PATH --dir PATH
   mithril-agent shadow review --policy PATH --dir PATH --days N
@@ -361,6 +362,9 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		}
 		if len(args) > 1 && args[1] == "perps-evaluate" {
 			return runShadowPerpsEvaluate(args[2:], output, time.Now)
+		}
+		if len(args) > 1 && args[1] == "perps-select-proposal" {
+			return runShadowPerpsSelectProposal(args[2:], output, time.Now)
 		}
 		if len(args) > 1 && args[1] == "perps-restore" {
 			return runShadowPerpsRestore(args[2:], output)
@@ -1867,6 +1871,9 @@ func runShadow(args []string, output io.Writer) error {
   mithril-agent shadow perps-evaluate --proposal PATH
                                        compare only the frozen target attempt;
                                        modeled advisory results, never selection
+  mithril-agent shadow perps-select-proposal --proposal PATH
+                                       select one verified evaluated proposal for
+                                       the next paper run; never real trading
   mithril-agent shadow perps-restore --state-dir PATH --symbol SOL
                                        restore the previous paper-only perps plan
   mithril-agent shadow market collect --market NAME --observe ADDR --journal PATH

@@ -1,4 +1,60 @@
 services:
+  hermes-perps-proposal:
+    image: nousresearch/hermes-agent:v2026.8.27@sha256:e0df6adebddf29b91112aefc999d4aaf6846c9eb544faca5672a16a13590ff79
+    # Bypass image bootstrap: do not seed skills/config into this fresh home.
+    entrypoint: [python, /opt/mithril/perps-proposal.py]
+    command: []
+    user: "${MITHRIL_UID:?set MITHRIL_UID}:${MITHRIL_GID:?set MITHRIL_GID}"
+    working_dir: /opt/research-data
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: 2.0
+    mem_limit: 4g
+    pids_limit: 128
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=64m,mode=1777
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "5"
+    environment:
+      HOME: /opt/research-data
+      HERMES_HOME: /opt/research-data
+      HERMES_WRITE_SAFE_ROOT: /opt/research-data
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - type: bind
+        source: ${MITHRIL_HERMES_PERPS_HOME:-/run/mithril-hermes-research/perps-unconfigured}
+        target: /opt/research-data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./state/auth.json
+        target: /opt/research-data/auth.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./config-perps.yaml
+        target: /opt/research-data/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./perps-proposal.py
+        target: /opt/mithril/perps-proposal.py
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MITHRIL_HERMES_PERPS_QUERY_FILE:-/run/mithril-hermes-research/perps-unconfigured-prompt.md}
+        target: /opt/mithril/prompts/perps-proposal.md
+        read_only: true
+        bind:
+          create_host_path: false
+
   hermes-research-parallel:
     image: nousresearch/hermes-agent:v2026.8.27@sha256:e0df6adebddf29b91112aefc999d4aaf6846c9eb544faca5672a16a13590ff79
     cpus: 2.0

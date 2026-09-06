@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -81,6 +82,8 @@ type View struct {
 	ResearchEnabled         bool             `json:"research_enabled"`
 	Research                *Research        `json:"research,omitempty"`
 	ResearchError           bool             `json:"research_error,omitempty"`
+	HermesPerps             *HermesPerps     `json:"hermes_perps,omitempty"`
+	HermesPerpsError        bool             `json:"hermes_perps_error,omitempty"`
 	MithrilEvidenceEnabled  bool             `json:"mithril_evidence_enabled"`
 	MithrilEvidence         *MithrilEvidence `json:"mithril_evidence,omitempty"`
 	MithrilEvidenceError    bool             `json:"mithril_evidence_error,omitempty"`
@@ -370,6 +373,12 @@ func (s *Server) readSnapshot(now time.Time) View {
 			view.Research = research
 		} else if !errors.Is(err, os.ErrNotExist) || errors.Is(err, errResearchEvidenceUnavailable) {
 			view.ResearchError = true
+		}
+		proposals, err := readHermesPerps(filepath.Join(filepath.Dir(s.researchPath), "perps-proposals.json"), now)
+		if err == nil {
+			view.HermesPerps = proposals
+		} else if !errors.Is(err, os.ErrNotExist) {
+			view.HermesPerpsError = true
 		}
 	}
 	if s.mithrilEvidencePath != "" {
