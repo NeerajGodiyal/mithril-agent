@@ -62,7 +62,7 @@ type RoundTripResult struct {
 	Ledger Ledger
 	// LiquidationLedger values every observation and fill at the same
 	// conservative sell mark. It is populated only by
-	// ReplayRoundTripTicksWithLiquidationMarks.
+	// ReplayRoundTripTicksWithLiquidationMarks or the observation-only comparison.
 	LiquidationLedger            Ledger
 	Counts                       RoundTripCounts
 	ClosingPrice                 uint64
@@ -139,12 +139,30 @@ func ReplayObservedNativeCostComparison(policy Policy, ticks []Tick, quoteFor fu
 	if err := validateObservedNativeCostHistory(policy, ticks); err != nil {
 		return RoundTripResult{}, RoundTripResult{}, err
 	}
+	return replayObservedNativeComparison(policy, ticks, quoteFor, false)
+}
+
+// ReplayObservedNativeObservationComparison compares counterfactual cost models
+// on observation points, including verified provisional admission observations.
+// It validates policy, times and paired price evidence through the round-trip
+// engine, but does not authenticate journal events or confer market admission.
+// Both lanes use liquidation marks; supplied quotes remain caller models, not
+// historical execution evidence. Use ReplayObservedNativeCostComparison when
+// the input claims to be an ordinary journal requiring strict Replay validation.
+func ReplayObservedNativeObservationComparison(policy Policy, ticks []Tick, quoteFor func(uint64, bool, uint64) (Quote, error)) (baseline, observed RoundTripResult, err error) {
+	if err := validateObservedNativeCostPolicy(policy); err != nil {
+		return RoundTripResult{}, RoundTripResult{}, err
+	}
+	return replayObservedNativeComparison(policy, ticks, quoteFor, true)
+}
+
+func replayObservedNativeComparison(policy Policy, ticks []Tick, quoteFor func(uint64, bool, uint64) (Quote, error), liquidationMarks bool) (baseline, observed RoundTripResult, err error) {
 	baselineReasons, observedReasons := make(map[string]uint64), make(map[string]uint64)
-	baseline, err = replayRoundTripTicksWithCost(policy, ticks, quoteFor, false, policyNativeCost, baselineReasons)
+	baseline, err = replayRoundTripTicksWithCost(policy, ticks, quoteFor, liquidationMarks, policyNativeCost, baselineReasons)
 	if err != nil {
 		return RoundTripResult{}, RoundTripResult{}, err
 	}
-	observed, err = replayRoundTripTicksWithCost(policy, ticks, quoteFor, false, observedNativeCost, observedReasons)
+	observed, err = replayRoundTripTicksWithCost(policy, ticks, quoteFor, liquidationMarks, observedNativeCost, observedReasons)
 	if err != nil {
 		return RoundTripResult{}, RoundTripResult{}, err
 	}
@@ -152,11 +170,18 @@ func ReplayObservedNativeCostComparison(policy Policy, ticks []Tick, quoteFor fu
 	return baseline, observed, nil
 }
 
-func validateObservedNativeCostHistory(policy Policy, ticks []Tick) error {
+func validateObservedNativeCostPolicy(policy Policy) error {
 	if policy.Cluster != Mainnet || policy.Adaptive == nil ||
 		(policy.Adaptive.Version != adaptiveVersionTwo && policy.Adaptive.Version != AdaptiveVersion) ||
 		policy.NativeFeePrice == nil || policy.IsSell() {
 		return errors.New("observed native cost experiment requires a v2 or v3 non-SOL Mainnet adaptive buy policy")
+	}
+	return nil
+}
+
+func validateObservedNativeCostHistory(policy Policy, ticks []Tick) error {
+	if err := validateObservedNativeCostPolicy(policy); err != nil {
+		return err
 	}
 	_, err := Replay(policy, ticks)
 	return err

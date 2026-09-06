@@ -24,6 +24,7 @@ const shadowMarketUsage = `Usage:
   mithril-agent shadow market diagnose --journal PATH [--hours 6]
   mithril-agent shadow market provisional --journal PATH --out PATH
   mithril-agent shadow market paper-check --policy PATH --provisional-artifact PATH --journal PATH [--dashboard-status PATH] [--result-out PATH] [--candidate-policy-out PATH]
+  mithril-agent shadow market paper-check --policy PATH --provisional-artifact PATH --journal PATH --cost-experiment observed-native-cost-v1
   mithril-agent shadow market evaluate --journal PATH --out PATH
 
 Collect attempts one immutable, hash-chained observation per minute; missed
@@ -38,7 +39,12 @@ write the exact immutable policy for further paper testing. Evaluate checks the 
 and writes a new artifact without replacing an existing file. Qualification
 covers market-data and route quality only; it does not start a paper strategy.
 
-Both commands are keyless and cannot sign or submit.
+The optional cost experiment compares the supplied policy using recorded
+SOL/USD instead of its conservative fee valuation. Assumed lamports stay fixed;
+route spreads are modeled at 25/50 bps each way. It prints historical diagnostics
+only, rejects all output-file flags, and never selects or qualifies a candidate.
+
+These commands are keyless and cannot sign or submit.
 Allowlisted markets: WIF/USDC, JTO/USDC, PYTH/USDC`
 
 const maxMarketAdmissionArtifactBytes = 1 << 20

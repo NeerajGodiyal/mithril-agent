@@ -71,6 +71,151 @@ func observedCostTicksWithStep(t *testing.T, p Policy, nativePrice, step uint64)
 	return recorder.ticks
 }
 
+func observedCostObservations(t *testing.T, policy Policy) []Tick {
+	t.Helper()
+	recorded := observedCostTicksWithStep(t, policy, 100_000_000, 40_000)
+	points := make([]Tick, len(recorded))
+	for i, tick := range recorded {
+		// Preserve only observation evidence, not the runner's journal events,
+		// decisions, quote-peg admission proof or accounting claims.
+		points[i] = Tick{At: tick.At, Event: EventWaiting, PriceMicros: tick.PriceMicros,
+			PrimaryPrice: tick.PrimaryPrice, SecondaryPrice: tick.SecondaryPrice,
+			NativeFeePriceMicros: tick.NativeFeePriceMicros, NativeFeePrimary: tick.NativeFeePrimary, NativeFeeSecondary: tick.NativeFeeSecondary}
+	}
+	return points
+}
+
+func TestObservedNativeObservationComparisonUsesLiquidationAndPreservesInputs(t *testing.T) {
+	for _, version := range []uint32{adaptiveVersionTwo, AdaptiveVersion} {
+		policy := observedCostPolicy(t)
+		policy.Adaptive.Version = version
+		points := observedCostObservations(t, policy)
+		before, err := json.Marshal(struct {
+			Policy Policy
+			Points []Tick
+		}{policy, points})
+		if err != nil {
+			t.Fatal(err)
+		}
+		baseline, observed, err := ReplayObservedNativeObservationComparison(policy, points, observedCostQuote(policy))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := ReplayRoundTripTicksWithLiquidationMarks(policy, points, observedCostQuote(policy))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, result := range []RoundTripResult{baseline, observed} {
+			var filtered uint64
+			for _, count := range result.FilteredReasons {
+				filtered += count
+			}
+			if result.FilteredReasons == nil || filtered != result.Counts.Filtered || !reflect.DeepEqual(result.LiquidationLedger.Policy, policy) {
+				t.Fatalf("comparison lost liquidation or filter evidence: %+v", result)
+			}
+		}
+		baseline.FilteredReasons = nil
+		if !reflect.DeepEqual(baseline, want) {
+			t.Fatal("observation baseline differs from existing liquidation replay")
+		}
+		if _, _, err := ReplayObservedNativeCostComparison(policy, points, observedCostQuote(policy)); err == nil {
+			t.Fatal("ordinary journal API accepted observation-only points")
+		}
+		after, err := json.Marshal(struct {
+			Policy Policy
+			Points []Tick
+		}{policy, points})
+		if err != nil || !bytes.Equal(before, after) {
+			t.Fatalf("comparison mutated inputs: %v", err)
+		}
+		// Exact ceiling-valued independent samples must produce identical lanes.
+		for i := range points {
+			points[i].NativeFeePrimary.PriceMicros = policy.NativeFeePriceCeilingMicros
+			points[i].NativeFeeSecondary.PriceMicros = policy.NativeFeePriceCeilingMicros
+			points[i].NativeFeePrimary.ConfidenceMicros = 0
+			points[i].NativeFeeSecondary.ConfidenceMicros = 0
+			points[i].NativeFeePriceMicros = policy.NativeFeePriceCeilingMicros
+		}
+		baseline, observed, err = ReplayObservedNativeObservationComparison(policy, points, observedCostQuote(policy))
+		if err != nil || !reflect.DeepEqual(baseline, observed) {
+			t.Fatalf("same cost differs between comparison lanes: %v", err)
+		}
+	}
+}
+
+func TestObservedNativeObservationComparisonRejectsInvalidEvidence(t *testing.T) {
+	policy := observedCostPolicy(t)
+	points := observedCostObservations(t, policy)
+	for _, kind := range []string{"missing_market", "market_identity", "market_divergence", "missing_native", "native_identity", "native_value", "native_divergence", "native_stale", "native_ceiling", "zero_time", "out_of_order", "repeated_sample", "observability", "short", "nil_quote"} {
+		t.Run(kind, func(t *testing.T) {
+			raw, err := json.Marshal(points)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var bad []Tick
+			if err := json.Unmarshal(raw, &bad); err != nil {
+				t.Fatal(err)
+			}
+			quote := observedCostQuote(policy)
+			switch kind {
+			case "missing_market":
+				bad[0].SecondaryPrice = nil
+			case "market_identity":
+				bad[0].SecondaryPrice.SourceSHA256 = bad[0].PrimaryPrice.SourceSHA256
+			case "market_divergence":
+				bad[0].SecondaryPrice.PriceMicros *= 2
+			case "missing_native":
+				bad[0].NativeFeeSecondary = nil
+			case "native_identity":
+				bad[0].NativeFeeSecondary.SourceSHA256 = bad[0].NativeFeePrimary.SourceSHA256
+			case "native_value":
+				bad[0].NativeFeePriceMicros++
+			case "native_divergence":
+				bad[0].NativeFeeSecondary.PriceMicros *= 2
+			case "native_stale":
+				bad[0].NativeFeePrimary.PublishedAt = bad[0].At.Add(-time.Hour)
+			case "native_ceiling":
+				bad[0].NativeFeePrimary.PriceMicros = policy.NativeFeePriceCeilingMicros * 2
+				bad[0].NativeFeeSecondary.PriceMicros = policy.NativeFeePriceCeilingMicros * 2
+				bad[0].NativeFeePriceMicros = policy.NativeFeePriceCeilingMicros * 2
+			case "zero_time":
+				bad[0].At = time.Time{}
+			case "out_of_order":
+				bad[0], bad[1] = bad[1], bad[0]
+			case "repeated_sample":
+				bad[1].PrimaryPrice.PublishedAt = bad[0].PrimaryPrice.PublishedAt
+				bad[1].SecondaryPrice.PublishedAt = bad[0].SecondaryPrice.PublishedAt
+			case "observability":
+				bad[0].Event = EventUnobservable
+			case "short":
+				bad = bad[:1]
+			case "nil_quote":
+				quote = nil
+			}
+			baseline, observed, err := ReplayObservedNativeObservationComparison(policy, bad, quote)
+			if err == nil || !reflect.DeepEqual(baseline, RoundTripResult{}) || !reflect.DeepEqual(observed, RoundTripResult{}) {
+				t.Fatalf("invalid observation produced comparison: %v", err)
+			}
+		})
+	}
+	for _, kind := range []string{"legacy_version", "missing_native_policy", "sell_first"} {
+		p := policy
+		a := *policy.Adaptive
+		p.Adaptive = &a
+		switch kind {
+		case "legacy_version":
+			p.Adaptive.Version = 1
+		case "missing_native_policy":
+			p.NativeFeePrice = nil
+		case "sell_first":
+			p.Trigger.Direction = pricetrigger.SellAtOrAbove
+		}
+		if _, _, err := ReplayObservedNativeObservationComparison(p, points, observedCostQuote(p)); err == nil {
+			t.Fatalf("unsupported policy accepted: %s", kind)
+		}
+	}
+}
+
 func TestObservedNativeCostComparisonExplainsOnlyFilteredSignals(t *testing.T) {
 	p := observedCostPolicy(t)
 	ticks := observedCostTicksWithStep(t, p, 100_000_000, 40_000)
