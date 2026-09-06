@@ -268,10 +268,30 @@ func TestHermesResearchProfileStaysBoundedAndPinned(t *testing.T) {
 			t.Errorf("Hermes compose file is missing pinned read-only boundary %q", want)
 		}
 	}
-	if got := strings.Count(compose, "read_only: true"); got != 12 {
+	perps, existing, ok := strings.Cut(compose, "\n  hermes-research-parallel:")
+	if !ok || !strings.HasPrefix(perps, "services:\n  hermes-perps-proposal:\n") {
+		t.Fatal("Hermes perps proposal profile must be separate from existing research")
+	}
+	for _, want := range []string{
+		"\n    read_only: true\n", "    cap_drop: [ALL]", "    security_opt: [no-new-privileges:true]",
+		"    entrypoint: [python, /opt/mithril/perps-proposal.py]", "    pids_limit: 128",
+		"source: ${MITHRIL_HERMES_PERPS_HOME:-/run/mithril-hermes-research/perps-unconfigured}\n        target: /opt/research-data\n        bind:",
+		"source: ./state/auth.json\n        target: /opt/research-data/auth.json\n        read_only: true",
+		"source: ./config-perps.yaml\n        target: /opt/research-data/config.yaml\n        read_only: true",
+		"source: ./perps-proposal.py\n        target: /opt/mithril/perps-proposal.py\n        read_only: true",
+		"source: ${MITHRIL_HERMES_PERPS_QUERY_FILE:-/run/mithril-hermes-research/perps-unconfigured-prompt.md}\n        target: /opt/mithril/prompts/perps-proposal.md\n        read_only: true",
+	} {
+		if !strings.Contains(perps, want) {
+			t.Errorf("Hermes perps profile is missing isolation boundary %q", want)
+		}
+	}
+	if strings.Count(perps, "      - type: bind") != 5 || strings.Count(perps, "create_host_path: false") != 5 || strings.Count(perps, "        read_only: true") != 4 {
+		t.Fatal("Hermes perps profile requires exactly five protected binds, four read-only")
+	}
+	if got := strings.Count(existing, "read_only: true"); got != 12 {
 		t.Errorf("Hermes compose has %d read-only mounts; want 12", got)
 	}
-	if got := strings.Count(compose, "create_host_path: false"); got != 15 {
+	if got := strings.Count(existing, "create_host_path: false"); got != 15 {
 		t.Errorf("Hermes compose protects %d host paths; want 15", got)
 	}
 	challengerMount := "source: /etc/mithril-agent/paper-active/selection/sol/challenger\n        target: /etc/mithril-agent/paper-active/selection/sol/challenger\n        bind:"

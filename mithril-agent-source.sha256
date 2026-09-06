@@ -57,7 +57,7 @@ e588c5821442434ea24841a27e2d4557013f5d00f76b45302c14d540c1a82c57  ./cmd/mithril-
 d53ac9839fbe784a1655a799f97c843bf9fcd4c5dd8d71838010f0b41dddf903  ./cmd/mithril-agent/doctor_telegram_test.go
 52084607d80293db7a84216e4d9d13f381ccd3f187c0045ac11cbc6480fbeb95  ./cmd/mithril-agent/doctor_test.go
 519267fdaa4647298c383b54cb24127010e9bb600ae334317012d3db45b12cd6  ./cmd/mithril-agent/doctor_trading_test.go
-605d99acd0dfb1adc5c1ff4dad0dacc5155656fc7474a20ba174c03e4fcd56ee  ./cmd/mithril-agent/documentation_test.go
+6c0709a19f7ce2d1d6d790235fafc7ead847d338f2e342a58638628509972493  ./cmd/mithril-agent/documentation_test.go
 4aad63196ecf6d68dd4047804cac2943ee4ece9a5cb7273878915b2983836d42  ./cmd/mithril-agent/explain.go
 f1a080ac99ba19b1a6cf9602d0bd65cd081145b8bcf620616a24b4ab7299923e  ./cmd/mithril-agent/explain_stage.go
 3358177400d3b66329c3510c8274e37c3fce8990ba48975eadf58fcead630cd6  ./cmd/mithril-agent/explain_stage_test.go
