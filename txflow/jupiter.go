@@ -31,14 +31,77 @@ type ExpectedJupiter struct {
 }
 
 type JupiterEffectEvidence struct {
-	TransactionSHA256   string `json:"transaction_sha256"`
-	FeeLamports         uint64 `json:"fee_lamports"`
-	InputAmount         uint64 `json:"input_amount"`
-	MinimumOutput       uint64 `json:"minimum_output"`
-	OutputAmount        uint64 `json:"output_amount"`
-	OutputAccountRent   uint64 `json:"output_account_rent_lamports,omitempty"`
-	PrimaryEffectSlot   uint64 `json:"primary_effect_slot"`
-	SecondaryEffectSlot uint64 `json:"secondary_effect_slot"`
+	TransactionSHA256   string                `json:"transaction_sha256"`
+	FeeLamports         uint64                `json:"fee_lamports"`
+	InputAmount         uint64                `json:"input_amount"`
+	MinimumOutput       uint64                `json:"minimum_output"`
+	OutputAmount        uint64                `json:"output_amount"`
+	OutputAccountRent   uint64                `json:"output_account_rent_lamports,omitempty"`
+	PrimaryEffectSlot   uint64                `json:"primary_effect_slot"`
+	SecondaryEffectSlot uint64                `json:"secondary_effect_slot"`
+	Payer               *JupiterPayerEvidence `json:"payer,omitempty"`
+	Token               *JupiterTokenEvidence `json:"token,omitempty"`
+}
+
+// JupiterTokenEvidence retains the verified non-SOL token account balances.
+// Missing evidence is unknown, not an empty account.
+type JupiterTokenEvidence struct {
+	Version   uint32 `json:"version"`
+	Account   string `json:"account"`
+	Mint      string `json:"mint"`
+	Owner     string `json:"owner"`
+	PreUnits  uint64 `json:"pre_units,string"`
+	PostUnits uint64 `json:"post_units,string"`
+}
+
+// ValidTokenEffects binds retained balances to the canonical account and swap.
+func (e JupiterEffectEvidence) ValidTokenEffects(policy jupiterswap.Policy, failed bool) bool {
+	t := e.Token
+	mint := policy.InputMint
+	if policy.NativeInput() {
+		mint = policy.OutputMint
+	}
+	account, err := orcaswap.AssociatedTokenAddress(policy.Owner, mint)
+	if err != nil || t == nil || t.Version != 1 || t.Account != account ||
+		t.Mint != mint || t.Owner != policy.Owner {
+		return false
+	}
+	if failed {
+		return t.PreUnits == t.PostUnits && e.OutputAmount == 0 && e.OutputAccountRent == 0
+	}
+	if policy.NativeInput() {
+		return t.PostUnits >= t.PreUnits && t.PostUnits-t.PreUnits == e.OutputAmount
+	}
+	return t.PreUnits >= t.PostUnits && t.PreUnits-t.PostUnits == e.InputAmount
+}
+
+// JupiterPayerEvidence retains the verified payer balances for one transaction.
+// ReclaimedInputLamports is the balance returned by closing an existing empty
+// wrapped-SOL input account, not trading profit. Missing evidence is unknown.
+type JupiterPayerEvidence struct {
+	Version                uint32 `json:"version"`
+	PreLamports            uint64 `json:"pre_lamports,string"`
+	PostLamports           uint64 `json:"post_lamports,string"`
+	ReclaimedInputLamports uint64 `json:"reclaimed_input_lamports,string"`
+}
+
+// ValidPayerEffects checks retained payer balances against the verified swap
+// effects. It rejects historical records without payer evidence.
+func (e JupiterEffectEvidence) ValidPayerEffects(nativeInput, failed bool) bool {
+	p := e.Payer
+	if p == nil || p.Version != 1 {
+		return false
+	}
+	if failed {
+		return p.ReclaimedInputLamports == 0 && e.OutputAmount == 0 && e.OutputAccountRent == 0 &&
+			jupiterPayerEffectMatches(p.PreLamports, p.PostLamports, 0, e.FeeLamports, 0, 0)
+	}
+	if nativeInput {
+		return jupiterPayerEffectMatches(p.PreLamports, p.PostLamports, e.InputAmount,
+			e.FeeLamports, e.OutputAccountRent, p.ReclaimedInputLamports)
+	}
+	return p.ReclaimedInputLamports == 0 && e.OutputAccountRent == 0 &&
+		jupiterPayerEffectMatches(p.PreLamports, p.PostLamports, 0, e.FeeLamports, 0, e.OutputAmount)
 }
 
 // ReconcileJupiterExpected obtains finalized evidence from two independent
@@ -163,11 +226,13 @@ func (l *Lifecycle) verifyJupiterEffects(
 		OutputMint: expected.Policy.OutputMint, InputAmount: expected.InputAmount,
 		SlippageBPS: expected.SlippageBPS,
 	}
-	request.DestinationTokenAccount, err = orcaswap.AssociatedTokenAddress(
-		expected.Policy.Owner, expected.Policy.OutputMint,
-	)
-	if err != nil {
-		return JupiterEffectEvidence{}, errFinalizedEffectsDiverged
+	if expected.Policy.NativeInput() {
+		request.DestinationTokenAccount, err = orcaswap.AssociatedTokenAddress(
+			expected.Policy.Owner, expected.Policy.OutputMint,
+		)
+		if err != nil {
+			return JupiterEffectEvidence{}, errFinalizedEffectsDiverged
+		}
 	}
 	quote := jupiterquote.Result{
 		InputAmount: expected.InputAmount, EstimatedOutput: expected.EstimatedOutput,
@@ -199,6 +264,8 @@ func (l *Lifecycle) verifyJupiterEffects(
 			TransactionSHA256: expected.TransactionSHA256, FeeLamports: expectedFeeLamports,
 			InputAmount: intent.InputAmount, MinimumOutput: intent.MinimumOutput,
 			PrimaryEffectSlot: a.Slot, SecondaryEffectSlot: b.Slot,
+			Payer: &JupiterPayerEvidence{Version: 1, PreLamports: a.PreBalances[0], PostLamports: a.PostBalances[0]},
+			Token: existingJupiterTokenEvidence(a, decoded.Message.AccountKeys, expected.Policy),
 		}, nil
 	}
 	if !expected.Policy.NativeInput() {
@@ -214,6 +281,8 @@ func (l *Lifecycle) verifyJupiterEffects(
 			FeeLamports:       expectedFeeLamports, InputAmount: expected.InputAmount,
 			MinimumOutput: expected.MinimumOutput, OutputAmount: outputAmount,
 			PrimaryEffectSlot: a.Slot, SecondaryEffectSlot: b.Slot,
+			Payer: &JupiterPayerEvidence{Version: 1, PreLamports: a.PreBalances[0], PostLamports: a.PostBalances[0]},
+			Token: existingJupiterTokenEvidence(a, decoded.Message.AccountKeys, expected.Policy),
 		}, nil
 	}
 
@@ -276,7 +345,36 @@ func (l *Lifecycle) verifyJupiterEffects(
 		InputAmount: expected.InputAmount, MinimumOutput: expected.MinimumOutput,
 		OutputAmount: postOutput - preOutput, OutputAccountRent: outputRent,
 		PrimaryEffectSlot: a.Slot, SecondaryEffectSlot: b.Slot,
+		Payer: &JupiterPayerEvidence{Version: 1, PreLamports: a.PreBalances[0],
+			PostLamports: a.PostBalances[0], ReclaimedInputLamports: a.PreBalances[inputIndex]},
+		Token: &JupiterTokenEvidence{Version: 1, Account: intent.DestinationTokenAccount,
+			Mint: expected.Policy.OutputMint, Owner: expected.Policy.Owner,
+			PreUnits: preOutput, PostUnits: postOutput},
 	}, nil
+}
+
+// existingJupiterTokenEvidence requires both balance entries. In particular,
+// fee-only failed transactions must not turn missing token metadata into zero.
+func existingJupiterTokenEvidence(effect solanarpc.TransactionEffect, keys [][32]byte, policy jupiterswap.Policy) *JupiterTokenEvidence {
+	mint := policy.InputMint
+	if policy.NativeInput() {
+		mint = policy.OutputMint
+	}
+	account, err := orcaswap.AssociatedTokenAddress(policy.Owner, mint)
+	if err != nil {
+		return nil
+	}
+	index := messageAccountIndex(keys, account)
+	if index <= 0 || index > int(^uint16(0)) {
+		return nil
+	}
+	pre, preFound, preErr := tokenAmount(effect.PreTokenBalances, uint16(index), mint, policy.Owner)
+	post, postFound, postErr := tokenAmount(effect.PostTokenBalances, uint16(index), mint, policy.Owner)
+	if preErr != nil || postErr != nil || !preFound || !postFound {
+		return nil
+	}
+	return &JupiterTokenEvidence{Version: 1, Account: account, Mint: mint, Owner: policy.Owner,
+		PreUnits: pre, PostUnits: post}
 }
 
 func feeOnlyEffects(effect solanarpc.TransactionEffect, fee uint64) bool {

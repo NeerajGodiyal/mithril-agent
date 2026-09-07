@@ -6,8 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"testing"
 
+	"github.com/Overclock-Validator/mithril-agent/jupiterquote"
 	"github.com/Overclock-Validator/mithril-agent/jupiterswap"
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
 	"github.com/Overclock-Validator/mithril-agent/solana"
@@ -35,6 +38,12 @@ func TestReconcileJupiterRequiresMatchingFinalizedEffects(t *testing.T) {
 	if result.Verdict != VerdictFinalized || result.JupiterEffects == nil ||
 		result.JupiterEffects.OutputAmount < expected.MinimumOutput {
 		t.Fatalf("reconciliation = %+v", result)
+	}
+	payer := result.JupiterEffects.Payer
+	if payer == nil || payer.PreLamports != effect.PreBalances[0] ||
+		payer.PostLamports != effect.PostBalances[0] || payer.ReclaimedInputLamports != 2_039_280 ||
+		!result.JupiterEffects.ValidPayerEffects(true, false) {
+		t.Fatalf("retained payer evidence = %+v", payer)
 	}
 
 	secondary.effect.PostTokenBalances[0].Amount--
@@ -133,6 +142,9 @@ func TestReconcileJupiterFailedTransactionOnlyChargesFee(t *testing.T) {
 	if result.Verdict != VerdictFailed || result.JupiterEffects == nil ||
 		result.JupiterEffects.OutputAmount != 0 {
 		t.Fatalf("failed reconciliation = %+v", result)
+	}
+	if !result.JupiterEffects.ValidPayerEffects(true, true) {
+		t.Fatalf("failed payer evidence = %+v", result.JupiterEffects.Payer)
 	}
 
 	primary.effect.PostBalances[1]++
@@ -261,11 +273,19 @@ func jupiterTokenToSOLEffectFixture() (
 
 func jupiterEffectFixture(t *testing.T) (ExpectedJupiter, Submission, solanarpc.TransactionEffect) {
 	t.Helper()
+	return jupiterDirectionalEffectFixture(t, true)
+}
+
+func jupiterDirectionalEffectFixture(t *testing.T, nativeInput bool, createOutput ...bool) (ExpectedJupiter, Submission, solanarpc.TransactionEffect) {
+	t.Helper()
 	seed := sha256.Sum256([]byte("Jupiter reconciliation signer"))
 	privateKey := ed25519.NewKeyFromSeed(seed[:])
 	owner := solana.Encode(privateKey.Public().(ed25519.PublicKey))
-	outputMint := solana.Encode(bytes.Repeat([]byte{2}, 32))
-	inputAccount := orcaswapATA(t, owner, orcaswap.WrappedSOLMint)
+	inputMint, outputMint := orcaswap.WrappedSOLMint, solana.Encode(bytes.Repeat([]byte{2}, 32))
+	if !nativeInput {
+		inputMint, outputMint = outputMint, inputMint
+	}
+	inputAccount := orcaswapATA(t, owner, inputMint)
 	outputAccount := orcaswapATA(t, owner, outputMint)
 	inputAmount, estimatedOutput, minimumOutput := uint64(10), uint64(20), uint64(20)
 	transfer := make([]byte, 12)
@@ -302,7 +322,7 @@ func jupiterEffectFixture(t *testing.T) (ExpectedJupiter, Submission, solanarpc.
 		}, Data: []byte{17}},
 		{Program: jupiterswap.Program, Accounts: []solana.AccountMeta{
 			{Address: owner, Signer: true}, {Address: inputAccount, Writable: true},
-			{Address: outputAccount, Writable: true}, {Address: orcaswap.WrappedSOLMint},
+			{Address: outputAccount, Writable: true}, {Address: inputMint},
 			{Address: outputMint}, {Address: orcaswap.TokenProgram},
 			{Address: orcaswap.TokenProgram}, {Address: outputAccount, Writable: true},
 			{Address: "D8cy77BBepLMngZx6ZukaTff5hCt1HrWyKk3Hnd9oitf"},
@@ -314,9 +334,22 @@ func jupiterEffectFixture(t *testing.T) (ExpectedJupiter, Submission, solanarpc.
 			{Address: owner, Signer: true},
 		}, Data: []byte{9}},
 	}
+	if !nativeInput {
+		instructions[2].Accounts[1].Address = outputAccount
+		instructions[5].Accounts[7] = solana.AccountMeta{Address: jupiterswap.Program}
+		instructions[6].Accounts[0].Address = outputAccount
+		instructions = []solana.Instruction{instructions[0], instructions[1], instructions[2], instructions[5], instructions[6]}
+	}
+	created := nativeInput && len(createOutput) != 0 && createOutput[0]
+	if created {
+		ata := instructions[2]
+		ata.Accounts = append([]solana.AccountMeta(nil), ata.Accounts...)
+		ata.Accounts[1].Address, ata.Accounts[3].Address = outputAccount, outputMint
+		instructions = append(instructions[:5:5], append([]solana.Instruction{ata}, instructions[5:]...)...)
+	}
 	recentBlockhash := solana.Encode(bytes.Repeat([]byte{9}, 32))
 	policy := jupiterswap.Policy{
-		Owner: owner, InputMint: orcaswap.WrappedSOLMint, OutputMint: outputMint,
+		Owner: owner, InputMint: inputMint, OutputMint: outputMint,
 		MaxInputAmount: inputAmount, MinOutputAmount: minimumOutput, MaxSlippageBPS: 50,
 		MaxComputeUnits: 100_000, MaxComputeUnitPriceMicroLamport: 1,
 		MaxFeeLamports: 5_000, MaxTokenAccountRentLamports: 3_000_000,
@@ -339,6 +372,20 @@ func jupiterEffectFixture(t *testing.T) (ExpectedJupiter, Submission, solanarpc.
 		Policy:      policy,
 		InputAmount: inputAmount, EstimatedOutput: estimatedOutput,
 		MinimumOutput: minimumOutput, SlippageBPS: 50,
+	}
+	request := jupiterquote.Request{Taker: owner, InputMint: inputMint, OutputMint: outputMint,
+		InputAmount: inputAmount, SlippageBPS: 50}
+	if nativeInput {
+		request.DestinationTokenAccount = outputAccount
+	}
+	if _, _, err := jupiterswap.ValidateSignedV0Transaction(policy, request,
+		jupiterquote.Result{InputAmount: inputAmount, EstimatedOutput: estimatedOutput, MinimumOutput: minimumOutput},
+		transaction, nil); created {
+		if err == nil {
+			t.Fatal("protected output account creation was accepted")
+		}
+	} else if err != nil {
+		t.Fatalf("invalid directional transaction fixture: %v", err)
 	}
 	decoded, err := solana.DecodeSignedV0Transaction(transaction, nil)
 	if err != nil {
@@ -366,9 +413,200 @@ func jupiterEffectFixture(t *testing.T) (ExpectedJupiter, Submission, solanarpc.
 			{AccountIndex: uint16(outputIndex), Mint: outputMint, Owner: owner, Amount: 120},
 		},
 	}
+	if !nativeInput {
+		effect.PreBalances[inputIndex], effect.PostBalances[inputIndex] = rent, rent
+		effect.PreBalances[outputIndex], effect.PostBalances[outputIndex] = 0, 0
+		effect.PostBalances[0] = effect.PreBalances[0] + estimatedOutput - effect.FeeLamports
+		effect.PreTokenBalances = []solanarpc.TokenBalance{{AccountIndex: uint16(inputIndex), Mint: inputMint, Owner: owner, Amount: 100}}
+		effect.PostTokenBalances = []solanarpc.TokenBalance{{AccountIndex: uint16(inputIndex), Mint: inputMint, Owner: owner, Amount: 100 - inputAmount}}
+	}
+	if created {
+		effect.PreBalances[outputIndex] = 0
+		effect.PostBalances[0] -= rent
+		effect.PreTokenBalances = effect.PreTokenBalances[:1]
+		effect.PostTokenBalances[0].Amount = estimatedOutput
+	}
 	return expected, Submission{
 		Signature: expected.Signature, LastValidBlockHeight: 200, State: StateAccepted,
 	}, effect
+}
+
+func TestJupiterPayerEvidenceEquations(t *testing.T) {
+	for _, tc := range []struct {
+		name                                        string
+		nativeInput, failed                         bool
+		input, output, fee, rent, refund, pre, post uint64
+	}{
+		{"new input", true, false, 10, 20, 5, 0, 0, 100, 85},
+		{"new output rent", true, false, 10, 20, 5, 30, 0, 100, 55},
+		{"refund exceeds debit", true, false, 10, 20, 5, 0, 30, 100, 115},
+		{"refund equals debit", true, false, 10, 20, 5, 0, 15, 100, 100},
+		{"native output", false, false, 10, 20, 5, 0, 0, 100, 115},
+		{"output below fee", false, false, 10, 2, 5, 0, 0, 100, 97},
+		{"failed", true, true, 10, 0, 5, 0, 0, 100, 95},
+		{"failed spends remaining balance", true, true, 10, 0, 5, 0, 0, 5, 0},
+		{"large balance", true, false, 10, 20, 5, 0, 0, ^uint64(0), ^uint64(0) - 15},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := JupiterEffectEvidence{InputAmount: tc.input, OutputAmount: tc.output,
+				FeeLamports: tc.fee, OutputAccountRent: tc.rent,
+				Payer: &JupiterPayerEvidence{Version: 1, PreLamports: tc.pre,
+					PostLamports: tc.post, ReclaimedInputLamports: tc.refund}}
+			if !e.ValidPayerEffects(tc.nativeInput, tc.failed) {
+				t.Fatalf("valid payer rejected: %+v", e.Payer)
+			}
+			for name, mutate := range map[string]func(*JupiterEffectEvidence){
+				"pre":     func(v *JupiterEffectEvidence) { v.Payer.PreLamports-- },
+				"post":    func(v *JupiterEffectEvidence) { v.Payer.PostLamports++ },
+				"refund":  func(v *JupiterEffectEvidence) { v.Payer.ReclaimedInputLamports++ },
+				"version": func(v *JupiterEffectEvidence) { v.Payer.Version++ },
+				"missing": func(v *JupiterEffectEvidence) { v.Payer = nil },
+			} {
+				t.Run(name, func(t *testing.T) {
+					changed, payer := e, *e.Payer
+					changed.Payer = &payer
+					mutate(&changed)
+					if changed.ValidPayerEffects(tc.nativeInput, tc.failed) {
+						t.Fatal("changed payer accepted")
+					}
+				})
+			}
+		})
+	}
+	e := JupiterEffectEvidence{InputAmount: ^uint64(0), FeeLamports: 1,
+		Payer: &JupiterPayerEvidence{Version: 1}}
+	if e.ValidPayerEffects(true, false) {
+		t.Fatal("overflowing debit accepted")
+	}
+	e.InputAmount = 0
+	if e.ValidPayerEffects(true, true) {
+		t.Fatal("zero balances accepted with nonzero fee")
+	}
+	payer := JupiterPayerEvidence{Version: 1, PreLamports: ^uint64(0)}
+	data, err := json.Marshal(payer)
+	if err != nil || !bytes.Contains(data, []byte(`"pre_lamports":"18446744073709551615"`)) {
+		t.Fatalf("lossless payer encoding = %s, %v", data, err)
+	}
+}
+
+func TestReconcileJupiterRetainsNativeOutputPayer(t *testing.T) {
+	expected, submission, effect := jupiterDirectionalEffectFixture(t, false)
+	primary := &fakeProvider{identity: "primary", status: finalizedStatus(false), effect: effect}
+	secondary := &fakeProvider{identity: "secondary", status: finalizedStatus(false), effect: cloneEffect(effect)}
+	lifecycle, err := NewEvidenceLifecycle(primary, secondary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := lifecycle.ReconcileJupiterExpected(t.Context(), submission, expected, effect.FeeLamports)
+	if err != nil || result.Verdict != VerdictFinalized || result.JupiterEffects == nil ||
+		!result.JupiterEffects.ValidPayerEffects(false, false) {
+		t.Fatalf("native output payer reconciliation = %+v, %v", result, err)
+	}
+	payer := result.JupiterEffects.Payer
+	if payer.PreLamports != effect.PreBalances[0] || payer.PostLamports != effect.PostBalances[0] || payer.ReclaimedInputLamports != 0 {
+		t.Fatalf("native output payer = %+v", payer)
+	}
+}
+
+func TestReconcileJupiterRetainsExactTokenBalances(t *testing.T) {
+	for _, nativeInput := range []bool{true, false} {
+		for _, mode := range []string{"success", "created", "failed", "failed zero", "failed missing metadata", "failed missing account"} {
+			if mode == "created" && !nativeInput {
+				continue
+			}
+			t.Run(fmt.Sprintf("native_input=%t/%s", nativeInput, mode), func(t *testing.T) {
+				expected, submission, effect := jupiterDirectionalEffectFixture(t, nativeInput, mode == "created")
+				failed := mode != "success" && mode != "created"
+				status := finalizedStatus(failed)
+				if mode == "failed zero" {
+					for i := range effect.PreTokenBalances {
+						if effect.PreTokenBalances[i].Mint != orcaswap.WrappedSOLMint {
+							effect.PreTokenBalances[i].Amount = 0
+						}
+					}
+				}
+				if failed {
+					effect.Failed, effect.ErrorFingerprint = true, "program_error"
+					status.ErrorFingerprint = effect.ErrorFingerprint
+					effect.PostBalances = append([]uint64(nil), effect.PreBalances...)
+					effect.PostBalances[0] -= effect.FeeLamports
+					effect.PostTokenBalances = append([]solanarpc.TokenBalance(nil), effect.PreTokenBalances...)
+				}
+				if mode == "failed missing metadata" || mode == "failed missing account" {
+					if mode == "failed missing account" {
+						for _, balance := range effect.PreTokenBalances {
+							if balance.Mint != orcaswap.WrappedSOLMint {
+								effect.PreBalances[balance.AccountIndex], effect.PostBalances[balance.AccountIndex] = 0, 0
+							}
+						}
+					}
+					effect.PreTokenBalances, effect.PostTokenBalances = nil, nil
+				}
+				a := &fakeProvider{identity: "primary", status: status, effect: effect}
+				b := &fakeProvider{identity: "secondary", status: status, effect: cloneEffect(effect)}
+				lifecycle, err := NewEvidenceLifecycle(a, b)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := lifecycle.ReconcileJupiterExpected(t.Context(), submission, expected, effect.FeeLamports)
+				if mode == "created" {
+					if err != nil || got.Verdict != VerdictDiverged || got.JupiterEffects != nil {
+						t.Fatalf("protected account creation accepted: %+v, %v", got, err)
+					}
+					return
+				}
+				verdict := VerdictFinalized
+				if failed {
+					verdict = VerdictFailed
+				}
+				if err != nil || got.Verdict != verdict || got.JupiterEffects == nil {
+					t.Fatalf("reconciliation = %+v, %v", got, err)
+				}
+				if mode == "failed missing metadata" || mode == "failed missing account" {
+					if got.JupiterEffects.Token != nil {
+						t.Fatal("missing token evidence became a zero holding")
+					}
+					return
+				}
+				token := got.JupiterEffects.Token
+				wantPre := uint64(100)
+				wantPost := uint64(100)
+				if !failed {
+					if nativeInput {
+						wantPost = 120
+					} else {
+						wantPost = 100 - expected.InputAmount
+					}
+				}
+				if mode == "created" {
+					wantPre, wantPost = 0, expected.EstimatedOutput
+				}
+				if mode == "failed zero" {
+					wantPre, wantPost = 0, 0
+				}
+				if token == nil || token.PreUnits != wantPre || token.PostUnits != wantPost || !got.JupiterEffects.ValidTokenEffects(expected.Policy, failed) {
+					t.Fatalf("token evidence = %+v", token)
+				}
+				for name, mutate := range map[string]func(*JupiterTokenEvidence){
+					"version": func(v *JupiterTokenEvidence) { v.Version++ },
+					"account": func(v *JupiterTokenEvidence) { v.Account = expected.Policy.Owner },
+					"owner":   func(v *JupiterTokenEvidence) { v.Owner = orcaswap.SystemProgram },
+					"mint":    func(v *JupiterTokenEvidence) { v.Mint = orcaswap.WrappedSOLMint },
+					"pre":     func(v *JupiterTokenEvidence) { v.PreUnits++ },
+					"post":    func(v *JupiterTokenEvidence) { v.PostUnits++ },
+				} {
+					t.Run(name, func(t *testing.T) {
+						changed, value := *got.JupiterEffects, *token
+						mutate(&value)
+						changed.Token = &value
+						if changed.ValidTokenEffects(expected.Policy, failed) {
+							t.Fatal("tampered token evidence accepted")
+						}
+					})
+				}
+			})
+		}
+	}
 }
 
 func txflowRouteGuard() jupiterswap.RouteGuardDeployment {

@@ -90,12 +90,40 @@ func TestReadRecordsNeverCreatesOrRepairsEvidence(t *testing.T) {
 	if _, err := ReadRecords(path); err == nil {
 		t.Fatal("read-only journal access accepted a torn tail")
 	}
+	if store, err := OpenStrict(path); err == nil {
+		store.Close()
+		t.Fatal("strict writer accepted a torn tail")
+	}
 	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(before, after) {
 		t.Fatal("read-only journal access repaired the evidence it was asked to inspect")
+	}
+}
+
+func TestOpenStrictCreatesAndReopensValidJournal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "strict.jsonl")
+	store, err := OpenStrict(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(time.Now().UTC(), "test.strict", "", struct{}{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStrict(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Records()) != 1 {
+		t.Fatal("strict reopen lost a record")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

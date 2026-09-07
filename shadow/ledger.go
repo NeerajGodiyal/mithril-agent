@@ -148,6 +148,10 @@ func NewLedger(policy Policy, openingPriceMicros uint64, nativePrice ...uint64) 
 // Apply books a settled attempt and returns the resulting ledger. A refused
 // submitted attempt moves no traded inventory but still pays its network fee.
 func (l Ledger) Apply(fill Fill, markPriceMicros uint64, nativePrice ...uint64) (Ledger, error) {
+	return l.applyAmounts(fill.Filled, fill.Sell, fill.SpentUnits, fill.ReceivedUnits, fill.FeeLamports, l.setupRentFor(fill), markPriceMicros, nativePrice...)
+}
+
+func (l Ledger) applyAmounts(success, sell bool, spentUnits, receivedUnits, feeLamports, setupRent, markPriceMicros uint64, nativePrice ...uint64) (Ledger, error) {
 	if markPriceMicros == 0 {
 		return Ledger{}, errZeroReference
 	}
@@ -157,32 +161,31 @@ func (l Ledger) Apply(fill Fill, markPriceMicros uint64, nativePrice ...uint64) 
 	}
 	// A transaction fee is withdrawn before its instructions execute. Bought
 	// SOL therefore cannot fund its own fee, and a sell must leave the fee.
-	setupRent := l.setupRentFor(fill)
-	nativeDebit, debitErr := addUnits(fill.FeeLamports, setupRent)
+	nativeDebit, debitErr := addUnits(feeLamports, setupRent)
 	if debitErr != nil {
 		return Ledger{}, debitErr
 	}
 	if l.separateFeeReserve() {
 		if nativeDebit > l.FeeReserveLamports ||
-			fill.Filled && fill.Sell && fill.SpentUnits > l.BaseUnits {
+			success && sell && spentUnits > l.BaseUnits {
 			return Ledger{}, errInsufficientInventory
 		}
-	} else if fill.FeeLamports > l.BaseUnits ||
-		(fill.Filled && fill.Sell && fill.SpentUnits > l.BaseUnits-fill.FeeLamports) {
+	} else if feeLamports > l.BaseUnits ||
+		(success && sell && spentUnits > l.BaseUnits-feeLamports) {
 		return Ledger{}, errInsufficientInventory
 	}
 	next := l
 	if usesSeparateNativePrice(l.Policy) {
 		next.NativeFeePriceMicros = nativePriceMicros
 	}
-	if !fill.Filled {
-		if next, err := next.chargeFee(fill.FeeLamports, nativePriceMicros); err != nil {
+	if !success {
+		if next, err := next.chargeFee(feeLamports, nativePriceMicros); err != nil {
 			return Ledger{}, err
 		} else {
 			return next.mark(markPriceMicros, nativePriceMicros)
 		}
 	}
-	if next, err = next.chargeFee(fill.FeeLamports, nativePriceMicros); err != nil {
+	if next, err = next.chargeFee(feeLamports, nativePriceMicros); err != nil {
 		return Ledger{}, err
 	}
 	if next, err = next.lockSetupRent(setupRent); err != nil {
@@ -190,17 +193,17 @@ func (l Ledger) Apply(fill Fill, markPriceMicros uint64, nativePrice ...uint64) 
 	}
 	quoteDecimals := next.quoteDecimals()
 
-	if fill.Sell {
-		if fill.SpentUnits > next.BaseUnits {
+	if sell {
+		if spentUnits > next.BaseUnits {
 			return Ledger{}, errInsufficientInventory
 		}
-		proceeds, err := scaleToMicros(fill.ReceivedUnits, quoteDecimals)
+		proceeds, err := scaleToMicros(receivedUnits, quoteDecimals)
 		if err != nil {
 			return Ledger{}, err
 		}
 		// Proportional to what is actually held, so the basis is exact rather
 		// than reconstructed from a rounded average.
-		cost := shareOf(next.CostBasisMicros, fill.SpentUnits, next.BaseUnits)
+		cost := shareOf(next.CostBasisMicros, spentUnits, next.BaseUnits)
 		signedProceeds, err := signed(proceeds)
 		if err != nil {
 			return Ledger{}, err
@@ -209,7 +212,7 @@ func (l Ledger) Apply(fill Fill, markPriceMicros uint64, nativePrice ...uint64) 
 		if err != nil {
 			return Ledger{}, err
 		}
-		quoteUnits, err := addUnits(next.QuoteUnits, fill.ReceivedUnits)
+		quoteUnits, err := addUnits(next.QuoteUnits, receivedUnits)
 		if err != nil {
 			return Ledger{}, err
 		}
@@ -221,20 +224,20 @@ func (l Ledger) Apply(fill Fill, markPriceMicros uint64, nativePrice ...uint64) 
 		if err != nil {
 			return Ledger{}, err
 		}
-		next.BaseUnits -= fill.SpentUnits
+		next.BaseUnits -= spentUnits
 		next.CostBasisMicros -= cost
 		next.QuoteUnits = quoteUnits
 		next.RealizedMicros = realized
 		next.TurnoverMicros = turnover
 	} else {
-		if fill.SpentUnits > next.QuoteUnits {
+		if spentUnits > next.QuoteUnits {
 			return Ledger{}, errInsufficientInventory
 		}
-		spent, err := scaleToMicros(fill.SpentUnits, quoteDecimals)
+		spent, err := scaleToMicros(spentUnits, quoteDecimals)
 		if err != nil {
 			return Ledger{}, err
 		}
-		baseUnits, err := addUnits(next.BaseUnits, fill.ReceivedUnits)
+		baseUnits, err := addUnits(next.BaseUnits, receivedUnits)
 		if err != nil {
 			return Ledger{}, err
 		}
@@ -249,7 +252,7 @@ func (l Ledger) Apply(fill Fill, markPriceMicros uint64, nativePrice ...uint64) 
 		// Buying simply adds what it cost to the basis of everything held.
 		next.BaseUnits = baseUnits
 		next.CostBasisMicros = costBasis
-		next.QuoteUnits -= fill.SpentUnits
+		next.QuoteUnits -= spentUnits
 		next.TurnoverMicros = turnover
 	}
 

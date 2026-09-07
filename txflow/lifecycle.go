@@ -130,6 +130,16 @@ func (l *Lifecycle) verifyTokenAccount(
 	minimumAmount,
 	minContextSlot uint64,
 ) (TokenAccountEvidence, error) {
+	return l.verifyTokenAccountAt(ctx, address, mint, owner, minimumAmount, minContextSlot, false)
+}
+
+type finalizedAccountSliceProvider interface {
+	FinalizedAccountSlice(context.Context, string, uint64, uint64, uint64) (solanarpc.AccountDataSlice, error)
+}
+
+func (l *Lifecycle) verifyTokenAccountAt(ctx context.Context, address, mint, owner string,
+	minimumAmount, minContextSlot uint64, finalized bool,
+) (TokenAccountEvidence, error) {
 	if _, err := solana.Decode32(address); err != nil {
 		return TokenAccountEvidence{}, errors.New("token account address is invalid")
 	}
@@ -139,13 +149,22 @@ func (l *Lifecycle) verifyTokenAccount(
 		return TokenAccountEvidence{}, errors.New("token account policy is invalid")
 	}
 	const tokenAccountLength = uint64(165)
+	primaryRead, secondaryRead := l.primary.AccountSlice, l.secondary.AccountSlice
+	if finalized {
+		primary, primaryOK := l.primary.(finalizedAccountSliceProvider)
+		secondary, secondaryOK := l.secondary.(finalizedAccountSliceProvider)
+		if !primaryOK || !secondaryOK {
+			return TokenAccountEvidence{}, errors.New("providers do not support finalized token inventory")
+		}
+		primaryRead, secondaryRead = primary.FinalizedAccountSlice, secondary.FinalizedAccountSlice
+	}
 	primary, secondary, err := queryPair(
 		ctx,
 		func(ctx context.Context) (solanarpc.AccountDataSlice, error) {
-			return l.primary.AccountSlice(ctx, address, minContextSlot, 0, tokenAccountLength)
+			return primaryRead(ctx, address, minContextSlot, 0, tokenAccountLength)
 		},
 		func(ctx context.Context) (solanarpc.AccountDataSlice, error) {
-			return l.secondary.AccountSlice(ctx, address, minContextSlot, 0, tokenAccountLength)
+			return secondaryRead(ctx, address, minContextSlot, 0, tokenAccountLength)
 		},
 	)
 	if err != nil {
@@ -718,6 +737,9 @@ func (l *Lifecycle) MithrilNodeIdentity() string {
 // independent evidence query. Callers can bind ownership metadata to the
 // evidence source instead of to unrelated reader objects.
 func (l *Lifecycle) EvidenceProviderIdentities() (string, string) {
+	if l == nil || l.primary == nil || l.secondary == nil {
+		return "", ""
+	}
 	return l.primary.Identity(), l.secondary.Identity()
 }
 

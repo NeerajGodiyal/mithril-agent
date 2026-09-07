@@ -1,4 +1,4 @@
-package execution
+package policyauthority
 
 import (
 	"bytes"
@@ -18,7 +18,6 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/jupiterquote"
 	"github.com/Overclock-Validator/mithril-agent/jupiterswap"
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
-	"github.com/Overclock-Validator/mithril-agent/policyauthority"
 	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
 	"github.com/Overclock-Validator/mithril-agent/signer"
 	"github.com/Overclock-Validator/mithril-agent/solana"
@@ -60,7 +59,7 @@ func TestPaperTerminalComposition(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := policyauthority.ValidatePaperRequestClaim(record, policy, request); err != nil {
+	if _, err := ValidatePaperRequestClaim(record, policy, request); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.ReadFile(path)
@@ -132,14 +131,63 @@ func TestPaperTerminalComposition(t *testing.T) {
 	if terminal.ClaimSHA256 != record.Hash || terminal.Finalized != evidence {
 		t.Fatalf("terminal binding changed: %+v", terminal)
 	}
+	want := PaperSwapAccounting{ClaimSHA256: record.Hash, TerminalSHA256: records[1].Hash,
+		TerminalAt: records[1].At, Owner: policy.TransactionPolicy.Source, Finalized: evidence,
+		NativeSwapDebitLamports: 10, TokenMint: evidence.OutputMint, TokenCreditUnits: 20}
+	for range 2 {
+		delta, err := readPaperSwapAccounting(path, policy, request, func() (submitter.JupiterFinalizedEvidence, error) {
+			return evidence, nil
+		})
+		if err != nil || delta != want {
+			t.Fatalf("inventory projection = %+v, %v; want %+v", delta, err, want)
+		}
+	}
+	changed := evidence
+	changed.OutputReceived++
+	for _, test := range []struct {
+		name     string
+		policy   Policy
+		request  signer.Request
+		evidence submitter.JupiterFinalizedEvidence
+		err      error
+	}{
+		{"changed effects", policy, request, changed, nil},
+		{"missing recovery", policy, request, evidence, recoveryErr},
+		{"changed request", policy, signer.Request{}, evidence, nil},
+		{"changed policy", Policy{}, request, evidence, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			delta, err := readPaperSwapAccounting(path, test.policy, test.request, func() (submitter.JupiterFinalizedEvidence, error) {
+				return test.evidence, test.err
+			})
+			if err == nil || delta != (PaperSwapAccounting{}) {
+				t.Fatalf("invalid inventory evidence accepted: %+v, %v", delta, err)
+			}
+		})
+	}
+	if delta, err := ReadPaperSwapAccounting(path, policy, request, submitter.Policy{}); err == nil || delta != (PaperSwapAccounting{}) {
+		t.Fatalf("public reader accepted missing recovery policy: %+v, %v", delta, err)
+	}
+	after, err = os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("inventory read changed durable claim: %v", err)
+	}
 }
 
 // paperTerminalRequest uses the same minimal guarded SOL route as signer tests;
 // all identities and amounts are synthetic and no signatures are produced.
-func paperTerminalRequest(t *testing.T) (policyauthority.Policy, signer.Request) {
+func paperTerminalRequest(t *testing.T) (Policy, signer.Request) {
+	t.Helper()
+	return paperTerminalRequestForOwner(t, "")
+}
+
+func paperTerminalRequestForOwner(t *testing.T, owner string) (Policy, signer.Request) {
 	t.Helper()
 	key := func(b byte) string { return solana.Encode(bytes.Repeat([]byte{b}, 32)) }
-	owner, outputMint, blockhash := key(1), key(2), key(9)
+	if owner == "" {
+		owner = key(1)
+	}
+	outputMint, blockhash := key(2), key(9)
 	input, err := orcaswap.AssociatedTokenAddress(owner, orcaswap.WrappedSOLMint)
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +241,7 @@ func paperTerminalRequest(t *testing.T) (policyauthority.Policy, signer.Request)
 	}
 	providers := &proposalcheck.ProviderBindings{PrimaryTrustDomain: "primary", PrimaryOriginSHA256: strings.Repeat("1", 64),
 		SecondaryTrustDomain: "secondary", SecondaryOriginSHA256: strings.Repeat("2", 64), ArchiveProbeSignature: solana.Encode(bytes.Repeat([]byte{7}, 64))}
-	policy := policyauthority.Policy{TransactionPolicy: signer.Policy{
+	policy := Policy{TransactionPolicy: signer.Policy{
 		Cluster: "mainnet-beta", Profile: jupiterswap.ProfileName, ProfileVersion: jupiterswap.ProfileVersion, ProfileFingerprint: fingerprint,
 		Source: owner, MaxLamports: 10, MaxFeeLamports: 10_000, DailyDebitCapLamports: 3_010_010,
 		AuthorizationLedgerPath: filepath.Join(t.TempDir(), "authorization.jsonl"), ScheduleWindowSeconds: 3600, ScheduleAnchorUnix: anchor,
@@ -237,7 +285,7 @@ func TestPaperTerminalRefusesBeforeRecoveryRead(t *testing.T) {
 				t.Fatal(readErr)
 			}
 			called := false
-			got, err := recordPaperTerminal(path, policyauthority.Policy{}, signer.Request{}, time.Now(), func() (submitter.JupiterFinalizedEvidence, error) {
+			got, err := recordPaperTerminal(path, Policy{}, signer.Request{}, time.Now(), func() (submitter.JupiterFinalizedEvidence, error) {
 				called = true
 				return submitter.JupiterFinalizedEvidence{}, errors.New("must not read recovery")
 			})

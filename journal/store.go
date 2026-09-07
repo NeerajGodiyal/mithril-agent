@@ -138,10 +138,16 @@ type Verification struct {
 }
 
 func Open(path string) (*Store, error) {
-	return open(path, false)
+	return open(path, false, true)
 }
 
-func open(path string, rotating bool) (*Store, error) {
+// OpenStrict opens a non-rotating writer without repairing a torn final record.
+// Use it when incomplete records may represent unresolved external actions.
+func OpenStrict(path string) (*Store, error) {
+	return open(path, false, false)
+}
+
+func open(path string, rotating, recoverTorn bool) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("journal path is empty")
 	}
@@ -204,7 +210,7 @@ func open(path string, rotating bool) (*Store, error) {
 	}
 
 	store := &Store{file: file, reservePath: path + ".reserve", basePath: path}
-	if err := store.load(); err != nil {
+	if err := store.load(recoverTorn); err != nil {
 		return closeOnError(err)
 	}
 	if err := store.loadReserve(); err != nil {
@@ -235,7 +241,7 @@ func open(path string, rotating bool) (*Store, error) {
 // that opt in receive the complete logical record stream, including the
 // original header and rotation markers.
 func OpenRotating(path string) (*Store, error) {
-	store, err := open(path, true)
+	store, err := open(path, true, true)
 	if err != nil {
 		return nil, err
 	}
@@ -872,19 +878,23 @@ func syncDirectory(path string) error {
 	return dir.Sync()
 }
 
-func (s *Store) load() error {
+func (s *Store) load(recoverTorn bool) error {
 	if _, err := s.file.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("seek journal: %w", err)
 	}
-	records, err := scanJournal(s.file, func(lineStart int64) error {
-		if err := s.file.Truncate(lineStart); err != nil {
-			return fmt.Errorf("recover torn journal tail: %w", err)
+	var recoverTail func(int64) error
+	if recoverTorn {
+		recoverTail = func(lineStart int64) error {
+			if err := s.file.Truncate(lineStart); err != nil {
+				return fmt.Errorf("recover torn journal tail: %w", err)
+			}
+			if err := s.file.Sync(); err != nil {
+				return fmt.Errorf("sync recovered journal: %w", err)
+			}
+			return nil
 		}
-		if err := s.file.Sync(); err != nil {
-			return fmt.Errorf("sync recovered journal: %w", err)
-		}
-		return nil
-	})
+	}
+	records, err := scanJournal(s.file, recoverTail)
 	if err != nil {
 		return err
 	}

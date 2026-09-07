@@ -1122,60 +1122,68 @@ func TestAccountRequiresValidAddressAndFreshContext(t *testing.T) {
 }
 
 func TestAccountSliceUsesBoundedConfirmedRead(t *testing.T) {
-	address := solana.Encode(bytes.Repeat([]byte{8}, 32))
-	owner := solana.Encode(bytes.Repeat([]byte{9}, 32))
-	httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		var input struct {
-			ID     uint64          `json:"id"`
-			Method string          `json:"method"`
-			Params json.RawMessage `json:"params"`
-		}
-		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
-			t.Fatal(err)
-		}
-		if input.Method != "getAccountInfo" {
-			t.Fatalf("method = %q", input.Method)
-		}
-		assertContains(t, input.Params, `"commitment":"confirmed"`)
-		assertContains(t, input.Params, `"minContextSlot":90`)
-		assertContains(t, input.Params, `"dataSlice":{"length":4,"offset":12}`)
-		return jsonResponse(t, map[string]any{
-			"jsonrpc": "2.0", "id": input.ID,
-			"result": map[string]any{
-				"context": map[string]any{"slot": uint64(91)},
-				"value": map[string]any{
-					"data":       []any{base64.StdEncoding.EncodeToString([]byte{1, 2, 3, 4}), "base64"},
-					"executable": true, "lamports": uint64(1), "owner": owner, "space": uint64(165),
-				},
-			},
-		}), nil
-	})}
-	client, err := New("https://rpc.test", httpClient, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := client.AccountSlice(t.Context(), address, 90, 12, 4)
-	if err != nil || got.ContextSlot != 91 || got.Owner != owner || !got.Executable ||
-		got.DataLength != 165 ||
-		!bytes.Equal(got.Data, []byte{1, 2, 3, 4}) {
-		t.Fatalf("account slice = %+v, %v", got, err)
-	}
-	for name, args := range map[string][4]uint64{
-		"zero context": {0, 0, 1, 0},
-		"zero length":  {1, 0, 0, 0},
-		"long slice":   {1, 0, 513, 0},
-		"overflow":     {1, ^uint64(0), 2, 0},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := client.AccountSlice(
-				t.Context(), address, args[0], args[1], args[2],
-			); err == nil {
-				t.Fatal("invalid account slice was accepted")
+	for _, commitment := range []string{"confirmed", "finalized"} {
+		t.Run(commitment, func(t *testing.T) {
+			address := solana.Encode(bytes.Repeat([]byte{8}, 32))
+			owner := solana.Encode(bytes.Repeat([]byte{9}, 32))
+			httpClient := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				var input struct {
+					ID     uint64          `json:"id"`
+					Method string          `json:"method"`
+					Params json.RawMessage `json:"params"`
+				}
+				if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+					t.Fatal(err)
+				}
+				if input.Method != "getAccountInfo" {
+					t.Fatalf("method = %q", input.Method)
+				}
+				assertContains(t, input.Params, `"commitment":"`+commitment+`"`)
+				assertContains(t, input.Params, `"minContextSlot":90`)
+				assertContains(t, input.Params, `"dataSlice":{"length":4,"offset":12}`)
+				return jsonResponse(t, map[string]any{
+					"jsonrpc": "2.0", "id": input.ID,
+					"result": map[string]any{
+						"context": map[string]any{"slot": uint64(91)},
+						"value": map[string]any{
+							"data":       []any{base64.StdEncoding.EncodeToString([]byte{1, 2, 3, 4}), "base64"},
+							"executable": true, "lamports": uint64(1), "owner": owner, "space": uint64(165),
+						},
+					},
+				}), nil
+			})}
+			client, err := New("https://rpc.test", httpClient, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			read := client.AccountSlice
+			if commitment == "finalized" {
+				read = client.FinalizedAccountSlice
+			}
+			got, err := read(t.Context(), address, 90, 12, 4)
+			if err != nil || got.ContextSlot != 91 || got.Owner != owner || !got.Executable ||
+				got.DataLength != 165 ||
+				!bytes.Equal(got.Data, []byte{1, 2, 3, 4}) {
+				t.Fatalf("account slice = %+v, %v", got, err)
+			}
+			for name, args := range map[string][4]uint64{
+				"zero context": {0, 0, 1, 0},
+				"zero length":  {1, 0, 0, 0},
+				"long slice":   {1, 0, 513, 0},
+				"overflow":     {1, ^uint64(0), 2, 0},
+			} {
+				t.Run(name, func(t *testing.T) {
+					if _, err := read(
+						t.Context(), address, args[0], args[1], args[2],
+					); err == nil {
+						t.Fatal("invalid account slice was accepted")
+					}
+				})
+			}
+			if _, err := read(t.Context(), "invalid", 1, 0, 1); err == nil {
+				t.Fatal("invalid account address was accepted")
 			}
 		})
-	}
-	if _, err := client.AccountSlice(t.Context(), "invalid", 1, 0, 1); err == nil {
-		t.Fatal("invalid account address was accepted")
 	}
 }
 
@@ -1207,10 +1215,30 @@ func TestAccountSliceRejectsMalformedEvidence(t *testing.T) {
 					"context": map[string]any{"slot": test.slot}, "value": test.value,
 				}}
 			})
-			if _, err := client.AccountSlice(t.Context(), address, 9, 0, 4); err == nil {
-				t.Fatal("malformed account slice was accepted")
+			for _, finalized := range []bool{false, true} {
+				read := client.AccountSlice
+				if finalized {
+					read = client.FinalizedAccountSlice
+				}
+				if _, err := read(t.Context(), address, 9, 0, 4); err == nil {
+					t.Fatalf("malformed account slice was accepted (finalized=%v)", finalized)
+				}
 			}
 		})
+	}
+}
+
+func TestFinalizedAccountSliceRejectsMithrilBeforeRPC(t *testing.T) {
+	client, err := NewMithrilNode("http://127.0.0.1:8899", &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("finalized account request reached processed-only provider")
+		return nil, errors.New("unexpected RPC")
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := solana.Encode(bytes.Repeat([]byte{8}, 32))
+	if _, err := client.FinalizedAccountSlice(t.Context(), address, 90, 0, 165); err == nil {
+		t.Fatal("processed-only provider accepted finalized account request")
 	}
 }
 

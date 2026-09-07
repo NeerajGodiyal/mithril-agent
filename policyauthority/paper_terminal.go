@@ -1,4 +1,4 @@
-package execution
+package policyauthority
 
 import (
 	"bytes"
@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/journal"
-	"github.com/Overclock-Validator/mithril-agent/policyauthority"
 	"github.com/Overclock-Validator/mithril-agent/signer"
 	"github.com/Overclock-Validator/mithril-agent/submitter"
 )
@@ -24,7 +23,7 @@ type paperTerminal struct {
 // journals to be read under existing checks; it is not cross-service transport.
 // It never accepts caller-supplied effects, releases a claim, credits inventory,
 // signs or submits. The first-action lock remains permanent after completion.
-func RecordPaperTerminal(path string, authority policyauthority.Policy, request signer.Request,
+func RecordPaperTerminal(path string, authority Policy, request signer.Request,
 	recoveryPolicy submitter.Policy, now time.Time,
 ) (submitter.JupiterFinalizedEvidence, error) {
 	return recordPaperTerminal(path, authority, request, now, func() (submitter.JupiterFinalizedEvidence, error) {
@@ -32,7 +31,7 @@ func RecordPaperTerminal(path string, authority policyauthority.Policy, request 
 	})
 }
 
-func recordPaperTerminal(path string, authority policyauthority.Policy, request signer.Request,
+func recordPaperTerminal(path string, authority Policy, request signer.Request,
 	now time.Time, readFinalized func() (submitter.JupiterFinalizedEvidence, error),
 ) (result submitter.JupiterFinalizedEvidence, err error) {
 	// Refuse missing/invalid evidence without creating or repairing a journal.
@@ -43,7 +42,7 @@ func recordPaperTerminal(path string, authority policyauthority.Policy, request 
 	if _, err := paperTerminalClaim(records, authority, request, now); err != nil {
 		return result, err
 	}
-	store, err := journal.Open(path)
+	store, err := journal.OpenStrict(path)
 	if err != nil {
 		return result, err
 	}
@@ -67,12 +66,12 @@ func recordPaperTerminal(path string, authority policyauthority.Policy, request 
 	return result, nil
 }
 
-func paperTerminalClaim(records []journal.Record, authority policyauthority.Policy, request signer.Request, now time.Time) (string, error) {
+func paperTerminalClaim(records []journal.Record, authority Policy, request signer.Request, now time.Time) (string, error) {
 	if len(records) < 1 || len(records) > 2 || now.IsZero() || now.Before(records[len(records)-1].At) ||
 		(len(records) == 2 && (records[1].Type != paperTerminalEvent || records[1].ActionID != request.ActionID)) {
 		return "", errors.New("paper terminal journal state is invalid")
 	}
-	return policyauthority.ValidatePaperRequestClaim(records[0], authority, request)
+	return ValidatePaperRequestClaim(records[0], authority, request)
 }
 
 func appendPaperTerminal(store *journal.Store, claim, actionID string, evidence submitter.JupiterFinalizedEvidence, now time.Time) error {

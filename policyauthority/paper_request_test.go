@@ -634,6 +634,63 @@ func TestPaperRequestAcquisitionExpiresDuringPreparation(t *testing.T) {
 	})
 }
 
+func TestValidatePaperRequestIntentRequiresOriginalReviewedHistory(t *testing.T) {
+	f := newPaperRequestFixture(t)
+	request, err := f.claim(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := journal.ReadRecords(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, err := proposalcheck.CheckPaperIntent(f.paper, f.ticks, f.candidate.Policy, *request.JupiterCandidate, f.bounds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hash, err := ValidatePaperRequestIntent(records[0], f.policy, request, intent); err != nil || hash != records[0].Hash {
+		t.Fatalf("original intent rejected: %q, %v", hash, err)
+	}
+	changedBounds := f.bounds
+	changedBounds.NativeBudgetLamports++
+	other, err := proposalcheck.CheckPaperIntent(f.paper, f.ticks, f.candidate.Policy, *request.JupiterCandidate, changedBounds)
+	if err != nil || other.SHA256 == intent.SHA256 {
+		t.Fatalf("different valid review was not constructed: %+v, %v", other, err)
+	}
+	changedTicks := append([]shadow.Tick(nil), f.ticks...)
+	changedTicks[0].At = changedTicks[0].At.Add(-time.Second)
+	quote := *changedTicks[0].DecisionQuote
+	quote.ReceivedAt = changedTicks[0].At
+	changedTicks[0].DecisionQuote = &quote
+	historyBounds := f.bounds
+	historyBounds.EvidenceSHA256, err = proposalcheck.PaperEvidenceSHA256(changedTicks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherHistory, err := proposalcheck.CheckPaperIntent(f.paper, changedTicks, f.candidate.Policy, *request.JupiterCandidate, historyBounds)
+	if err != nil || otherHistory.SHA256 == intent.SHA256 {
+		t.Fatalf("different valid history was not constructed: %+v, %v", otherHistory, err)
+	}
+	for _, candidate := range []proposalcheck.PaperIntent{other, otherHistory, {}} {
+		if hash, err := ValidatePaperRequestIntent(records[0], f.policy, request, candidate); err == nil || hash != "" {
+			t.Fatalf("unrelated intent accepted: %q, %v", hash, err)
+		}
+	}
+	changedRequest := request
+	changedRequest.PrimaryFeeContextSlot++
+	if hash, err := ValidatePaperRequestIntent(records[0], f.policy, changedRequest, intent); err == nil || hash != "" {
+		t.Fatalf("intent bypassed original request validation: %q, %v", hash, err)
+	}
+	after, err := os.ReadFile(f.path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("historical intent comparison changed the claim: %v", err)
+	}
+}
+
 func TestValidatePaperRequestClaimBindsOriginalWithoutExpiry(t *testing.T) {
 	f := newPaperRequestFixture(t)
 	request, err := f.claim(t)
@@ -656,6 +713,10 @@ func TestValidatePaperRequestClaimBindsOriginalWithoutExpiry(t *testing.T) {
 	}
 	if _, err := ValidatePaperRequestClaim(record, f.policy, request); err != nil {
 		t.Fatalf("expired original request cannot be accounted for: %v", err)
+	}
+	retained, err := ReadClaimedPaperRequest(f.path, f.policy)
+	if err != nil || !reflect.DeepEqual(retained, request) || retained.RiskGrant.SignatureBase64 != "" {
+		t.Fatalf("expired retained request changed or gained authority: %+v, %v", retained, err)
 	}
 	for _, name := range []string{"policy", "request", "type", "sequence", "action", "legacy", "noncanonical", "bad acquisition"} {
 		t.Run(name, func(t *testing.T) {
@@ -705,6 +766,103 @@ func TestValidatePaperRequestClaimBindsOriginalWithoutExpiry(t *testing.T) {
 	f.now = f.ticks[0].At
 	if request, err := f.claim(t); err == nil || !reflect.DeepEqual(request, signer.Request{}) {
 		t.Fatalf("terminal marker released first-action lock: %v", err)
+	}
+}
+
+func TestReadClaimedPaperRequestRetainsExactUnsignedBytes(t *testing.T) {
+	f := newPaperRequestFixture(t)
+	request, err := f.claim(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		got, err := ReadClaimedPaperRequest(f.path, f.policy)
+		if err != nil || !reflect.DeepEqual(got, request) {
+			t.Fatalf("retained request: %+v, %v", got, err)
+		}
+	}
+	after, err := os.ReadFile(f.path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("read changed original claim")
+	}
+	records, err := journal.ReadRecords(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"historical", "amount", "grant", "corruption", "torn"} {
+		t.Run(name, func(t *testing.T) {
+			var claim paperRequestClaim
+			if err := json.Unmarshal(records[0].Payload, &claim); err != nil {
+				t.Fatal(err)
+			}
+			switch name {
+			case "historical":
+				claim.Request = nil
+			case "amount":
+				claim.Request.PrimaryFeeContextSlot++
+			case "grant":
+				claim.Request.RiskGrant.SignatureBase64 = "not-authority"
+			}
+			copyFixture := f
+			copyFixture.path = filepath.Join(t.TempDir(), "claim.jsonl")
+			store, err := journal.OpenStrict(copyFixture.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Append(records[0].At, records[0].Type, records[0].ActionID, claim); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if name == "corruption" || name == "torn" {
+				file, err := os.OpenFile(copyFixture.path, os.O_WRONLY|os.O_APPEND, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tail := "{\"unfinished\":"
+				if name == "corruption" {
+					tail = "{\"invalid\":true}\n"
+				}
+				if _, err := file.WriteString(tail); err != nil {
+					t.Fatal(err)
+				}
+				if err := file.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := os.ReadFile(copyFixture.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, err := ReadClaimedPaperRequest(copyFixture.path, copyFixture.policy); err == nil || !reflect.DeepEqual(got, signer.Request{}) {
+				t.Fatalf("invalid retained request: %+v, %v", got, err)
+			}
+			if name == "historical" {
+				legacy, err := journal.ReadRecords(copyFixture.path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := ValidatePaperRequestClaim(legacy[0], f.policy, request); err != nil {
+					t.Fatalf("legacy terminal validation changed: %v", err)
+				}
+				if got, err := copyFixture.claim(t); err != nil || !reflect.DeepEqual(got, request) {
+					t.Fatalf("legacy exact repeat changed: %+v, %v", got, err)
+				}
+			} else if name == "torn" || name == "corruption" {
+				if got, err := copyFixture.claim(t); err == nil || !reflect.DeepEqual(got, signer.Request{}) {
+					t.Fatalf("broken journal returned claim: %+v, %v", got, err)
+				}
+			}
+			after, err := os.ReadFile(copyFixture.path)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatal("rejected or historical read rewrote claim")
+			}
+		})
 	}
 }
 

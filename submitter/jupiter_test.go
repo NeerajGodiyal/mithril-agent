@@ -7,148 +7,18 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/jupiterquote"
 	"github.com/Overclock-Validator/mithril-agent/jupiterswap"
-	"github.com/Overclock-Validator/mithril-agent/operatorapproval"
 	"github.com/Overclock-Validator/mithril-agent/orcaswap"
-	"github.com/Overclock-Validator/mithril-agent/policyauthority"
 	"github.com/Overclock-Validator/mithril-agent/proposalcheck"
-	"github.com/Overclock-Validator/mithril-agent/riskgrant"
 	"github.com/Overclock-Validator/mithril-agent/sealedtx"
 	"github.com/Overclock-Validator/mithril-agent/signer"
 	"github.com/Overclock-Validator/mithril-agent/solana"
-	"github.com/Overclock-Validator/mithril-agent/solanarpc"
-	"github.com/Overclock-Validator/mithril-agent/txflow"
 )
-
-func TestJupiterAuthorityCustodyAndSubmitterBoundariesCompose(t *testing.T) {
-	submitterPolicy, submitterKey, request, _ := jupiterSubmitterFixture(t)
-	ledgerDir, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(ledgerDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	riskSeed := sha256.Sum256([]byte("Jupiter composed risk authority"))
-	riskKey := ed25519.NewKeyFromSeed(riskSeed[:])
-	riskPublic, err := riskgrant.PublicKeyHex(riskKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signerPolicy := signer.Policy{
-		Cluster: submitterPolicy.Cluster, Profile: submitterPolicy.Profile,
-		ProfileVersion:          jupiterswap.ProfileVersion,
-		ProfileFingerprint:      submitterPolicy.ProfileFingerprint,
-		Source:                  submitterPolicy.Source,
-		MaxLamports:             submitterPolicy.MaxLamports,
-		MaxFeeLamports:          submitterPolicy.MaxFeeLamports,
-		DailyDebitCapLamports:   10_000_000,
-		AuthorizationLedgerPath: filepath.Join(ledgerDir, "authorization.jsonl"),
-		ScheduleWindowSeconds:   submitterPolicy.ScheduleWindowSeconds,
-		ScheduleAnchorUnix:      submitterPolicy.ScheduleAnchorUnix,
-		MaxBlockHeightWindow:    submitterPolicy.MaxBlockHeightWindow,
-		RiskAuthorityKeyID:      "Jupiter composed risk authority",
-		RiskAuthorityPublicKey:  riskPublic,
-		SubmitterPublicKey:      submitterPolicy.SubmitterPublicKey,
-		AttestationPublicKey:    submitterPolicy.AttestationPublicKey,
-		Jupiter:                 submitterPolicy.Jupiter,
-	}
-	approvalSeed := sha256.Sum256([]byte("Jupiter composed operator approval"))
-	approvalKey := ed25519.NewKeyFromSeed(approvalSeed[:])
-	authorityPolicy := policyauthority.Policy{
-		TransactionPolicy: signerPolicy,
-		JupiterProviders:  request.JupiterProviders,
-		OperatorApprover:  solana.Encode(approvalKey.Public().(ed25519.PublicKey)),
-		GrantLifetimeSecs: 30,
-	}
-	now := time.Unix(request.ScheduleWindowStartUnix+1, 0).UTC()
-	validated, err := signer.ValidateJupiterRequest(signerPolicy, request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	review, err := operatorapproval.BuildReview(
-		authorityPolicy.OperatorApprover, request, validated,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	approval, err := operatorapproval.Create(
-		authorityPolicy.OperatorApprover, request, validated,
-		solana.Encode(ed25519.Sign(approvalKey, []byte(review.Challenge))),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.RiskGrant, err = policyauthority.AuthorizeApproved(
-		authorityPolicy, riskKey, request, approval, now,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	walletSeed := sha256.Sum256([]byte("Jupiter submitter wallet"))
-	walletKey := ed25519.NewKeyFromSeed(walletSeed[:])
-	attestationSeed := sha256.Sum256([]byte("Jupiter response attestor"))
-	attestationKey := ed25519.NewKeyFromSeed(attestationSeed[:])
-	response, err := signer.AuthorizeAndSignJupiterFileKey(
-		t.Context(), signerPolicy, walletKey, attestationKey, request, now,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := ValidateJupiterResponse(
-		submitterPolicy, submitterKey, request, response,
-	); err != nil {
-		t.Fatal(err)
-	}
-
-	recoveryDir, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(recoveryDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	submitterPolicy.ControlStatePath = filepath.Join(recoveryDir, "control.json")
-	transaction, err := sealedtx.OpenConfidential(
-		submitterKey, response.SealedTransaction,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := prepareJupiterRecovery(
-		submitterPolicy, request, response, transaction,
-	); err != nil {
-		t.Fatal(err)
-	}
-	status := solanarpc.SignatureStatus{
-		Found: true, Slot: 150, ConfirmationStatus: "finalized",
-	}
-	effect := jupiterRecoveryEffect(t, submitterPolicy, request, transaction, 150)
-	primary := &recoveryEvidence{
-		identity: submitterPolicy.Evidence.PrimaryOriginSHA256,
-		status:   status, effect: effect,
-	}
-	secondary := &recoveryEvidence{
-		identity: submitterPolicy.Evidence.SecondaryOriginSHA256,
-		status:   status, effect: effect,
-	}
-	lifecycle, err := txflow.NewEvidenceLifecycle(primary, secondary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	markJupiterSendStarted(t, submitterPolicy)
-	actionID, result, err := ReconcileRecovery(t.Context(), submitterPolicy, lifecycle)
-	if err != nil || actionID != request.ActionID || result.Verdict != txflow.VerdictFinalized {
-		t.Fatalf("composed Jupiter recovery = %q, %+v, %v", actionID, result, err)
-	}
-}
 
 func TestValidateJupiterResponseCannotReachSubmission(t *testing.T) {
 	policy, privateKey, request, response := jupiterSubmitterFixture(t)
@@ -284,6 +154,11 @@ func TestJupiterPolicyRequiresExplicitRecoveryMode(t *testing.T) {
 
 func jupiterSubmitterFixture(t *testing.T) (Policy, string, signer.Request, signer.Response) {
 	t.Helper()
+	return jupiterSubmitterFixtureAt(t, time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC).Unix())
+}
+
+func jupiterSubmitterFixtureAt(t *testing.T, at int64) (Policy, string, signer.Request, signer.Response) {
+	t.Helper()
 	walletSeed := sha256.Sum256([]byte("Jupiter submitter wallet"))
 	walletKey := ed25519.NewKeyFromSeed(walletSeed[:])
 	owner := solana.Encode(walletKey.Public().(ed25519.PublicKey))
@@ -384,8 +259,8 @@ func jupiterSubmitterFixture(t *testing.T) (Policy, string, signer.Request, sign
 	if err != nil {
 		t.Fatal(err)
 	}
-	anchor := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC).Unix()
-	scheduleStart := anchor + 3_600
+	anchor := time.Unix(at, 0).UTC().Truncate(24 * time.Hour).Unix()
+	scheduleStart := time.Unix(at+3_600, 0).UTC().Truncate(time.Hour).Unix()
 	actionID, err := jupiterswap.ComputeActionID(fingerprint, scheduleStart)
 	if err != nil {
 		t.Fatal(err)

@@ -68,7 +68,7 @@ type RoundTripResult struct {
 	ClosingPrice                 uint64
 	LiquidationMaxDrawdownMicros uint64
 	LiquidationMaxDrawdownBPS    uint16
-	// FilteredReasons is populated only by the explicit offline cost comparison.
+	// FilteredReasons is populated only by explicit offline diagnostics.
 	// It explains modeled quote refusals, not real venue execution outcomes.
 	FilteredReasons map[string]uint64 `json:"filtered_reasons,omitempty"`
 }
@@ -111,6 +111,22 @@ func ReplayRoundTripTicks(
 	quoteFor func(priceMicros uint64, sell bool, inputAmount uint64) (Quote, error),
 ) (RoundTripResult, error) {
 	return replayRoundTripTicks(policy, ticks, quoteFor, false)
+}
+
+// ReplayRoundTripTicksWithDiagnostics adds filter counts to the ordinary replay
+// without changing its decisions, fee model, or ledger marks.
+func ReplayRoundTripTicksWithDiagnostics(
+	policy Policy,
+	ticks []Tick,
+	quoteFor func(priceMicros uint64, sell bool, inputAmount uint64) (Quote, error),
+) (RoundTripResult, error) {
+	reasons := make(map[string]uint64)
+	result, err := replayRoundTripTicksWithCost(policy, ticks, quoteFor, false, policyNativeCost, reasons)
+	if err != nil {
+		return RoundTripResult{}, err
+	}
+	result.FilteredReasons = reasons
+	return result, nil
 }
 
 // ObservedNativeCostVersion is an offline-only experiment, not a policy version.

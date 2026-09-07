@@ -855,20 +855,23 @@ func (r *Runner) activeTrigger() pricetrigger.Policy {
 }
 
 func (r *Runner) read(ctx context.Context) (pricetrigger.Sample, pricetrigger.Sample, error) {
-	return readPricePair(ctx, r.primary, r.secondary, r.policy.Trigger.Feed)
+	return ReadPricePair(ctx, r.primary, r.secondary, r.policy.Trigger.Feed)
 }
 
 func (r *Runner) readQuotePeg(ctx context.Context) (pricetrigger.Sample, pricetrigger.Sample, error) {
-	return readPricePair(ctx, r.quotePrimary, r.quoteSecondary, r.policy.QuotePeg.Feed)
+	return ReadPricePair(ctx, r.quotePrimary, r.quoteSecondary, r.policy.QuotePeg.Feed)
 }
 
 func (r *Runner) readNativeFeePrice(ctx context.Context) (pricetrigger.Sample, pricetrigger.Sample, error) {
-	return readPricePair(ctx, r.nativePrimary, r.nativeSecondary, r.policy.NativeFeePrice.Feed)
+	return ReadPricePair(ctx, r.nativePrimary, r.nativeSecondary, r.policy.NativeFeePrice.Feed)
 }
 
-// readPricePair overlaps independent provider latency without changing source
+// ReadPricePair overlaps independent provider latency without changing source
 // timestamps or validation. Each provider still applies its own request gate.
-func readPricePair(ctx context.Context, primary, secondary PriceReader, feed string) (pricetrigger.Sample, pricetrigger.Sample, error) {
+func ReadPricePair(ctx context.Context, primary, secondary PriceReader, feed string) (pricetrigger.Sample, pricetrigger.Sample, error) {
+	if primary == nil || secondary == nil {
+		return pricetrigger.Sample{}, pricetrigger.Sample{}, errors.New("price pair requires both readers")
+	}
 	if err := ctx.Err(); err != nil {
 		return pricetrigger.Sample{}, pricetrigger.Sample{}, err
 	}

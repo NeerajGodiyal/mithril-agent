@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Overclock-Validator/mithril-agent/internal/control"
@@ -279,6 +280,9 @@ func TestJupiterRecoveryPersistsAndReconcilesExactV0Evidence(t *testing.T) {
 		record.Reconciliation.JupiterEffects.OutputAmount != 20 {
 		t.Fatalf("finalized Jupiter recovery was not durable: %+v, %v", record, err)
 	}
+	if !record.Reconciliation.JupiterEffects.ValidPayerEffects(true, false) {
+		t.Fatal("payer evidence was not retained in recovery")
+	}
 	active, err := securefile.ReadPrivate(recoveryPath(policy), maxRecoveryBytes)
 	if err != nil {
 		t.Fatal(err)
@@ -296,6 +300,100 @@ func TestJupiterRecoveryPersistsAndReconcilesExactV0Evidence(t *testing.T) {
 	}
 	t.Run("read-only finalized projection", func(t *testing.T) {
 		checkJupiterFinalizedProjection(t, policy, unsigned, response, active)
+	})
+	t.Run("archived exact request after active removal", func(t *testing.T) {
+		before, err := ReadJupiterFinalizedWalletEvidence(policy, unsigned)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(recoveryPath(policy)); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := securefile.ReplacePrivate(recoveryPath(policy), active, maxRecoveryBytes); err != nil {
+				t.Fatal(err)
+			}
+		})
+		after, err := ReadJupiterFinalizedWalletEvidence(policy, unsigned)
+		if err != nil || after != before {
+			t.Fatalf("exact archived finalized wallet evidence was unavailable: %+v, %v", after, err)
+		}
+		if _, err := os.Lstat(recoveryPath(policy)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("archive read recreated active recovery", err)
+		}
+		if _, err := ReadJupiterRecoveryStatus(policy); err == nil {
+			t.Fatal("ordinary recovery status unexpectedly used an archive")
+		}
+	})
+	t.Run("archive selection preserves active conflicts", func(t *testing.T) {
+		before, err := ReadJupiterFinalizedWalletEvidence(policy, unsigned)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := securefile.ReplacePrivate(recoveryPath(policy), active, maxRecoveryBytes); err != nil {
+				t.Fatal(err)
+			}
+			if err := securefile.ReplacePrivate(finalizedRecoveryPath(policy, unsigned.ActionID), active, maxRecoveryBytes); err != nil {
+				t.Fatal(err)
+			}
+		})
+		for _, test := range []struct {
+			name    string
+			invalid bool
+		}{
+			{"different action", false}, {"malformed active", true}, {"missing active action", true},
+			{"same action corrupt transaction", true}, {"corrupt selected archive", true}, {"wrong archive action", true},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				var record recoveryRecord
+				if err := json.Unmarshal(active, &record); err != nil {
+					t.Fatal(err)
+				}
+				record.ActionID = strings.Repeat("b", 64)
+				if record.ActionID == unsigned.ActionID {
+					record.ActionID = strings.Repeat("c", 64)
+				}
+				switch test.name {
+				case "missing active action":
+					record.ActionID = ""
+				case "same action corrupt transaction":
+					record.ActionID, record.TransactionBase64 = unsigned.ActionID, "bad"
+				}
+				data, err := json.Marshal(record)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if test.name == "malformed active" {
+					data = []byte(`{"action_id":`)
+				}
+				archive := active
+				if test.name == "corrupt selected archive" {
+					archive = []byte(`{"action_id":`)
+				}
+				if test.name == "wrong archive action" {
+					archive = data
+				}
+				if err := securefile.ReplacePrivate(recoveryPath(policy), data, maxRecoveryBytes); err != nil {
+					t.Fatal(err)
+				}
+				if err := securefile.ReplacePrivate(finalizedRecoveryPath(policy, unsigned.ActionID), archive, maxRecoveryBytes); err != nil {
+					t.Fatal(err)
+				}
+				got, err := ReadJupiterFinalizedWalletEvidence(policy, unsigned)
+				if test.invalid {
+					if err == nil || got != (JupiterFinalizedWalletEvidence{}) {
+						t.Fatal("invalid recovery selection exposed evidence", err)
+					}
+				} else if err != nil || got != before {
+					t.Fatal("different active action hid exact archived evidence", err)
+				}
+				after, err := securefile.ReadPrivate(recoveryPath(policy), maxRecoveryBytes)
+				if err != nil || !bytes.Equal(after, data) {
+					t.Fatal("archive selection changed active evidence", err)
+				}
+			})
+		}
 	})
 	if err := prepareJupiterRecovery(policy, request, response, transaction); err == nil {
 		t.Fatal("finalized Jupiter action was reopened for submission")
@@ -319,6 +417,15 @@ func checkJupiterFinalizedProjection(t *testing.T, policy Policy, request signer
 		got.FeeLamports != response.FeeLamports {
 		t.Fatalf("finalized projection = %+v, %v", got, err)
 	}
+	balances, err := ReadJupiterFinalizedPayerEvidence(policy, request)
+	if err != nil || balances.Finalized != got || balances.Payer.Version != 1 {
+		t.Fatalf("finalized payer projection = %+v, %v", balances, err)
+	}
+	wallet, err := ReadJupiterFinalizedWalletEvidence(policy, request)
+	if err != nil || wallet.Finalized != got || wallet.Payer != balances.Payer || wallet.Token.Version != 1 ||
+		wallet.Token.PostUnits-wallet.Token.PreUnits != got.OutputReceived {
+		t.Fatalf("finalized wallet projection = %+v, %v", wallet, err)
+	}
 	encoded, err := json.Marshal(got)
 	if err != nil || bytes.Contains(encoded, []byte("transaction_base64")) || bytes.Contains(encoded, []byte("signature")) ||
 		!bytes.Contains(encoded, []byte(`"input_spent":"`)) || !bytes.Contains(encoded, []byte(`"fee_lamports":"`)) {
@@ -328,7 +435,7 @@ func checkJupiterFinalizedProjection(t *testing.T, policy Policy, request signer
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"action", "window", "fee context", "amount", "provider", "grant"} {
+	for _, name := range []string{"action", "unsafe action", "window", "fee context", "amount", "provider", "grant"} {
 		t.Run(name, func(t *testing.T) {
 			var changed signer.Request
 			if err := json.Unmarshal(requestBytes, &changed); err != nil {
@@ -337,6 +444,8 @@ func checkJupiterFinalizedProjection(t *testing.T, policy Policy, request signer
 			switch name {
 			case "action":
 				changed.ActionID = strings.Repeat("a", 64)
+			case "unsafe action":
+				changed.ActionID = "../other"
 			case "window":
 				changed.ScheduleWindowEndUnix++
 			case "fee context":
@@ -350,6 +459,12 @@ func checkJupiterFinalizedProjection(t *testing.T, policy Policy, request signer
 			}
 			if got, err := ReadJupiterFinalizedEvidence(policy, changed); err == nil || got != (JupiterFinalizedEvidence{}) {
 				t.Fatalf("changed unsigned request exposed evidence: %+v, %v", got, err)
+			}
+			if got, err := ReadJupiterFinalizedPayerEvidence(policy, changed); err == nil || got != (JupiterFinalizedPayerEvidence{}) {
+				t.Fatalf("changed unsigned request exposed payer balances: %+v, %v", got, err)
+			}
+			if got, err := ReadJupiterFinalizedWalletEvidence(policy, changed); err == nil || got != (JupiterFinalizedWalletEvidence{}) {
+				t.Fatalf("changed unsigned request exposed wallet balances: %+v, %v", got, err)
 			}
 		})
 	}
@@ -379,6 +494,12 @@ func checkJupiterFinalizedProjection(t *testing.T, policy Policy, request signer
 			if got, err := ReadJupiterFinalizedEvidence(policy, request); err == nil || got != (JupiterFinalizedEvidence{}) {
 				t.Fatalf("nonterminal/legacy record exposed evidence: %+v, %v", got, err)
 			}
+			if got, err := ReadJupiterFinalizedPayerEvidence(policy, request); err == nil || got != (JupiterFinalizedPayerEvidence{}) {
+				t.Fatalf("nonterminal/legacy record exposed payer balances: %+v, %v", got, err)
+			}
+			if got, err := ReadJupiterFinalizedWalletEvidence(policy, request); err == nil || got != (JupiterFinalizedWalletEvidence{}) {
+				t.Fatalf("nonterminal/legacy record exposed wallet balances: %+v, %v", got, err)
+			}
 			after, err := securefile.ReadPrivate(recoveryPath(policy), maxRecoveryBytes)
 			if err != nil || !bytes.Equal(data, after) {
 				t.Fatalf("projection changed recovery: %v", err)
@@ -391,6 +512,14 @@ func checkJupiterFinalizedProjection(t *testing.T, policy Policy, request signer
 	again, err := ReadJupiterFinalizedEvidence(policy, request)
 	if err != nil || again != got {
 		t.Fatalf("reopened projection changed: %+v, %v", again, err)
+	}
+	balancesAgain, err := ReadJupiterFinalizedPayerEvidence(policy, request)
+	if err != nil || balancesAgain != balances {
+		t.Fatalf("reopened payer projection changed: %+v, %v", balancesAgain, err)
+	}
+	walletAgain, err := ReadJupiterFinalizedWalletEvidence(policy, request)
+	if err != nil || walletAgain != wallet {
+		t.Fatalf("reopened wallet projection changed: %+v, %v", walletAgain, err)
 	}
 	after, err := securefile.ReadPrivate(recoveryPath(policy), maxRecoveryBytes)
 	if err != nil || !bytes.Equal(original, after) {
@@ -446,6 +575,24 @@ func TestJupiterRecoveryRejectsTamperedDurableFinality(t *testing.T) {
 		"effects": func(value *recoveryRecord) {
 			value.Reconciliation.JupiterEffects.OutputAmount = 0
 		},
+		"payer balance": func(value *recoveryRecord) {
+			value.Reconciliation.JupiterEffects.Payer.PostLamports++
+		},
+		"payer refund": func(value *recoveryRecord) {
+			value.Reconciliation.JupiterEffects.Payer.ReclaimedInputLamports++
+		},
+		"payer version": func(value *recoveryRecord) {
+			value.Reconciliation.JupiterEffects.Payer.Version = 0
+		},
+		"token balance": func(value *recoveryRecord) {
+			value.Reconciliation.JupiterEffects.Token.PostUnits++
+		},
+		"token identity": func(value *recoveryRecord) {
+			value.Reconciliation.JupiterEffects.Token.Account = policy.Jupiter.Owner
+		},
+		"token version": func(value *recoveryRecord) {
+			value.Reconciliation.JupiterEffects.Token.Version = 0
+		},
 		"success error fingerprint": func(value *recoveryRecord) {
 			value.Reconciliation.PrimaryErrorFingerprint = strings.Repeat("a", 64)
 			value.Reconciliation.SecondaryErrorFingerprint = strings.Repeat("a", 64)
@@ -473,7 +620,56 @@ func TestJupiterRecoveryRejectsTamperedDurableFinality(t *testing.T) {
 			if got, err := ReadJupiterFinalizedEvidence(policy, request); err == nil || got != (JupiterFinalizedEvidence{}) {
 				t.Fatalf("tampered effects exposed finality: %+v, %v", got, err)
 			}
+			if got, err := ReadJupiterFinalizedPayerEvidence(policy, request); err == nil || got != (JupiterFinalizedPayerEvidence{}) {
+				t.Fatalf("tampered effects exposed payer balances: %+v, %v", got, err)
+			}
+			if got, err := ReadJupiterFinalizedWalletEvidence(policy, request); err == nil || got != (JupiterFinalizedWalletEvidence{}) {
+				t.Fatalf("tampered effects exposed wallet balances: %+v, %v", got, err)
+			}
 		})
+	}
+	var historical recoveryRecord
+	if err := json.Unmarshal(original, &historical); err != nil {
+		t.Fatal(err)
+	}
+	// Token evidence was added after payer evidence; preserve payer-only history.
+	historical.Reconciliation.JupiterEffects.Token = nil
+	tokenless, err := json.Marshal(historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := securefile.ReplacePrivate(recoveryPath(policy), tokenless, maxRecoveryBytes); err != nil {
+		t.Fatal(err)
+	}
+	request.RiskGrant = riskgrant.Grant{}
+	if _, err := ReadJupiterFinalizedPayerEvidence(policy, request); err != nil {
+		t.Fatalf("payer-only history rejected: %v", err)
+	}
+	if got, err := ReadJupiterFinalizedWalletEvidence(policy, request); err == nil || got != (JupiterFinalizedWalletEvidence{}) {
+		t.Fatalf("missing historical token balances inferred: %+v, %v", got, err)
+	}
+	unchanged, err := securefile.ReadPrivate(recoveryPath(policy), maxRecoveryBytes)
+	if err != nil || !bytes.Equal(tokenless, unchanged) {
+		t.Fatalf("tokenless history changed: %v", err)
+	}
+	historical.Reconciliation.JupiterEffects.Payer = nil
+	data, err := json.Marshal(historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := securefile.ReplacePrivate(recoveryPath(policy), data, maxRecoveryBytes); err != nil {
+		t.Fatal(err)
+	}
+	request.RiskGrant = riskgrant.Grant{}
+	if _, err := ReadJupiterFinalizedEvidence(policy, request); err != nil {
+		t.Fatalf("historical swap evidence rejected: %v", err)
+	}
+	if got, err := ReadJupiterFinalizedPayerEvidence(policy, request); err == nil || got != (JupiterFinalizedPayerEvidence{}) {
+		t.Fatalf("missing historical payer balances were inferred: %+v, %v", got, err)
+	}
+	after, err := securefile.ReadPrivate(recoveryPath(policy), maxRecoveryBytes)
+	if err != nil || !bytes.Equal(after, data) {
+		t.Fatalf("historical read changed recovery: %v", err)
 	}
 }
 
@@ -714,6 +910,78 @@ func TestPreparedJupiterStopOnlyPolicyCannotRetryOrBeWidenedAfterward(t *testing
 	}
 }
 
+func TestSubmitPreparedJupiterUsesHostClock(t *testing.T) {
+	for _, mode := range []string{"accepted", "ambiguous", "expired"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				// The fixture aligns the policy anchor to UTC midnight and starts
+				// the request in the current hour, preserving production constraints.
+				anchor := now.Add(-time.Hour).Unix()
+				if mode == "expired" {
+					anchor = now.Add(-3 * time.Hour).Unix()
+				}
+				policy, key, request, response := jupiterSubmitterFixtureAt(t, anchor)
+				dir, err := filepath.EvalSymlinks(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				policy.ControlStatePath = filepath.Join(dir, "control.json")
+				if err := PrepareJupiterRecovery(policy, key, request, response); err != nil {
+					t.Fatal(err)
+				}
+				record, transaction, _, err := readRecovery(policy)
+				clear(transaction)
+				if err != nil {
+					t.Fatal(err)
+				}
+				gate, err := control.NewMainnetCanaryStateFile(policy.ControlStatePath, policy.ProfileFingerprint, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				revision, err := gate.Revision()
+				if err != nil {
+					t.Fatal(err)
+				}
+				written, err := control.WriteMainnetCanaryActivationForActionIfRevision(policy.ControlStatePath, policy.ProfileFingerprint, revision, record.ActionID, now, now.Add(time.Hour), 1, "offline public wrapper test")
+				if err != nil || !written {
+					t.Fatalf("activate fixture: %v", err)
+				}
+				evidence := newJupiterReadinessEvidence(policy)
+				node := &jupiterSubmitNode{identity: evidence.nodeIdentity, returned: record.Submission.Signature}
+				if mode == "ambiguous" {
+					node.sendErr = errors.New("synthetic transport failure")
+				}
+				primary := &jupiterFinalizedReader{identity: policy.Evidence.PrimaryOriginSHA256, slot: 110}
+				secondary := &jupiterFinalizedReader{identity: policy.Evidence.SecondaryOriginSHA256, slot: 111}
+				got, err := SubmitPreparedJupiter(t.Context(), policy, node, evidence, primary, secondary)
+				if mode == "expired" {
+					status, statusErr := gate.Status()
+					if err == nil || node.sendCalls != 0 || statusErr != nil || status.RemainingActions != 1 {
+						t.Fatal("expired public request consumed authority or sent")
+					}
+					return
+				}
+				want := txflow.StateAccepted
+				if mode == "ambiguous" {
+					want = txflow.StateAmbiguous
+				}
+				if err != nil || got.State != want || got.Signature != record.Submission.Signature || node.sendCalls != 1 || node.lastContextSlot != record.BlockhashContext {
+					t.Fatalf("public submission state=%s calls=%d error=%v", got.State, node.sendCalls, err)
+				}
+				after, bytes, _, err := readRecovery(policy)
+				clear(bytes)
+				if err != nil || !after.SendStarted || after.SendAttempts != 1 || after.Finalized {
+					t.Fatal("public wrapper lost durable recovery state")
+				}
+			})
+		})
+	}
+}
+
 func TestPreparedJupiterSubmissionIsAtomicBoundedAndRecoverable(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -787,8 +1055,13 @@ func TestPreparedJupiterSubmissionIsAtomicBoundedAndRecoverable(t *testing.T) {
 				sendErr:  test.sendErr,
 			}
 			clock := jupiterRecoveryNow(request)
-			if _, err := submitPreparedJupiterAt(
-				t.Context(), policy, node, evidence, primary, secondary, clock,
+			if _, err := SubmitPreparedJupiter(
+				t.Context(), policy, nil, evidence, primary, secondary,
+			); err == nil || node.sendCalls != 0 {
+				t.Fatal("public submission accepted a missing node")
+			}
+			if _, err := SubmitPreparedJupiter(
+				t.Context(), policy, node, evidence, primary, secondary,
 			); !errors.Is(err, ErrControlBlocked) || node.sendCalls != 0 {
 				t.Fatalf("unrelated control gate authorized submission: calls=%d, err=%v", node.sendCalls, err)
 			}
@@ -805,8 +1078,8 @@ func TestPreparedJupiterSubmissionIsAtomicBoundedAndRecoverable(t *testing.T) {
 			}
 
 			node.identity = strings.Repeat("4", 64)
-			if _, err := submitPreparedJupiterAt(
-				t.Context(), policy, node, evidence, primary, secondary, clock,
+			if _, err := SubmitPreparedJupiter(
+				t.Context(), policy, node, evidence, primary, secondary,
 			); err == nil {
 				t.Fatal("submission accepted a different Mithril broadcast node")
 			}

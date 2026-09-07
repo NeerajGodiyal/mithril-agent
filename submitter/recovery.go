@@ -254,15 +254,64 @@ type JupiterFinalizedEvidence struct {
 // caller's exact unsigned request. It uses no RPC and cannot sign, submit,
 // modify recovery, release a claim or credit strategy inventory.
 func ReadJupiterFinalizedEvidence(policy Policy, expected signer.Request) (JupiterFinalizedEvidence, error) {
-	if err := ValidateJupiterPolicy(policy); err != nil {
-		return JupiterFinalizedEvidence{}, err
+	result, _, err := readJupiterFinalizedEvidence(policy, expected)
+	return result, err
+}
+
+// JupiterFinalizedPayerEvidence binds one transaction's payer balances to its
+// finalized swap effects. These are historical balances, not current spendable
+// inventory or authorization to release a claim or place another trade.
+type JupiterFinalizedPayerEvidence struct {
+	Finalized JupiterFinalizedEvidence    `json:"finalized"`
+	Payer     txflow.JupiterPayerEvidence `json:"payer"`
+}
+
+// ReadJupiterFinalizedPayerEvidence requires retained payer evidence and performs
+// the same exact-request validation as ReadJupiterFinalizedEvidence. Historical
+// records lacking payer balances are rejected without rewriting them.
+func ReadJupiterFinalizedPayerEvidence(policy Policy, expected signer.Request) (JupiterFinalizedPayerEvidence, error) {
+	result, effects, err := readJupiterFinalizedEvidence(policy, expected)
+	if err != nil {
+		return JupiterFinalizedPayerEvidence{}, err
 	}
-	if expected.RiskGrant != (riskgrant.Grant{}) {
-		return JupiterFinalizedEvidence{}, errors.New("finalized evidence requires an unsigned ungranted request")
+	if effects.Payer == nil {
+		return JupiterFinalizedPayerEvidence{}, errors.New("finalized payer balances are unavailable")
+	}
+	return JupiterFinalizedPayerEvidence{Finalized: result, Payer: *effects.Payer}, nil
+}
+
+// JupiterFinalizedWalletEvidence retains both verified sides of the wallet
+// change. It is historical evidence, not a fresh spendable balance observation.
+type JupiterFinalizedWalletEvidence struct {
+	Finalized JupiterFinalizedEvidence    `json:"finalized"`
+	Payer     txflow.JupiterPayerEvidence `json:"payer"`
+	Token     txflow.JupiterTokenEvidence `json:"token"`
+}
+
+// ReadJupiterFinalizedWalletEvidence requires exact-request finalized evidence
+// with both payer and token balances. Missing historical balances are rejected.
+func ReadJupiterFinalizedWalletEvidence(policy Policy, expected signer.Request) (JupiterFinalizedWalletEvidence, error) {
+	result, effects, err := readJupiterFinalizedEvidence(policy, expected)
+	if err != nil {
+		return JupiterFinalizedWalletEvidence{}, err
+	}
+	if effects.Payer == nil || effects.Token == nil {
+		return JupiterFinalizedWalletEvidence{}, errors.New("finalized wallet balances are unavailable")
+	}
+	return JupiterFinalizedWalletEvidence{Finalized: result, Payer: *effects.Payer, Token: *effects.Token}, nil
+}
+
+func readJupiterFinalizedEvidence(policy Policy, expected signer.Request) (JupiterFinalizedEvidence, *txflow.JupiterEffectEvidence, error) {
+	if err := ValidateJupiterPolicy(policy); err != nil {
+		return JupiterFinalizedEvidence{}, nil, err
+	}
+	if expected.RiskGrant != (riskgrant.Grant{}) || !validHash(expected.ActionID) {
+		return JupiterFinalizedEvidence{}, nil, errors.New("finalized evidence requires an unsigned ungranted request")
 	}
 	var result JupiterFinalizedEvidence
+	var retained *txflow.JupiterEffectEvidence
 	err := withRecoveryLock(policy, func() error {
-		record, transaction, decoded, err := readRecovery(policy)
+		record, transaction, decoded, err := readFinalizedRecovery(policy, expected.ActionID)
 		defer clear(transaction)
 		if err != nil {
 			return err
@@ -277,6 +326,7 @@ func ReadJupiterFinalizedEvidence(policy Policy, expected signer.Request) (Jupit
 		}
 		reconciliation := record.Reconciliation
 		effects := reconciliation.JupiterEffects
+		retained = effects
 		result = JupiterFinalizedEvidence{
 			ActionID: record.ActionID, RequestSHA256: record.RequestSHA256,
 			TransactionSHA256: effects.TransactionSHA256, Verdict: reconciliation.Verdict,
@@ -292,9 +342,9 @@ func ReadJupiterFinalizedEvidence(policy Policy, expected signer.Request) (Jupit
 		return nil
 	})
 	if err != nil {
-		return JupiterFinalizedEvidence{}, err
+		return JupiterFinalizedEvidence{}, nil, err
 	}
-	return result, nil
+	return result, retained, nil
 }
 
 func checkJupiterRecoveryReadinessAt(
@@ -385,11 +435,25 @@ func RetireUnstartedJupiterRecovery(policy Policy) (string, error) {
 	return actionID, err
 }
 
-// submitPreparedJupiterAt crosses the internal one-action Mainnet canary
+// SubmitPreparedJupiter attempts the exact persisted transaction using the
+// submitter's own clock. It preserves the action-scoped control and recovery
+// barriers; a returned acceptance is not proof of finalized execution.
+func SubmitPreparedJupiter(
+	ctx context.Context,
+	policy Policy,
+	node JupiterSubmitNode,
+	evidence JupiterReadinessEvidence,
+	primary, secondary proposalcheck.FinalizedSlotReader,
+) (txflow.Submission, error) {
+	return submitPreparedJupiterAt(ctx, policy, node, evidence, primary, secondary, time.Now)
+}
+
+// submitPreparedJupiterAt crosses the one-action Mainnet canary
 // boundary. It repeats every readiness check while holding both barriers,
 // durably marks send-started, and only then attempts an exact-byte broadcast.
 // An exact-retry policy may rebroadcast only those same persisted bytes while
-// the original recovery marker and blockhash remain valid. No command or
+// the original recovery marker and blockhash remain valid. The injected clock
+// is private so only tests can replace the production wall clock.
 func submitPreparedJupiterAt(
 	ctx context.Context,
 	policy Policy,
@@ -539,8 +603,8 @@ func prepareRecovery(policy Policy, response signer.Response, transaction []byte
 }
 
 // prepareJupiterRecovery durably preserves the exact v0 transaction and all
-// address-table evidence needed for independent restart reconciliation. It is
-// not connected to a Mainnet send path.
+// address-table evidence needed for independent restart reconciliation. It does
+// not submit the transaction.
 func prepareJupiterRecovery(
 	policy Policy,
 	request signer.Request,
@@ -628,20 +692,55 @@ func sameRecoveryRecord(a, b recoveryRecord) (bool, error) {
 }
 
 func readRecovery(policy Policy) (recoveryRecord, []byte, decodedTransaction, error) {
-	data, err := securefile.ReadPrivate(recoveryPath(policy), maxRecoveryBytes)
+	record, err := readRecoveryRecord(recoveryPath(policy))
 	if err != nil {
 		return recoveryRecord{}, nil, decodedTransaction{}, err
-	}
-	defer clear(data)
-	var record recoveryRecord
-	if err := strictjson.Decode(data, &record); err != nil {
-		return recoveryRecord{}, nil, decodedTransaction{}, errors.New("decode submission recovery evidence")
 	}
 	transaction, decoded, err := validateRecovery(policy, record)
 	if err != nil {
 		return recoveryRecord{}, nil, decodedTransaction{}, err
 	}
 	return record, transaction, decoded, nil
+}
+
+// readFinalizedRecovery preserves same-action active conflicts. Only absence or
+// a structurally decoded different action permits the exact archived lookup;
+// another action may use a different policy and is not validated as this one.
+func readFinalizedRecovery(policy Policy, actionID string) (recoveryRecord, []byte, decodedTransaction, error) {
+	if !validHash(actionID) {
+		return recoveryRecord{}, nil, decodedTransaction{}, errors.New("finalized recovery action is invalid")
+	}
+	record, err := readRecoveryRecord(recoveryPath(policy))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return recoveryRecord{}, nil, decodedTransaction{}, err
+	}
+	if err == nil && !validHash(record.ActionID) {
+		return recoveryRecord{}, nil, decodedTransaction{}, errors.New("active recovery action is invalid")
+	}
+	if errors.Is(err, os.ErrNotExist) || record.ActionID != actionID {
+		record, err = readRecoveryRecord(finalizedRecoveryPath(policy, actionID))
+		if err != nil {
+			return recoveryRecord{}, nil, decodedTransaction{}, err
+		}
+	}
+	if record.ActionID != actionID {
+		return recoveryRecord{}, nil, decodedTransaction{}, errors.New("finalized recovery archive action differs")
+	}
+	transaction, decoded, err := validateRecovery(policy, record)
+	return record, transaction, decoded, err
+}
+
+func readRecoveryRecord(path string) (recoveryRecord, error) {
+	data, err := securefile.ReadPrivate(path, maxRecoveryBytes)
+	if err != nil {
+		return recoveryRecord{}, err
+	}
+	defer clear(data)
+	var record recoveryRecord
+	if err := strictjson.Decode(data, &record); err != nil {
+		return recoveryRecord{}, errors.New("decode submission recovery evidence")
+	}
+	return record, nil
 }
 
 func validateRecovery(policy Policy, record recoveryRecord) ([]byte, decodedTransaction, error) {
@@ -744,6 +843,12 @@ func validJupiterReconciliation(record recoveryRecord, expected txflow.ExpectedJ
 		effects.PrimaryEffectSlot != result.Slot ||
 		effects.SecondaryEffectSlot != result.Slot ||
 		effects.OutputAccountRent > expected.Policy.MaxTokenAccountRentLamports {
+		return false
+	}
+	if effects.Payer != nil && !effects.ValidPayerEffects(expected.Policy.NativeInput(), failed) {
+		return false
+	}
+	if effects.Token != nil && !effects.ValidTokenEffects(expected.Policy, failed) {
 		return false
 	}
 	if failed {

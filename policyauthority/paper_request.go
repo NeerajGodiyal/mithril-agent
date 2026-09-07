@@ -20,11 +20,12 @@ import (
 const paperRequestClaimEvent = "paper.unsigned-request-claim-v1"
 
 type paperRequestClaim struct {
-	PaperIntentSHA256 string `json:"paper_intent_sha256"`
-	PolicySHA256      string `json:"policy_sha256"`
-	RequestSHA256     string `json:"request_sha256"`
-	MaxDecisionAgeNS  int64  `json:"max_decision_age_ns,string"`
-	AcquisitionSHA256 string `json:"acquisition_sha256"`
+	PaperIntentSHA256 string          `json:"paper_intent_sha256"`
+	PolicySHA256      string          `json:"policy_sha256"`
+	RequestSHA256     string          `json:"request_sha256"`
+	MaxDecisionAgeNS  int64           `json:"max_decision_age_ns,string"`
+	AcquisitionSHA256 string          `json:"acquisition_sha256"`
+	Request           *signer.Request `json:"request,omitempty"`
 }
 
 // ClaimPaperRequest binds the first frozen paper decision to one exact unsigned,
@@ -41,6 +42,8 @@ type paperRequestClaim struct {
 // pending claim has no release/reset operation: later actions require a separate
 // finalized-inventory contract, never simulated proceeds. Exact repeats still
 // require a successful current recheck and an unchanged unsigned request.
+// New claims retain that exact request in the same durable record so recovery
+// does not depend on recreating it with a different quote or schedule window.
 func ClaimPaperRequest(
 	ctx context.Context,
 	path string,
@@ -71,7 +74,7 @@ func ClaimPaperRequest(
 	if err != nil {
 		return signer.Request{}, err
 	}
-	store, err := journal.Open(path)
+	store, err := journal.OpenStrict(path)
 	if err != nil {
 		return signer.Request{}, err
 	}
@@ -134,12 +137,24 @@ func claimPaperRequest(store *journal.Store, policy Policy, intent proposalcheck
 		return err
 	}
 	claim := paperRequestClaim{PaperIntentSHA256: intent.SHA256, MaxDecisionAgeNS: int64(maxDecisionAge), AcquisitionSHA256: acquisition,
-		PolicySHA256: policyHash, RequestSHA256: requestHash}
+		PolicySHA256: policyHash, RequestSHA256: requestHash, Request: &request}
+	records := store.Records()
+	if len(records) == 1 {
+		var previous paperRequestClaim
+		if err := strictjson.Decode(records[0].Payload, &previous); err != nil {
+			return err
+		}
+		// Historical claims remain byte-identical. Their caller must retain the
+		// original request; a repeat cannot upgrade or rewrite their evidence.
+		if previous.Request == nil {
+			claim.Request = nil
+		}
+	}
 	payload, err := json.Marshal(claim)
 	if err != nil {
 		return err
 	}
-	if records := store.Records(); len(records) != 0 {
+	if len(records) != 0 {
 		if len(records) != 1 || records[0].Type != paperRequestClaimEvent ||
 			records[0].ActionID != request.ActionID || !bytes.Equal(records[0].Payload, payload) {
 			return errors.New("paper request journal already contains a different or pending claim")
@@ -148,6 +163,31 @@ func claimPaperRequest(store *journal.Store, policy Policy, intent proposalcheck
 	}
 	_, err = store.Append(now.UTC(), paperRequestClaimEvent, request.ActionID, claim)
 	return err
+}
+
+// ReadClaimedPaperRequest retrieves the exact unsigned request retained in a
+// protected claim. It works after expiry for reconciliation only; it neither
+// refreshes a quote or schedule nor grants permission to sign or submit.
+// Historical claims without retained request bytes are not reconstructed.
+func ReadClaimedPaperRequest(path string, policy Policy) (signer.Request, error) {
+	records, err := journal.ReadRecords(path)
+	if err != nil {
+		return signer.Request{}, err
+	}
+	if len(records) == 0 {
+		return signer.Request{}, errors.New("paper claim is missing")
+	}
+	var claim paperRequestClaim
+	if err := strictjson.Decode(records[0].Payload, &claim); err != nil {
+		return signer.Request{}, err
+	}
+	if claim.Request == nil {
+		return signer.Request{}, errors.New("original paper request was not retained")
+	}
+	if _, err := ValidatePaperRequestClaim(records[0], policy, *claim.Request); err != nil {
+		return signer.Request{}, err
+	}
+	return *claim.Request, nil
 }
 
 // ValidatePaperRequestClaim binds one canonical original claim to its protected
@@ -181,11 +221,36 @@ func ValidatePaperRequestClaim(record journal.Record, policy Policy, request sig
 		!validDigest(claim.PaperIntentSHA256) || !validDigest(claim.AcquisitionSHA256) || !validDigest(record.Hash) {
 		return "", errors.New("paper claim does not match the policy and unsigned request")
 	}
+	if claim.Request != nil {
+		_, retainedHash, err := paperRequestHashes(policy, *claim.Request)
+		if err != nil || retainedHash != requestHash {
+			return "", errors.New("retained paper request differs from the original claim")
+		}
+	}
 	canonical, err := json.Marshal(claim)
 	if err != nil || !bytes.Equal(canonical, record.Payload) {
 		return "", errors.New("paper claim is not canonical")
 	}
 	return record.Hash, nil
+}
+
+// ValidatePaperRequestIntent binds a recomputed first-action intent to its exact
+// original claim. The caller must derive intent with CheckPaperIntent and read
+// record from a verified protected journal. This historical comparison does not
+// renew acquisition, grant authority, or make a request executable.
+func ValidatePaperRequestIntent(record journal.Record, policy Policy, request signer.Request, intent proposalcheck.PaperIntent) (string, error) {
+	hash, err := ValidatePaperRequestClaim(record, policy, request)
+	if err != nil {
+		return "", err
+	}
+	var claim paperRequestClaim
+	if err := strictjson.Decode(record.Payload, &claim); err != nil {
+		return "", err
+	}
+	if intent.SHA256 != claim.PaperIntentSHA256 {
+		return "", errors.New("paper strategy intent differs from the original claim")
+	}
+	return hash, nil
 }
 
 func paperRequestHashes(policy Policy, request signer.Request) (string, string, error) {

@@ -361,7 +361,11 @@ func TestObservedNativeCostComparisonExplainsOnlyFilteredSignals(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for index, lane := range []RoundTripResult{baseline, observed} {
+			diagnostic, err := ReplayRoundTripTicksWithDiagnostics(p, ticks, quote)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for index, lane := range []RoundTripResult{baseline, observed, diagnostic} {
 				if lane.Counts.BuySignals == 0 {
 					t.Fatal("fixture did not exercise a signal in both lanes")
 				}
@@ -380,7 +384,7 @@ func TestObservedNativeCostComparisonExplainsOnlyFilteredSignals(t *testing.T) {
 					t.Fatalf("wrong filter classification: %+v", lane)
 				}
 				lane.FilteredReasons = nil
-				want := []RoundTripResult{ordinary, oldObserved}[index]
+				want := []RoundTripResult{ordinary, oldObserved, ordinary}[index]
 				if !reflect.DeepEqual(lane, want) || want.FilteredReasons != nil {
 					t.Fatal("diagnostics changed existing API results")
 				}

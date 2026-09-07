@@ -49,6 +49,10 @@ type replayPending struct {
 
 // Replay rebuilds the run from its ticks, in order.
 func Replay(policy Policy, ticks []Tick) (Replayed, error) {
+	return replayWithAttribution(policy, ticks, nil)
+}
+
+func replayWithAttribution(policy Policy, ticks []Tick, attribution *ReplayAttribution) (Replayed, error) {
 	if err := policy.Validate(); err != nil {
 		return Replayed{}, err
 	}
@@ -114,6 +118,9 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 				}
 				pending = nil
 				result.Counts.Missed++
+				if attribution != nil {
+					attribution.miss()
+				}
 			} else if pending != nil && !tick.At.Before(pending.settleAfter) {
 				return Replayed{}, errors.New("an expired decision remained pending on an unobservable tick")
 			}
@@ -261,6 +268,9 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 					riskExit:    tick.Decision != nil && tick.Decision.Strategy == StrategyRiskExit,
 					settleAfter: quoteReceivedAt(*tick.DecisionQuote, tick.At).Add(policy.Settle()),
 				}
+				if attribution != nil {
+					attribution.signal(tick)
+				}
 			}
 		case EventFiltered:
 			if policy.Adaptive == nil || pending != nil || !tick.Triggered || tick.Deferred ||
@@ -283,6 +293,9 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 				return Replayed{}, errors.New("a missed tick contains trade evidence")
 			}
 			result.Counts.Missed++
+			if attribution != nil && pending != nil {
+				attribution.miss()
+			}
 			if tick.PeriodClose {
 				if pending == nil {
 					return Replayed{}, errors.New("a period close missed no pending decision")
@@ -331,6 +344,11 @@ func Replay(policy Policy, ticks []Tick) (Replayed, error) {
 				*tick.Fill, tick.PriceMicros, nativePrice,
 			); replayErr != nil {
 				return Replayed{}, replayErr
+			}
+			if attribution != nil {
+				if err := attribution.settle(tick, priorLedger, result.Ledger); err != nil {
+					return Replayed{}, err
+				}
 			}
 			closingRoundTrip := tick.Fill.Filled && policy.RoundTrip() && result.Counts.Fills%2 == 1
 			if tick.Fill.Filled && policy.RoundTrip() && !closingRoundTrip {

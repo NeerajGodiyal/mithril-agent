@@ -634,7 +634,18 @@ func (c *Client) AccountSlice(
 	if length > 512 {
 		return AccountDataSlice{}, errors.New("account data slice is invalid")
 	}
-	return c.accountDataRange(ctx, address, minContextSlot, offset, length, true)
+	return c.accountDataRange(ctx, address, minContextSlot, offset, length, true, "")
+}
+
+// FinalizedAccountSlice reads an exact bounded slice at finalized commitment.
+// It is for independent RPC providers, not the processed-only Mithril reader.
+func (c *Client) FinalizedAccountSlice(ctx context.Context, address string,
+	minContextSlot, offset, length uint64,
+) (AccountDataSlice, error) {
+	if c.mithril || length > 512 {
+		return AccountDataSlice{}, errors.New("finalized account slice requires an independent provider and bounded length")
+	}
+	return c.accountDataRange(ctx, address, minContextSlot, offset, length, true, "finalized")
 }
 
 // AccountDataRange reads up to length bytes from an account while retaining
@@ -651,7 +662,7 @@ func (c *Client) AccountDataRange(
 	if length > maxAccountDataBytes {
 		return AccountDataSlice{}, errors.New("account data range is invalid")
 	}
-	return c.accountDataRange(ctx, address, minContextSlot, offset, length, false)
+	return c.accountDataRange(ctx, address, minContextSlot, offset, length, false, "")
 }
 
 func (c *Client) accountDataRange(
@@ -661,6 +672,7 @@ func (c *Client) accountDataRange(
 	offset,
 	length uint64,
 	requireExact bool,
+	commitment string,
 ) (AccountDataSlice, error) {
 	if _, err := solana.Decode32(address); err != nil {
 		return AccountDataSlice{}, errors.New("account address is invalid")
@@ -668,9 +680,11 @@ func (c *Client) accountDataRange(
 	if minContextSlot == 0 || length == 0 || offset > ^uint64(0)-length {
 		return AccountDataSlice{}, errors.New("account data slice is invalid")
 	}
-	commitment := "confirmed"
-	if c.mithril {
-		commitment = "processed"
+	if commitment == "" {
+		commitment = "confirmed"
+		if c.mithril {
+			commitment = "processed"
+		}
 	}
 	raw, err := c.callBounded(ctx, "getAccountInfo", []any{
 		address,
