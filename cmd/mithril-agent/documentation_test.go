@@ -1550,6 +1550,21 @@ func TestHermesBehaviorContextIsAttemptLocalAndFailsClosed(t *testing.T) {
 }
 
 func TestHermesRetainsNonqualifyingObservationDiagnostics(t *testing.T) {
+	prompt := strings.Join(strings.Fields(readDocumentation(t, "../../deploy/hermes-research/prompts/market-scout.md")), " ")
+	for _, want := range []string{
+		"check whether the host supplied a qualifying recorded-observations artifact for the selected market",
+		"bounded version-2 paper experiment with an empty `verified_facts` array",
+		"Missing current web evidence still prevents unsupported current-market or execution-cost claims; it does not by itself rule out that recorded-only route",
+		"Return `no_change` when the measurements do not justify a specific experiment",
+		"Do not invent a missing artifact, value, path or observation date",
+		"Every external fact in such a candidate still needs the ordinary independent web evidence",
+		"an independent `risk_veto` pass and a nonempty bounded parameter diff",
+		"The separate fixed forward-paper gate remains mandatory",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("Hermes recorded-basis guidance is missing %q", want)
+		}
+	}
 	runner := readDocumentation(t, "../../deploy/hermes-research/run-market-scout.sh")
 	start := strings.Index(runner, "  if sol_observations=$(")
 	if start < 0 {
@@ -1630,6 +1645,16 @@ func TestHermesIndexGateRequiresMainnetIdentity(t *testing.T) {
 
 func TestHermesFinalizerSkipsNonCandidates(t *testing.T) {
 	runner := readDocumentation(t, "../../deploy/hermes-research/run-market-scout.sh")
+	prompt := readDocumentation(t, "../../deploy/hermes-research/prompts/market-scout.md")
+	for _, want := range []string{
+		"The research stage has no paper challenge tools, even after a champion exists.",
+		"Missing challenge status alone must not veto a research hypothesis.",
+		"The following challenge-status and creation rules apply only to the finalizer.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("Hermes prompt does not separate research from finalization: %q", want)
+		}
+	}
 	line := func(prefix string) string {
 		t.Helper()
 		for _, value := range strings.Split(runner, "\n") {

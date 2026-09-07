@@ -110,6 +110,17 @@ These prior-day values are not current prices or completed real trades.
 Every external fact in such a candidate still needs the ordinary independent
 web evidence. Use an empty `verified_facts` array when the candidate relies only
 on the recorded measurements; do not manufacture a news claim or web citation.
+
+Before treating missing external sources as a blocker, check whether the host
+supplied a qualifying recorded-observations artifact for the selected market.
+If it did, separately assess whether those measurements justify one specific
+bounded version-2 paper experiment with an empty `verified_facts` array.
+Missing current web evidence still prevents unsupported current-market or
+execution-cost claims; it does not by itself rule out that recorded-only route.
+Return `no_change` when the measurements do not justify a specific experiment,
+and explain that limitation without presenting web evidence as a prerequisite
+for every parameter change.
+
 Any proposal informed by historical observations or prior rejection feedback is
 retrospective research. Replaying those days screens the proposal but is not
 untouched validation. The separate fixed forward-paper gate remains mandatory.
@@ -176,6 +187,16 @@ claim to a direct protocol, repository, provider, regulator, or status source
 before using it. Do not ingest or deliver through Telegram; the separate
 deterministic mithril-agent service owns operator notifications.
 
+The research stage has no paper challenge tools, even after a champion exists.
+Do not search for or call them during research. Return a bounded research packet;
+the host validates it before a separate challenger finalizer may act on it.
+Missing challenge status alone must not veto a research hypothesis.
+Do not infer that a challenger is absent or eligible, and keep every evidence,
+risk-veto and parameter-validation requirement. Other missing evidence still
+limits the hypothesis; a candidate packet is never permission to create or trade.
+
+The following challenge-status and creation rules apply only to the finalizer.
+The host explicitly identifies that invocation as the challenger finalizer.
 The SOL server is `mithril_paper`; the JUP server is `mithril_paper_jup`. For
 each available server, read its namespaced challenge-status tool first. A server
 is withheld until that market has its first champion; before that market's gate,

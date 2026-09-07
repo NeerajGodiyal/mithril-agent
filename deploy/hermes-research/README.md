@@ -350,6 +350,7 @@ sudo install -o root -g root -m 0644 \
   deploy/hermes-research/config.yaml \
   deploy/hermes-research/config-delegated.yaml \
   deploy/hermes-research/build-research-evidence.py \
+  deploy/hermes-research/historical-research-context.py \
   deploy/hermes-research/AGENTS.md \
   deploy/hermes-research/AGENTS-research.md \
   deploy/hermes-research/SOUL.md \
@@ -1553,6 +1554,169 @@ Restore binaries/config/owners/modes first, then prove index integrity and
 freshness, restore paper trees, restore Telegram cursor/dedup state, canary the
 runners, canary Hermes MCP/schema/search, and enable the timer last. Keep the
 timer stopped until freshness and delivery checks pass.
+
+## Quote diagnostic executable
+
+The host research wrapper runs `allocation-quotes` through the fixed executable
+`/opt/mithril-hermes-research/mithril-agent-quotes`. Install a verified build as a
+root-owned executable readable and executable by `mithril-agent-research`.
+All other commands retain `/usr/local/libexec/mithril-agent/mithril-agent`;
+do not replace that shared executable or its Compose mounts for this diagnostic.
+A missing quote executable makes quote context unavailable without falling back.
+
+Load the existing encrypted `jupiter-api-key` credential into the spot research
+service and retain the shared request gate through
+`MITHRIL_AGENT_JUPITER_RATE_STATE=/run/mithril-agent-research/jupiter-rate`.
+Preserve that file's contents and ownership. The wrapper exports the API key
+only to the quote subprocess; never put the key in an environment file or prompt.
+
+## Optional historical simulation context
+
+`historical-research-context.py` reads a reviewed historical report without
+running Jesse, accessing the network or changing a strategy. It reuses the
+private-file and strict-JSON helpers in `build-research-evidence.py`; install
+both scripts together in the root-owned deployment directory.
+
+The wrapper reads only
+`/var/lib/mithril-agent-research/historical/report.json`. Keep this report
+root-owned, mode `0600`, under a protected directory. Configure
+`MITHRIL_HERMES_HISTORICAL_REPORT_SHA256` with the independently reviewed SHA-256
+of those exact report bytes. Never derive this pin from an unreviewed report
+or a model-writable adjacent checksum. An absent pin, changed report, malformed
+input or reader failure produces `unavailable` without copying raw errors into
+the research prompt. The optional reader is invoked again on every attempt.
+
+The supported input is the fixed historical pipeline report: three declared
+daily periods and a BuyHold/SMA1030 comparison with reconciled cash-change
+fields. Only allowlisted numbers, identifiers and provenance hashes are
+projected; report prose is not copied into the prompt. A matching digest proves
+reviewed artifact identity, not that its economics were independently verified.
+Summary arithmetic does not replace reproducing the simulation from source
+data and executed-order evidence.
+
+This is already-evaluated Binance SOL/USDT candle research, not current market
+data or Jupiter SOL/USDC execution. The Python strategies are not the Go
+adaptive strategy. A consumed evaluation period cannot become a fresh holdout
+by rerunning the report. Drawdown remains unavailable when intraday equity was
+not measured, and engine trade P&L is distinct from simulated cash change.
+
+Historical context is advisory only. It is never added to web citations or
+`RecordedObservations`, and cannot select, qualify, promote or execute a
+proposal. Existing policy, journal and proposal validation remains mandatory.
+
+### Frozen-proposal diagnostic feedback
+
+The same reader accepts `--kind packet-backtest` for the Go
+`research packet-backtest` report. This is a comparison on an already-consumed
+observation day, not an unseen test. It projects the tested parameter changes,
+policy and journal identities, signals, filter counts and simulated outcomes
+under the explicit modeled spread. Amounts ending in `_micros` are millionths
+of simulated USD, not wallet balances. Raw report prose is never included.
+
+The optional host prompt input has one fixed path:
+`/var/lib/mithril-agent-research/historical/packet-backtest.json`. After separately
+reviewing and reproducing the diagnostic, keep the file root-owned with mode
+`0600` under a protected directory. Pin its exact file bytes with
+`MITHRIL_HERMES_RETROSPECTIVE_REPORT_SHA256` and the tested packet's content
+identity with `MITHRIL_HERMES_RETROSPECTIVE_PACKET_SHA256` in the protected service
+environment. Both pins are required. Do not derive either from unreviewed or
+model-writable input. Without them the feature remains unavailable.
+
+On each research attempt the host checks private-file metadata, the report and
+packet pins, schema, bounded settings and summary consistency. Any mismatch
+produces `unavailable`, never a zero result. The existing Jesse reader remains
+the default mode and has its own independent pin. No model, strategy replay,
+network request or deployment is performed by either reader.
+
+A matching hash verifies the reviewed artifact's identity, not independent
+financial results. Historical settings need not match today's active policy;
+the report identifies what was tested, not what should be activated. Receiving
+this context does not demonstrate that Hermes used it or learned a profitable
+strategy. Verify delivery against the archived host-user prompt and distinguish
+any attributable response from subsequent forward evaluation. This input
+cannot become a web citation, new recorded basis, qualification or permission.
+No new MCP service, container mount or credential is needed. Source support
+does not itself install a report, configure its pin or enable the feature.
+
+### Measuring a completed research export
+
+`research-cycle-audit.py` is an offline host diagnostic. Supply one private
+session export, its sealed packet and its evidence sidecar, with separately
+reviewed SHA-256 file pins and an externally established time interval:
+
+```sh
+python3 research-cycle-audit.py \
+  --sessions SESSION_PATH --sessions-sha256 SESSION_FILE_SHA256 \
+  --packet PACKET_PATH --packet-sha256 PACKET_FILE_SHA256 \
+  --evidence EVIDENCE_PATH --evidence-sha256 EVIDENCE_FILE_SHA256 \
+  --run-started START_EPOCH --run-finished FINISH_EPOCH
+```
+
+The packet file hash is distinct from its internal content digest. The tool
+reuses the existing retrieval/evidence validator and returns sanitized JSON;
+it does not call Hermes, fetch pages, alter a journal or select a strategy.
+Session-envelope time includes tool waits and delegated work, not just model
+inference. An externally supplied service interval may also include preparation
+and publication; its provenance must be retained separately.
+
+The wrapper archives successful pre-publication attempts only. Failed or
+retried attempts can be absent, so this audit cannot calculate a success rate,
+total research cost or coverage of scheduled opportunities from that archive.
+Unknown denominators and usefulness remain unavailable, not zero.
+
+For new runs, fixed `mithril-hermes-attempt-v1` START/END markers in journald
+record `phase=prepublication`, attempt 1 or 2, UTC epoch bounds and the END exit
+status. Group them by journald's trusted systemd invocation metadata, not a
+model-supplied identifier. START precedes attempt cleanup; END precedes retry
+cleanup. An END status of zero means pre-publication acceptance only, not later
+publication or finalizer success. A missing END or unavailable log retention is
+unknown, not success or zero failures. These bounds include host preparation;
+they are not model-only latency, total cost, scheduled-opportunity coverage or
+research usefulness. No prompts, raw errors or session-file digests are logged.
+
+Before comparing research schedules, freeze the question, eligible observation
+window, shared call budget and exclusions. Have reviewers assess retained
+findings for source support, relevance to that question, and whether the finding
+was already present in supplied context. Hide schedule/model labels while
+reviewing and resolve disagreements explicitly. A useful correction or justified
+abstention can matter; more URLs, more candidates or more trades are not quality
+scores. Existing hourly archives cannot show what an unrun event-triggered
+session would have found. Use the event-wake simulator for load estimates only;
+an actual comparison needs separately recorded treatment sessions.
+
+Hermes' [session documentation](https://hermes-agent.nousresearch.com/docs/user-guide/sessions/)
+describes the stored messages, tool calls and timestamps used here. These trace
+records support measurement, not proof of model reliance or profitable learning.
+
+## Prior-day base-book attribution context
+
+Active-role performance and quote context uses a `host_checks` envelope around
+the unchanged `cli_report`. The wrapper records selector, ownership marker and
+selected/conflicting service-state checks before and after collection. The CLI's
+`process_health_verified=false` and nested `active_role_verified=false` retain
+their original scope: those components did not check host services. They do not
+negate successful wrapper checks. `role_binding_verified` concerns role evidence,
+not process health. None of these checks establishes continuous health, financial
+causality or authority. Failed wrapper checks still emit only `unavailable`.
+
+Each research attempt can include the existing read-only `research attribution`
+projection for the selected allocation's SOL and JUP base books. This is not
+current champion performance. Whole-account change includes unrealized holdings;
+group realized accounting is not causal edge, and reported fees are already
+included. Daily inventory resets and incomplete coverage prohibit compounding
+days or interpreting partial observations as whole-day performance. These
+aggregates are advisory context, not citations or a new recorded basis.
+
+The host-only executable is fixed at
+`/opt/mithril-hermes-research/mithril-agent-attribution`, separate from the trading
+binary. `MITHRIL_HERMES_ATTRIBUTION_BINARY_SHA256` must match its SHA-256;
+the executable and parents must be root-owned, non-symlink and not group/world
+writable. No pin means unavailable. The existing shared allocation lock is held;
+selector and UTC day are checked before and after each command. Each market is
+limited to 60 seconds (plus a two-second kill grace) and 16 KiB successful stdout,
+using a private temporary file with a file-size limit. Errors, overflow or drift
+produce only `unavailable`. No executable, journal or credential mount is added
+to Hermes, and no model tool or trading permission changes.
 
 ## Helius
 

@@ -16,11 +16,17 @@ import (
 )
 
 const researchUsage = `Usage:
+  mithril-agent research packet-backtest --in PATH --packet-sha256 HASH --policy PATH --journal-dir DIR --day YYYY-MM-DD --spread-bps N
   mithril-agent research packet-record --in PATH --latest PATH [--archive-dir DIR]
       [--sol-policy PATH --sol-journal-dir DIR --jup-policy PATH --jup-journal-dir DIR]
   mithril-agent research packet-project --in PATH --latest PATH
   mithril-agent research observations --policy PATH --journal-dir DIR
   mithril-agent research behavior --policy PATH --journal-dir DIR
+  mithril-agent research attribution --policy PATH --journal-dir DIR
+  mithril-agent research event-wake-experiment --policy PATH --journal-dir DIR [--help]
+  mithril-agent research performance --policy PATH --journal-dir DIR [--max-age 2m]
+  mithril-agent research allocation-performance --generation DIR --market sol|jup --role pre-champion|champion [--max-age 2m]
+  mithril-agent research allocation-quotes --generation DIR --market sol|jup --role pre-champion|champion [--max-age 30s]
 
 Validates one strict Hermes packet with web or host-recorded evidence. The optional archive is
 immutable; latest is an atomic read-only projection for the dashboard. This
@@ -32,6 +38,18 @@ func runResearch(args []string, output io.Writer) error {
 		return err
 	}
 	switch args[0] {
+	case "attribution":
+		return runResearchAttribution(args[1:], output, time.Now)
+	case "event-wake-experiment":
+		return runResearchEventWake(args[1:], output, time.Now)
+	case "packet-backtest":
+		return runResearchPacketBacktest(args[1:], output, time.Now)
+	case "allocation-quotes":
+		return runResearchAllocationQuotes(args[1:], output)
+	case "allocation-performance":
+		return runResearchAllocationPerformance(args[1:], output, time.Now)
+	case "performance":
+		return runResearchPerformance(args[1:], output, time.Now)
 	case "behavior":
 		return runResearchBehavior(args[1:], output, time.Now)
 	case "observations":
@@ -41,7 +59,7 @@ func runResearch(args []string, output io.Writer) error {
 	case "packet-record":
 		return runResearchPacketRecord(args[1:], output, time.Now)
 	default:
-		return errors.New("research expects packet-record, packet-project, observations, or behavior")
+		return errors.New("research expects packet-backtest, packet-record, packet-project, observations, behavior, attribution, event-wake-experiment, performance, allocation-performance, or allocation-quotes")
 	}
 }
 

@@ -38,14 +38,14 @@ observe)
     exec /usr/local/libexec/mithril-agent/mithril-agent shadow run \
       --policy "$policy" --dir "$runs/pre-champion" \
       --portfolio "$portfolio" --portfolio-book "$market" \
-      --alert-status "$status/alerts.json"
+      --alert-status "$status/alerts.json" --publish-research-prefix
     ;;
   champion|challenger)
     set -- /usr/local/libexec/mithril-agent/mithril-agent shadow run \
       --policy "$policy" --dir "$runs/$role" \
       --candidate-pointer "$selection/$role/active.json" \
       --portfolio "$portfolio" --portfolio-book "$market"
-    [ "$role" = champion ] && set -- "$@" --alert-status "$status/alerts.json"
+    [ "$role" = champion ] && set -- "$@" --alert-status "$status/alerts.json" --publish-research-prefix
     exec "$@"
     ;;
   *) echo "observe requires base, pre-champion, champion, or challenger" >&2; exit 2 ;;
