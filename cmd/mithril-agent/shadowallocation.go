@@ -15,6 +15,7 @@ import (
 	"github.com/Overclock-Validator/mithril-agent/marketadmission"
 	"github.com/Overclock-Validator/mithril-agent/paperdashboard"
 	"github.com/Overclock-Validator/mithril-agent/pricesource"
+	"github.com/Overclock-Validator/mithril-agent/pricetrigger"
 	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
 
@@ -140,8 +141,12 @@ func validatePaperPolicySources(policy shadow.Policy) error {
 	if err := policy.ValidateForRun(); err != nil {
 		return err
 	}
+	market := policy.Market
+	if policy.Version == shadow.LegacyVersion && market == "" {
+		market = shadow.MarketSOLUSDC
+	}
 	marketPrimary, marketSecondary := "", ""
-	switch policy.Market {
+	switch market {
 	case shadow.MarketSOLUSDC:
 		marketPrimary = pricesource.PythPushIdentitySHA256()
 		marketSecondary = pricesource.KrakenSOLIdentitySHA256()
@@ -163,18 +168,34 @@ func validatePaperPolicySources(policy shadow.Policy) error {
 			return err
 		}
 	}
+	quoteSecondary, nativeSecondary := pricesource.KrakenIdentitySHA256(), pricesource.KrakenSOLIdentitySHA256()
+	if paperUsesKrakenTicker(policy) {
+		var err error
+		marketSecondary, err = pricesource.KrakenTickerIdentitySHA256(policy.Trigger.Feed)
+		if err != nil {
+			return err
+		}
+		quoteSecondary, err = pricesource.KrakenTickerIdentitySHA256(pricetrigger.FeedUSDCUSD)
+		if err != nil {
+			return err
+		}
+		nativeSecondary, err = pricesource.KrakenTickerIdentitySHA256(pricetrigger.FeedSOLUSD)
+		if err != nil {
+			return err
+		}
+	}
 	if policy.Trigger.PrimarySourceSHA256 != marketPrimary ||
 		policy.Trigger.SecondarySourceSHA256 != marketSecondary {
 		return errors.New("paper policy market sources are not the pinned pair")
 	}
 	if policy.QuotePeg == nil ||
 		policy.QuotePeg.PrimarySourceSHA256 != pricesource.PythPushUSDCIdentitySHA256() ||
-		policy.QuotePeg.SecondarySourceSHA256 != pricesource.KrakenIdentitySHA256() {
+		policy.QuotePeg.SecondarySourceSHA256 != quoteSecondary {
 		return errors.New("paper policy quote sources are not the pinned pair")
 	}
 	if policy.NativeFeePrice != nil {
 		if policy.NativeFeePrice.PrimarySourceSHA256 != pricesource.PythPushIdentitySHA256() ||
-			policy.NativeFeePrice.SecondarySourceSHA256 != pricesource.KrakenSOLIdentitySHA256() {
+			policy.NativeFeePrice.SecondarySourceSHA256 != nativeSecondary {
 			return errors.New("paper policy native fee sources are not the pinned pair")
 		}
 	}

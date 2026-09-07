@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/internal/securefile"
 	"github.com/Overclock-Validator/mithril-agent/journal"
 )
 
@@ -51,6 +53,23 @@ func (d *dailyJournal) Records() []journal.Record {
 		return nil
 	}
 	return d.store.Records()
+}
+
+// publishResearchPrefix exposes only a verified, fsynced journal boundary.
+func (d *dailyJournal) publishResearchPrefix() error {
+	if d.store == nil {
+		return errors.New("shadow journal is not open")
+	}
+	prefix, err := d.store.DurablePrefix()
+	if err != nil {
+		return err
+	}
+	raw, err := json.Marshal(prefix)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(d.directory, "shadow-"+d.day+".jsonl.prefix.json")
+	return securefile.ReplacePrivate(path, append(raw, '\n'), 4096)
 }
 
 // RolledOver reports whether the given time belongs to a later day than the one

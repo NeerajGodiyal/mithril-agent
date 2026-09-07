@@ -417,6 +417,12 @@ func runContext(ctx context.Context, args []string, output io.Writer) error {
 		}
 		return runShadow(args[1:], output)
 	case "proposal":
+		if len(args) > 1 && args[1] == "strategy" {
+			return runProposalStrategy(ctx, args[2:], output, time.Now)
+		}
+		if len(args) > 1 && args[1] == "inventory" {
+			return runProposalInventory(ctx, args[2:], output, time.Now)
+		}
 		if len(args) == 1 || args[1] == "help" || args[1] == "-h" || args[1] == "--help" {
 			_, err := fmt.Fprintln(output, proposalUsage)
 			return err

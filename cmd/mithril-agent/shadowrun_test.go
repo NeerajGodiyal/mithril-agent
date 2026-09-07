@@ -161,39 +161,108 @@ func TestShadowDriveUTCCadenceAfterCompletedWork(t *testing.T) {
 			[]time.Duration{14 * time.Second, 45 * time.Second, 60 * time.Second},
 			[]time.Duration{16 * time.Second, 45*time.Second + time.Second/2, 62 * time.Second}, 21 * time.Second},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				day := time.Now().UTC()
-				time.Sleep(14 * time.Second)
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-				var starts []time.Duration
-				run := cadenceRun(t, func() {
-					index := len(starts)
-					if index >= len(test.delays) {
-						t.Fatal("unexpected catch-up acquisition")
+		for _, mode := range []string{"ordinary", "timing", "failed writer"} {
+			t.Run(test.name+"/"+mode, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					day := time.Now().UTC()
+					time.Sleep(14 * time.Second)
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					var starts []time.Duration
+					run := cadenceRun(t, func() {
+						index := len(starts)
+						if index >= len(test.delays) {
+							t.Fatal("unexpected catch-up acquisition")
+						}
+						starts = append(starts, time.Now().Sub(day))
+						time.Sleep(test.delays[index])
+						if index == len(test.delays)-1 {
+							cancel()
+						}
+					})
+					defer run.roll.Close()
+					var diagnostic bytes.Buffer
+					if mode == "timing" {
+						run.timingOutput = &diagnostic
 					}
-					starts = append(starts, time.Now().Sub(day))
-					time.Sleep(test.delays[index])
-					if index == len(test.delays)-1 {
-						cancel()
+					var failedWrites int
+					if mode == "failed writer" {
+						run.timingOutput = writerFunc(func([]byte) (int, error) {
+							failedWrites++
+							return 0, io.ErrClosedPipe
+						})
+					}
+					output := &cadenceTickWriter{delay: test.work}
+					if err := run.drive(ctx, false, output); err != nil {
+						t.Fatal(err)
+					}
+					if len(starts) != len(test.starts) || len(output.ticks) != len(test.events) {
+						t.Fatalf("polls=%v events=%d", starts, len(output.ticks))
+					}
+					for i := range starts {
+						if starts[i] != test.starts[i] || output.ticks[i].At.Sub(day) != test.events[i] {
+							t.Fatalf("poll %d start=%v event=%v, want %v/%v", i, starts[i], output.ticks[i].At.Sub(day), test.starts[i], test.events[i])
+						}
+					}
+					journalTicks := 0
+					for _, record := range run.roll.Records() {
+						var tick shadow.Tick
+						if err := json.Unmarshal(record.Payload, &tick); err != nil {
+							t.Fatal(err)
+						}
+						if tick.Event == "" || tick.PeriodClose {
+							continue
+						}
+						want, err := json.Marshal(output.ticks[journalTicks])
+						if err != nil || !bytes.Equal(want, record.Payload) {
+							t.Fatal("timing changed the ordinary journal payload")
+						}
+						journalTicks++
+					}
+					if journalTicks != len(output.ticks) {
+						t.Fatal("timing changed journal observation count")
+					}
+					if mode != "timing" {
+						if diagnostic.Len() != 0 || run.timingRecords != 0 {
+							t.Fatal("disabled timing emitted diagnostics")
+						}
+						if mode == "failed writer" && (failedWrites != 1 || run.timingOutput != nil) {
+							t.Fatal("failed diagnostic writer was not disabled")
+						}
+						return
+					}
+					decoder := json.NewDecoder(&diagnostic)
+					for i, delay := range test.delays {
+						var publication time.Duration
+						if i == 0 {
+							publication = test.work // cadenceTickWriter delays only its first tick.
+						}
+						var got map[string]int64
+						if err := decoder.Decode(&got); err != nil {
+							t.Fatal(err)
+						}
+						if len(got) != 4 || got["observation"] != int64(i+1) || got["observe_ns"] != int64(delay) || got["step_ns"] != 0 || got["publication_ns"] != int64(publication) {
+							t.Fatalf("timing %d = %v", i, got)
+						}
+					}
+					var extra any
+					if err := decoder.Decode(&extra); err != io.EOF {
+						t.Fatalf("unexpected timing tail: %v", err)
 					}
 				})
-				defer run.roll.Close()
-				output := &cadenceTickWriter{delay: test.work}
-				if err := run.drive(ctx, false, output); err != nil {
-					t.Fatal(err)
-				}
-				if len(starts) != len(test.starts) || len(output.ticks) != len(test.events) {
-					t.Fatalf("polls=%v events=%d", starts, len(output.ticks))
-				}
-				for i := range starts {
-					if starts[i] != test.starts[i] || output.ticks[i].At.Sub(day) != test.events[i] {
-						t.Fatalf("poll %d start=%v event=%v, want %v/%v", i, starts[i], output.ticks[i].At.Sub(day), test.starts[i], test.events[i])
-					}
-				}
 			})
-		})
+		}
+	}
+}
+
+func TestShadowTimingDiagnosticIsBounded(t *testing.T) {
+	var output bytes.Buffer
+	run := shadowRun{timingOutput: &output}
+	for range 70 {
+		run.writeTiming(time.Second, 2*time.Second, 3*time.Second)
+	}
+	if run.timingRecords != 64 || bytes.Count(output.Bytes(), []byte("\n")) != 64 {
+		t.Fatal("timing exceeded its per-process bound")
 	}
 }
 

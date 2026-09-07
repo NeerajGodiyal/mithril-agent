@@ -1,0 +1,38 @@
+[Unit]
+Description=Mithril unsigned recovery-first strategy cycle
+Wants=network-online.target
+After=network-online.target time-sync.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+# Review the existing journal owner and exact paths before installing this example.
+User=mithril-agent
+Group=mithril-agent
+UMask=0077
+StateDirectory=mithril-agent-unsigned-strategy
+StateDirectoryMode=0700
+EnvironmentFile=/etc/mithril-agent/unsigned-strategy/rpc.env
+ExecStart=/usr/bin/python3 -B /usr/local/libexec/mithril-agent/run-unsigned-strategy.py --state-dir /var/lib/mithril-agent-unsigned-strategy --timeout-seconds 60 -- --strategy /var/lib/mithril-agent-unsigned-strategy/strategy.jsonl --inventory /var/lib/mithril-agent-unsigned-strategy/inventory.jsonl --authority-policy /etc/mithril-agent/unsigned-strategy/original-authority.json --submitter-policy /etc/mithril-agent/unsigned-strategy/original-recovery.json --buy-authority-policy /etc/mithril-agent/unsigned-strategy/buy-authority.json --sell-authority-policy /etc/mithril-agent/unsigned-strategy/sell-authority.json --max-decision-age-seconds 60 --max-acquisition-age-seconds 60
+TimeoutStartSec=75s
+TimeoutStopSec=10s
+KillMode=control-group
+Restart=no
+StandardOutput=null
+StandardError=journal
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/mithril-agent-unsigned-strategy
+MemoryMax=256M
+TasksMax=32
+LimitNOFILE=128

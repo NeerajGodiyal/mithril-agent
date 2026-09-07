@@ -63,6 +63,9 @@ you; everything else has a working default.
                     paper mandates default 100000)
   --observe ADDR    the address to quote against; watch-only, never signed for
   --tick-seconds N  how often to look at the market (default 60)
+  --kraken-source NAME
+                    pre-trade (default) or experimental ticker-batch;
+                    ticker-batch is Mainnet SOL/USDC and JUP/USDC only
 
 Devnet Orca only:
   --pool ADDRESS        pool whose executable prices will be measured
@@ -86,6 +89,7 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	cluster := flags.String("cluster", shadow.Mainnet, "mainnet-beta or devnet")
 	adaptive := flags.Bool("adaptive", false, "use the adaptive paper strategy")
 	market := flags.String("market", "", "paper mandate market")
+	krakenSource := flags.String("kraken-source", "pre-trade", "pre-trade or experimental ticker-batch")
 	admissionArtifact := flags.String("admission-artifact", "", "qualified market evidence")
 	admissionJournal := flags.String("admission-journal", "", "market evidence journal")
 	provisionalArtifact := flags.String("provisional-artifact", "", "two-hour paper-only market evidence")
@@ -123,6 +127,14 @@ func runShadowPolicy(args []string, output io.Writer) error {
 	}
 	explicit := make(map[string]bool)
 	flags.Visit(func(item *flag.Flag) { explicit[item.Name] = true })
+	if *krakenSource != "pre-trade" && *krakenSource != "ticker-batch" {
+		return errors.New("--kraken-source must be pre-trade or ticker-batch")
+	}
+	if *krakenSource == "ticker-batch" && (*cluster != shadow.Mainnet ||
+		(*market != "" && *market != shadow.MarketSOLUSDC && *market != shadow.MarketJUPUSDC) ||
+		*admissionArtifact != "" || *admissionJournal != "" || *provisionalArtifact != "" || *provisionalJournal != "") {
+		return errors.New("ticker-batch requires Mainnet SOL/USDC or JUP/USDC without market admission evidence")
+	}
 	if *outPath == "" {
 		return errors.New("shadow policy requires --out PATH, where to write the policy")
 	}
@@ -322,6 +334,26 @@ func runShadowPolicy(args []string, output io.Writer) error {
 			policy.OneTimeSetupRentLamports = setupRentLamports
 		}
 		policy.Adaptive.MaxDrawdownBPS = uint16(*drawdownStopBPS)
+		if err := policy.Validate(); err != nil {
+			return err
+		}
+	}
+	if *krakenSource == "ticker-batch" {
+		for _, trigger := range []*pricetrigger.Policy{&policy.Trigger, policy.ReturnTrigger, policy.NativeFeePrice} {
+			if trigger == nil {
+				continue
+			}
+			trigger.SecondarySourceSHA256, err = pricesource.KrakenTickerIdentitySHA256(trigger.Feed)
+			if err != nil {
+				return err
+			}
+		}
+		if policy.QuotePeg != nil {
+			policy.QuotePeg.SecondarySourceSHA256, err = pricesource.KrakenTickerIdentitySHA256(policy.QuotePeg.Feed)
+			if err != nil {
+				return err
+			}
+		}
 		if err := policy.Validate(); err != nil {
 			return err
 		}

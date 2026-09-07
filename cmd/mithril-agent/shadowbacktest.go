@@ -30,7 +30,7 @@ import (
 // its own face. A backtest that hides its assumptions is worse than no backtest.
 const shadowBacktestUsage = `Usage: mithril-agent shadow backtest --policy PATH --dir PATH
                               [--buy-at-usd PRICE] [--spread-bps N] [--day YYYY-MM-DD]
-                              [--risk-lanes] [--json]
+                              [--risk-lanes] [--json] [--explain-filters]
 
 Scores a sell-then-buy-back round trip against the prices a shadow run already
 recorded, on ONE set of books, with the same ledger and report the live observer
@@ -46,6 +46,8 @@ uses.
   --risk-lanes      adaptive policies only: compare holding, conservative,
                     current, and aggressive paper settings on the same ticks
   --json            emit the report as JSON
+  --explain-filters  include existing executable-quote filter reason counts;
+                    requires --json, without --risk-lanes or --cost-experiment
 
   --cost-experiment observed-native-cost-v1
                     offline v2/v3 non-SOL adaptive comparison using verified
@@ -56,8 +58,8 @@ uses.
                     historical venue quotes are modeled using --spread-bps;
                     this is not admission evidence and activates nothing.
 
-The result is only as honest as --spread-bps. Read the pool's real quote with
-"mithril-agent swap discover" and set it from what you actually see.`
+The result is only as honest as --spread-bps. "mithril-agent swap discover"
+reads a current quote, not evidence of historical execution costs.`
 
 func runShadowBacktest(args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("shadow backtest", flag.ContinueOnError)
@@ -70,6 +72,7 @@ func runShadowBacktest(args []string, output io.Writer) error {
 	riskLanes := flags.Bool("risk-lanes", false, "compare paper risk profiles")
 	costExperiment := flags.String("cost-experiment", "", "offline observed-native-cost-v1 comparison")
 	asJSON := flags.Bool("json", false, "emit JSON")
+	explainFilters := flags.Bool("explain-filters", false, "include existing filter reason counts")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, shadowBacktestUsage)
@@ -79,6 +82,9 @@ func runShadowBacktest(args []string, output io.Writer) error {
 	}
 	if flags.NArg() != 0 || *policyPath == "" || *directory == "" {
 		return errors.New("shadow backtest requires --policy and --dir")
+	}
+	if *explainFilters && (!*asJSON || *riskLanes || *costExperiment != "") {
+		return errors.New("--explain-filters requires --json without --risk-lanes or --cost-experiment")
 	}
 	if *costExperiment != "" && (*costExperiment != shadow.ObservedNativeCostVersion || *riskLanes || *buyAtUSD != "") {
 		return errors.New("cost experiment must be observed-native-cost-v1 without --risk-lanes or --buy-at-usd")
@@ -144,7 +150,11 @@ func runShadowBacktest(args []string, output io.Writer) error {
 		return writeRiskComparison(output, *asJSON, chosen, uint64(*spreadBPS), policy, ticks)
 	}
 
-	result, err := shadow.ReplayRoundTripTicks(
+	replay := shadow.ReplayRoundTripTicks
+	if *explainFilters {
+		replay = shadow.ReplayRoundTripTicksWithDiagnostics
+	}
+	result, err := replay(
 		policy, ticks, modelledPool(policy, uint64(*spreadBPS), policy.SlippageBPS),
 	)
 	if err != nil {
@@ -287,13 +297,14 @@ type backtestResult struct {
 	Day string `json:"day"`
 	// PoolModelled is stated in the payload, not just the prose, so a machine
 	// reading this cannot present it as an observed result either.
-	PoolModelled   bool                   `json:"pool_modelled"`
-	SpreadBPS      uint64                 `json:"assumed_spread_bps"`
-	Counts         shadow.RoundTripCounts `json:"counts"`
-	RealizedMicros int64                  `json:"realized_micros"`
-	VersusHold     int64                  `json:"versus_hold_micros"`
-	ClosingEquity  uint64                 `json:"closing_equity_micros"`
-	OpeningEquity  uint64                 `json:"opening_equity_micros"`
+	PoolModelled    bool                   `json:"pool_modelled"`
+	SpreadBPS       uint64                 `json:"assumed_spread_bps"`
+	Counts          shadow.RoundTripCounts `json:"counts"`
+	RealizedMicros  int64                  `json:"realized_micros"`
+	VersusHold      int64                  `json:"versus_hold_micros"`
+	ClosingEquity   uint64                 `json:"closing_equity_micros"`
+	OpeningEquity   uint64                 `json:"opening_equity_micros"`
+	FilteredReasons map[string]uint64      `json:"filtered_reasons,omitempty"`
 }
 
 type riskLaneResult struct {
@@ -611,11 +622,12 @@ func writeBacktest(
 		encoder.SetEscapeHTML(false)
 		return encoder.Encode(backtestResult{
 			Day: day, PoolModelled: true, SpreadBPS: spreadBPS,
-			Counts:         result.Counts,
-			RealizedMicros: report.RealizedMicros,
-			VersusHold:     report.VersusHoldMicros,
-			ClosingEquity:  report.ClosingEquityMicros,
-			OpeningEquity:  report.OpeningEquityMicros,
+			Counts:          result.Counts,
+			RealizedMicros:  report.RealizedMicros,
+			VersusHold:      report.VersusHoldMicros,
+			ClosingEquity:   report.ClosingEquityMicros,
+			OpeningEquity:   report.OpeningEquityMicros,
+			FilteredReasons: result.FilteredReasons,
 		})
 	}
 	w := func(format string, args ...any) { fmt.Fprintf(output, format, args...) }

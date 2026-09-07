@@ -106,6 +106,70 @@ func TestObservedNativeCostBacktestIsOfflineAndProvenanceBound(t *testing.T) {
 			t.Fatal("CLI filtered reason denominator changed")
 		}
 	}
+	// The diagnostic flag must use the ordinary replay and report, not the
+	// experiment's different native-cost valuation or liquidation marks.
+	// Keep the slow baseline above intact; a separate, faster price history
+	// fires ordinary signals without changing any policy or execution gate.
+	diagnosticDir := privateTestDirectory(t)
+	diagnosticLog, err := newDailyJournal(diagnosticDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := diagnosticLog.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	diagnosticRunner, err := shadow.NewRunner(p, primary, secondary, shadowSearchUnavailableQuoter{}, diagnosticLog, peg1, peg2, native1, native2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 12; i++ {
+		at := start.Add(time.Duration(i) * time.Minute)
+		primary.price, secondary.price = 2_000_000+uint64(i)*40_000, 2_000_000+uint64(i)*40_000
+		for _, reader := range []*shadowSearchReader{primary, secondary, peg1, peg2, native1, native2} {
+			reader.at = at
+		}
+		if _, err := diagnosticRunner.Step(t.Context(), at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := diagnosticLog.Close(); err != nil {
+		t.Fatal(err)
+	}
+	diagnosticPath := filepath.Join(diagnosticDir, "shadow-2026-09-05.jsonl")
+	diagnosticBefore, err := os.ReadFile(diagnosticPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinaryArgs := []string{"--policy", policyPath, "--dir", diagnosticDir, "--day", "2026-09-05", "--spread-bps", "100", "--json"}
+	var ordinaryOutput bytes.Buffer
+	if err := runShadowBacktest(ordinaryArgs, &ordinaryOutput); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(ordinaryOutput.Bytes(), []byte("filtered_reasons")) {
+		t.Fatal("ordinary backtest gained diagnostics")
+	}
+	output.Reset()
+	if err := runShadowBacktest(append(append([]string(nil), ordinaryArgs...), "--explain-filters"), &output); err != nil {
+		t.Fatal(err)
+	}
+	var diagnostic backtestResult
+	if err := json.Unmarshal(output.Bytes(), &diagnostic); err != nil {
+		t.Fatal(err)
+	}
+	if diagnostic.Counts.Filtered == 0 || diagnostic.FilteredReasons["signal_below_cost_hurdle"] != diagnostic.Counts.Filtered || diagnostic.Counts.Missed != 0 {
+		t.Fatalf("ordinary diagnostic did not explain filtered signals: %s", output.String())
+	}
+	diagnostic.FilteredReasons = nil
+	encoded, err := json.Marshal(diagnostic)
+	if err != nil || !bytes.Equal(encoded, bytes.TrimSpace(ordinaryOutput.Bytes())) {
+		t.Fatal("opt-in diagnostics changed ordinary report values or encoding")
+	}
+	diagnosticAfter, err := os.ReadFile(diagnosticPath)
+	if err != nil || !bytes.Equal(diagnosticBefore, diagnosticAfter) {
+		t.Fatal("diagnostic changed journal")
+	}
 	after, err := os.ReadFile(journalPath)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatal("experiment changed journal")
@@ -113,6 +177,21 @@ func TestObservedNativeCostBacktestIsOfflineAndProvenanceBound(t *testing.T) {
 	for _, extra := range [][]string{{"--risk-lanes"}, {"--cost-experiment", "unknown"}} {
 		if err := runShadowBacktest(append(append([]string(nil), args...), extra...), io.Discard); err == nil {
 			t.Fatal("unsupported experiment combination accepted")
+		}
+	}
+}
+
+func TestBacktestExplainFiltersRejectsIncompatibleOptions(t *testing.T) {
+	for _, extra := range [][]string{
+		nil,
+		{"--json", "--risk-lanes"},
+		{"--json", "--cost-experiment", shadow.ObservedNativeCostVersion},
+	} {
+		args := append([]string{"--policy", "missing", "--dir", "missing", "--explain-filters"}, extra...)
+		var output bytes.Buffer
+		err := runShadowBacktest(args, &output)
+		if err == nil || !strings.Contains(err.Error(), "--explain-filters requires") || output.Len() != 0 {
+			t.Fatalf("invalid diagnostic options reached policy reads or output: %v, %v, %q", extra, err, output.String())
 		}
 	}
 }

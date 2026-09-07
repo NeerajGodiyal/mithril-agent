@@ -67,7 +67,12 @@ Mainnet rehearsal, in order:
      the exact one-action canary is ready but still disabled:
   mithril-agent proposal canary-check [options]
 
-Every command here is read-only or offline. None can submit a transaction.
+Offline inventory accounting (no signing or submission):
+  mithril-agent proposal inventory --help
+  mithril-agent proposal strategy --help
+
+Commands only read network evidence or write local preparation and accounting
+records. None can submit a transaction.
 Create each private identity only on the separate host that will retain it;
 proposal policy-create accepts public identities and never creates a key.`
 
@@ -1418,24 +1423,8 @@ func validateJupiterPolicySet(
 	if !sameJupiterSignerPolicy(authority.TransactionPolicy, signing) {
 		return errors.New("authority and signer policies do not match")
 	}
-	if authority.JupiterProviders == nil || *authority.JupiterProviders != submission.Evidence {
-		return errors.New("authority and submitter evidence providers do not match")
-	}
-	if signing.Jupiter == nil || submission.Jupiter == nil ||
-		*signing.Jupiter != *submission.Jupiter ||
-		submission.Cluster != signing.Cluster ||
-		submission.Profile != signing.Profile ||
-		submission.ProfileFingerprint != signing.ProfileFingerprint ||
-		submission.Source != signing.Source ||
-		submission.MaxLamports != signing.MaxLamports ||
-		submission.MaxInputTokenAmount != signing.MaxInputTokenAmount ||
-		submission.MaxFeeLamports != signing.MaxFeeLamports ||
-		submission.ScheduleWindowSeconds != signing.ScheduleWindowSeconds ||
-		submission.ScheduleAnchorUnix != signing.ScheduleAnchorUnix ||
-		submission.MaxBlockHeightWindow != signing.MaxBlockHeightWindow ||
-		submission.SubmitterPublicKey != signing.SubmitterPublicKey ||
-		submission.AttestationPublicKey != signing.AttestationPublicKey {
-		return errors.New("signer and submitter policies do not match")
+	if err := policyauthority.ValidateJupiterRecoveryPolicy(authority, submission); err != nil {
+		return err
 	}
 	if policyStatePathsCollide(signing.AuthorizationLedgerPath, submission.ControlStatePath) {
 		return errors.New("signer and submitter policy state paths collide")

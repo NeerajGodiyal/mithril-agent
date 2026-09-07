@@ -39,6 +39,8 @@ signed and nothing is submitted; no wallet signing key is loaded at any point.
 
   --policy PATH         shadow policy JSON
   --dir PATH            directory for the daily journals and reports
+  --publish-research-prefix
+                        publish a durable read-only research boundary after each observation
   --candidate-pointer PATH
                         selected paper candidate; checked only at startup and
                         UTC-day boundaries
@@ -62,6 +64,12 @@ signed and nothing is submitted; no wallet signing key is loaded at any point.
   --input-mint ADDRESS  optional compatibility check; must match the policy
   --output-mint ADDRESS optional compatibility check; must match the policy
   --once                take a single observation and stop
+  --diagnose-timing     emit numeric phase durations to stderr for the first 64 completed observations
+
+Timing measures Observe (all source reads and waits), StepObservation (including
+quotes and journal writes), and publication/status work. It excludes diagnostic
+output itself, cadence sleep and rollover; it is not network-only latency.
+Diagnostic write failure disables further timing output without stopping paper observation.
 
 Endpoints come from the environment and are never printed, logged, or written
 to the journal:
@@ -85,24 +93,26 @@ const (
 var errProvisionalPaperComplete = errors.New("provisional paper experiment completed")
 
 type shadowRunOptions struct {
-	policyPath          string
-	directory           string
-	candidatePointer    string
-	portfolioPath       string
-	portfolioBook       string
-	admissionArtifact   string
-	admissionJournal    string
-	provisionalArtifact string
-	provisionalJournal  string
-	paperCheckArtifact  string
-	alertStatus         string
-	quoteSource         string
-	nodeCommand         string
-	quoteScript         string
-	pool                string
-	inputMint           string
-	outputMint          string
-	once                bool
+	policyPath            string
+	directory             string
+	candidatePointer      string
+	portfolioPath         string
+	portfolioBook         string
+	admissionArtifact     string
+	admissionJournal      string
+	provisionalArtifact   string
+	provisionalJournal    string
+	paperCheckArtifact    string
+	alertStatus           string
+	quoteSource           string
+	nodeCommand           string
+	quoteScript           string
+	pool                  string
+	inputMint             string
+	outputMint            string
+	once                  bool
+	publishResearchPrefix bool
+	diagnoseTiming        bool
 }
 
 func runShadowRun(ctx context.Context, args []string, output io.Writer) error {
@@ -127,6 +137,8 @@ func runShadowRun(ctx context.Context, args []string, output io.Writer) error {
 	flags.StringVar(&options.inputMint, "input-mint", "", "mint being spent")
 	flags.StringVar(&options.outputMint, "output-mint", "", "mint being received")
 	flags.BoolVar(&options.once, "once", false, "take one observation and stop")
+	flags.BoolVar(&options.publishResearchPrefix, "publish-research-prefix", false, "publish durable journal boundaries for research")
+	flags.BoolVar(&options.diagnoseTiming, "diagnose-timing", false, "emit bounded observation timing to stderr")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, writeErr := fmt.Fprintln(output, shadowRunUsage)
@@ -146,6 +158,9 @@ func runShadowRun(ctx context.Context, args []string, output io.Writer) error {
 		return err
 	}
 	defer func() { _ = run.roll.Close() }()
+	if options.diagnoseTiming {
+		run.timingOutput = os.Stderr
+	}
 	if err := notifyShadowRunReady(); err != nil {
 		return err
 	}
@@ -223,22 +238,26 @@ func validateActiveShadowPolicy(policy shadow.Policy) error {
 // runner from exactly these dependencies, so crossing midnight cannot silently
 // change what is being read or where it is recorded.
 type shadowRun struct {
-	basePolicy        shadow.Policy
-	policy            shadow.Policy
-	journalRoot       string
-	candidatePointer  string
-	policySHA256      string
-	primary           shadow.PriceReader
-	secondary         shadow.PriceReader
-	quotePrimary      shadow.PriceReader
-	quoteSecondary    shadow.PriceReader
-	nativePrimary     shadow.PriceReader
-	nativeSecondary   shadow.PriceReader
-	quoter            shadow.Quoter
-	roll              *dailyJournal
-	runner            *shadow.Runner
-	alerts            *paperstatus.Writer
-	reconcilingAlerts bool
+	basePolicy            shadow.Policy
+	policy                shadow.Policy
+	journalRoot           string
+	candidatePointer      string
+	policySHA256          string
+	primary               shadow.PriceReader
+	secondary             shadow.PriceReader
+	quotePrimary          shadow.PriceReader
+	quoteSecondary        shadow.PriceReader
+	nativePrimary         shadow.PriceReader
+	nativeSecondary       shadow.PriceReader
+	krakenBatch           *pricesource.KrakenTickerBatch
+	quoter                shadow.Quoter
+	roll                  *dailyJournal
+	runner                *shadow.Runner
+	alerts                *paperstatus.Writer
+	reconcilingAlerts     bool
+	publishResearchPrefix bool
+	timingOutput          io.Writer
+	timingRecords         uint64
 	// activationSequence counts durable period-close records in today's
 	// journal. A crash restart reuses the same sequence and stays deduplicated;
 	// a restart after a clean stop announces that the strategy resumed.
@@ -399,6 +418,15 @@ func openShadowRun(ctx context.Context, policy shadow.Policy, options shadowRunO
 		}
 		nativeSecondary = pricesource.NewKrakenSOL(nil)
 	}
+	var krakenBatch *pricesource.KrakenTickerBatch
+	if paperUsesKrakenTicker(policy) {
+		var readers [3]shadow.PriceReader
+		krakenBatch, readers, err = newPaperTickerReaders(policy)
+		if err != nil {
+			return nil, err
+		}
+		secondary, quoteSecondary, nativeSecondary = readers[0], readers[1], readers[2]
+	}
 	if portfolioMaxSOL != 0 {
 		ceilingPolicy := policy.Trigger
 		ceilingPrimary, ceilingSecondary := primary, secondary
@@ -439,12 +467,14 @@ func openShadowRun(ctx context.Context, policy shadow.Policy, options shadowRunO
 	}
 	run := &shadowRun{
 		basePolicy: basePolicy, policy: policy, journalRoot: options.directory,
-		candidatePointer: options.candidatePointer,
-		policySHA256:     policyFingerprint,
-		primary:          primary, secondary: secondary,
+		candidatePointer:      options.candidatePointer,
+		publishResearchPrefix: options.publishResearchPrefix,
+		policySHA256:          policyFingerprint,
+		primary:               primary, secondary: secondary,
 		quotePrimary: quotePrimary, quoteSecondary: quoteSecondary,
 		nativePrimary: nativePrimary, nativeSecondary: nativeSecondary,
-		quoter: quoter, roll: roll, alerts: alerts,
+		krakenBatch: krakenBatch,
+		quoter:      quoter, roll: roll, alerts: alerts,
 		portfolioMaxSOL:             portfolioMaxSOL,
 		portfolioBound:              options.portfolioPath != "",
 		portfolioPaperCapitalMicros: portfolioPaperCapitalMicros,
@@ -773,6 +803,9 @@ func (s *shadowRun) refreshSelectedCandidate(now time.Time) error {
 	if err := validateActiveShadowPolicy(candidate.Policy); err != nil {
 		return err
 	}
+	if paperUsesKrakenTicker(candidate.Policy) != (s.krakenBatch != nil) {
+		return errors.New("selected candidate cannot change the price source method")
+	}
 	if candidate.CandidatePolicySHA256 == s.policySHA256 {
 		return ensureShadowPolicySnapshot(s.roll.directory, candidate.Policy)
 	}
@@ -875,7 +908,18 @@ func (s *shadowRun) drive(ctx context.Context, once bool, output io.Writer) erro
 			}
 			return err
 		}
+		var observeStart time.Time
+		if s.timingOutput != nil && s.timingRecords < 64 {
+			observeStart = time.Now()
+		}
+		if s.krakenBatch != nil {
+			s.krakenBatch.BeginObservation()
+		}
 		observation := s.runner.Observe(ctx)
+		var observeDuration time.Duration
+		if !observeStart.IsZero() {
+			observeDuration = time.Since(observeStart)
+		}
 		now = time.Now().UTC()
 		rolled, err := s.rollDay(now, output)
 		if err != nil {
@@ -889,9 +933,22 @@ func (s *shadowRun) drive(ctx context.Context, once bool, output io.Writer) erro
 		}
 		observation = s.runner.ApplyNativePriceCeiling(now, observation, s.portfolioMaxSOL)
 		nextSell := s.runner.NextSell()
+		var stepStart time.Time
+		if !observeStart.IsZero() {
+			stepStart = time.Now()
+		}
 		tick, err := s.runner.StepObservation(ctx, now, observation)
 		if err != nil {
 			return err
+		}
+		var publicationStart time.Time
+		if !observeStart.IsZero() {
+			publicationStart = time.Now()
+		}
+		if s.publishResearchPrefix {
+			if err := s.roll.publishResearchPrefix(); err != nil {
+				return err
+			}
 		}
 		if tick.PriceMicros != 0 {
 			s.lastPrice = tick.PriceMicros
@@ -904,6 +961,9 @@ func (s *shadowRun) drive(ctx context.Context, once bool, output io.Writer) erro
 		}
 		if err := s.updatePaperCurrent(tick, s.runner.NextSell()); err != nil {
 			return err
+		}
+		if !observeStart.IsZero() {
+			s.writeTiming(observeDuration, publicationStart.Sub(stepStart), time.Since(publicationStart))
 		}
 		if once {
 			return nil
@@ -926,6 +986,24 @@ func (s *shadowRun) drive(ctx context.Context, once bool, output io.Writer) erro
 			return s.finishDayAt(output, tick.At)
 		}
 	}
+}
+
+// writeTiming bounds temporary diagnostics per process, including across UTC rollover.
+func (s *shadowRun) writeTiming(observe, step, publication time.Duration) {
+	if s.timingOutput == nil || s.timingRecords >= 64 {
+		return
+	}
+	err := json.NewEncoder(s.timingOutput).Encode(struct {
+		Observation   uint64 `json:"observation"`
+		ObserveNS     int64  `json:"observe_ns"`
+		StepNS        int64  `json:"step_ns"`
+		PublicationNS int64  `json:"publication_ns"`
+	}{s.timingRecords + 1, observe.Nanoseconds(), step.Nanoseconds(), publication.Nanoseconds()})
+	if err != nil {
+		s.timingOutput = nil
+		return
+	}
+	s.timingRecords++
 }
 
 // nextShadowPollAt returns a strictly future boundary of this UTC day's cadence.

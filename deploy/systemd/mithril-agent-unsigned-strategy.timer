@@ -1,0 +1,11 @@
+[Unit]
+Description=Schedule non-overlapping unsigned strategy cycles
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=30s
+AccuracySec=1s
+Unit=mithril-agent-unsigned-strategy.service
+
+[Install]
+WantedBy=timers.target

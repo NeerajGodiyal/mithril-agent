@@ -51,6 +51,8 @@ func run(ctx context.Context, args []string, input io.Reader, output io.Writer) 
 		"validate one sealed Mainnet response and persist recovery evidence without submitting")
 	checkMainnet := flags.Bool("check-mainnet", false,
 		"read-only readiness check for one offline-prepared Mainnet action")
+	submitMainnet := flags.Bool("submit-mainnet", false,
+		"submit only the persisted Mainnet transaction after all existing control and readiness checks")
 	recoveryStatus := flags.Bool("recovery-status", false,
 		"print bounded read-only Mainnet recovery status")
 	retireMainnet := flags.Bool("retire-mainnet", false,
@@ -64,7 +66,7 @@ func run(ctx context.Context, args []string, input io.Reader, output io.Writer) 
 		"independently reconcile the submitter-owned pending record")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent-submitter --policy PATH [--key PATH] [--identity|--prepare-mainnet [--signer-request PATH --signer-response PATH]|--check-mainnet|--recovery-status|--retire-mainnet|--socket|--operator-socket|--recover]")
+			_, writeErr := fmt.Fprintln(output, "Usage: mithril-agent-submitter --policy PATH [--key PATH] [--identity|--prepare-mainnet [--signer-request PATH --signer-response PATH]|--check-mainnet|--submit-mainnet|--recovery-status|--retire-mainnet|--socket|--operator-socket|--recover]")
 			return writeErr
 		}
 		return err
@@ -74,7 +76,7 @@ func run(ctx context.Context, args []string, input io.Reader, output io.Writer) 
 	}
 	modeCount := 0
 	for _, selected := range []bool{
-		*identity, *prepareMainnet, *checkMainnet, *recoveryStatus, *retireMainnet,
+		*identity, *prepareMainnet, *checkMainnet, *submitMainnet, *recoveryStatus, *retireMainnet,
 		*socket, *operatorSocket, *recoverPending,
 	} {
 		if selected {
@@ -104,17 +106,21 @@ func run(ctx context.Context, args []string, input io.Reader, output io.Writer) 
 		}
 		return runOperatorSocket(policy, input, output)
 	}
-	if *checkMainnet {
+	if *checkMainnet || *submitMainnet {
+		mode := "--check-mainnet"
+		if *submitMainnet {
+			mode = "--submit-mainnet"
+		}
 		if *keyPath != "" {
-			return errors.New("--check-mainnet must not receive --key")
+			return fmt.Errorf("%s must not receive --key", mode)
 		}
 		if policy.Jupiter == nil {
-			return errors.New("--check-mainnet requires a Jupiter Mainnet policy")
+			return fmt.Errorf("%s requires a Jupiter Mainnet policy", mode)
 		}
 		if err := submitter.ValidateJupiterPolicy(policy); err != nil {
 			return err
 		}
-		return checkMainnetReadiness(ctx, policy, output)
+		return runPreparedMainnet(ctx, policy, output, *submitMainnet)
 	}
 	if *recoveryStatus {
 		if *keyPath != "" {
@@ -514,10 +520,11 @@ func applyRecoveryResult(gate *control.StateFile, actionID, verdict string) erro
 	}
 }
 
-func checkMainnetReadiness(
+func runPreparedMainnet(
 	ctx context.Context,
 	policy submitter.Policy,
 	output io.Writer,
+	send bool,
 ) error {
 	primary, secondary, err := openRecoveryProviders(policy)
 	if err != nil {
@@ -534,6 +541,13 @@ func checkMainnetReadiness(
 	lifecycle, err := txflow.New(node, primary, secondary)
 	if err != nil {
 		return err
+	}
+	if send {
+		submission, err := submitter.SubmitPreparedJupiter(ctx, policy, node, lifecycle, primary, secondary)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(output).Encode(submission)
 	}
 	actionID, err := submitter.CheckJupiterRecoveryReadiness(
 		ctx, policy, lifecycle, primary, secondary,
