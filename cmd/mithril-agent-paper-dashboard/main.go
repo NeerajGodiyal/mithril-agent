@@ -45,6 +45,9 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	flags.SetOutput(io.Discard)
 	var sockets, optionalSockets, perpsResearchPaths socketPaths
 	var instructionPath, researchPath, mithrilEvidencePath, marketAdmissionPath, recordMarketAdmissionPath, recordMithrilPath, mithrilStatus, renderInstructionPath, exportInstructionPath string
+	var researchAttemptPath, recordResearchAttemptPath string
+	flags.StringVar(&researchAttemptPath, "research-attempt-status-path", "", "private host snapshot of the Hermes research cycle")
+	flags.StringVar(&recordResearchAttemptPath, "record-research-attempt", "", "record the fixed Hermes service state without journal access")
 	flags.Var(&sockets, "paper-status-socket", "MARKET=/absolute/path to a bounded paper status socket")
 	flags.Var(&optionalSockets, "optional-paper-status-socket", "MARKET=/absolute/path for a bounded experiment that may expire")
 	flags.Var(&perpsResearchPaths, "render-perps-research", "MARKET=/absolute/path to a completed perps paper status")
@@ -59,10 +62,31 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	flags.StringVar(&exportInstructionPath, "export-instruction", "", "export one validated canonical operator instruction")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			_, writeErr := fmt.Fprintln(output, usage)
+			_, writeErr := fmt.Fprintln(output, usage+"\n       Server option: --research-attempt-status-path /absolute/path\n       mithril-agent-paper-dashboard --record-research-attempt /absolute/path")
 			return writeErr
 		}
 		return err
+	}
+	if recordResearchAttemptPath != "" {
+		otherFlag := false
+		flags.Visit(func(f *flag.Flag) { otherFlag = otherFlag || f.Name != "record-research-attempt" })
+		if otherFlag || flags.NArg() != 0 || !cleanAbsolutePath(recordResearchAttemptPath) {
+			return errors.New("--record-research-attempt requires one clean absolute path and no other mode")
+		}
+		return recordResearchAttempt(ctx, recordResearchAttemptPath)
+	}
+	if researchAttemptPath != "" {
+		otherMode := false
+		flags.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "research-attempt-status-path", "paper-status-socket", "optional-paper-status-socket", "instruction-path", "research-packet-path", "mithril-evidence-status-path", "market-admission-status-path":
+			default:
+				otherMode = true
+			}
+		})
+		if otherMode || !cleanAbsolutePath(researchAttemptPath) {
+			return errors.New("--research-attempt-status-path requires a clean absolute path and server mode")
+		}
 	}
 	if len(perpsResearchPaths) != 0 {
 		if flags.NArg() != 0 || len(sockets) != 0 || len(optionalSockets) != 0 ||
@@ -179,6 +203,11 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	}
 	if marketAdmissionPath != "" {
 		if err := handler.EnableMarketAdmission(marketAdmissionPath); err != nil {
+			return err
+		}
+	}
+	if researchAttemptPath != "" {
+		if err := handler.EnableResearchAttempt(researchAttemptPath); err != nil {
 			return err
 		}
 	}

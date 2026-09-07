@@ -1,20 +1,20 @@
 [Unit]
-Description=Mithril bounded market-admission dashboard projection
-Wants=mithril-agent-research-status.service
+Description=Mithril bounded research service dashboard projection
 
 [Service]
 Type=oneshot
 User=mithril-agent-dashboard
 Group=mithril-agent-dashboard
 UMask=0077
-StateDirectory=mithril-agent-dashboard
-StateDirectoryMode=0700
-LoadCredential=market-wif-status:/var/lib/mithril-agent-research/market-admission-wif/dashboard-status.json
-LoadCredential=market-jto-status:/var/lib/mithril-agent-research/market-admission-jto/dashboard-status.json
-LoadCredential=market-pyth-status:/var/lib/mithril-agent-research/market-admission-pyth/dashboard-status.json
-ExecStart=/usr/local/libexec/mithril-agent/mithril-agent-paper-dashboard --record-market-admission /var/lib/mithril-agent-dashboard/market-admission.json
+RuntimeDirectory=mithril-agent-dashboard
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ExecStart=/usr/local/libexec/mithril-agent/mithril-agent-paper-dashboard --record-research-attempt /run/mithril-agent-dashboard/research-attempt.json
 TimeoutStartSec=10s
 InaccessiblePaths=-/var/lib/mithril-agent-research
+InaccessiblePaths=-/etc/mithril-agent
+InaccessiblePaths=-/var/log/journal
+InaccessiblePaths=-/run/log/journal
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
@@ -46,7 +46,6 @@ RestrictAddressFamilies=AF_UNIX
 RestrictNamespaces=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
-SystemCallFilter=~socket socketpair connect bind listen
 SystemCallArchitectures=native
 TasksMax=16
 LimitNOFILE=16

@@ -59,6 +59,7 @@ type Server struct {
 	instructionPath     string
 	researchPath        string
 	mithrilEvidencePath string
+	researchAttemptPath string
 	marketAdmissionPath string
 	now                 func() time.Time
 	mu                  sync.Mutex
@@ -87,6 +88,9 @@ type View struct {
 	MithrilEvidenceEnabled  bool             `json:"mithril_evidence_enabled"`
 	MithrilEvidence         *MithrilEvidence `json:"mithril_evidence,omitempty"`
 	MithrilEvidenceError    bool             `json:"mithril_evidence_error,omitempty"`
+	ResearchAttemptEnabled  bool             `json:"research_attempt_enabled"`
+	ResearchAttempt         *ResearchAttempt `json:"research_attempt,omitempty"`
+	ResearchAttemptError    bool             `json:"research_attempt_error,omitempty"`
 	MarketResearchEnabled   bool             `json:"market_research_enabled"`
 	MarketResearch          []MarketResearch `json:"market_research,omitempty"`
 	MarketResearchError     bool             `json:"market_research_error,omitempty"`
@@ -354,6 +358,7 @@ func (s *Server) readSnapshot(now time.Time) View {
 		InstructionsEnabled:    s.instructionPath != "",
 		ResearchEnabled:        s.researchPath != "",
 		MithrilEvidenceEnabled: s.mithrilEvidencePath != "",
+		ResearchAttemptEnabled: s.researchAttemptPath != "",
 		MarketResearchEnabled:  s.marketAdmissionPath != "",
 		ResearchMarkets:        marketadmission.Markets(),
 		Markets:                make([]Market, 0, len(s.sources)), Activity: make([]Activity, 0),
@@ -379,6 +384,14 @@ func (s *Server) readSnapshot(now time.Time) View {
 			view.HermesPerps = proposals
 		} else if !errors.Is(err, os.ErrNotExist) {
 			view.HermesPerpsError = true
+		}
+	}
+	if s.researchAttemptPath != "" {
+		attempt, err := readResearchAttempt(s.researchAttemptPath, now)
+		if err == nil {
+			view.ResearchAttempt = attempt
+		} else if !errors.Is(err, os.ErrNotExist) {
+			view.ResearchAttemptError = true
 		}
 	}
 	if s.mithrilEvidencePath != "" {

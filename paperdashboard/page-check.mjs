@@ -36,12 +36,30 @@ console.log('Paper-check renderer: legacy, no-entry, mixed, unknown and incomple
 const researchStart = source.indexOf('function researchView(');
 const researchEnd = source.indexOf('function mithrilEvidenceView(', researchStart);
 assert(researchStart > 0 && researchEnd > researchStart, 'research renderer boundaries missing');
-const research = packet => runInNewContext(source.slice(researchStart, researchEnd) + '\nresearchView()', {
-  current: { research_enabled: true, research: packet }, age: () => 'just now',
+const research = (packet, state = {}) => runInNewContext(source.slice(researchStart, researchEnd) + '\nresearchView()', {
+  current: { research_enabled: true, research: packet, ...state }, age: () => 'just now',
 });
 const web = { market: 'SOL/USDC', current: true, actionable: true, disposition: 'candidate', risk_decision: 'pass',
   risk_reason: 'Paper only.', sources_checked: 0, retrieved_pages: 0, successful_web_searches: 0,
   two_source_claims: 0, single_source_facts: 0, contradicted_facts: 0, unverified_facts: 0 };
+for (const [packet, state, label] of [
+  [null, {}, 'No saved result yet'],
+  [web, { research_error: true }, 'Saved result rejected'],
+  [web, { research_enabled: false }, 'Not connected'],
+  [web, {}, 'Proposal ready'],
+  [{ ...web, current: false }, {}, 'Expired'],
+  [{ ...web, disposition: 'no_change', actionable: false }, {}, 'No change'],
+  [{ ...web, disposition: 'blocked', actionable: false }, {}, 'Hermes advised no change'],
+]) {
+  const saved = research(packet, state);
+  assert.equal(saved.label, label);
+  assert.doesNotMatch(JSON.stringify(saved), /Running|Latest Hermes research|No valid run yet|Rejected output/);
+}
+assert.match(research(web).description, /^Saved SOL\/USDC result/);
+const savedHelp = source.match(/help\('Saved Hermes research','([^']+)'\)/)?.[1];
+assert(savedHelp, 'saved research needs its own scoped help button');
+for (const text of ['not live agent activity', 'does not show whether a newer attempt is running or failed',
+  'only the archived session behind this result', 'Result age is not source age']) assert(savedHelp.includes(text), text);
 const legacyResearch = research(web);
 const webResearch = research({ ...web, evidence_basis: 'web_sources', retrospective_screening: false });
 assert.equal(JSON.stringify(legacyResearch), JSON.stringify(webResearch), 'v1 rendering changed');
@@ -57,6 +75,30 @@ for (const current of [true, false]) {
 }
 assert.doesNotMatch(research({ ...web, evidence_basis: 'future_unknown', retrospective_screening: true }).detail, /Uses recorded/);
 console.log('Research renderer: legacy, web, recorded, expired and unknown evidence bases passed.');
+
+const attemptStart = source.indexOf('function researchAttemptView(');
+const attemptEnd = source.indexOf('function mithrilEvidenceView(', attemptStart);
+assert(attemptStart > 0 && attemptEnd > attemptStart);
+const attemptNow = Date.now();
+const attemptView = (attempt, flags = {}) => runInNewContext(source.slice(attemptStart, attemptEnd) + '\nresearchAttemptView()', {
+  current: { research_attempt_enabled: true, research_attempt: attempt, ...flags },
+  Date: class extends Date { static now() { return attemptNow; } }, age: () => 'Updated just now',
+});
+const observedAttempt = { checked_at: new Date(attemptNow).toISOString(), state: 'running' };
+for (const [state, label] of Object.entries({ preparing: 'Preparing at last check', running: 'Active at last check', finishing: 'Finishing at last check', completed: 'Cycle finished', failed: 'Cycle failed', idle: 'No cycle recorded', unknown: 'Activity unknown', future_state: 'Activity unknown' })) {
+  assert.equal(attemptView({ ...observedAttempt, state }).label, label);
+}
+assert.equal(attemptView(null).label, 'Activity unknown');
+assert.equal(attemptView(observedAttempt, { research_attempt_enabled: false }).label, 'Saved results only');
+assert.equal(attemptView(observedAttempt, { research_attempt_error: true }).label, 'Activity unknown');
+for (const checked_at of ['bad', new Date(attemptNow - 90001).toISOString(), new Date(attemptNow + 2001).toISOString()]) {
+  assert.equal(attemptView({ ...observedAttempt, checked_at }).label, 'Activity unknown');
+}
+assert.match(attemptView({ ...observedAttempt, state: 'completed' }).description, /does not mean a new strategy was accepted/);
+assert.match(attemptView({ ...observedAttempt, state: 'failed' }).description, /Earlier saved findings/);
+assert.equal(research(web, { research_attempt: { ...observedAttempt, state: 'failed' } }).label, 'Proposal ready');
+assert.match(source, /automationCard\('hermes','H','Nous Hermes',researchAttempt\.label/);
+console.log('Research activity renderer: lifecycle states, stale/future checks and saved-result independence passed.');
 
 const proposalStart = source.indexOf('function hermesPerpsCards(');
 const proposalEnd = source.indexOf('function renderSystem(', proposalStart);

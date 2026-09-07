@@ -5,6 +5,29 @@ import (
 	"testing"
 )
 
+func TestDashboardLabelsSavedResearchWithoutInferringLiveAttempts(t *testing.T) {
+	if !strings.Contains(indexHTML, "Saved Hermes research") {
+		t.Fatal("initial page omits saved research scope")
+	}
+	for _, want := range []string{
+		`help('Saved Hermes research',`,
+		`This card describes a saved research result, not live agent activity.`,
+		`It does not show whether a newer attempt is running or failed.`,
+		`Search and source counts cover only the archived session behind this result.`,
+		`Result age is not source age.`,
+		`Saved result rejected`, `No saved result yet`,
+	} {
+		if !strings.Contains(appJS, want) {
+			t.Errorf("saved research omits %q", want)
+		}
+	}
+	for _, old := range []string{"Latest Hermes research", "Rejected output", "No valid run yet"} {
+		if strings.Contains(appJS, old) || strings.Contains(indexHTML, old) {
+			t.Errorf("research retains ambiguous wording %q", old)
+		}
+	}
+}
+
 func TestDashboardSeparatesLiveSpotAccountFromPerpsResearch(t *testing.T) {
 	for _, want := range []string{
 		`aria-label="Live spot markets"`,

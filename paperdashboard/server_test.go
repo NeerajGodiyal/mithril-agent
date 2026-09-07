@@ -853,7 +853,7 @@ func TestDashboardUsesBeginnerLanguageAndAccessibleExplanations(t *testing.T) {
 			"amount>=1000000n?2:amount>=10000n?4:6",
 			"marketPriceChart", "LightweightCharts.createChart", "chartSegments", "View exact chart values", "data-chart-action=\"zoom-in\"", "activeChart.remove()", "Bot strategy", "If simply held", "Ahead by ", "Behind by ", "older events omitted", "Proposal ready", "Nous Hermes",
 			"chartPointAvailable", "key!=='price_micros'||integer(point[key])>0n", "m.state==='waiting for data'", "price-values", "performance-values", "pnl===0n?'→'", "Paper values')+' unavailable", "readout.innerHTML=original",
-			"Rejected output", "No valid run yet", "Deterministic replay gates alone decide whether any paper plan may change.", "open-order-history", "Starting trade lot", "Loss pause",
+			"Saved Hermes research", "Saved result rejected", "No saved result yet", "Deterministic replay gates alone decide whether any paper plan may change.", "open-order-history", "Starting trade lot", "Loss pause",
 			"Minimum opportunity", "saveInstruction", "X-Mithril-Paper-Request",
 			"Fee budget left", "Orders left this session", "No more orders this run",
 			"Orders paused until tomorrow",

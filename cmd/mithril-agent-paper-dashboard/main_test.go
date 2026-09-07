@@ -61,6 +61,7 @@ func TestRunServesOnlyFromActivatedUnixSocket(t *testing.T) {
 			"--paper-status-socket", "JUP/USDC=/run/mithril-agent-paper-jup-status.sock",
 			"--research-packet-path", "/var/lib/mithril-agent-dashboard/research.json",
 			"--mithril-evidence-status-path", "/var/lib/mithril-agent-dashboard/mithril-evidence.json",
+			"--research-attempt-status-path", "/run/mithril-agent-dashboard/research-attempt.json",
 		}, &bytes.Buffer{})
 	}()
 	select {
@@ -76,6 +77,22 @@ func TestRunServesOnlyFromActivatedUnixSocket(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("HTTP server did not stop")
+	}
+}
+
+func TestResearchAttemptModesRejectMixedFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"--record-research-attempt", "relative"},
+		{"--record-research-attempt", "/run/status.json", "extra"},
+		{"--record-research-attempt", "/run/status.json", "--paper-status-socket", "SOL/USDC=/run/paper.sock"},
+		{"--record-research-attempt", "/run/status.json", "--record-market-admission", "/run/market.json"},
+		{"--research-attempt-status-path", "/run/status.json", "--record-mithril-evidence", "/run/evidence.json", "--mithril-evidence", "unavailable"},
+		{"--research-attempt-status-path", "/run/status.json", "--render-instruction", "/run/instruction.json"},
+		{"--research-attempt-status-path", "relative", "--paper-status-socket", "SOL/USDC=/run/paper.sock"},
+	} {
+		if err := run(t.Context(), args, &bytes.Buffer{}); err == nil {
+			t.Errorf("accepted invalid mode: %v", args)
+		}
 	}
 }
 

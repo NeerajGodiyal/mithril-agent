@@ -166,7 +166,7 @@ const indexHTML = `<!doctype html>
       <div class="section-title compact"><div><p class="eyebrow">Trust boundary</p><h2>Access and evidence</h2></div></div>
       <div class="detail-grid">
         <article class="card detail-card"><span class="badge green">Paper only</span><h3>Permissions</h3><p>No wallet key, signing, real funds, or Mainnet submission. Margin, leverage, short positions, funding, and liquidation exist only inside the perps simulation.</p></article>
-        <article id="research-evidence" class="card detail-card"><span class="badge blue">Research status</span><h3>Latest Hermes research</h3><p>Waiting for a validated research packet.</p></article>
+        <article id="research-evidence" class="card detail-card"><span class="badge blue">Saved result</span><h3>Saved Hermes research</h3><p>Waiting for a checked research result.</p></article>
 	        <article class="card detail-card"><span class="badge amber">Reviewed scope</span><h3>Markets</h3><p>SOL and JUP spot simulations run beside isolated SOL, BTC, and ETH perps experiments. Recorded replay and doubled-fee checks run in minutes; short live checkpoints exercise current data and status plumbing. None proves profitability. WIF, JTO, and PYTH remain research-only until their route and liquidity evidence passes admission.</p></article>
         <article class="card detail-card"><span class="badge blue">Evidence retained</span><h3>Recent order activity</h3><p>The dashboard keeps a bounded recent list. Older events remain in the local evidence journals. There are no on-chain signatures because no transaction is submitted.</p><button id="open-order-history" class="text-button" type="button">View recent paper orders</button></article>
       </div>
@@ -798,21 +798,30 @@ function renderActivity(){
 function automationCard(klass,symbol,title,label,toneName,description){return '<article class="automation-card '+klass+'"><div class="automation-name"><span class="role-symbol" aria-hidden="true">'+safe(symbol)+'</span><h3>'+safe(title)+'</h3></div><p>'+safe(description)+'</p><span class="badge '+toneName+'">'+safe(label)+'</span></article>';}
 function researchView(){
   if(!current.research_enabled)return {label:'Not connected',tone:'amber',description:'No validated Hermes packet path is configured.',detail:'Hermes remains outside the trading and wallet boundary.'};
-  if(current.research_error)return {label:'Rejected output',tone:'red',description:'The latest output did not pass the agent packet checks.',detail:'No proposal or policy change was accepted.'};
+  if(current.research_error)return {label:'Saved result rejected',tone:'red',description:'The saved research result did not pass validation.',detail:'No proposal or policy change was accepted.'};
   const packet=current.research;
-  if(!packet)return {label:'No valid run yet',tone:'amber',description:'Waiting for the first validated source-cited packet.',detail:'The paper plans continue without Hermes input.'};
+  if(!packet)return {label:'No saved result yet',tone:'amber',description:'Waiting for the first checked research result.',detail:'The paper plans continue without Hermes input.'};
 	const cited=packet.sources_checked+' unique source'+(packet.sources_checked===1?'':'s')+' retained in the final packet';
 	const retrieved=packet.retrieved_pages+' page'+(packet.retrieved_pages===1?'':'s')+' retrieved from '+packet.successful_web_searches+' successful search'+(packet.successful_web_searches===1?'':'es');
 	const outcomes=packet.two_source_claims+' two-source fact'+(packet.two_source_claims===1?'':'s')+' · '+packet.single_source_facts+' one-source fact'+(packet.single_source_facts===1?'':'s')+' · '+packet.contradicted_facts+' contradicted · '+packet.unverified_facts+' unverified';
 	const evidence=retrieved+'; '+cited+'; '+outcomes;
 	const sourceFreshness='Individual source publication freshness is unavailable in this bounded view; packet age is not source age.';
 	const basisDetail=packet.evidence_basis==='recorded_paper_observations'&&packet.retrospective_screening===true?'Uses recorded paper data from '+packet.observation_day+'. Still needs testing on new market data. ':'';
-  if(!packet.current)return {label:'Expired',tone:'amber',description:packet.market+' research expired. '+evidence+'.',detail:basisDetail+'It cannot be used for a new paper experiment. '+sourceFreshness};
+  if(!packet.current)return {label:'Expired',tone:'amber',description:packet.market+' saved research expired. '+evidence+'.',detail:basisDetail+'It cannot be used for a new paper experiment. '+sourceFreshness};
   const passed=packet.risk_decision==='pass';
   const label=packet.disposition==='candidate'&&packet.actionable?'Proposal ready':packet.disposition==='blocked'?'Hermes advised no change':'No change';
   const tone=packet.disposition==='candidate'&&packet.actionable?'blue':packet.disposition==='blocked'?'red':'green';
   const changes=(packet.proposed_changes||[]).map(change=>change.name.replaceAll('_',' ')+' '+change.current+' → '+change.proposed).join(' · ');
-	  return {label,tone,description:packet.market+' · '+evidence+' · '+age(packet.created_at)+'.',detail:basisDetail+'Hermes risk review (advisory): '+(passed?'continue to deterministic testing':'do not propose this change')+' · '+packet.risk_reason+(changes?' Proposed only: '+changes+'.':'')+' Deterministic replay gates alone decide whether any paper plan may change. '+sourceFreshness};
+	  return {label,tone,description:'Saved '+packet.market+' result · '+evidence+' · '+age(packet.created_at)+'.',detail:basisDetail+'Hermes risk review (advisory): '+(passed?'continue to deterministic testing':'do not propose this change')+' · '+packet.risk_reason+(changes?' Proposed only: '+changes+'.':'')+' Deterministic replay gates alone decide whether any paper plan may change. '+sourceFreshness};
+}
+function researchAttemptView(){
+  if(!current.research_attempt_enabled)return {label:'Saved results only',tone:'amber',description:'Current research activity is not connected. See saved findings below.'};
+  const attempt=current.research_attempt;
+  const checked=Date.parse(attempt?.checked_at),elapsed=Date.now()-checked;
+  if(current.research_attempt_error||!attempt||!Number.isFinite(checked)||elapsed>90000||elapsed < -2000)return {label:'Activity unknown',tone:'amber',description:'A recent research activity check is unavailable. Saved findings are separate.'};
+  const states={preparing:['Preparing at last check','blue','Starting the research cycle.'],running:['Active at last check','blue','The research cycle was working.'],finishing:['Finishing at last check','blue','The research cycle was wrapping up.'],completed:['Cycle finished','green','The last cycle finished without a service error. This does not mean a new strategy was accepted.'],failed:['Cycle failed','red','The last cycle ended with an error. Earlier saved findings may still be available.'],idle:['No cycle recorded','amber','No completed research cycle is recorded in this host status.'],unknown:['Activity unknown','amber','The host could not establish the research cycle state.']};
+  const state=states[attempt.state]||states.unknown;
+  return {label:state[0],tone:state[1],description:state[2]+' Checked '+age(attempt.checked_at).replace(/^Updated /,'')+'.'};
 }
 function mithrilEvidenceView(){
   if(!current.mithril_evidence_enabled)return {label:'Not connected',tone:'amber',description:'No host-produced Mithril evidence status is configured.'};
@@ -961,16 +970,16 @@ function renderSystem(){
   const required=current.markets.filter(market=>!market.optional),healthy=required.filter(marketDataHealthy).length,total=required.length;
   const additionalSpots=current.markets.filter(market=>market.optional&&!isPerps(market)),healthyAdditionalSpots=additionalSpots.filter(marketDataHealthy).length,completedAdditionalSpots=additionalSpots.filter(market=>market.completed).length;
 	const perpsMarkets=current.markets.filter(isPerps),completedPerps=perpsMarkets.filter(market=>latestCompletedPerps(market)).length,recordingPerps=perpsMarkets.filter(perpsRecordingInProgress).length;
-	const research=researchView();
+	const research=researchView(),researchAttempt=researchAttemptView();
   const mithril=mithrilEvidenceView();
   $('automation').innerHTML='<div class="automation-list-head" aria-hidden="true"><span>Service</span><span>Role and boundary</span><span>Status</span></div>'+
     automationCard('engines','BOT','Paper engines',healthy===total&&total?'Running':'Needs attention',healthy===total&&total?'green':'amber',healthy+' of '+total+' core spot observers are current. '+healthyAdditionalSpots+' of '+additionalSpots.length+' additional spot observers are current; '+completedAdditionalSpots+' completed. '+completedPerps+' of '+perpsMarkets.length+' perps markets have a saved result; '+recordingPerps+' recording now.')+
-    automationCard('hermes','H','Nous Hermes',research.label,research.tone,research.description)+
+    automationCard('hermes','H','Nous Hermes',researchAttempt.label,researchAttempt.tone,researchAttempt.description)+
     automationCard('mithril','M','Mithril evidence',mithril.label,mithril.tone,mithril.description)+
     automationCard('strategy','AD','Versioned learning','Gate required','blue','Spot rules adapt to current prices. A perps challenger must beat the current paper plan on untouched normal-cost and doubled-fee replay before it can become the next bounded paper test. This never enables real execution.')+
     automationCard('alerts','TG','Telegram alerts','Open + filled','amber','Sends concise open-order, filled-order, safety, data, and daily-result messages. Unfilled attempts appear in Recent activity instead of creating Telegram noise.');
 	  $('system-list').innerHTML=current.markets.map(m=>{const completed=Boolean(m.completed),healthy=marketDataHealthy(m),updating=m.available&&!m.ready&&!completed,checking=m.available&&m.ready&&m.fresh&&!m.coverage_ready,limited=m.available&&m.ready&&m.fresh&&m.coverage_ready&&Number(m.coverage_bps||0)<9900;const description=healthy?'Paper observer and price data are current.':completed?(isPerps(m)?'This completed experiment is saved for comparison. Live spot totals are unaffected.':'This bounded spot paper run finished and its result is saved for review.'):updating?'Waiting for the first complete paper status.':checking?'Checking whether enough recent price data is usable.':limited?'Only '+priceCoverage(m)+' of recent price checks were usable. New evidence is still being collected.':m.available?'Observer status is older than expected.':'Status source could not be read. Other markets continue independently.';const label=healthy?'Healthy':completed?(isPerps(m)?'Completed experiment':'Completed paper run'):updating?'Updating':checking?'Checking data':limited?'Limited data':m.available?'Stale':'Unavailable';return '<article class="system-row"><p><strong>'+safe(m.name)+'</strong></p><p class="description">'+description+'</p><span class="badge '+(healthy?'green':completed||m.available?'amber':'red')+'">'+label+'</span></article>';}).join('');
-	$('research-evidence').innerHTML='<span class="badge '+research.tone+'">'+safe(research.label)+'</span><h3>Latest Hermes research</h3><p>'+safe(research.description)+'<br>'+safe(research.detail)+'</p>';
+	$('research-evidence').innerHTML='<span class="badge '+research.tone+'">'+safe(research.label)+'</span><h3 class="chart-title-row">Saved Hermes research'+help('Saved Hermes research','This card describes a saved research result, not live agent activity. It does not show whether a newer attempt is running or failed. Search and source counts cover only the archived session behind this result. Result age is not source age.')+'</h3><p>'+safe(research.description)+'<br>'+safe(research.detail)+'</p>';
 }
 function captureRenderFocus(){
   const active=document.activeElement;
