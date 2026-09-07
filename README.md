@@ -116,6 +116,18 @@ Separate days are not a continuous portfolio or independent statistical trials,
 and their values must not be compounded. Backtests validate the original
 journal with strict replay before applying a hypothetical candidate.
 
+For a new SOL/USDC or JUP/USDC paper policy, the experimental
+`shadow policy --kraken-source ticker-batch` option groups the market, USDC peg,
+and optional SOL fee price into one Kraken REST request per observation.
+The default remains `pre-trade`. The selected method has distinct source
+identities and changes the policy fingerprint: use a new policy and journal,
+not an in-place source replacement for an existing run.
+Each observation starts a fresh batch; failures never reuse an earlier success.
+Samples retain the original HTTP response date, which is not a market-event
+timestamp. Existing age, source agreement, and shared request-rate checks still
+apply. This reduces duplicate requests, not trading costs or investment risk,
+and adds no signing or submission capability.
+
 An adaptive policy has no absolute entry prices. Its deterministic, regime-aware
 controller maintains rolling fast and slow market baselines, measures return
 volatility and drawdown, and chooses momentum, range-reversion, risk-exit, or
@@ -187,17 +199,13 @@ execution to stopped mode.
 
 ## Mainnet proposal boundary
 
-Mainnet proposal commands are evaluation and packaging tools, not a live send
-path. The current flow can check a narrow Jupiter Exact-In v0 transaction,
-create matching protected policies, review exact human-readable intent, and
-verify detached operator approval while remaining unauthorized.
-
-Relevant gates include `proposal approval-create`,
-`mithril-agent proposal canary-check`, and
-`mithril-agent proposal turnkey-check`. The canary repeats
-Mithril plus two-provider evidence and still cannot enable, sign, or submit.
-The Turnkey command validates an explicitly configured transaction-only mapping;
-generated services do not select it. Funded Mainnet submission remains disabled.
+Mainnet proposal commands evaluate and package a narrow Jupiter Exact-In v0 transaction;
+they do not send it. They create protected policies and verify exact operator approval.
+Gates include `proposal approval-create`, `mithril-agent proposal canary-check`, and
+`mithril-agent proposal turnkey-check`. The canary repeats Mithril plus two-provider
+evidence without enabling, signing or submitting. The Turnkey check validates an explicit
+transaction-only mapping. Generated services select neither it nor the separate guarded
+submission command, which still requires qualification and exact-action approval.
 
 ## Architecture and repository split
 
@@ -215,11 +223,10 @@ Mithril replay and RPC
                      journals, metrics, and operator status
 ```
 
-The public [Mithril repository](https://github.com/NeerajGodiyal/mithril) owns
-node correctness, replay, RPC/evidence primitives, rooted publication, and node
-monitoring. This repository owns workspaces, interfaces, indexes, builders,
-paper evaluation, execution policy, custody adapters, recovery, Telegram UX,
-agent status, and deployment helpers.
+The public [Mithril repository](https://github.com/NeerajGodiyal/mithril) owns node correctness,
+replay, RPC/evidence primitives, rooted publication, and monitoring. This repository owns
+workspaces, interfaces, indexes, builders, paper evaluation, execution policy, custody
+adapters, recovery, Telegram UX, agent status, and deployment helpers.
 
 The focused public-node prerequisites and their merge order are in
 [ROADMAP.md](ROADMAP.md#node-prerequisites). The old all-in-one integration
@@ -238,19 +245,15 @@ branch is comparison material, not an installation or merge target.
 
 ## Current limits
 
-- Funded Mainnet signing and submission are disabled.
+- Funded Mainnet signing and submission are disabled by default and in generated
+  services; explicit operator commands require separate qualification and approval.
 - Solana v1 is indexed, not signed or executed.
-- The live execution pilot supports one reviewed Devnet route, not arbitrary
-  assets, venues, leverage, or perpetuals.
-- Paper results are evidence about a strategy and data path, not proof of a
-  profitable strategy.
-- Dynamic paper candidate selection applies at UTC boundaries. Protected live
-  execution configuration is not arbitrary hot-reload state.
-- The local rooted index is for private bounded queries, not public multi-user
-  serving.
+- The live execution pilot supports one reviewed Devnet route, not arbitrary assets or leverage.
+- Paper results test a strategy and data path; they do not prove profitability.
+- Paper candidate selection applies at UTC boundaries; live configuration is not freely hot-reloaded.
+- The local rooted index supports private bounded queries, not public multi-user serving.
 - Native Alpenglow and classic finalized evidence remain separately labelled.
-- A new node or agent revision must repeat the cross-repository contract and
-  the live acceptance appropriate to that revision.
+- New node or agent revisions must repeat the cross-repository contract and appropriate live acceptance.
 
 ## Verification
 
@@ -290,10 +293,7 @@ live service, or mutate index history without the operator's explicit approval.
 
 ## Releases and documentation rule
 
-Use [GitHub Releases](https://github.com/NeerajGodiyal/mithril-agent/releases)
-for published summaries and Git history for exact changes. A merged feature
-branch has no remaining diff against `main`; compare release tags instead.
-Keep this README as the entry point. Put walletless setup in
-`WALLETLESS_QUICKSTART.md`, index operation in `INDEXING.md`, installation in
-`QUICKSTART.md`, installed-pilot review in `DEMO.md`, and detailed security,
-paper, monitoring, upgrade, and recovery material in `OPERATIONS.md`.
+Use [GitHub Releases](https://github.com/NeerajGodiyal/mithril-agent/releases) for summaries
+and Git history for exact changes. Compare release tags after feature branches merge.
+Keep this README as the entry point; use the linked workflow guides for setup and
+`OPERATIONS.md` for detailed security, paper, monitoring, upgrade, and recovery procedures.

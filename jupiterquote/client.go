@@ -128,7 +128,7 @@ type Client struct {
 // New returns a read-only client pinned to Jupiter's Swap V2 build endpoint.
 // The endpoint is intentionally not configurable: accepting an arbitrary URL
 // here would turn a credential-bearing request into an SSRF primitive. An
-// empty API key uses Jupiter's lower-rate keyless access.
+// empty API key is accepted; Jupiter controls endpoint access and rate limits.
 func New(apiKey string) (*Client, error) {
 	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {

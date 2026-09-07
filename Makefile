@@ -135,8 +135,9 @@ verify-source:
 	@if [[ ! -f "$(MANIFEST)" ]]; then \
 		echo "No manifest at $(MANIFEST); pass MANIFEST=<path>." >&2; exit 1; \
 	fi
-	@expected=$$(mktemp); listed=$$(mktemp); \
+	@set -e -o pipefail; expected=; listed=; \
 	 trap 'rm -f "$$expected" "$$listed"' EXIT; \
+	 expected=$$(mktemp); listed=$$(mktemp); \
 	find . -type f \( -name '*.go' -o -name '*.rs' -o -name '*.js' -o -name '*.mjs' -o -name '*.py' -o -name '*.html' -o -name '*.json' \
 	      -o -name '*.svg' -o -name '*.woff2' \
 	      -o -name '*.yaml' -o -name '*.sh' -o -name '*.example' -o -name 'Dockerfile' -o -name '.dockerignore' \
@@ -153,9 +154,14 @@ verify-source:
 	    -not -name '$(MANIFEST)' \
 	    | LC_ALL=C sort > "$$expected"; \
 	 awk '{print $$2}' "$(MANIFEST)" | LC_ALL=C sort > "$$listed"; \
-	 if ! cmp -s "$$expected" "$$listed"; then \
-	   echo "MISMATCH: the manifest does not list exactly the current source files. Do not run it." >&2; \
-	   exit 1; \
+	 if cmp -s "$$expected" "$$listed"; then :; else \
+	   status=$$?; \
+	   if [[ "$$status" -eq 1 ]]; then \
+	     echo "MISMATCH: the manifest does not list exactly the current source files. Do not run it." >&2; \
+	   else \
+	     echo "Cannot compare source inventory with the manifest. Do not run it." >&2; \
+	   fi; \
+	   exit "$$status"; \
 	 fi
 	@sum=$$(command -v sha256sum || command -v shasum); \
 	 if [[ -z "$$sum" ]]; then \
@@ -167,7 +173,7 @@ verify-source:
 	 if $$sum -c "$(MANIFEST)" >/dev/null; then \
 	   echo "OK: every file listed in $(MANIFEST) matches."; \
 	 else \
-	   echo "MISMATCH: the source does not match the manifest. Do not run it." >&2; \
+	   echo "Source verification failed; inspect the checksum diagnostics above. Do not run it." >&2; \
 	   exit 1; \
 	 fi
 

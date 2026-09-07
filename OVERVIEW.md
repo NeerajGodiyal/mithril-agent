@@ -113,14 +113,15 @@ order.
   attest it with a separate identity, seal it, validate it independently, and
   preserve the exact v0 and lookup-table evidence needed for fail-closed
   restart reconciliation. The bounded submitter CLI/socket can prepare that
-  recovery record offline but cannot submit it. The self-hosted file-key
+  recovery record offline; only the separate guarded CLI mode can submit it.
+  The self-hosted file-key
   adapter is callable through the bounded signer CLI/socket only when separate
   wallet and attestation keys are supplied. The Turnkey transaction-only
   adapter is also callable there only with its complete explicit protected-file
   configuration and no local wallet key. Its opt-in retained-candidate harness
   checks policy-bound Jupiter and lookup-table mutations without an RPC or
   broadcast. No generated service or live Mainnet submit path uses either adapter.
-- An unexported Mainnet canary sender uses a control mode distinct from the
+- The guarded Mainnet canary sender uses a control mode distinct from the
   Devnet grant, limited to one action for at most one hour, and activated only
   for the exact reviewed action ID against an unchanged state revision. The
   sender repeats readiness under both locks, marks send-started durably, and
@@ -132,8 +133,9 @@ order.
   terminal two-provider reconciliation is stored with the exact recovery
   record and retained in an action-ID archive before another proposal can
   replace it. The
-  root-only operator socket can activate the state, but no generated service,
-  strategy runner, operator command, or live submit path uses the sender.
+  root-only operator socket can activate the state. The explicit keyless
+  `--submit-mainnet` command can invoke the guarded sender for the persisted
+  action; no generated service, strategy runner or agent socket selects it.
 - Offline Mainnet preparation is explicitly pre-send. The keyless read-only
   `--check-mainnet` command repeats the complete retained-proposal check using
   fresh Mithril and two-witness evidence, then requires fresh independent
@@ -141,7 +143,7 @@ order.
   keyless `--retire-mainnet` command can archive an expired proposal only while
   control is stopped and only before send-started; retired actions cannot be
   prepared again. The same keyless `--recover` command accepts Mainnet policy,
-  but finality reconciliation refuses until a future send path durably marks
+  but finality reconciliation refuses until the send path durably marks
   send-started. Two-provider exact effects clear a finalized success or turn a
   finalized failure into an operator-acknowledgeable stop; uncertain evidence
   remains latched.

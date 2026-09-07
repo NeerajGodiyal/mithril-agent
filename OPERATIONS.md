@@ -304,8 +304,9 @@ candidate validation, one bounded authorization, transaction-only custody,
 separate attestation, sealed submitter validation, and durable recovery with
 two-provider effect reconciliation. A disabled Turnkey adapter covers the
 transaction-signing API contract and can be selected explicitly by the bounded
-signer CLI/socket, but no generated service selects it and there is no Mainnet
-submit command that invokes those pieces.
+signer CLI/socket, but no generated service selects it. The separate keyless
+Mainnet submit command accepts only the exact prepared transaction after control
+and readiness checks; it does not invoke the signer.
 Do not grant an assistant shell or service-control access to the deployment.
 
 The current demonstration is designed to exercise the autonomous mechanics
@@ -2268,8 +2269,379 @@ socket, child process, or remote signer cannot wedge the autonomous loop. The
 only as an explicit backend of the bounded signer command described below. It
 is mutually exclusive with the self-hosted file-key backend, requires a
 protected CLI key file, and exposes no raw-signing operation. Generated
-services do not select either Mainnet backend, and live submission remains
-Devnet-only.
+services do not select either Mainnet backend. The default live pilot remains
+Devnet-only; the separate Mainnet submission command requires exact-action
+approval and the readiness checks described below.
+
+### Durable wallet accounting without submission
+
+`mithril-agent proposal inventory --help` describes six bounded operations:
+
+- `initialize` records independently observed finalized SOL and token balances.
+- `show` reads the durable state without RPC or writes.
+- `reserve` binds an existing claim to unchanged observed balances.
+- `account` records its verified terminal and applies the exact finalized balances
+  once. It may be retried after a crash between terminal recording and accounting.
+- `admit` recovers the original per-head claim before reading new paper inputs or
+  contacting RPCs. For a fresh head it checks the frozen decision, acquisition
+  receipt and actual accounted budget, then records one unsigned claim and reserve.
+- `acquire` connects that frozen decision to the existing Jupiter builder before
+  admission. It derives a private acquisition journal beside the per-head claim,
+  retaining the exact candidate and original receipt in one atomic record.
+
+Every operation requires distinct absolute `--inventory` and `--authority-policy`
+paths. Reserve and account also require `--claim`; account additionally requires
+`--submitter-policy` and already-finalized recovery evidence. Initialize and
+reserve use the protected primary and secondary RPC environment variables.
+Fresh admission also requires Mithril RPC reads and simulation, plus the existing
+paper policy, hash-verified paper journal, bounds, candidate and acquisition files.
+Its age bounds are positive integer seconds; `--help` lists all required flags.
+Acquire uses the same paper, schedule and age inputs but does not accept candidate
+or acquisition paths. An existing receipt is reused without another builder call;
+expired, incomplete or conflicting evidence is rejected, never replaced. It does
+not generate a new strategy decision or reset adaptive history and risk state.
+Claim paths are derived from the inventory head, not a changing quote or window.
+An existing claim is returned recovery-only, including after expiry or a crash
+before reservation. It is never silently replaced. A later claim requires a new
+head produced by verified accounting and a previously unused scheduled action.
+No operation signs, sends, resets signer allowances, releases the original claim,
+or activates an automated Mainnet runner. Failed transactions retain their fees.
+Unexplained transfers, incomplete records and conflicting claims stop progression
+instead of resetting balances. Returned balances are historical base-unit strings,
+not a fresh quotation or permission to spend.
+
+New paper claims retain the exact unsigned request atomically, so recovery can
+read it after expiry without acquiring a new quote or extending its validity.
+Historical claims lacking those bytes require their original retained request.
+Upgrade acquisition, claim, recovery and accounting readers together before writing the new
+records; older strict readers cannot decode the added evidence fields. Keep all
+original claim journals and the existing signer authorization ledger paths.
+
+`ReadWalletStrategyOutcome` projects only a specified wallet accounting hash
+whose reserved claim, terminal and full retained recovery balances agree. Its
+knowledge time is the accounting record time; a reservation, submission or
+unaccounted terminal cannot be used as a completed trade. Historical outcomes
+remain readable after later actions without applying them again.
+Finalized readers use the exact action archive when active recovery is absent or
+belongs to another action. Same-action active conflicts and malformed selected
+evidence still fail; archived evidence never reopens an action for submission.
+
+The separate `shadow.AccountedStrategy` calculation path preserves the original
+adaptive observation history, cost basis, drawdown and risk latch. It applies
+exact finalized amounts through shared ledger arithmetic, never simulated
+settlement. Pending work does not expire at the paper settlement deadline;
+successful outcomes alone advance fill cooldown and round-trip direction.
+Repeated accounting identities must match their original amounts and application
+time. Quote opportunities remain subject to existing size and cost gates.
+This calculation type performs no I/O. The journal below persists its history;
+a driver still must bind subsequent decisions to exact claims and pass the
+existing signing controls. The
+current exact ledger supports unsplit SOL/USDC balances only. Rent recovered
+from pre-existing wrapped-SOL accounts requires additional capital-basis
+evidence; it is not silently counted as trading profit.
+
+`InitializeStrategyJournal`, `ReadStrategyJournal` and `ObserveStrategyJournal`
+persist the first reserved strategy and subsequent market observations in a
+separate strict journal. Initialization recomputes the original intent from the
+complete policy, history, review bounds and retained unsigned candidate, then
+matches the exact claim and original wallet opening. The opening must precede
+the first recorded price; current balances cannot replace its historical basis.
+Restart reconstructs that same history. Identical observation retries do not
+append twice, and incomplete tails are rejected without repair. Dependency
+journals must remain at their protected absolute paths.
+
+`ApplyStrategyJournalOutcome` consumes the original claim's exact verified wallet
+accounting once. It rechecks the retained claim, terminal, account balances and
+signed recovery evidence, including action-specific archives. The journal stores
+the outcome and a digest of the original typed recovery policy, not operational
+configuration or keys. Reads and observations require that same policy once an
+outcome exists; copied amounts alone cannot recover the strategy.
+
+Source accounting `KnownAt` remains unchanged. The strategy event time records
+when that result was delivered, which cannot precede accounting or earlier
+strategy events. Replay uses the original delivery time for cooldown; retries
+after later observations cannot apply the trade again or refresh its time.
+Failed transactions charge their actual fee without recording a successful fill.
+Subsequent quote opportunities are sized from accounted balances and proceeds.
+
+`CommitStrategyJournalDecision` persists an acquired decision after exact
+accounting. It binds the exact observation prefix and available wallet head to
+the original acquisition digest, receipt time and next protected policy. Replay
+uses the original logical decision time; it never renews the quote. The full typed
+next policy is retained in the protected journal, without private keys. Historical
+wallet-prefix verification remains valid after a later reservation, while a new
+decision requires the current wallet head to be unchanged and available.
+
+`PrepareStrategyWalletClaim` connects that decision to the existing unsigned
+request and reservation path. Existing claims recover before fresh strategy or
+quote reads. Fresh preparation checks the independently supplied next policy,
+both journal heads, original acquisition and observation age, and independent
+native reserve evidence. Acquisition and decision recency are checked again after
+provider calls, before immutable claim creation; schedule checks use that same
+completion time. An interruption before reservation leaves the original request
+recovery-only. This does not grant approval or reset signer spending limits.
+
+`ApplyStrategyContinuationOutcome` delivers subsequent exact accounted outcomes.
+Each event binds its original decision, claim intent, acquisition, request, wallet
+predecessor and recovery-policy digest. Historical typed recovery policies remain
+independent inputs; a missing original policy cannot be replaced by the latest
+configuration. Repeated delivery is read-only and preserves later pending work.
+Replay verifies that the original acquisition was still valid when the claim was
+created, not merely when its earlier strategy decision was committed.
+Successful trades size reverse opportunities from actual finalized proceeds;
+failed transactions retain direction and charge only their verified costs.
+
+`AcquireStrategyWalletClaim` connects a ready persisted observation to checked
+builder acquisition, committed decision and unsigned reservation. Existing claims
+recover before fresh dependencies, and committed decisions resume without another
+builder call. The selected observation head remains bound across acquisition;
+concurrent market-history changes reject commitment instead of switching the
+opportunity. A private per-wallet-head intent is persisted before the builder call
+and binds that observation, exact request, protected policy and age limits across
+restarts. An existing receipt without this intent cannot acquire it retroactively.
+Each acquisition retains its original receipt without renewal. Explicit retirement
+of an expired, uncommitted opportunity permits a distinct next acquisition while
+preserving the same wallet head, claim path and spending controls.
+
+Managed decisions retain the original acquisition intent identity and decision-age
+limit. Commitment and claim preparation use that original limit even if a retry
+requests a longer lifetime; a shorter requested limit still applies. Historical
+claims are checked at their original claim time, not the time of a later replay.
+New managed records require their original intent evidence. Older decisions with
+retained intent evidence also enforce its bound. Older standalone records without
+an intent retain their existing semantics: those records cannot distinguish a
+standalone acquisition from managed history whose intent was already lost. Keep
+all original journals; do not remove intent files to resume expired work.
+
+These journal implementations are shared by the policy authority; existing
+execution APIs forward to them without changing historical record encodings.
+The strategy journal supports repeated outcome/decision progression. The operator
+entry point is `mithril-agent proposal strategy --help`; it supports `initialize`,
+`show`, `observe`, `account`, `prepare`, `acquire`, `step`, `retire-acquisition` and
+`cancel-decision`. `show` exposes the verified
+journal head and pending continuation decision hash from the same replayed
+snapshot. The original first action has no continuation decision hash.
+
+Keep the original authority and recovery policies, and supply original later-leg
+recovery policies with repeated `--historical-submitter-policy` flags. At most
+64 unique recovery-policy files are accepted. `observe` reads protected strict
+JSON containing `at`, `primary`, `secondary`, `quote_primary` and `quote_secondary`;
+the samples use the existing price-trigger schema. The original observation time
+must not be in the future. This command does not fetch or invent observations.
+
+Run `proposal inventory account` for the exact finalized claim before delivering
+its returned wallet head with `proposal strategy --operation account
+--accounting-sha256 HEX`. For later legs, also provide the original decision hash
+with `--decision-sha256 HEX` and its exact `--next-submitter-policy PATH`.
+Delivery advances strategy bookkeeping; it does not credit the wallet again.
+
+`prepare` resumes a committed decision; `acquire` also obtains a fresh candidate
+for a ready observation. Both recover retained claims before loading fresh history
+or provider configuration. Jupiter client setup occurs only when a fresh build is
+actually needed. A recovered claim with `pending=false` still needs the existing
+`proposal inventory reserve` operation for that exact request; recovery itself does
+not repair a failed reservation or authorize execution.
+
+For read-only current-day research, `shadow run --publish-research-prefix`
+optionally publishes a private `.prefix.json` beside the current daily journal.
+The descriptor identifies an fsynced prefix and is published before current status;
+it permits a verified concurrent reader without changing the writer lock. This
+option is off by default. Publication failure stops that opted-in run after the
+observation is retained, rather than publishing unbound current status.
+
+`research performance --policy PATH --journal-dir DIR --max-age 2m` verifies and
+replays that exact current-day prefix using the existing report accounting. It
+includes negative realized and unrealized results, costs, drawdown and comparison
+with holding. Realized results already include fees. Both the prefix and its last
+usable price mark must be fresh; recent outage records cannot refresh an old mark.
+The output labels reset-daily, partial-period paper results and observation bucket
+coverage. It is diagnostic-only, not completed evaluation or live-wallet evidence.
+It verifies supplied policy/journal identity, not active deployment ownership.
+The reader never substitutes another day, policy, journal or stored report.
+
+`research allocation-performance --generation DIR --market sol|jup
+--role pre-champion|champion --max-age 2m` adds that allocation binding. It checks
+the canonical instruction, portfolio book and role ownership marker, and resolves
+the champion policy already pinned by today's journal separately from its next
+selected candidate. It rechecks identity and freshness after replay and emits
+hashes rather than private paths. An identity change, ambiguous current-day
+journal or unavailable prefix produces no performance values. The reader
+accepts the deployment's protected root-owned `0750` generation directory;
+the final generation cannot be a symlink or group/world writable. Policy and
+prefix files and role journal directories retain their private-file checks.
+This binding is not a process-health claim: the host research wrapper checks the fixed active
+selector and active/inactive observer roles before and after each collection.
+The wrapper collects this context afresh on every research attempt and uses
+`unavailable` on failure, never an old base result or a fabricated zero. The paper
+generation wrapper opts in only pre-champion and champion observers. These
+partial results can guide a hypothesis but are not untouched out-of-sample
+evaluation, external verified news or permission to change trading policy.
+
+`research allocation-quotes --generation DIR --market sol|jup
+--role pre-champion|champion --max-age 30s` reads a paired Jupiter Metis quote
+under the same allocation identity checks. It requires the existing
+`MITHRIL_AGENT_JUPITER_API_KEY` environment setting. The first leg uses the
+actual day-pinned policy's initial amount and direction; the reverse uses its
+estimated output. This is neither a current-inventory quote nor the next
+dynamically sized order. Raw amounts use the emitted input/output decimals;
+those decimals swap roles for the reverse leg. `price_impact_pct` is a decimal
+ratio: `0.001` means 0.1%. The client retains its existing 32-account route bound.
+
+Both response receipts must fall inside their requests, remain ordered and be
+fresh at the final allocation recheck. `max_receipt_age_millis` is the configured
+age limit (one millisecond to one minute); `received_at` is host receipt time,
+not provider quote creation or a price-validity guarantee. The whole command
+has a 30-second timeout. A missing quote, invalid response or changed binding
+produces no diagnostic JSON. No private journal, order or balance is changed.
+
+The output is single-provider diagnostic evidence, not a recorded research
+basis, independent verification, operational qualification or trade authority.
+`round_trip_route_loss_bps` uses expected outputs and is floored at zero when
+the hypothetical return is larger; zero is not a free round trip or profit.
+Network/priority fees, account rent, failures and subsequent price movement
+are not an all-in cost estimate. The two sequential quotes are not an executed
+round trip. The research wrapper collects these snapshots near the end of
+context assembly on every attempt, with the same selector/service checks as
+performance. Failure produces `unavailable`; partial output and raw errors are
+discarded. The prompt labels freshness at `checked_at`, not at the later model
+decision, and does not promote quotes into independently verified facts.
+
+Before deployment, prefer a dedicated systemd credential named `jupiter-api-key`,
+provisioned with `LoadCredentialEncrypted=` in a reviewed research-service drop-in.
+The wrapper reads it from `CREDENTIALS_DIRECTORY` without a helper process. A
+present empty or unsafe credential does not fall back to an environment key.
+When the credential is absent, the existing `MITHRIL_AGENT_JUPITER_API_KEY`
+environment input remains supported; the wrapper immediately unsets it.
+Only the host quote subprocess receives the key in its environment, never in
+arguments or the prompt. A service `EnvironmentFile=` also exposes its values
+to preflight commands, so it is not equivalent to credential-file delivery.
+Do not source an entire credentials file or add a key environment entry or mount
+to Hermes Compose. The checked-in research service does not provision this key;
+without explicit configuration, quote context remains unavailable. This change
+does not install the wrapper or activate quote collection on an existing host.
+
+`step` runs one unsigned recovery-first cycle with the explicit inventory path.
+It verifies and delivers exact pending finalized accounting before reading prices.
+The original first claim uses its original recovery policy; later pending claims
+use their exact `--next-submitter-policy`, or one uniquely matching policy from
+the explicit `--historical-submitter-policy` inputs. Selection matches the pending
+decision's protected execution envelope, not the direction of the next trade.
+Distinct matching policies are ambiguous even when only one has available recovery
+evidence; no alternative archive is probed to resolve that ambiguity. Identical
+full policy digests count once. An explicit next recovery policy never falls back
+to historical candidates. Missing finality still blocks. A crash between wallet
+accounting and strategy delivery can be retried
+without changing the original accounting knowledge time or applying it twice.
+
+An idle strategy is not proof of an idle wallet. Reconciliation also checks the
+current wallet for pending claims, balance conflicts, future records and retained
+current-head claim/acquisition journals. Nonempty acquisition evidence reports
+`acquisition_pending`, not a usable quote: `step` invokes the existing acquisition
+verifier before any new observations. Torn or unsafe journals fail closed. Claims
+that still need reservation are not automatically repaired or replaced.
+
+When genuinely idle, `step` reads the existing pinned Pyth/Kraken SOL and USDC
+sources through `MITHRIL_AGENT_SHADOW_RPC_URL`, preserving their published times.
+Legacy v4 policies retain their original empty market field, which denotes
+SOL/USDC; source selection does not upgrade or rewrite the policy. Current
+policies still require their explicit supported market and pinned source pair.
+Independent provider pairs overlap their reads using the same shared helper as
+paper mode. Observation time is captured after all four reads. These prices are
+advisory inputs; they do not replace independent execution evidence or simulate
+transaction settlement. A ready opportunity requires the explicit next authority
+policy and age bounds; the current schedule window comes from that protected
+policy, not a caller-selected reset. The reported observation decision/time are
+separate from `current_head_sha256`, which may reflect a concurrent later update.
+`strategy_pending` describes only that strategy; always check `blocked_reason`
+because another wallet claim can block an otherwise idle strategy.
+
+For repeated unsigned steps, supply both `--buy-authority-policy PATH` and
+`--sell-authority-policy PATH` instead of `--next-authority-policy`. Buy denotes
+USDC to SOL and sell denotes SOL to USDC. Verified strategy state selects the
+direction after delivering any finalized outcome. Failed execution preserves the
+original direction; successful execution uses the direction and actual proceeds
+retained by the existing accounting model. Only the selected file is loaded when
+an acquisition or preparation is needed, and its route must match that direction.
+An unresolved claim still stops the cycle without loading either next policy.
+
+The pair must contain distinct clean absolute paths, separate from the journals.
+Selection never rewrites policies or renews a decision, changes spending limits,
+or tries the opposite policy after a failure. Retained acquisitions and committed
+decisions must still match their exact original policy. Keep the originals for
+replay and explicit retirement/cancellation. Recovery policy inputs remain
+explicit; neither authority selection nor historical recovery matching configures
+custody, discovers files, or starts an unattended trader.
+
+The optional `deploy/unsigned-strategy/run-once.py` wrapper runs exactly this
+`step` command under wallet and status-directory locks. It accepts the existing
+step flags after `--`, not arbitrary commands or a shell configuration. Its
+fixed installed agent path is `/usr/local/libexec/mithril-agent/mithril-agent`.
+The private `--state-dir` must already exist. A cycle publishes atomic
+`status.json` with its configuration digest, start/deadline/completion times and
+explicit false `can_sign`/`can_submit` values. It distinguishes an observed
+non-opportunity, blocked work, an unsigned reservation awaiting finality, a
+failure, interruption and timeout. Raw command output, paths and errors are not
+published. Exit 75 means another cycle owns a lock; its status is left intact.
+Never label a `running` record past its deadline as healthy, or a completed
+record as current without comparing its completion time to the configured
+cadence. A missing status is unavailable, not proof that no opportunity exists.
+
+The accompanying `mithril-agent-unsigned-strategy.service` and `.timer` are
+disabled-by-default examples, not installed or enabled by a CLI operation.
+They use a bounded one-shot and schedule the next cycle after completion,
+without catch-up bursts. Before installation, review the existing journal owner,
+exact original paths, policy age limits, RPC environment and writable recovery
+locations. Add every required original later-leg recovery policy explicitly with
+`--historical-submitter-policy`; do not discover or regenerate them. The example
+paths do not initialize a wallet or migrate journals, and its limited writable
+directory must not be broadened to signer state. Keep credentials and original
+policies private; do not put secrets in command arguments.
+
+This is unsigned progression, not a read-only monitor. The existing step can
+append verified accounting and create a guarded unsigned claim/reservation.
+The wrapper does not independently reserve, repair, cancel, retire, sign or
+submit anything. Retained unresolved work still blocks new opportunities, and
+an unsigned reservation cannot produce its own finalized transaction evidence.
+Run `python3 -B -m unittest discover -s deploy/unsigned-strategy -p 'test_*.py'`
+for wrapper checks. Set `MITHRIL_AGENT_QA_CLI` to a separately built agent and run
+`go test ./policyauthority -run TestStrategyRunnerCompiledCLI` to verify repeated
+wrapper calls against the original protected journal fixtures.
+
+`retire-acquisition` explicitly retires an expired opportunity that never became
+a committed decision or claim. Pass the common original history inputs,
+`--inventory PATH`, `--acquisition PATH` and that acquisition's original
+`--next-authority-policy PATH`. When blocked on retained acquisition evidence,
+`step` reports its `acquisition_path`; use that exact path rather than guessing
+the current generation. The operation
+validates original intent, quote provenance, expiry, available wallet and strategy
+history before appending a retirement event. Original files remain unchanged.
+Retirement changes no balances, risk history, pending orders or spending limits.
+Repeated retirement is read-only, including after later progress. The next
+acquisition has a distinct path and requires a fresh observation; old retired
+receipts cannot be reused through another path. No RPC or signing is performed.
+
+`cancel-decision` resolves an expired continuation decision that never created a
+claim or reservation. Pass the common original history inputs, `--inventory PATH`
+and the exact `--decision-sha256 HEX` reported by `show`. The operation checks
+the original receipt lifetime and observation-age limit; it accepts no replacement
+age, policy or balance. It cannot cancel the original first action, a submitted
+order, or any decision with uncertain claim evidence. Keep those records and
+resolve their actual execution history instead.
+
+Cancellation appends an event and clears only that pending decision. Balances,
+actual outcome history, strategy observations, cooldown, risk state and spending
+limits remain intact. A fresh observation is needed for the next acquisition,
+which uses a distinct generation; the canceled receipt cannot be reused. Retrying
+the same cancellation returns current verified state without touching newer work.
+This operation performs no network calls, signing or submission.
+
+No recurring timer or deployed service is activated by this command. A
+terminal alone or timeout cannot clear pending work. A committed decision awaiting
+its claim is different from an uncommitted receipt: use the matching explicit
+operation, not `retire-acquisition` for a committed decision. Do not delete its journals
+or reuse submitter recovery retirement to bypass these checks. Replay scans the bounded
+full history; capacity limits stop writes rather than discard evidence. These
+APIs do not activate a deployed autonomous execution driver.
 
 ### Mainnet custody backend and cutover still required
 
@@ -2648,7 +3020,7 @@ mithril-agent-submitter \
 
 Run it with the configured Mithril RPC and the two policy-bound independent
 evidence RPCs. It re-opens the exact prepared record under its cross-process
-lock and repeats the same immutable-candidate check used before signing. With
+lock and repeats the same immutable-candidate check used before signing.
 The operator-signed schedule end is an approval expiry: readiness refuses it
 before opening an RPC once that time has passed. With fresh finalized contexts
 it checks Mainnet identity, the pinned Jupiter
@@ -2658,6 +3030,20 @@ lifetime. It then requires both witnesses to return fresh
 `isBlockhashValid=true` at or after that new evidence context. It returns only
 `ok` and the public action ID. The command rejects a submitter key, and the
 readiness package interface exposes no transaction-submission method.
+
+After the separate qualification and exact-action control approval, the explicit
+keyless `mithril-agent-submitter --policy PATH --submit-mainnet` command can
+submit only the transaction already persisted by preparation. It does not read
+signer input, load a key, arm control, rebuild a transaction or retry in a loop.
+It repeats readiness under the existing control and recovery locks. Invocation
+is restricted by the private policy, recovery and control file permissions, not
+by a root-UID check; do not grant those files to the research agent.
+
+Its JSON state is `accepted` or `ambiguous`, never confirmation of a fill.
+Even a command error can follow a broadcast if writing the output fails. Inspect
+recovery evidence before retrying; do not prepare replacement bytes to resolve
+uncertainty. Mainnet agent-socket submission remains disabled, and generated
+services do not invoke this operator command.
 
 Solana considers the blockhash expired only after that height is exceeded. The
 equality rejection above is a deliberate submission-headroom policy: the
@@ -2711,8 +3097,8 @@ during the preceding network checks cannot reach broadcast. A
 transport error remains ambiguous. The default `stop_only` policy cannot create
 a second attempt; `exact_retry` permits exactly one resubmission of the same
 persisted bytes and never creates a new signature.
-No command, socket operation, generated service, or
-strategy runner calls this boundary yet.
+Only the explicit keyless `--submit-mainnet` command invokes this boundary.
+Socket operations, generated services and strategy runners do not call it.
 
 The installed Devnet sender follows the same binding rule: both senders derive
 the control path and profile fingerprint from their protected submitter policy.
@@ -2768,8 +3154,9 @@ response attestation, sealing, independent submitter validation, and a pinned
 Turnkey v2 transaction-signing adapter. Both the Turnkey and self-hosted
 file-key implementations are callable only through explicit bounded signer
 CLI/socket configuration; no generated service chooses either one. The
-submitter command can prepare recovery evidence offline, but no Mainnet submit
-path is operational. Qualify a hosted adapter against a real
+submitter command can prepare recovery evidence offline and exposes a separate
+keyless command for guarded submission of that exact prepared transaction.
+Neither command qualifies or enables a funded deployment. Qualify a hosted adapter against a real
 test organization and wallet using
 version-0 transactions, address lookup tables, every Jupiter instruction the
 policy permits, deterministic idempotency keyed by `request_sha256`, outage and
@@ -3136,8 +3523,8 @@ The live Orca and Jupiter tests are read-only. The Jupiter tests fetch one
 proposal in each direction, verify the pinned on-chain deployment and its
 program-owned Anchor IDL, and require one current proposal to retain the
 supported `route_v2` contract; the wallet address is watch-only and no key is
-read. No command, generated service, or strategy runner can invoke the
-unexported Mainnet sender, and there is no external-RPC submission fallback.
+read. These tests never invoke the guarded Mainnet sender. Only the separate
+explicit operator command can do so; there is no external-RPC submission fallback.
 Shadow mode and `proposal check` can read Mainnet, but neither can sign; see
 "Shadow mode" below.
 
@@ -3401,8 +3788,75 @@ hold benchmark.
 the original policy made, not every hypothetical threshold. Changed-threshold
 fills are therefore derived from `--spread-bps`. The report states that in its own output and in its JSON
 (`"pool_modelled": true`), because a modelled number presented as an observed
-one is worse than no backtest — somebody will size a real position on it. Read
-the pool's real spread with `swap discover` and set the flag from what you see.
+one is worse than no backtest — somebody will size a real position on it. A
+current `swap discover` quote can inform a forward experiment, but cannot prove
+the cost of a hypothetical historical trade. Historical calibration requires
+recorded quotes for the relevant time, direction, and size.
+
+For adaptive policies, add `--explain-filters --json` to see why modeled signals
+were rejected. `filtered_reasons` counts quote-gate rejections, not failed venue
+executions. Quote errors still count as missed observations. This diagnostic
+does not change the policy, cost assumptions, or journal; it cannot be combined
+with `--risk-lanes` or `--cost-experiment`.
+
+To compare one frozen recorded-basis research proposal with its unchanged base
+policy, use the read-only retrospective diagnostic:
+
+```bash
+mithril-agent research packet-backtest --in STORED_PACKET \
+  --packet-sha256 PACKET_CONTENT_SHA256 --policy BASE_POLICY \
+  --journal-dir JOURNAL_DIR --day OBSERVATION_DAY --spread-bps 100
+```
+
+The packet must be an accepted-format recorded-basis candidate with the exact
+content digest. Its observation day must match `--day`; the command reconstructs
+the recorded evidence from the base policy's authenticated journal before applying
+the bounded parameter change. It compares just those two policies with identical
+explicit modeled costs. The output retains journal and policy identities, fill
+counts, quote-filter reasons, equity, drawdown and results versus holding.
+The bounded `parameter_changes` entries identify each tested parameter's name,
+original value and proposed value; they are copied only after policy binding.
+
+This is consumed training data, not an unseen test or a current recommendation.
+An expired packet can be studied at its original creation time without renewing
+its authority; future-dated packets are rejected. The command does not read a
+validation day, search parameters, create a challenger, change policy or write
+an output file. Real-time research and strategy-qualification gates are unchanged.
+
+Two additional read-only diagnostics use the immediately preceding complete
+UTC day's authenticated journal and exact current SOL/USDC or JUP/USDC policy:
+
+```bash
+mithril-agent research attribution --policy PATH --journal-dir DIR
+mithril-agent research event-wake-experiment --policy PATH --journal-dir DIR \
+  --window 5m --move-bps 100 --cooldown 30m --max-gap 2m \
+  --simulated-busy 3m --max-calls 48
+```
+
+`attribution` groups realized cost-basis changes by the strategy and regime of
+the original signal, never the later settlement observation. Its totals
+reconcile to the existing ledger; unknown labels and missed or pending signals
+remain explicit. Realized amounts are not whole-round-trip profit or total
+account return. Opening equity, closing equity, net account change, unrealized
+inventory change and the holding comparison are reported alongside the groups.
+The report verifies that realized plus unrealized equals closing minus opening.
+`first_price_at` identifies the actual opening observation separately from the
+UTC reporting window; low coverage is not a complete day's result. These daily
+reset observations must not be compounded into a continuous wallet balance.
+Fees are already included through cost basis; the separately
+reported fee valuation must not be deducted again. Invalid settlement evidence
+fails the report rather than producing partial or guessed attribution.
+
+`event-wake-experiment` compares a synthetic hourly-only lane with hourly plus
+price-move requests over the same day. Both use the same total call budget and
+assumed processing duration. Busy requests are coalesced without a stale queue;
+gaps reset the price window. Durations must be whole seconds. These declared
+defaults are test inputs, not optimized strategy settings. The hourly schedule
+uses UTC hour boundaries, not the deployed timer's offset or jitter. Reported
+calls are simulated, including scheduled requests when price evidence is absent;
+coverage and gap counts must be read alongside them. No service, model, network
+request, policy update or trade is started. This experiment measures scheduling
+load, not research quality, production latency or trading returns.
 
 The model is deliberately pessimistic: it always fills worse than the oracle, in
 both directions, and a wider spread always fills worse than a narrow one.

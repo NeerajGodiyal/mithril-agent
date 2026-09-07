@@ -20,6 +20,12 @@ jobs:
       - run: make verify-source
       - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/hermes-research -p 'test_*.py'
       - run: make test
+      - name: Test compiled CLI recovery
+        run: |
+          go build -o "$RUNNER_TEMP/mithril-agent" ./cmd/mithril-agent
+          MITHRIL_AGENT_QA_CLI="$RUNNER_TEMP/mithril-agent" go test ./policyauthority -run CompiledCLI -count=1
+      - run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/unsigned-strategy -p 'test_*.py'
+      - run: node paperdashboard/page-check.mjs
       - run: make test-route-guard
       - run: make build
 
