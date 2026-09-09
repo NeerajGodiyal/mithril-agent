@@ -23,6 +23,7 @@ const researchUsage = `Usage:
   mithril-agent research observations --policy PATH --journal-dir DIR
   mithril-agent research behavior --policy PATH --journal-dir DIR
   mithril-agent research attribution --policy PATH --journal-dir DIR
+  mithril-agent research cost-sensitivity --policy PATH --journal-dir DIR
   mithril-agent research event-wake-experiment --policy PATH --journal-dir DIR [--help]
   mithril-agent research performance --policy PATH --journal-dir DIR [--max-age 2m]
   mithril-agent research allocation-performance --generation DIR --market sol|jup --role pre-champion|champion [--max-age 2m]
@@ -38,6 +39,8 @@ func runResearch(args []string, output io.Writer) error {
 		return err
 	}
 	switch args[0] {
+	case "cost-sensitivity":
+		return runResearchCosts(args[1:], output, time.Now)
 	case "attribution":
 		return runResearchAttribution(args[1:], output, time.Now)
 	case "event-wake-experiment":
@@ -59,7 +62,7 @@ func runResearch(args []string, output io.Writer) error {
 	case "packet-record":
 		return runResearchPacketRecord(args[1:], output, time.Now)
 	default:
-		return errors.New("research expects packet-backtest, packet-record, packet-project, observations, behavior, attribution, event-wake-experiment, performance, allocation-performance, or allocation-quotes")
+		return errors.New("research expects packet-backtest, packet-record, packet-project, observations, behavior, attribution, cost-sensitivity, event-wake-experiment, performance, allocation-performance, or allocation-quotes")
 	}
 }
 

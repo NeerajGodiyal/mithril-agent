@@ -85,13 +85,16 @@ fake_runuser() {
     printf credential > "$generation/violation"; exit 9
   fi
   age=2m
-  [ "$requested_diagnostic" != quotes ] || age=30s
-  case "$*" in *"research allocation-$requested_diagnostic --generation "*" --market "*" --role "*" --max-age $age") ;; *) exit 9;; esac
+  suffix=
+  count=14
+  [ "$requested_diagnostic" != quotes ] || { age=30s; suffix=' --include-inventory'; count=15; }
+  [ "$#" -eq "$count" ] || exit 9
+  case "$*" in *"research allocation-$requested_diagnostic --generation "*" --market "*" --role "*" --max-age $age$suffix") ;; *) exit 9;; esac
   printf called > "$generation/called"
   if [ "$mode" = marker-drift ]; then touch "$generation/status/sol/champion-owned" "$generation/status/jup/champion-owned"; fi
   if [ "$mode" = command-error ]; then printf 'PRIVATE_TOKEN/partial-output'; printf 'PRIVATE_TOKEN/path' >&2; exit 1; fi
   if [ "$requested_diagnostic" = quotes ]; then
-    printf '{"size_basis":"initial_policy_lot","round_trip_route_loss_bps":0,"role_binding_verified":true,"process_health_verified":false}'
+    printf '{"size_basis":"initial_policy_lot","round_trip_route_loss_bps":0,"role_binding_verified":true,"process_health_verified":false,"inventory":{"status":"quoted","size_basis":"journal_base_inventory","base_units":"123"}}'
   else
     printf '{"realized_micros":-100,"unrealized_micros":-200,"fees_micros":10,"role_binding_verified":true,"process_health_verified":false,"performance":{"active_role_verified":false}}'
   fi
@@ -121,6 +124,9 @@ fake_runuser() {
 						t.Fatal("verified negative performance was not preserved")
 					}
 					if diagnostic == "quotes" && (strings.Count(text, `"size_basis":"initial_policy_lot"`) != 2 ||
+						strings.Count(text, `"inventory":{"status":"quoted","size_basis":"journal_base_inventory","base_units":"123"}`) != 2 ||
+						!strings.Contains(text, "no_base_inventory means no base-token holding") ||
+						!strings.Contains(text, "not the inventory exit") ||
 						!strings.Contains(text, "Zero route loss is not profit") || !strings.Contains(text, "may already be stale")) {
 						t.Fatal("quote values or diagnostic limitations missing")
 					}

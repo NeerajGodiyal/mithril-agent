@@ -11,14 +11,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/jupiterquote"
 )
 
-const researchAllocationQuotesUsage = `Usage: mithril-agent research allocation-quotes --generation DIR --market sol|jup --role pre-champion|champion [--max-age 30s]
+const researchAllocationQuotesUsage = `Usage: mithril-agent research allocation-quotes --generation DIR --market sol|jup --role pre-champion|champion [--max-age 30s] [--include-inventory]
 
 Reads two sequential Jupiter Metis quotes for the actual allocation policy's
 initial lot, then its hypothetical reverse. This is not the current position
-or the next dynamically sized order. Requires MITHRIL_AGENT_JUPITER_API_KEY.
+or the next dynamically sized order. With --include-inventory, also quotes selling
+the full base-token inventory in a verified paper prefix no older than two minutes.
+That prefix must remain unchanged during collection. This is a liquidation-size
+diagnostic, not an order recommendation; separately held fee reserves are excluded.
+Requires MITHRIL_AGENT_JUPITER_API_KEY.
 Amounts are raw token units; priceImpactPct is a decimal ratio, not a percentage.
 Freshness bounds local response receipts, not provider creation or price validity.
 Route loss is not an all-in cost: network/priority fees, account rent, failed
@@ -50,6 +55,19 @@ type researchAllocationQuotes struct {
 	Initial               shadowMarketCurveQuote    `json:"initial"`
 	Reverse               shadowMarketCurveQuote    `json:"reverse"`
 	RoundTripRouteLossBPS uint16                    `json:"round_trip_route_loss_bps"`
+	Inventory             *researchInventoryQuote   `json:"inventory,omitempty"`
+}
+
+type researchInventoryQuote struct {
+	Status          string                  `json:"status"`
+	SizeBasis       string                  `json:"size_basis"`
+	BaseUnits       uint64                  `json:"base_units,string"`
+	InputDecimals   uint8                   `json:"input_decimals"`
+	OutputDecimals  uint8                   `json:"output_decimals"`
+	ObservedThrough time.Time               `json:"observed_through"`
+	MarkPublishedAt time.Time               `json:"mark_published_at"`
+	Journal         journal.DurablePrefix   `json:"journal"`
+	Quote           *shadowMarketCurveQuote `json:"quote,omitempty"`
 }
 
 func runResearchAllocationQuotes(args []string, output io.Writer) error {
@@ -59,6 +77,7 @@ func runResearchAllocationQuotes(args []string, output io.Writer) error {
 	market := flags.String("market", "", "sol or jup")
 	role := flags.String("role", "", "pre-champion or champion")
 	maxAge := flags.Duration("max-age", 30*time.Second, "maximum local response receipt age")
+	includeInventory := flags.Bool("include-inventory", false, "also quote the verified current base inventory")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			_, err = fmt.Fprintln(output, researchAllocationQuotesUsage)
@@ -80,7 +99,7 @@ func runResearchAllocationQuotes(args []string, output io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	artifact, err := collectResearchAllocationQuotes(ctx, *generation, *market, *role, *maxAge, quotes, time.Now)
+	artifact, err := collectResearchAllocationQuotes(ctx, *generation, *market, *role, *maxAge, quotes, time.Now, *includeInventory)
 	if err != nil {
 		return err
 	}
@@ -93,6 +112,7 @@ func collectResearchAllocationQuotes(
 	maxAge time.Duration,
 	quotes shadowMarketCurveQuoteSource,
 	now func() time.Time,
+	includeInventory bool,
 ) (researchAllocationQuotes, error) {
 	if ctx == nil || quotes == nil || now == nil || maxAge < time.Millisecond || maxAge > time.Minute {
 		return researchAllocationQuotes{}, errors.New("allocation quote source or receipt age is invalid")
@@ -122,8 +142,32 @@ func collectResearchAllocationQuotes(
 		OutputMint: source.policy.QuoteRoute.OutputMint, InputAmount: source.policy.InputAmount,
 		SlippageBPS: source.policy.SlippageBPS,
 	}
+	legs := []*shadowMarketCurveQuote{&artifact.Initial, &artifact.Reverse}
+	if includeInventory {
+		performance, err := buildResearchPerformance(source.policy, source.directory, started, 2*time.Minute)
+		if err != nil {
+			return researchAllocationQuotes{}, err
+		}
+		artifact.Inventory = &researchInventoryQuote{
+			Status: "no_base_inventory", SizeBasis: "journal_base_inventory",
+			BaseUnits: performance.BaseUnits, InputDecimals: performance.BaseDecimals, OutputDecimals: performance.QuoteDecimals,
+			ObservedThrough: performance.ObservedThrough, MarkPublishedAt: performance.MarkPublishedAt, Journal: performance.Journal,
+		}
+		if performance.BaseUnits > 0 {
+			artifact.Inventory.Status = "quoted"
+			artifact.Inventory.Quote = &shadowMarketCurveQuote{}
+			legs = append(legs, artifact.Inventory.Quote)
+		}
+	}
 	previous := started
-	for _, leg := range []*shadowMarketCurveQuote{&artifact.Initial, &artifact.Reverse} {
+	for index, leg := range legs {
+		if index == 2 {
+			request.InputMint, request.OutputMint = source.policy.QuoteRoute.InputMint, source.policy.QuoteRoute.OutputMint
+			if !source.policy.IsSell() {
+				request.InputMint, request.OutputMint = request.OutputMint, request.InputMint
+			}
+			request.InputAmount = artifact.Inventory.BaseUnits
+		}
 		if err := ctx.Err(); err != nil {
 			return researchAllocationQuotes{}, err
 		}
@@ -149,10 +193,20 @@ func collectResearchAllocationQuotes(
 	if err != nil {
 		return researchAllocationQuotes{}, err
 	}
+	if includeInventory {
+		performance, err := buildResearchPerformance(after.policy, after.directory, now().UTC(), 2*time.Minute)
+		if err != nil || performance.Journal != artifact.Inventory.Journal || performance.BaseUnits != artifact.Inventory.BaseUnits {
+			return researchAllocationQuotes{}, errors.New("allocation inventory prefix changed or became unavailable during collection")
+		}
+	}
 	finished := now().UTC()
 	if ctx.Err() != nil || finished.Before(previous) || dayKey(started) != dayKey(finished) ||
 		!sameResearchAllocation(source, after) || finished.Sub(artifact.Initial.ReceivedAt) > maxAge {
 		return researchAllocationQuotes{}, errors.New("allocation quote identity or receipt freshness changed during collection")
+	}
+	if includeInventory && (finished.Sub(artifact.Inventory.ObservedThrough) > 2*time.Minute ||
+		finished.Sub(artifact.Inventory.MarkPublishedAt) > 2*time.Minute) {
+		return researchAllocationQuotes{}, errors.New("allocation inventory or valuation became stale during collection")
 	}
 	artifact.CheckedAt = finished
 	if artifact.Reverse.EstimatedOutput < artifact.Initial.InputAmount {

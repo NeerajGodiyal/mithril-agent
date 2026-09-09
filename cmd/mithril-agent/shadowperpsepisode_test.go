@@ -222,7 +222,7 @@ func TestPerpsEpisodePrefixFailurePreventsExternalReader(t *testing.T) {
 }
 
 func TestPerpsEpisodeOneFrameBindingAndStaleReceiptRefused(t *testing.T) {
-	parent := t.TempDir()
+	parent := privateTestDirectory(t)
 	state := filepath.Join(parent, "current")
 	at := time.Date(2026, 9, 5, 12, 5, 30, 0, time.UTC)
 	reader := validStubShadowPerpsReader(at)
@@ -270,7 +270,7 @@ func TestPerpsEpisodeOneFrameBindingAndStaleReceiptRefused(t *testing.T) {
 }
 
 func TestPerpsEpisodeRejectsFinalizationAfterTerminal(t *testing.T) {
-	parent := t.TempDir()
+	parent := privateTestDirectory(t)
 	state := filepath.Join(parent, "current")
 	at := time.Date(2026, 9, 5, 12, 5, 30, 0, time.UTC)
 	reader := validStubShadowPerpsReader(at)

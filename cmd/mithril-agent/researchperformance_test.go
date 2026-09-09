@@ -81,7 +81,8 @@ func TestResearchPerformanceReplaysLossesWhileWriterIsActive(t *testing.T) {
 	}
 	report, err := buildShadowReport(policy, dayKey(now), ticks)
 	if err != nil || got.RealizedMicros != report.RealizedMicros || got.UnrealizedMicros != report.UnrealizedMicros ||
-		got.FeesMicros != report.FeesMicros || got.EquityMicros != report.ClosingEquityMicros || got.VersusHoldMicros != report.VersusHoldMicros {
+		got.FeesMicros != report.FeesMicros || got.EquityMicros != report.ClosingEquityMicros || got.VersusHoldMicros != report.VersusHoldMicros ||
+		got.BaseUnits != report.BaseUnits || got.QuoteUnits != report.QuoteUnits || got.BaseDecimals != 9 || got.QuoteDecimals != 6 {
 		t.Fatalf("performance changed existing accounting: %+v, %v", got, err)
 	}
 	if !got.PaperOnly || !got.DiagnosticOnly || !got.RealizedIncludesFees || got.RecordedBasisEligible || got.ActiveRoleVerified ||

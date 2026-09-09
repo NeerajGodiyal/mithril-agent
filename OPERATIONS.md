@@ -2487,7 +2487,20 @@ dynamically sized order. Raw amounts use the emitted input/output decimals;
 those decimals swap roles for the reverse leg. `price_impact_pct` is a decimal
 ratio: `0.001` means 0.1%. The client retains its existing 32-account route bound.
 
-Both response receipts must fall inside their requests, remain ordered and be
+The optional `--include-inventory` flag also requests a sell quote for the full
+base-token balance in the role's verified paper journal prefix. This sends the
+token pair and exact simulated holding size to Jupiter; it is off by default.
+The host research wrapper opts in to include this current-position context.
+The prefix and valuation must be no older than two minutes, and the prefix must
+remain unchanged during collection. Missing, stale or changing evidence returns
+no quote artifact. The nested `inventory` object carries the prefix, observation
+time, raw amount and its own input/output decimals. An empty position is
+`no_base_inventory` without a quote. Separately accounted fee reserves are not
+included. This is a liquidation-size diagnostic, not the next strategy order,
+a sell recommendation, or historical fill evidence. The existing initial/reverse
+route-loss calculation is unchanged.
+
+All response receipts must fall inside their requests, remain ordered and be
 fresh at the final allocation recheck. `max_receipt_age_millis` is the configured
 age limit (one millisecond to one minute); `received_at` is host receipt time,
 not provider quote creation or a price-validity guarantee. The whole command
@@ -3823,11 +3836,12 @@ its authority; future-dated packets are rejected. The command does not read a
 validation day, search parameters, create a challenger, change policy or write
 an output file. Real-time research and strategy-qualification gates are unchanged.
 
-Two additional read-only diagnostics use the immediately preceding complete
+Additional read-only diagnostics use the immediately preceding complete
 UTC day's authenticated journal and exact current SOL/USDC or JUP/USDC policy:
 
 ```bash
 mithril-agent research attribution --policy PATH --journal-dir DIR
+mithril-agent research cost-sensitivity --policy PATH --journal-dir DIR
 mithril-agent research event-wake-experiment --policy PATH --journal-dir DIR \
   --window 5m --move-bps 100 --cooldown 30m --max-gap 2m \
   --simulated-busy 3m --max-calls 48
@@ -3846,6 +3860,18 @@ reset observations must not be compounded into a continuous wallet balance.
 Fees are already included through cost basis; the separately
 reported fee valuation must not be deducted again. Invalid settlement evidence
 fails the report rather than producing partial or guessed attribution.
+
+`cost-sensitivity` replays the unchanged adaptive policy at four hypothetical
+per-side spreads: 1, 10, 25 and 100 bps. Each lane retains the same recorded
+prices, policy fees, starting inventory, timing and risk limits, and reports
+fills, filter reasons, opening and closing equity, net change and the holding
+comparison. The spreads are model assumptions, not measured historical quotes.
+All four remain visible; the command does not choose a cheaper assumption or
+write a policy, candidate or order. This is previously observed base-policy
+data, not fresh validation or active-role performance. Sparse coverage and daily
+inventory resets remain explicit. The Hermes wrapper uses the existing pinned,
+read-only diagnostic binary and bounded capture; unavailable output stays unknown.
+These reports cannot qualify as recorded-basis evidence or authorize trading.
 
 `event-wake-experiment` compares a synthetic hourly-only lane with hourly plus
 price-move requests over the same day. Both use the same total call budget and

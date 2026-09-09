@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,11 +13,181 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Overclock-Validator/mithril-agent/journal"
 	"github.com/Overclock-Validator/mithril-agent/jupiterquote"
 	"github.com/Overclock-Validator/mithril-agent/paperdashboard"
+	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
 
 type researchAllocationQuoteFunc func(context.Context, jupiterquote.Request) (jupiterquote.Result, error)
+
+func TestResearchAllocationInventoryBuyPolicyAndEmptyPosition(t *testing.T) {
+	for _, buy := range []bool{false, true} {
+		t.Run(fmt.Sprint(buy), func(t *testing.T) {
+			_, policy, _, _ := shadowPortfolioTestPolicies(t)
+			policy.Adaptive = nil
+			policy.Trigger.ThresholdMicros = 1_000_000
+			if !buy {
+				policy.Trigger.ThresholdMicros = 500_000
+			}
+			roll, err := newDailyJournal(privateTestDirectory(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer roll.Close()
+			at := time.Date(2026, 9, 7, 0, 1, 0, 0, time.UTC)
+			readers := []*shadowSearchReader{
+				{identity: policy.Trigger.PrimarySourceSHA256, price: 1_000_000},
+				{identity: policy.Trigger.SecondarySourceSHA256, price: 1_000_000},
+				{identity: policy.QuotePeg.PrimarySourceSHA256, price: 1_000_000},
+				{identity: policy.QuotePeg.SecondarySourceSHA256, price: 1_000_000},
+				{identity: policy.NativeFeePrice.PrimarySourceSHA256, price: 100_000_000},
+				{identity: policy.NativeFeePrice.SecondarySourceSHA256, price: 100_000_000},
+			}
+			runner, err := shadow.NewRunner(policy, readers[0], readers[1], shadowSearchQuoter(func(sell bool, amount uint64) shadow.Quote {
+				return shadow.Quote{InputAmount: amount, EstimatedOutput: amount, MinimumOutput: amount * uint64(10_000-policy.SlippageBPS) / 10_000}
+			}), roll, readers[2], readers[3], readers[4], readers[5])
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range 3 {
+				at = at.Add(time.Minute)
+				for _, reader := range readers {
+					reader.at = at
+				}
+				if _, err := runner.Step(t.Context(), at); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := roll.publishResearchPrefix(); err != nil {
+				t.Fatal(err)
+			}
+			generation := researchAllocationJournalFixture(t, policy, roll.directory, at)
+			var requests []jupiterquote.Request
+			quotes := researchAllocationQuoteFunc(func(_ context.Context, request jupiterquote.Request) (jupiterquote.Result, error) {
+				requests = append(requests, request)
+				return researchAllocationQuoteResult(request, at), nil
+			})
+			got, err := collectResearchAllocationQuotes(t.Context(), generation, "jup", "pre-champion", time.Minute, quotes, func() time.Time { return at }, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Inventory == nil || got.Inventory.InputDecimals != 6 || got.Inventory.OutputDecimals != 6 {
+				t.Fatal("missing token units")
+			}
+			if buy {
+				if got.Inventory.BaseUnits == 0 || len(requests) != 3 || requests[2].InputAmount != got.Inventory.BaseUnits || requests[2].InputMint != policy.QuoteRoute.OutputMint || requests[2].OutputMint != policy.QuoteRoute.InputMint {
+					t.Fatalf("buy-first policy did not quote selling the acquired token: %+v %+v", got.Inventory, requests)
+				}
+			} else if got.Inventory.Status != "no_base_inventory" || got.Inventory.BaseUnits != 0 || got.Inventory.Quote != nil || len(requests) != 2 {
+				t.Fatalf("empty inventory invented a sell quote: %+v", got.Inventory)
+			}
+		})
+	}
+}
+
+func TestResearchAllocationInventoryQuotesUseVerifiedHoldings(t *testing.T) {
+	for _, name := range []string{"valid", "missing prefix", "stale prefix", "prefix changed", "wrong inventory amount", "third quote unavailable", "expires at final check"} {
+		t.Run(name, func(t *testing.T) {
+			generation, at := researchAllocationPerformanceFixture(t)
+			source, err := resolveResearchAllocation(generation, "sol", "pre-champion", at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			performance, err := buildResearchPerformance(source.policy, source.directory, at, 2*time.Minute)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if performance.BaseUnits == 0 || performance.BaseUnits == source.policy.InputAmount {
+				t.Fatal("fixture must hold a different amount from the initial lot")
+			}
+			path := filepath.Join(source.directory, "shadow-"+dayKey(at)+".jsonl")
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name == "missing prefix" {
+				if err := os.Remove(path + ".prefix.json"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if name == "stale prefix" {
+				at = at.Add(3 * time.Minute)
+			}
+			if name == "expires at final check" {
+				at = at.Add(110 * time.Second)
+			}
+			var requests []jupiterquote.Request
+			quotes := researchAllocationQuoteFunc(func(_ context.Context, request jupiterquote.Request) (jupiterquote.Result, error) {
+				requests = append(requests, request)
+				result := researchAllocationQuoteResult(request, at)
+				if len(requests) == 3 {
+					switch name {
+					case "wrong inventory amount":
+						result.InputAmount++
+					case "third quote unavailable":
+						return jupiterquote.Result{}, errors.New("unavailable")
+					case "prefix changed":
+						lines := bytes.Split(bytes.TrimSuffix(raw, []byte("\n")), []byte("\n"))
+						var last journal.Record
+						if err := json.Unmarshal(lines[len(lines)-2], &last); err != nil {
+							t.Fatal(err)
+						}
+						prefix := performance.Journal
+						prefix.Bytes -= int64(len(lines[len(lines)-1]) + 1)
+						prefix.Records--
+						prefix.ChainHeadSHA256 = last.Hash
+						encoded, err := json.Marshal(prefix)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(path+".prefix.json", encoded, 0600); err != nil {
+							t.Fatal(err)
+						}
+						if _, err := buildResearchPerformance(source.policy, source.directory, at, 2*time.Minute); err != nil {
+							t.Fatalf("changed prefix must itself remain valid: %v", err)
+						}
+					}
+				}
+				return result, nil
+			})
+			clockCalls := 0
+			clock := func() time.Time {
+				clockCalls++
+				if name == "expires at final check" && clockCalls == 9 {
+					return at.Add(10 * time.Second)
+				}
+				return at
+			}
+			got, err := collectResearchAllocationQuotes(t.Context(), generation, "sol", "pre-champion", time.Minute, quotes, clock, true)
+			if name != "valid" {
+				if err == nil || !reflect.DeepEqual(got, researchAllocationQuotes{}) {
+					t.Fatal("unavailable inventory returned a usable quote artifact")
+				}
+				if (name == "missing prefix" || name == "stale prefix") && len(requests) != 0 {
+					t.Fatal("requested quotes before verifying inventory")
+				}
+				if name == "expires at final check" && (clockCalls != 9 || !strings.Contains(err.Error(), "became stale")) {
+					t.Fatalf("did not reach final inventory age guard: calls=%d err=%v", clockCalls, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(requests) != 3 || requests[2].InputAmount != performance.BaseUnits || requests[2].InputMint != source.policy.QuoteRoute.InputMint || requests[2].OutputMint != source.policy.QuoteRoute.OutputMint {
+				t.Fatalf("wrong inventory quote: %+v", requests)
+			}
+			if got.Inventory == nil || got.Inventory.Status != "quoted" || got.Inventory.SizeBasis != "journal_base_inventory" || got.Inventory.BaseUnits != performance.BaseUnits || got.Inventory.Journal != performance.Journal || got.Inventory.ObservedThrough != performance.ObservedThrough || got.Inventory.InputDecimals != 9 || got.Inventory.OutputDecimals != 6 || got.Inventory.Quote.InputAmount != performance.BaseUnits {
+				t.Fatalf("inventory quote lost provenance: %+v", got.Inventory)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(raw, after) {
+				t.Fatal("quote collection changed the paper journal")
+			}
+		})
+	}
+}
 
 func (f researchAllocationQuoteFunc) Quote(ctx context.Context, request jupiterquote.Request) (jupiterquote.Result, error) {
 	return f(ctx, request)
@@ -86,7 +257,7 @@ func testResearchAllocationQuotesPolicyLot(t *testing.T, market string) {
 		requests = append(requests, request)
 		return researchAllocationQuoteResult(request, at), nil
 	})
-	result, err := collectResearchAllocationQuotes(t.Context(), generation, market, "pre-champion", time.Minute, quotes, func() time.Time { return at })
+	result, err := collectResearchAllocationQuotes(t.Context(), generation, market, "pre-champion", time.Minute, quotes, func() time.Time { return at }, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +345,7 @@ func TestResearchAllocationQuotesRejectInvalidEvidence(t *testing.T) {
 				}
 				return result, nil
 			})
-			result, err := collectResearchAllocationQuotes(ctx, generation, "sol", "pre-champion", age, quotes, func() time.Time { return current })
+			result, err := collectResearchAllocationQuotes(ctx, generation, "sol", "pre-champion", age, quotes, func() time.Time { return current }, false)
 			if err == nil || !reflect.DeepEqual(result, researchAllocationQuotes{}) {
 				t.Fatal("invalid quote evidence returned a usable artifact")
 			}
@@ -205,7 +376,7 @@ func TestResearchAllocationQuotesApparentGainIsNotNegativeLoss(t *testing.T) {
 		}
 		return result, nil
 	})
-	result, err := collectResearchAllocationQuotes(t.Context(), generation, "sol", "pre-champion", time.Minute, quotes, func() time.Time { return at })
+	result, err := collectResearchAllocationQuotes(t.Context(), generation, "sol", "pre-champion", time.Minute, quotes, func() time.Time { return at }, false)
 	if err != nil || calls != 2 || result.Reverse.EstimatedOutput != source.policy.InputAmount+1 || result.RoundTripRouteLossBPS != 0 {
 		t.Fatalf("apparent route gain was reported as loss: %+v, %v", result, err)
 	}

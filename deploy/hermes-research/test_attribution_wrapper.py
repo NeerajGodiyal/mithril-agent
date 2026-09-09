@@ -60,8 +60,9 @@ fake_prlimit() {
   [ "$4" = --kill-after=2s ] && [ "$5" = 60s ] && [ "$6" = /usr/sbin/runuser ] &&
   [ "$7" = -u ] && [ "$8" = mithril-agent-research ] && [ "$9" = -- ] || exit 9
   shift 9
-  [ "$1" = "$root/binary" ] && [ "$2" = research ] && [ "$3" = attribution ] &&
+  [ "$1" = "$root/binary" ] && [ "$2" = research ] &&
   [ "$4" = --policy ] && [ "$6" = --journal-dir ] && [ "$#" = 7 ] || exit 9
+  case "$3" in attribution|cost-sensitivity) ;; *) exit 9;; esac
   case "$5:$7" in sol-policy:sol-base|jup-policy:jup-base) ;; *) exit 9;; esac
   /bin/sh -c '[ "${MITHRIL_AGENT_JUPITER_API_KEY+x}" != x ] && [ "${jupiter_api_key+x}" != x ]' || exit 9
   touch "$root/called"
@@ -71,7 +72,11 @@ fake_prlimit() {
   fi
   if [ "$mode" = overflow ]; then head -c 16385 /dev/zero; return; fi
   if [ "$mode" = empty ]; then return; fi
-  printf '{"net_change_micros":"-100","realized_micros":"20","coverage_sufficient":false,"fees_already_included":true}'
+  if [ "$3" = cost-sensitivity ]; then
+    printf '{"kind":"modelled_paper_cost_sensitivity","authorized":false}'
+  else
+    printf '{"net_change_micros":"-100","realized_micros":"20","coverage_sufficient":false,"fees_already_included":true}'
+  fi
 }
 ''' + helper + "\n" + block + '\ncat "$research_query"\n'
             result = subprocess.run(["/bin/sh", "-c", script, "test", directory, mode], capture_output=True, text=True, check=True)
@@ -84,7 +89,10 @@ fake_prlimit() {
     def test_success_and_limits(self):
         output = self.exercise("success")
         self.assertEqual(output.count('"net_change_micros":"-100"'), 2)
+        self.assertEqual(output.count('"kind":"modelled_paper_cost_sensitivity"'), 2)
         for phrase in ("BASE-book", "not current champion", "Fees are already included", "not causal", "do not compound", "new recorded basis"):
+            self.assertIn(phrase, output)
+        for phrase in ("not measured execution costs", "100 bps stress", "do not choose a cheaper assumption", "not a citation", "permission to change a policy"):
             self.assertIn(phrase, output)
 
     def test_unavailable_boundaries(self):
@@ -94,6 +102,7 @@ fake_prlimit() {
                 self.assertIn("SOL/USDC: unavailable", output)
                 if mode != "day-drift":
                     self.assertIn("JUP/USDC: unavailable", output)
+                    self.assertNotIn('"kind":"modelled_paper_cost_sensitivity"', output)
                 else:
                     # The next market starts after midnight and may verify its new day.
                     self.assertEqual(output.count('"net_change_micros":"-100"'), 1)
@@ -113,6 +122,7 @@ fake_prlimit() {
         output = self.exercise("sol-failed")
         self.assertIn("SOL/USDC: unavailable", output)
         self.assertEqual(output.count('"net_change_micros":"-100"'), 1)
+        self.assertEqual(output.count('"kind":"modelled_paper_cost_sensitivity"'), 1)
 
 
 if __name__ == "__main__":

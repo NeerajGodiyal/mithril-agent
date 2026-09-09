@@ -488,7 +488,7 @@ func TestPerpsProposalFrameTimesAcceptCollectorTimestampSemantics(t *testing.T) 
 			case "venue_within_clock_skew":
 				reader.book.Time = at.Add(2 * time.Second).UnixMilli()
 			}
-			parent := t.TempDir()
+			parent := privateTestDirectory(t)
 			state := filepath.Join(parent, "current")
 			if err := runShadowPerpsPaperWith(t.Context(), []string{
 				"--state-dir", state, "--archive-dir", filepath.Join(parent, "runs"), "--symbols", "SOL", "--once",

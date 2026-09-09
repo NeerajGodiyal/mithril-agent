@@ -140,12 +140,14 @@ allocation_diagnostic() (
     [ "$(/usr/bin/systemctl show --property=ActiveState --value "$unit-$other.service")" = inactive ] || exit 1
     if [ "$boundary" = before ]; then
       result=$(
+        set --
         if [ "$diagnostic" = allocation-quotes ]; then
           export MITHRIL_AGENT_JUPITER_API_KEY="${jupiter_api_key-}"
+          set -- --include-inventory
         fi
         /usr/sbin/runuser -u mithril-agent-research -- \
           "$diagnostic_binary" research "$diagnostic" \
-            --generation "$generation" --market "$market" --role "$role" --max-age "$max_age"
+            --generation "$generation" --market "$market" --role "$role" --max-age "$max_age" "$@"
       ) || exit 1
     fi
   done
@@ -153,6 +155,8 @@ allocation_diagnostic() (
 )
 
 attribution_diagnostic() (
+  diagnostic=${2:-attribution}
+  case "$diagnostic" in attribution|cost-sensitivity) ;; *) exit 1 ;; esac
   case "$1" in
     sol) policy=$sol_policy; journals=$sol_journals ;;
     jup) policy=$jup_policy; journals=$jup_journals ;;
@@ -179,7 +183,7 @@ attribution_diagnostic() (
     [ "$(/usr/bin/date -u +%F)" = "$day" ] || exit 1
     if [ "$boundary" = before ]; then
       /usr/bin/prlimit --fsize=16385:16385 -- /usr/bin/timeout --kill-after=2s 60s \
-        /usr/sbin/runuser -u mithril-agent-research -- "$binary" research attribution \
+        /usr/sbin/runuser -u mithril-agent-research -- "$binary" research "$diagnostic" \
           --policy "$policy" --journal-dir "$journals" >"$capture" || exit 1
     fi
   done
@@ -341,6 +345,12 @@ collect_research_packet() (
   if reviewed=$(attribution_diagnostic jup 2>/dev/null); then jup_attribution=$reviewed; fi
   /usr/bin/printf '\nHost-verified prior-day BASE-book origin accounting follows, not current champion or active-role performance. Compare group realized accounting with whole-account net change, unrealized inventory and versus-hold before forming a hypothesis: positive realized groups can coexist with account losses. Fees are already included; fees_micros is a separate valuation, not another deduction. Groups associate settlements with original signals, not causal strategy edge or complete round-trip profit. Check coverage, first-price time, period bounds and unknown/pending origins; missing observations are unknown, not no-trades. Each day resets configured inventory; do not compound days or call low coverage whole-day performance. This internal paper diagnostic is not current market evidence, a citation, a new recorded basis, untouched validation, proven learning, or permission to select or trade. Unavailable means unknown, never zero. SOL/USDC: %s\nJUP/USDC: %s\n' \
     "$sol_attribution" "$jup_attribution" >>"$research_query"
+  sol_costs=unavailable
+  if reviewed=$(attribution_diagnostic sol cost-sensitivity 2>/dev/null); then sol_costs=$reviewed; fi
+  jup_costs=unavailable
+  if reviewed=$(attribution_diagnostic jup cost-sensitivity 2>/dev/null); then jup_costs=$reviewed; fi
+  /usr/bin/printf '\nPrior-day BASE-policy cost sensitivity, not measured execution costs: all four spreads are hypothetical and reuse already observed prices. Keep the 100 bps stress case visible; do not choose a cheaper assumption because it trades more or looks profitable. This is internal diagnostic context, not a citation, qualifying recorded basis, untouched validation or permission to change a policy. Missing reports are unavailable, not zero. SOL/USDC: %s\nJUP/USDC: %s\n' \
+    "$sol_costs" "$jup_costs" >>"$research_query"
   sol_behavior=unavailable
   if reviewed=$(/usr/sbin/runuser -u mithril-agent-research -- \
     /usr/local/libexec/mithril-agent/mithril-agent research behavior \
@@ -419,7 +429,7 @@ collect_research_packet() (
   if reviewed=$(allocation_diagnostic sol quotes 2>/dev/null); then sol_quotes=$reviewed; fi
   jup_quotes=unavailable
   if reviewed=$(allocation_diagnostic jup quotes 2>/dev/null); then jup_quotes=$reviewed; fi
-  /usr/bin/printf '\nHost-collected active-role quote snapshots follow. Selector, ownership marker and observer service roles were checked before and after each collection; process_health_verified=false describes the CLI alone. Each snapshot met its receipt-age bound at checked_at, not throughout this research run. These are sequential, single-provider Jupiter Metis quotes for the initial policy lot and its hypothetical reverse, not current holdings or the next adaptive order. Read raw amounts using the emitted decimals, swapped for the reverse leg; price_impact_pct is a decimal ratio. Route loss excludes network/priority fees, rent, failures and later price movement. Zero route loss is not profit or a free trade. Quotes may already be stale when read; do not use them as current executable prices. This is diagnostic context only, not independent verification, an external citation, a recorded basis, market admission or trade permission. Missing quotes are unavailable, never zero cost. SOL/USDC: %s\nJUP/USDC: %s\n' \
+  /usr/bin/printf '\nHost-collected active-role quote snapshots follow. Selector, ownership marker and observer service roles were checked before and after each collection; process_health_verified=false describes the CLI alone. Each snapshot met its receipt-age bound at checked_at, not throughout this research run. The initial and reverse legs are sequential, single-provider Jupiter Metis quotes for the initial policy lot and its hypothetical reverse. The separate inventory object quotes the full base-token holding from an unchanged paper journal prefix with observation and valuation no older than two minutes. This is a liquidation-size diagnostic, not the next adaptive order or a sell recommendation; separately accounted fee reserves are excluded. no_base_inventory means no base-token holding, not zero cost. Read raw amounts using the emitted decimals for each quote, swapped for the reverse leg; price_impact_pct is a decimal ratio. Route loss describes only the initial/reverse pair, not the inventory exit, and excludes network/priority fees, rent, failures and later price movement. Zero route loss is not profit or a free trade. Quotes may already be stale when read; do not use them as current executable prices. This is diagnostic context only, not historical fills, independent verification, an external citation, a recorded basis, market admission or trade permission. Missing quotes are unavailable, never zero cost. SOL/USDC: %s\nJUP/USDC: %s\n' \
     "$sol_quotes" "$jup_quotes" >>"$research_query"
   /usr/bin/chmod 0644 "$research_query"
   export MITHRIL_HERMES_TOOLSETS="$research_toolsets"

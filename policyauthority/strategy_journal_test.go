@@ -144,6 +144,9 @@ func strategyJournalFixtureWithIdentity(t *testing.T, owner, attestor string) (s
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	wallet, claim := filepath.Join(dir, "wallet.jsonl"), filepath.Join(dir, "claim.jsonl")
 	// Reuse the established test claim encoder, retaining its field order.
 	scratch := filepath.Join(t.TempDir(), "claim.jsonl")

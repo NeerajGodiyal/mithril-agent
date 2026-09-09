@@ -52,6 +52,10 @@ type researchPerformance struct {
 	VersusHoldMicros      int64                 `json:"versus_hold_micros"`
 	MaxDrawdownMicros     uint64                `json:"max_drawdown_micros"`
 	Fills                 uint64                `json:"fills"`
+	BaseUnits             uint64                `json:"base_units,string"`
+	QuoteUnits            uint64                `json:"quote_units,string"`
+	BaseDecimals          uint8                 `json:"base_decimals"`
+	QuoteDecimals         uint8                 `json:"quote_decimals"`
 }
 
 func runResearchPerformance(args []string, output io.Writer, now func() time.Time) error {
@@ -148,6 +152,10 @@ func buildResearchPerformance(policy shadow.Policy, directory string, now time.T
 		return researchPerformance{}, err
 	}
 	expected := uint64(report.To.Sub(report.From)/policy.Tick()) + 1
+	baseDecimals, quoteDecimals := policy.InputDecimals, policy.OutputDecimals
+	if !policy.IsSell() {
+		baseDecimals, quoteDecimals = quoteDecimals, baseDecimals
+	}
 	return researchPerformance{
 		Kind: "journal_bound_paper_performance", PaperOnly: true, DiagnosticOnly: true,
 		PeriodBasis: "reset_daily_partial", Market: shadowMarketPair(policy), PolicySHA256: fingerprint,
@@ -156,5 +164,6 @@ func buildResearchPerformance(policy shadow.Policy, directory string, now time.T
 		OpeningEquityMicros: report.OpeningEquityMicros, EquityMicros: report.ClosingEquityMicros,
 		RealizedMicros: report.RealizedMicros, UnrealizedMicros: report.UnrealizedMicros, FeesMicros: report.FeesMicros,
 		RealizedIncludesFees: true, VersusHoldMicros: report.VersusHoldMicros, MaxDrawdownMicros: report.MaxDrawdownMicros, Fills: report.Counts.Fills,
+		BaseUnits: report.BaseUnits, QuoteUnits: report.QuoteUnits, BaseDecimals: baseDecimals, QuoteDecimals: quoteDecimals,
 	}, nil
 }

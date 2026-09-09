@@ -12,6 +12,7 @@ import (
 
 	"github.com/Overclock-Validator/mithril-agent/jupiterquote"
 	"github.com/Overclock-Validator/mithril-agent/paperdashboard"
+	"github.com/Overclock-Validator/mithril-agent/shadow"
 )
 
 func TestResearchAllocationChampionUsesDayPinnedPolicy(t *testing.T) {
@@ -108,7 +109,7 @@ func TestResearchAllocationChampionUsesDayPinnedPolicy(t *testing.T) {
 	quotes := researchAllocationQuoteFunc(func(_ context.Context, request jupiterquote.Request) (jupiterquote.Result, error) {
 		return researchAllocationQuoteResult(request, now), nil
 	})
-	quoted, err := collectResearchAllocationQuotes(t.Context(), generation, "sol", "champion", time.Minute, quotes, func() time.Time { return now })
+	quoted, err := collectResearchAllocationQuotes(t.Context(), generation, "sol", "champion", time.Minute, quotes, func() time.Time { return now }, false)
 	if err != nil || quoted.PolicySHA256 != baseSHA || quoted.Binding.SelectedCandidatePolicySHA256 != candidate.CandidatePolicySHA256 || quoted.Initial.InputAmount != base.InputAmount {
 		t.Fatalf("allocation quotes did not retain day-pinned policy: %+v %v", quoted, err)
 	}
@@ -134,16 +135,25 @@ func TestResearchAllocationChampionUsesDayPinnedPolicy(t *testing.T) {
 func researchAllocationPerformanceFixture(t *testing.T) (string, time.Time) {
 	t.Helper()
 	policy, source, _, now := researchPerformanceFixture(t, false)
+	return researchAllocationJournalFixture(t, policy, source.directory, now), now
+}
+
+func researchAllocationJournalFixture(t *testing.T, policy shadow.Policy, directory string, now time.Time) string {
+	t.Helper()
+	market := "sol"
+	if shadowMarketPair(policy) == "JUP/USDC" {
+		market = "jup"
+	}
 	generation := privateTestDirectory(t)
-	role := filepath.Join(generation, "runs", "sol", "pre-champion")
-	for _, path := range []string{role, filepath.Join(generation, "status", "sol"), filepath.Join(generation, "selection", "sol", "champion")} {
+	role := filepath.Join(generation, "runs", market, "pre-champion")
+	for _, path := range []string{role, filepath.Join(generation, "status", market), filepath.Join(generation, "selection", market, "champion")} {
 		if err := os.MkdirAll(path, 0700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for _, suffix := range []string{".jsonl", ".jsonl.prefix.json"} {
 		name := "shadow-" + dayKey(now) + suffix
-		raw, err := os.ReadFile(filepath.Join(source.directory, name))
+		raw, err := os.ReadFile(filepath.Join(directory, name))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -161,7 +171,7 @@ func researchAllocationPerformanceFixture(t *testing.T) (string, time.Time) {
 			t.Fatal(err)
 		}
 	}
-	policyPath := filepath.Join(generation, "sol-policy.json")
+	policyPath := filepath.Join(generation, market+"-policy.json")
 	write(policyPath, policy)
 	capital, err := shadowPortfolioCapital(policy, 300_000_000)
 	if err != nil {
@@ -169,7 +179,7 @@ func researchAllocationPerformanceFixture(t *testing.T) (string, time.Time) {
 	}
 	instruction := paperdashboard.Instruction{Version: paperdashboard.InstructionVersion,
 		UpdatedAt: now.Add(-time.Hour), Market: "all", Preference: "balanced",
-		PaperCapitalMicros: capital, MinimumOrderMicros: 5_000_000, MaximumOrderMicros: 100_000_000,
+		PaperCapitalMicros: capital, MinimumOrderMicros: 5_000_000, MaximumOrderMicros: min(100_000_000, capital),
 		CadenceSeconds: 15, MaxDrawdownBPS: 750}
 	digest, err := paperdashboard.InstructionSHA256(instruction)
 	if err != nil {
@@ -183,9 +193,9 @@ func researchAllocationPerformanceFixture(t *testing.T) (string, time.Time) {
 	write(filepath.Join(generation, "portfolio.json"), shadowPortfolioManifest{
 		Version: shadowPortfolioVersion, Status: "paper_portfolio", PaperOnly: true,
 		InstructionSHA256: digest, TotalCapitalLimitMicros: capital, MaxSOLUSDMicros: 300_000_000,
-		Books: []shadowPortfolioBook{{ID: "sol", Market: policy.Market, PolicyPath: policyPath, PolicySHA256: fingerprint}},
+		Books: []shadowPortfolioBook{{ID: market, Market: policy.Market, PolicyPath: policyPath, PolicySHA256: fingerprint}},
 	})
-	return generation, now
+	return generation
 }
 
 func TestResearchAllocationPerformancePreservesLosses(t *testing.T) {
